@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
-import { ArrowLeft, ArrowRight, Braces, ChevronRight, Circle, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, MessageSquare, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Braces, ChevronRight, Circle, FileCode2, FileWarning, FolderTree, GitCompare, Image, LockKeyhole, MessageSquare, RefreshCw, Sparkles, X } from "lucide-react";
 import { fileGlyphColor, fileIcon } from "../lib/file-icons";
 import { defaultUrlTransform } from "react-markdown";
 import { useAppStore } from "../stores";
@@ -15,6 +15,7 @@ import {
 import { fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
 import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
+import { SelectMenu } from "../components/SelectMenu";
 import {
   isWindowsLikeWorkspacePath,
   normalizeWorkspacePath,
@@ -37,6 +38,7 @@ import { AgentEditReviewBar } from "../components/AgentEditReviewBar";
 import type { EditorTextSurface } from "./editor-text-surface";
 import type { MarkdownEditorSession } from "./LiveMarkdownEditor";
 import { EditorActions, type EditorAction } from "./EditorActions";
+import { FileTree } from "../shell/FileTree";
 import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "./monacoTheme";
 import { configureMiniCodeMonacoWorkers, editorModelUri, loadMiniCodeLanguageServices, registerMiniCodeEditorOpener } from "./monacoLanguageServices";
 import { renameMonacoModel } from "./monacoModelRename";
@@ -47,7 +49,6 @@ import "./EditorChrome.css";
 import { EditorNavigation } from "./editorNavigation";
 import { formatEditorModel } from "./editorNativeServices";
 const LazyEditorSymbols = lazy(() => import("./EditorSymbols").then((module) => ({ default: module.EditorSymbols })));
-const LazyEditorInlineEdit = lazy(() => import("./EditorInlineEdit").then((module) => ({ default: module.EditorInlineEdit })));
 
 const LazyMonacoEditor = lazy(async () => {
   configureMiniCodeMonacoWorkers();
@@ -83,6 +84,8 @@ const guessLanguage = (path: string): string => {
   if (["ts", "tsx", "mts", "cts"].includes(ext)) return "typescript";
   if (["js", "jsx", "mjs", "cjs"].includes(ext)) return "javascript";
   if (ext === "py") return "python";
+  if (["cpp", "cc", "cxx", "hpp", "hh", "hxx"].includes(ext)) return "cpp";
+  if (["c", "h"].includes(ext)) return "c";
   if (ext === "json" || ext === "jsonc") return "json";
   if (ext === "md" || ext === "mdx") return "markdown";
   if (["css", "scss", "less"].includes(ext)) return ext;
@@ -91,6 +94,14 @@ const guessLanguage = (path: string): string => {
   if (ext === "toml") return "toml";
   return "plaintext";
 };
+
+const editorLanguages = [
+  ["plaintext", "纯文本"], ["cpp", "C++"], ["c", "C"],
+  ["typescript", "TypeScript"], ["javascript", "JavaScript"], ["python", "Python"],
+  ["html", "HTML"], ["css", "CSS"], ["scss", "SCSS"], ["less", "Less"],
+  ["json", "JSON"], ["yaml", "YAML"],
+] as const;
+const editorLanguageName = (language: string) => editorLanguages.find(([id]) => id === language)?.[1] ?? language;
 
 const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 const dirname = (path: string) => {
@@ -399,9 +410,13 @@ const readFileSnapshot = async (path: string, workingDirectory: string): Promise
 };
 
 export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" } = {}) => {
+  const explorerId = useId();
+  const editorExplorerOpen = useAppStore((s) => s.editorExplorerOpen);
+  const setEditorExplorerOpen = useAppStore((s) => s.setEditorExplorerOpen);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const codeTextScale = useAppStore((s) => s.codeTextScale);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
+  const predictionUsage = useAppStore((s) => s.inlineCompletionUsage);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const projectIndex = useWorkspaceModelIndex(workingDirectory);
   const editorOpenRequests = useAppStore((s) => s.editorOpenRequests);
@@ -432,8 +447,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const navigating = useRef(false);
   const [, refreshNavigation] = useState(0);
   const [symbolMode, setSymbolMode] = useState<"file" | "project" | null>(null);
-  const [inlineEditOpen, setInlineEditOpen] = useState(false);
-  useEffect(() => { setInlineEditOpen(false); setSymbolMode(null); }, [workingDirectory, activeTabPath]);
+  const [predictionReady, setPredictionReady] = useState(false);
+  useEffect(() => { setSymbolMode(null); }, [workingDirectory, activeTabPath]);
   const navigateHistory = (direction: number) => {
     const location = navigation.go(direction);
     if (!location) return;
@@ -487,7 +502,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const editorSlotId = editorSlot?.id ?? "editor";
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat");
   const dirty = activeTab ? !activeTab.readOnly && activeTab.content !== activeTab.original : false;
-  const language = useMemo(() => guessLanguage(activeTabPath ?? ""), [activeTabPath]);
+  const language = activeTab?.language ?? guessLanguage(activeTabPath ?? "");
   const monacoTheme = miniCodeMonacoThemeName(resolvedTheme);
   const canRenderMarkdown = Boolean(activeTab && isMarkdownPath(activeTab.path) && !activeTab.loading && !activeTab.error && !activeTab.largeFile);
   const canAskAboutSelection = Boolean(activeTab && !activeTab.loading && !activeTab.error && !activeTab.largeFile
@@ -512,7 +527,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const showEditorTabs = chrome === "full";
   const supportedEditorActions: EditorAction[] = canRenderMarkdown
     ? ["find", "replace", "gotoLine"]
-    : ["find", "replace", "gotoLine", "foldAll", "unfoldAll", ...(["typescript", "javascript", "json", "html", "css", "scss", "less", "python", "yaml"].includes(language) ? ["format" as const] : []), ...(["typescript", "javascript", "python"].includes(language) ? ["definition", "references", "rename"] as const : [])];
+    : ["find", "replace", "gotoLine", "foldAll", "unfoldAll", ...(["typescript", "javascript", "json", "html", "css", "scss", "less", "python", "yaml", "c", "cpp"].includes(language) ? ["format" as const] : []), ...(["typescript", "javascript", "python", "c", "cpp"].includes(language) ? ["definition", "references", "rename"] as const : [])];
   const runEditorAction = (action: EditorAction) => {
     const ids: Record<EditorAction, string> = {
       find: "actions.find", replace: "editor.action.startFindReplaceAction", gotoLine: "editor.action.gotoLine",
@@ -1047,13 +1062,13 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const native = editor as unknown as import("monaco-editor").editor.IStandaloneCodeEditor;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "mc-inline-edit-trigger";
-      button.textContent = "小改 · Ctrl+K";
-      button.onclick = () => setInlineEditOpen(true);
+      button.className = "mc-editor-selection-trigger";
+      button.textContent = "提问 · Ctrl+K";
+      button.onclick = () => askAboutSelection(mountedEditor);
       const widget = {
-        getId: () => "minicode.selection.edit",
+        getId: () => "minicode.selection.question",
         getDomNode: () => button,
-        getPosition: () => { const selection = native.getSelection(); return !native.getRawOptions().readOnly && selection && !selection.isEmpty() ? { position: selection.getEndPosition(), preference: [2, 1] } : null; },
+        getPosition: () => { const selection = native.getSelection(); return selection && !selection.isEmpty() ? { position: selection.getEndPosition(), preference: [2, 1] } : null; },
       };
       native.addContentWidget(widget);
       const selectionChanged = native.onDidChangeCursorSelection(() => native.layoutContentWidget(widget));
@@ -1202,9 +1217,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   }, [activeTabPath]);
 
   return (
-    <div className="mc-editor-panel flex-1 min-h-0 flex flex-col" onKeyDownCapture={(event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k" && hasActiveSelection && !canRenderMarkdown && !activeTab?.readOnly) {
-        event.preventDefault(); event.stopPropagation(); setInlineEditOpen(true);
+    <div className="mc-editor-panel flex-1 min-h-0 flex flex-col">
+      <div className="mc-editor-workspace">
+        <aside id={explorerId} className="mc-editor-explorer" aria-label="项目文件" style={{ display: editorExplorerOpen ? "flex" : "none" }}>
+          <FileTree />
+        </aside>
+        <div className="mc-editor-document" onKeyDownCapture={(event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k" && hasActiveSelection) {
+        event.preventDefault(); event.stopPropagation(); askAboutSelection(editorRef.current!);
       } else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
         event.preventDefault(); event.stopPropagation(); navigateHistory(event.key === "ArrowLeft" ? -1 : 1);
       } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === "t" || (event.shiftKey && event.key.toLowerCase() === "o")) && !canRenderMarkdown) {
@@ -1214,7 +1234,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         event.stopPropagation();
         setWordWrap((value) => !value);
       }
-    }}>
+        }}>
+        <div className="mc-editor-tabbar">
+          <button
+            type="button"
+            className="mc-editor-explorer-toggle"
+            aria-label={editorExplorerOpen ? "收起项目文件" : "展开项目文件"}
+            title={editorExplorerOpen ? "收起项目文件" : "展开项目文件"}
+            aria-expanded={editorExplorerOpen}
+            aria-controls={explorerId}
+            onClick={() => setEditorExplorerOpen(!editorExplorerOpen)}
+          ><FolderTree size={16} aria-hidden="true" /></button>
       {showEditorTabs && tabs.length > 0 && (
         <div ref={tabListRef} role="tablist" aria-label="打开的文件" className="mc-editor-tabs">
           {tabs.map((tab, tabIndex) => {
@@ -1288,6 +1318,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           })}
         </div>
       )}
+        </div>
       {showEditorToolbar && (
         <div className="mc-editor-toolbar">
           <div className="mc-editor-actions" role="toolbar" aria-label="代码导航">
@@ -1308,11 +1339,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <button
               type="button"
               onClick={() => askAboutSelection(editorRef.current!)}
-              title="将当前所选代码带入侧边对话"
+              title="将当前所选代码带入侧边对话 · Ctrl+K"
               className="mc-editor-selection-action"
             >
               <MessageSquare size={14} />
-              询问选区
+              提问 · Ctrl+K
             </button>
           )}
           <EditorActions
@@ -1332,7 +1363,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       )}
 
       {symbolMode && monacoRef.current && <Suspense fallback={null}><LazyEditorSymbols monaco={monacoRef.current} workspaceRoot={workingDirectory} path={activeMonacoUri} project={symbolMode === "project"} onClose={() => setSymbolMode(null)} /></Suspense>}
-      {inlineEditOpen && editorRef.current && <Suspense fallback={null}><LazyEditorInlineEdit editor={editorRef.current as unknown as import("monaco-editor").editor.IStandaloneCodeEditor} workspaceRoot={workingDirectory} onClose={() => setInlineEditOpen(false)} /></Suspense>}
       {activeTab?.externalChanged && !isPreviewableMediaPath(activeTab.path) && (
         <div
           className="min-h-9 px-3 py-1.5 flex items-center gap-2 border-b"
@@ -1427,19 +1457,35 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 onChange={(value) => {
                   if (!projectIndex.ownsModel(activeTab.path)) updateTabContent(activeTab.path, value ?? "");
                 }}
-                onMount={(editor) => mountTextSurface(editor as MonacoEditorInstance)}
+                onMount={(editor) => {
+                  editor.getContribution("editor.contrib.inlineCompletionsController");
+                  mountTextSurface(editor as MonacoEditorInstance);
+                  setPredictionReady(true);
+                  editor.onDidDispose(() => setPredictionReady(false));
+                  editor.addAction({ id: "minicode.predict", label: "代码预测",
+                    keybindings: [monacoRef.current!.KeyMod.Alt | monacoRef.current!.KeyCode.Backslash],
+                    run: (target) => {
+                      const store = useAppStore.getState();
+                      if (!store.workbenchPreferences.aiEnabled) store.setWorkbenchPreferences({ aiEnabled: true });
+                      requestAnimationFrame(() => {
+                        target.trigger("minicode", "hideSuggestWidget", null);
+                        target.trigger("minicode", "editor.action.inlineSuggest.trigger", null);
+                      });
+                    },
+                  });
+                }}
                 options={{
                   ...miniCodeCodeEditingOptions,
                   inlineSuggest: { enabled: preferences.aiEnabled, showToolbar: "onHover" },
                   automaticLayout: true,
                   readOnly: Boolean(activeTab.readOnly),
-                  fontFamily: preferences.codeFont || "var(--editor-font-family)",
+                  fontFamily: "var(--editor-font-family)",
                   fontSize: Math.round(14 * codeTextScale),
                   lineHeight: Math.round(22 * codeTextScale),
                   minimap: { enabled: minimap },
                   scrollBeyondLastLine: false,
                   wordWrap: wordWrap ? "on" : "off",
-                  fontLigatures: preferences.ligatures,
+                  fontLigatures: false,
                   tabSize: preferences.tabSize,
                   insertSpaces: preferences.insertSpaces,
                   detectIndentation: false,
@@ -1488,7 +1534,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <span className="editor-empty-file-icon" aria-hidden="true"><FileCode2 size={28} strokeWidth={1.8} className="editor-empty-file-icon-svg" /></span>
             <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>未打开文件</div>
             <div className="max-w-[420px] text-center">
-              从左侧项目文件或搜索中打开工作区文件。
+              从项目文件中选择文件，或按 Ctrl+P 快速打开。
             </div>
           </div>
         )}
@@ -1505,7 +1551,29 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <LockKeyhole size={14} /> 只读
           </span>
         )}
-        <span>{language}</span>
+        {activeTab && canAskAboutSelection && !canRenderMarkdown ? (
+          <SelectMenu
+            className="mc-editor-language-select"
+            ariaLabel="文件语言"
+            title="更改文件语言模式；纯文本不会显示语法颜色"
+            align="end"
+            value={activeTab.language ?? "auto"}
+            onValueChange={(value) => useAppStore.getState().setEditorTabLanguage(activeTab.path, value === "auto" ? undefined : value)}
+          >
+            <option value="auto">自动 · {editorLanguageName(guessLanguage(activeTab.path))}</option>
+            {editorLanguages.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </SelectMenu>
+        ) : <span>{editorLanguageName(language)}</span>}
+        {activeTab && !canRenderMarkdown && !isImagePath(activeTab.path) && !isPdfPath(activeTab.path) && !activeTab.readOnly && !activeTab.largeFile && <button
+          type="button" className="mc-editor-prediction-status" data-error={Boolean(predictionUsage.lastError)}
+          aria-label={preferences.aiEnabled ? "触发代码预测" : "开启代码预测"}
+          title={predictionUsage.lastError || "暂停输入自动预测。Alt + \\ 手动触发，Tab 接受，Esc 取消。"}
+          disabled={!predictionReady || predictionUsage.pending}
+          onClick={() => {
+            const target = editorRef.current as unknown as import("monaco-editor").editor.IStandaloneCodeEditor;
+            target.focus();
+            void target.getAction("minicode.predict")!.run();
+          }}><Sparkles size={12} /><span>{predictionUsage.pending ? "正在预测…" : predictionUsage.lastError ? "预测失败 · 重试" : preferences.aiEnabled ? "代码预测" : "开启预测"}</span></button>}
         {activeGitChange?.patch && (
           <button
             type="button"
@@ -1514,8 +1582,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           >
             <GitCompare size={14} />
             Diff
-            <span style={{ color: "var(--state-success)" }}>+{activeGitChange.additions}</span>
-            <span style={{ color: "var(--state-danger)" }}>-{activeGitChange.deletions}</span>
+            <span style={{ color: "var(--diff-added-foreground)" }}>+{activeGitChange.additions}</span>
+            <span style={{ color: "var(--diff-removed-foreground)" }}>-{activeGitChange.deletions}</span>
           </button>
         )}
         {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>已保存</span>}
@@ -1534,6 +1602,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           : projectIndex.status.phase === "partial" ? `索引有缺项 · ${projectIndex.status.issues.length}`
           : `项目索引 · ${projectIndex.status.sourceCount} 个源码`}</button>}
         {showEditorToolbar && <span>{`第 ${cursor.line} 行，第 ${cursor.column} 列`}</span>}
+      </div>
+        </div>
       </div>
 
       {ctxMenu && workspaceRootsEqual(ctxMenu.workspaceRoot, workingDirectory) && (

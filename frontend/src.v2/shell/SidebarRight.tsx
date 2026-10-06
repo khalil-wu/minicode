@@ -15,8 +15,9 @@ import {
   TerminalSquare,
   Maximize2,
   Minimize2,
+  MessageCircle,
   ChevronDown,
-} from "lucide-react";
+} from "../lib/icons";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
@@ -50,8 +51,7 @@ const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => 
   return tab ?? "tasks";
 };
 
-const defaultOpenTabs: StackTab[] = ["tasks"];
-const sidebarIconProps = { size: 16, strokeWidth: 1.85 } as const;
+const sidebarIconProps = { size: 16, strokeWidth: 1.5 } as const;
 
 const LazyPreviewPanel = lazy(() =>
   import("../panels/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
@@ -96,6 +96,7 @@ const preferredManualSidebarWidth = (tab: StackTab): number => {
 
 export const SidebarRight = ({ embedded = false, visible = true, initialTab }: SidebarRightProps) => {
   const messages = useAppStore((s) => s.messages);
+  const mainConversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title || "主聊天");
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
@@ -110,7 +111,9 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const toggleQuickOpen = useAppStore((s) => s.toggleQuickOpen);
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
-  const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => Array.from(new Set([...defaultOpenTabs, normalizeInitialTab(initialTab)])));
+  const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => initialTab !== undefined
+    ? [normalizeInitialTab(initialTab)]
+    : rightPanelOpen ? [normalizeInitialTab(rightStackTab)] : []);
   const [launcherPosition, setLauncherPosition] = useState<{ x: number; y: number } | null>(null);
   const [openedPanelPosition, setOpenedPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
@@ -142,7 +145,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
-    { id: "diff", label: "审阅", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
+    { id: "diff", label: "变更", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
     { id: "preview", label: "预览", badge: previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
     { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
     { id: "sidechat", label: "侧边聊天", icon: <MessageCirclePlus {...sidebarIconProps} /> },
@@ -336,6 +339,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   return (
     <aside
       ref={sidebarRef}
+      id="workbench-right-sidebar"
       className="mc-sidebar-right relative flex flex-col overflow-hidden"
       data-embedded={embedded ? "true" : "false"}
       data-expanded={expanded ? "true" : "false"}
@@ -360,7 +364,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         borderRadius: 0,
         boxShadow: "none",
         opacity: embedded || rightPanelOpen ? 1 : 0,
-        transform: embedded || rightPanelOpen ? "translateX(0)" : "translateX(8px)",
+        transform: embedded || rightPanelOpen ? "none" : "translateX(8px)",
         visibility: embedded || rightPanelOpen ? "visible" : "hidden",
         pointerEvents: embedded || rightPanelOpen ? "auto" : "none",
         transition: `width var(--transition-normal), min-width var(--transition-normal), max-width var(--transition-normal), flex-basis var(--transition-normal), margin var(--transition-normal), opacity var(--transition-fast), transform var(--duration-base) var(--easing-enter), border-color var(--transition-fast), box-shadow var(--transition-normal), visibility 0s linear ${embedded || rightPanelOpen ? "0ms" : "var(--duration-base)"}`,
@@ -385,6 +389,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         />
       )}
       <div className="mc-sidebar-right-header">
+        {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label="返回主聊天" title="返回主聊天"
+          onClick={() => setRightPanelExpanded(false)}><MessageCircle size={15} /><span>{mainConversationTitle}</span></button>}
         <div ref={tabListRef} className="mc-sidebar-right-tabs" role="tablist" aria-label="右侧栏面板">
         {openedTabs.map((t, index) => (
           <div
@@ -536,7 +542,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {panelTab === "diff" && (
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="diff" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="审阅" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName="变更" />}>
                   <LazyDiffPanel />
                 </SafeBoundary>
               </Suspense>

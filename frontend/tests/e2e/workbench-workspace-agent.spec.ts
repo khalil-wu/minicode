@@ -347,7 +347,7 @@ test.describe("Workbench workspace and chat continuity", () => {
       const messages = [{ id: "old-user", role: "user", content: "Keep Alpha history", timestamp: 1, blocks: [], artifacts: [] }];
       store.setState({ workingDirectory: "C:/Alpha", messages, conversations: [{ id: "conv-workbench", title: "Alpha", workspaceRoot: "C:/Alpha", updatedAt: "2026-06-15T00:00:00Z" }] });
     });
-    await page.getByRole("button", { name: "切换项目" }).click();
+    await page.getByRole("button", { name: "添加项目", exact: true }).click();
 
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().workingDirectory)).toBe(workspacePath);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().appMode)).toBe("code");
@@ -358,6 +358,7 @@ test.describe("Workbench workspace and chat continuity", () => {
     })).toEqual({ root: "C:/Alpha", history: "Keep Alpha history", count: 0 });
     await expect(page.getByRole("tree", { name: "文件资源管理器" })).toBeVisible();
 
+    await page.keyboard.press("Control+L");
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();
     await composer.fill("Update the README for private beta.");
     await composer.press("Enter");
@@ -381,7 +382,7 @@ test.describe("Workbench workspace and chat continuity", () => {
   });
 
   test("keeps an opened project visible after its last conversation disappears", async ({ page }) => {
-    await page.getByRole("tab", { name: "协作", exact: true }).click();
+    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
     await page.evaluate((workspacePath) => {
       (window as any).__mockWs._receive({ type: "workspace.recent.list", projects: [{
         path: workspacePath, name: "MiniCode", project_type: "typescript", last_opened: 1,
@@ -403,7 +404,7 @@ test.describe("Workbench workspace and chat continuity", () => {
 
   test("Cowork home keeps the composer readable across desktop and mobile", async ({ page }) => {
     await page.setViewportSize({ width: 2048, height: 1100 });
-    await page.getByRole("tab", { name: "协作", exact: true }).click();
+    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
 
     const home = page.locator(".chat-pane-main");
     const composer = page.locator(".composer-container");

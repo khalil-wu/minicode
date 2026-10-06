@@ -1074,7 +1074,6 @@ export const ProviderTab = ({
       <div className="provider-settings-header">
         <div className="provider-settings-heading">
           <h3>模型提供商</h3>
-          <p>保存接口、凭据和模型配置，并选择新任务使用的提供商。</p>
         </div>
         <button type="button" onClick={addProvider} disabled={busy} className="provider-add-button">
           <Plus size={14} />

@@ -765,6 +765,35 @@ class TaskScheduler:
             self._save()
         return len(task_ids) + len(run_ids)
 
+    async def pause_for_conversation(self, conversation_id: str) -> int:
+        """Pause a chat's schedules and stop its runs without deleting history."""
+        task_ids = {
+            task_id for task_id, task in self._tasks.items()
+            if task.conversation_id == conversation_id
+        }
+        for task_id in task_ids:
+            task = self._tasks[task_id]
+            task.enabled = False
+            task.next_run_at = None
+        if task_ids:
+            self._save()
+        run_ids = [
+            run_id for run_id, run in self._runs.items()
+            if run.task_id in task_ids or run.conversation_id == conversation_id
+        ]
+        workers = [
+            self._run_tasks[run_id] for run_id in run_ids
+            if run_id in self._run_tasks and not self._run_tasks[run_id].done()
+        ]
+        for run_id in run_ids:
+            self.cancel_run(run_id)
+        pending = await cancel_and_drain(
+            workers, timeout=None, label=f"scheduled runs for archived conversation {conversation_id}",
+        )
+        if pending:
+            raise RuntimeError("scheduled runs are still stopping")
+        return len(task_ids)
+
     @staticmethod
     def _workspace_matches(stored: str, requested: str | None) -> bool:
         return requested is None or _normalize_workspace_root(stored) == _normalize_workspace_root(requested)

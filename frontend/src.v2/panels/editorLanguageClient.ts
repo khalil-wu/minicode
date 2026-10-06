@@ -10,6 +10,8 @@ type Location = { uri: string; range: Range } | { targetUri: string; targetSelec
 type DocumentSymbol = { name: string; detail?: string; kind: number; range: Range; selectionRange: Range; children?: DocumentSymbol[] };
 type CompletionItem = { label: string; kind?: number; detail?: string; documentation?: string | { value: string }; insertText?: string; insertTextFormat?: number; textEdit?: TextEdit; additionalTextEdits?: TextEdit[]; filterText?: string; sortText?: string };
 type Diagnostic = { range: Range; message: string; severity?: number; code?: string | number; source?: string };
+const serverLanguages = ["python", "yaml", "c", "cpp"];
+const isCpp = (language: string) => language === "c" || language === "cpp";
 
 export const fromLspRange = (range: Range): Monaco.IRange => ({
   startLineNumber: range.start.line + 1, startColumn: range.start.character + 1,
@@ -18,12 +20,13 @@ export const fromLspRange = (range: Range): Monaco.IRange => ({
 
 export async function requestEditorLanguage<T>(monaco: typeof Monaco, model: Monaco.editor.ITextModel, method: string, position?: Monaco.IPosition, extra = {}, signal?: AbortSignal): Promise<T> {
   const root = useAppStore.getState().workingDirectory;
-  const documents = [model, ...monaco.editor.getModels().filter((candidate) => candidate !== model && candidate.getLanguageId() === model.getLanguageId()
+  const documents = [model, ...monaco.editor.getModels().filter((candidate) => candidate !== model && (candidate.getLanguageId() === model.getLanguageId()
+    || (isCpp(model.getLanguageId()) && isCpp(candidate.getLanguageId())))
     && candidate.uri.scheme === "file" && workspacePathWithin(candidate.uri.fsPath, root))];
   const url = new URL("/api/workspace/language", apiBase());
   url.searchParams.set("workspace_root", root);
   const response = await fetchWithTimeout(url, { method: "POST", signal, headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ method, documents: documents.map((doc) => ({ path: doc.uri.fsPath, content: doc.getValue() })),
+    body: JSON.stringify({ method, documents: documents.map((doc) => ({ path: doc.uri.fsPath, content: doc.getValue(), language: doc.getLanguageId() })),
       line: (position?.lineNumber ?? 1) - 1, character: (position?.column ?? 1) - 1, ...extra }),
   });
   if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
@@ -51,10 +54,10 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
   const kindMap = [kinds.Text, kinds.Method, kinds.Function, kinds.Constructor, kinds.Field, kinds.Variable, kinds.Class,
     kinds.Interface, kinds.Module, kinds.Property, kinds.Unit, kinds.Value, kinds.Enum, kinds.Keyword, kinds.Snippet,
     kinds.Color, kinds.File, kinds.Reference, kinds.Folder, kinds.EnumMember, kinds.Constant, kinds.Struct, kinds.Event, kinds.Operator, kinds.TypeParameter];
-  for (const language of ["python", "yaml"]) {
+  for (const language of serverLanguages) {
     disposables.push(
       monaco.languages.registerCompletionItemProvider(language, {
-        triggerCharacters: [".", ":", " ", '"', "'"],
+        triggerCharacters: isCpp(language) ? [".", ":", " ", '"', "'", "#", "<", "/", ">"] : [".", ":", " ", '"', "'"],
         async provideCompletionItems(model, position, _context, token) {
           const result = await request<CompletionItem[] | { items: CompletionItem[]; isIncomplete?: boolean } | null>(model, "completion", token, position);
           const word = model.getWordUntilPosition(position);
@@ -76,7 +79,7 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
         },
       }),
       monaco.languages.registerDocumentSymbolProvider(language, {
-        displayName: language === "python" ? "Pyright" : "YAML",
+        displayName: language === "python" ? "Pyright" : language === "yaml" ? "YAML" : "clangd",
         async provideDocumentSymbols(model, token) { return (await request<DocumentSymbol[] | null>(model, "documentSymbol", token) ?? []).map(symbol); },
       }),
       monaco.languages.registerDocumentFormattingEditProvider(language, {
@@ -87,7 +90,7 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
         },
       }),
     );
-    if (language === "python") disposables.push(
+    if (language === "python" || isCpp(language)) disposables.push(
       monaco.languages.registerDefinitionProvider(language, { async provideDefinition(model, position, token) { return asLocations(await request<Location[] | Location | null>(model, "definition", token, position)); } }),
       monaco.languages.registerReferenceProvider(language, { async provideReferences(model, position, _context, token) { return asLocations(await request<Location[] | null>(model, "references", token, position)); } }),
       monaco.languages.registerRenameProvider(language, {
@@ -108,7 +111,7 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
   }
   const modelSubscriptions = new Map<Monaco.editor.ITextModel, () => void>();
   const observe = (model: Monaco.editor.ITextModel) => {
-    if (!["python", "yaml"].includes(model.getLanguageId()) || model.uri.scheme !== "file" || modelSubscriptions.has(model)) return;
+    if (!serverLanguages.includes(model.getLanguageId()) || model.uri.scheme !== "file" || modelSubscriptions.has(model)) return;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController | undefined;
     const scan = () => {
@@ -140,6 +143,10 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
     scan();
   };
   monaco.editor.getModels().forEach(observe);
-  disposables.push(monaco.editor.onDidCreateModel(observe), monaco.editor.onDidChangeModelLanguage(({ model }) => observe(model)));
+  disposables.push(monaco.editor.onDidCreateModel(observe), monaco.editor.onDidChangeModelLanguage(({ model }) => {
+    modelSubscriptions.get(model)?.();
+    monaco.editor.setModelMarkers(model, "minicode-language", []);
+    observe(model);
+  }));
   return { dispose() { disposables.forEach((item) => item.dispose()); modelSubscriptions.forEach((dispose) => dispose()); } };
 }

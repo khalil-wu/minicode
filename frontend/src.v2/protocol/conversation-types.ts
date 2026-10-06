@@ -499,6 +499,7 @@ export interface ConversationArchiveCommand {
   type: "conversation.archive" | "conversation.unarchive";
   conversation_id: string;
   archived?: boolean;
+  client_resource_cleanup?: boolean;
 }
 
 export interface ConversationRenameCommand {

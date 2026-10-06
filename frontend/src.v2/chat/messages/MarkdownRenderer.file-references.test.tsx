@@ -37,12 +37,13 @@ describe("Markdown file reference projection", () => {
   ];
 
   describe.each(["link", "code", "bare"] as const)("%s references", (format) => {
-    it.each(locations)("shows the HTML icon and opens the start location for $suffix", ({ suffix, line, column }) => {
+    it.each(locations)("preserves the reference presentation and opens the start location for $suffix", ({ suffix, line, column }) => {
       const label = `${path}${suffix}`;
       const content = format === "link" ? `[${label}](${label})` : format === "code" ? `\`${label}\`` : `检查 ${label}。`;
       const view = render(<MarkdownRenderer content={content} workspaceRoot={root} knownFilePaths={[path]} />);
       const chip = view.getByRole("button", { name: label });
-      expect(chip.querySelector('.md-official-file-icon[data-document-type="html"] > svg')).not.toBeNull();
+      expect(chip.getAttribute("data-presentation")).toBe(format === "code" ? "code" : "link");
+      expect(Boolean(chip.querySelector(".md-file-link-icon"))).toBe(format !== "code");
       expect(chip.querySelector(".md-file-chip-name")?.textContent).toBe(path);
       expect(chip.querySelector(".md-file-chip-meta")?.textContent).toBe(suffix);
       expect(view.container.querySelector('[data-kind="folder"]')).toBeNull();
@@ -69,14 +70,15 @@ describe("Markdown file reference projection", () => {
       "pelican-bicycle.html", "qinshihuang-polarbear.html", path, "项目内容概览.md",
     ]} />);
     expect(view.container.querySelectorAll("td .md-file-chip")).toHaveLength(5);
-    expect(view.container.querySelectorAll("td .md-official-file-icon > svg")).toHaveLength(5);
+    expect(view.container.querySelectorAll("td .md-file-link-icon")).toHaveLength(1);
+    expect(view.container.querySelectorAll("td .md-file-code-reference")).toHaveLength(4);
     expect(view.container.querySelector("td a.md-text-link")).toBeNull();
   });
 
   it.each(["report.pdf", "report.docx", "metrics.csv", "diagram.svg"])("gives a known bare %s the same preview as a Markdown link", (file) => {
     const view = render(<MarkdownRenderer content={`查看 ${file}.`} workspaceRoot={root} conversationId="owner" knownFilePaths={[file]} />);
     const chip = view.getByRole("button", { name: file });
-    expect(chip.querySelector(".md-official-file-icon > svg")).not.toBeNull();
+    expect(chip.querySelector(".md-file-link-icon")).not.toBeNull();
     fireEvent.click(chip);
     expect(previewFile).toHaveBeenCalledWith({ path: file, name: file, workspaceRoot: root, conversationId: "owner" });
     expect(openFile).not.toHaveBeenCalled();
@@ -85,7 +87,8 @@ describe("Markdown file reference projection", () => {
   it("uses the HTML type icon and editor action for HTM files", () => {
     const view = render(<MarkdownRenderer content="[页面](index.htm:9–10)" workspaceRoot={root} />);
     const chip = view.getByRole("button", { name: "页面" });
-    expect(chip.querySelector('[data-file-kind="code"]')).not.toBeNull();
+    expect(chip.getAttribute("data-ext")).toBe("htm");
+    expect(chip.querySelector(".md-file-link-icon")).not.toBeNull();
     fireEvent.click(chip);
     expect(openFile).toHaveBeenCalledWith("index.htm", undefined, { line: 9, column: undefined });
   });
@@ -93,7 +96,7 @@ describe("Markdown file reference projection", () => {
   it.each(["`页面`", "**页面**"])("keeps a Windows destination containing spaces behind the formatted label %s", (label) => {
     const view = render(<MarkdownRenderer content={`[${label}](C:\\projects\\demo\\my page.html:13–14)`} workspaceRoot={root} />);
     const chip = view.getByRole("button", { name: "页面" });
-    expect(chip.querySelector('.md-official-file-icon[data-document-type="html"] > svg')).not.toBeNull();
+    expect(chip.querySelector(".md-file-link-icon")).not.toBeNull();
     fireEvent.click(chip);
     expect(openFile).toHaveBeenCalledWith("C:/projects/demo/my page.html", undefined, { line: 13, column: undefined });
   });

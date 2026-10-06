@@ -10,6 +10,7 @@ import pytest
 import httpx
 
 from backend.agent.context import ContextBuilder
+from backend.agent.codex_prompts import codex_model_instructions
 from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.lifecycle_generation import LifecycleGenerationState
 from backend.agent.loop_session import AgentLoopSessionContext
@@ -196,7 +197,8 @@ async def test_live_selection_changes_next_request_and_keeps_issued_tools_bound(
             observer = ExtensionLifecycleObserver(None, "", metadata={"model": "stale"}, run_context=fixture.owner)
             assert observer._assistant_defaults()["model"] == "model-a"
             return ToolCallEvent(id="from-a", name="inspect_model", arguments={})
-        assert any("INSTRUCTION-model-b" in message.content for message in messages)
+        assert any(message.role == "system" and message.content.startswith(codex_model_instructions("model-b")) for message in messages)
+        assert all("INSTRUCTION-model-b" not in message.content for message in messages)
         if len(model.inputs) == 1:
             return ToolCallEvent(id="from-b", name="inspect_model", arguments={})
         return None
@@ -355,6 +357,7 @@ async def test_responses_wire_keeps_inflight_effort_and_uses_new_model_next(tmp_
         monkeypatch.setattr("backend.llm.model_registry.create_session_llm", build)
         await execute(fixture, tmp_path)
         assert [(request["model"], request["reasoning"]["effort"]) for request in requests] == [("model-a", "low"), ("model-b", "high")]
-        assert "INSTRUCTION-model-b" in requests[1]["instructions"]
+        assert requests[1]["instructions"].startswith(codex_model_instructions("model-b"))
+        assert "INSTRUCTION-model-b" not in requests[1]["instructions"]
         assert original._settings.reasoning_effort == "low"
         assert fixture.inspector.observations == [("model-a", "model-a", "low", 96000)]

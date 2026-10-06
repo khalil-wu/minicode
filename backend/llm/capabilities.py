@@ -9,11 +9,11 @@ dedicated image models, not coding models with function-calling tools.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 from backend.config import LLMSettings, normalize_custom_wire_api
-from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
+from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels, reasoning_effort_wire_map, reasoning_effort_wire_value
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,9 @@ class ProviderCapabilities:
     reasoning_effort_levels: tuple[str, ...] = ()
     configured_reasoning_effort: str = ""
     effective_reasoning_effort: str = ""
+    wire_reasoning_effort: str = ""
+    wire_reasoning_effort_levels: tuple[str, ...] = ()
+    reasoning_effort_wire_map: dict[str, str] = field(default_factory=dict)
     reasoning_effort_supported: bool | None = None
     context_window: int | float = 0
     context_window_source: str = ""
@@ -63,6 +66,7 @@ class ProviderCapabilities:
         # coercion.  The stricter session restore validator must see the same
         # shape that browsers receive.
         data["reasoning_effort_levels"] = list(self.reasoning_effort_levels)
+        data["wire_reasoning_effort_levels"] = list(self.wire_reasoning_effort_levels)
         data["limitations"] = list(self.limitations)
         data["adapters"] = [adapter.to_dict() for adapter in self.adapters]
         return data
@@ -165,6 +169,9 @@ def capabilities_from_openai_settings(
         reasoning_effort_levels=() if dedicated_image_model else effort_levels,
         configured_reasoning_effort=configured_effort,
         effective_reasoning_effort="" if dedicated_image_model else effective_effort,
+        wire_reasoning_effort="" if dedicated_image_model else reasoning_effort_wire_value(model, effective_effort),
+        wire_reasoning_effort_levels=() if dedicated_image_model else tuple(dict.fromkeys(reasoning_effort_wire_value(model, level) for level in effort_levels)),
+        reasoning_effort_wire_map=reasoning_effort_wire_map(model),
         reasoning_effort_supported=(
             False if dedicated_image_model else bool(effort_levels)
         ),

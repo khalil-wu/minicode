@@ -3,7 +3,7 @@ import type React from "react";
 import type { HistoryCellState } from "../../chat/cells/cellTypes";
 import type { AgentLoopTurnProjection } from "../projection/project-turn";
 import { AgentProcessSummary } from "./AgentProcessSummary";
-import { AgentTimeline, isProcessNarration } from "./AgentTimeline";
+import { AgentTimeline } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
 
@@ -55,6 +55,7 @@ export const AgentTurn = memo(function AgentTurn({
     const reachedCompleteAnswer =
       !previousHasCompleteFinalAnswer.current
       && turn.hasCompleteFinalAnswer;
+    const lostCompleteAnswer = previousHasCompleteFinalAnswer.current && !turn.hasCompleteFinalAnswer;
     const enteredRunning =
       previousStatus.current !== "running"
       && turn.status === "running";
@@ -62,18 +63,20 @@ export const AgentTurn = memo(function AgentTurn({
     if (changedTurn || changedMode) {
       userToggled.current = false;
       setProcessExpanded(initialProcessExpanded);
+    } else if (lostCompleteAnswer && !userToggled.current) {
+      setProcessExpanded(true);
     } else if (changedDefault && turn.hasCompleteFinalAnswer && !userToggled.current) {
       setProcessExpanded(initialProcessExpanded);
     } else if (
       reachedCompleteAnswer
-      && turn.processDetailMode === "normal"
+      && turn.processDetailMode !== "verbose"
       && defaultProcessExpanded !== true
       && !userToggled.current
     ) {
       setProcessExpanded(initialProcessExpanded);
     } else if (
       enteredRunning
-      && turn.processDetailMode === "normal"
+      && turn.processDetailMode !== "verbose"
       && defaultProcessExpanded === undefined
       && !userToggled.current
     ) {
@@ -101,7 +104,7 @@ export const AgentTurn = memo(function AgentTurn({
   const diffCells = useMemo(() => turn.processCells.filter((cell) => cell.kind === "diff"), [turn.processCells]);
   const visibleTimelineCells = useMemo(() => processExpanded
     ? timelineCells
-    : timelineCells.filter(isProcessNarration), [processExpanded, timelineCells]);
+    : [], [processExpanded, timelineCells]);
   const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
   const hasActiveTimelineItem = timelineCells.some((cell) => {
     if (cell.kind === "activity") return cell.status === "running";
@@ -114,24 +117,26 @@ export const AgentTurn = memo(function AgentTurn({
   });
   const showIdleProcessingStatus =
     turn.status === "running"
+    && !turn.hasCompleteFinalAnswer
     && !turn.answerIsStreaming
     && !hasActiveTimelineItem;
   const failureIsTimelineEvidence = turn.processCells.some((cell) => cell.kind === "error");
   const showProcessStack =
     turn.hasProcessContent &&
     visibleTimelineCells.length > 0;
-  const summaryPosition = turn.status === "running" ? "bottom" : "top";
+  const summaryPosition = turn.status === "running" && !turn.hasCompleteFinalAnswer ? "bottom" : "top";
   const standaloneNotice = !turn.userCell && turn.status === "completed"
     && turn.processCells.length > 0
     && turn.processCells.every((cell) => cell.kind === "status_notice");
   const processSummary = standaloneNotice ? null : (
     <AgentProcessSummary
-      status={turn.status}
+      status={turn.hasCompleteFinalAnswer && turn.status === "running" ? "completed" : turn.status}
       processExpanded={processExpanded}
       hasTimelineItems={hasTimelineItems}
       durationMs={turn.durationMs}
-      failureMessage={failureIsTimelineEvidence ? undefined : turn.failureMessage}
+      failureMessage={failureIsTimelineEvidence && processExpanded ? undefined : turn.failureMessage}
       canCollapse={turn.hasCompleteFinalAnswer}
+      canExpand={userToggled.current && !processExpanded}
       position={summaryPosition}
       onToggle={() => {
         userToggled.current = true;
@@ -160,11 +165,12 @@ export const AgentTurn = memo(function AgentTurn({
         <section
           className="chat-turn-process agent-loop-process agent-loop-work-area"
           data-zone="work"
-          data-active={turn.status === "running" ? "true" : "false"}
+          data-active={turn.status === "running" && !turn.hasCompleteFinalAnswer ? "true" : "false"}
           data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent 处理进度"
+          onWheel={() => { if (processExpanded && turn.status === "running") userToggled.current = true; }}
         >
-          {turn.status !== "running" && processSummary}
+          {(turn.status !== "running" || turn.hasCompleteFinalAnswer) && processSummary}
           {processExpanded && historyControl}
 
           {showProcessStack && (
@@ -175,6 +181,7 @@ export const AgentTurn = memo(function AgentTurn({
               isRunning={turn.status === "running"}
               expandWorkGroups={userToggled.current}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
+              onUserDisclosure={() => { userToggled.current = true; }}
             />
           )}
 

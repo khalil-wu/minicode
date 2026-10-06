@@ -16,7 +16,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { formatModelLabel } from "../lib/model-label";
 import { ChatTurn } from "../chat/components/ChatTurn";
 import { projectMessagesToTurns } from "../chat/chatSurfaceState";
-import { applyAuthoritativeTurnDiff } from "../chat/MessageList";
+import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import {

@@ -30,11 +30,11 @@
 /* ── 页面骨架 ─────────────────────────────────────────────────────────── */
 
 .settings-workspace.settings-center {
-  width: 100vw;
-  height: 100dvh;
+  width: auto;
+  height: auto;
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-columns: 275px minmax(0, 1fr);
+  grid-template-rows: 52px minmax(0, 1fr);
   overflow: hidden;
   box-sizing: border-box;
   color: var(--text-primary);
@@ -45,6 +45,7 @@
 
 .settings-workspace.settings-center[hidden], .settings-tab-pane[hidden] { display: none; }
 .settings-tab-pane { display: grid; gap: 28px; min-width: 0; }
+.settings-tab-pane:not([hidden]) { animation: settings-tab-in var(--duration-fast) var(--easing-standard); }
 .settings-search-results { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); }
 .settings-search-result { display: grid; gap: 4px; padding: 9px; text-align: left; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-primary); }
 .settings-search-result:hover, .settings-search-result:focus-visible { background: var(--surface-soft); }
@@ -98,6 +99,9 @@
   -webkit-app-region: no-drag;
 }
 
+.settings-navigation-heading { display: flex; align-items: center; gap: 6px; min-height: 36px; }
+.settings-navigation-heading > h2 { margin: 0; color: var(--text-primary); font-size: 20px; font-weight: var(--fw-semibold); }
+
 .settings-workspace .settings-workspace-header {
   grid-column: 2;
   grid-row: 1;
@@ -113,12 +117,12 @@
 }
 
 .settings-center-content {
-  width: min(1000px, calc(100% - 96px));
+  width: min(760px, calc(100% - 80px));
   min-height: 100%;
   margin: 0 auto;
   padding: 48px 0 80px;
   box-sizing: border-box;
-  animation: settings-content-in var(--duration-slow) var(--easing-spring) both;
+  animation: settings-content-in var(--duration-fast) var(--easing-standard);
 }
 
 /* ── 侧栏：返回 / 搜索 / 分类导航 ─────────────────────────────────────── */
@@ -132,7 +136,7 @@
   gap: 8px;
   padding: 0 8px;
   border: 0;
-  border-radius: var(--mc-control-radius);
+  border-radius: 20px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -156,7 +160,7 @@
   padding: 0 10px;
   box-sizing: border-box;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--mc-control-radius);
+  border-radius: 20px;
   background: color-mix(in oklch, var(--surface-soft) 70%, var(--surface-sidebar));
   color: var(--text-muted);
 }
@@ -198,8 +202,8 @@
 .settings-nav-group-label {
   padding: 0 9px 5px;
   color: var(--text-muted);
-  font-size: var(--text-2xs);
-  font-weight: var(--fw-medium);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
   letter-spacing: 0;
 }
 
@@ -213,16 +217,16 @@
   padding: 0 9px;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-primary);
   cursor: pointer;
   font: inherit;
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
   text-align: left;
 }
 
 .settings-center-tab[aria-current="page"] {
   color: var(--text-primary);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-regular);
 }
 
 /* 选中项图标跟随文字色，不额外上强调色——导航保持安静。 */
@@ -582,10 +586,21 @@
    属性，深色卡片整体改写，便于统一调整。 */
 
 .settings-theme-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 14px;
 }
+
+.settings-mode-row { min-height: 80px; }
+.settings-theme-grid .settings-theme-preview { width: 78px; height: 58px; min-height: 0; border-radius: 10px; }
+.settings-theme-grid .settings-theme-preview-chrome { height: 9px; }
+.settings-theme-grid .settings-theme-preview-sidebar { top: 9px; gap: 4px; padding: 6px 4px; }
+.settings-theme-grid .settings-theme-preview-main { top: 9px; gap: 5px; padding: 6px 5px; }
+.settings-theme-grid :is(.settings-theme-preview-sidebar i, .settings-theme-preview-main i, .settings-theme-preview-main b) { height: 3px; }
+.settings-theme-grid .settings-theme-preview-main b { background: var(--accent-primary); }
+.settings-theme-grid .settings-theme-selected { display: none; }
+.settings-theme-grid .settings-theme-card[data-active="true"] .settings-theme-preview { outline: 2px solid var(--accent-primary); outline-offset: 1px; border-color: var(--border-subtle); box-shadow: none; }
+.settings-theme-grid .settings-theme-card[data-theme-preview="system"] .settings-theme-preview::after { background: linear-gradient(#303030 0 9px, transparent 9px), linear-gradient(90deg, #282828 0 34%, #1d1d1d 34%); }
 
 .settings-theme-card {
   --preview-frame: #f4f4f5;
@@ -2011,24 +2026,32 @@
 }
 
 .provider-empty-list {
-  min-height: 150px;
+  min-height: 112px;
   display: grid;
   place-content: center;
   gap: 5px;
   padding: 24px;
-  border: 1px dashed var(--border-subtle);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  background: var(--surface-soft);
+  background: var(--surface-base);
   color: var(--text-muted);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
   text-align: center;
 }
 
 .provider-empty-title {
   color: var(--text-primary);
   font-size: var(--text-sm);
-  font-weight: var(--fw-bold);
+  font-weight: var(--fw-semibold);
 }
+
+.settings-mcp-services-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.settings-mcp-services-heading h3 { margin: 0; font-size: var(--text-sm); font-weight: var(--fw-semibold); }
+.settings-mcp-services-heading h3 small { margin-left: 6px; color: var(--text-muted); font-size: inherit; font-weight: var(--fw-regular); }
+.settings-mcp-services-actions { display: inline-flex; align-items: center; gap: 8px; }
+.settings-mcp-services .settings-mcp-add { background: var(--text-primary); color: var(--surface-base); border-color: transparent; }
+.settings-mcp-services .settings-mcp-add:hover:not(:disabled) { background: var(--text-secondary); color: var(--surface-base); }
+.settings-mcp-empty { padding: 24px 20px; color: var(--text-muted); font-size: var(--text-sm); }
 
 /* 详情页面板的边框/底色由 ui-polish 归零接管。 */
 .provider-settings-detail {
@@ -2183,13 +2206,14 @@
 
 @keyframes settings-page-in {
   from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: translateY(0); }
+  to { opacity: 1; transform: none; }
 }
 
 @keyframes settings-content-in {
-  from { opacity: 0; transform: translateY(5px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
+@keyframes settings-tab-in { from { opacity: 0; } to { opacity: 1; } }
 
 @keyframes settings-spin {
   to { transform: rotate(360deg); }
@@ -2463,6 +2487,7 @@
 @media (prefers-reduced-motion: reduce) {
   .settings-workspace.settings-center,
   .settings-center-content,
+  .settings-tab-pane,
   .settings-theme-preview {
     animation: none;
   }
@@ -2470,6 +2495,7 @@
 .settings-environment-output, .settings-import-preview pre { max-height: 280px; overflow: auto; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--editor-font-family); font-size: var(--text-xs); background: var(--surface-soft); }
 .settings-import-preview { padding: 12px; }
 .settings-row > code, .settings-row-description { overflow-wrap: anywhere; }
+.settings-row > code { max-width: min(380px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .settings-mcp-tool-list { max-height: 270px; overflow: auto; }
 .settings-mcp-tool-list > label { display: flex; align-items: flex-start; gap: 8px; padding: 8px 2px; }

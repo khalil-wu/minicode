@@ -16,14 +16,15 @@
     "start:client": "npm run build:frontend:desktop && chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "start:client:devfrontend": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "node --test backend-sidecar.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js pty-cleanup-regressions.test.js security.test.js updater.test.js utils.test.js window-manager.test.js windows-sandbox-setup.test.js",
+    "test:unit": "node --test backend-sidecar.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js pty-cleanup-regressions.test.js security.test.js updater.test.js utils.test.js window-manager.test.js windows-sandbox-setup.test.js menu-popup.test.js",
     "test:e2e": "node --test electron-smoke.test.js editor-viewport.test.js",
     "test:packaged": "node packaged-smoke.test.js",
     "version:check": "python ../scripts/version_sync.py --check",
     "version:sync": "python ../scripts/version_sync.py",
     "runtime:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-python-runtime.ps1",
     "github:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-github-runtime.ps1",
-    "language:prepare": "npm ci --prefix language-services --omit=dev --no-audit --no-fund",
+    "language:prepare": "npm ci --prefix language-services --omit=dev --no-audit --no-fund && npm run clangd:prepare",
+    "clangd:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-clangd-runtime.ps1",
     "runtime:windows-sandbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-sandbox-runtime.ps1",
     "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js",
     "pack:dir": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
@@ -58,6 +59,7 @@
       "preload.js",
       "backend-sidecar.js",
       "windows-sandbox-setup.js",
+      "menu-popup.js",
       "cdp-bridge.js",
       "crash-reporter.js",
       "embedded-browser-manager.js",
@@ -85,6 +87,11 @@
       {
         "from": "language-services",
         "to": "language-services",
+        "filter": ["**/*", "!node_modules/**", "!**/.cache/**"]
+      },
+      {
+        "from": "language-services/node_modules",
+        "to": "language-services/node_modules",
         "filter": ["**/*", "!**/.cache/**"]
       },
       {

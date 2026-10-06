@@ -134,7 +134,7 @@ it("settles a mixed streamed document to the same structures as a complete docum
   ].join("\n");
   const shape = (element: HTMLElement) => Object.fromEntries([
     "h4", "strong", "em", "del", ".katex", "table", "thead", "tbody tr", "input[type=checkbox]",
-    "blockquote", "pre", "a", ".md-file-chip", ".md-official-file-icon > svg",
+    "blockquote", "pre", "a", ".md-file-chip", ".md-file-link-icon",
   ].map((selector) => [selector, element.querySelectorAll(selector).length]));
   const complete = render(<MarkdownRenderer content={content} />);
   const expected = shape(complete.container);

@@ -10,7 +10,6 @@ import { ComposerTextarea } from "./ComposerTextarea";
 import { appendComposerTokenAnchor, composerTokenAtSelection, removeComposerToken, type ComposerSelection } from "./inputSelection";
 import { MenuOverlay } from "./MenuOverlay";
 import { FooterRow } from "./FooterRow";
-import { ProviderRequestStatus } from "./ProviderRequestStatus";
 import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
 import { QueuedMessageList } from "./QueuedMessageList";
 import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
@@ -134,6 +133,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
+  const selectedMentions = useAppStore((s) => s.selectedMentions);
+  const hasPendingPrompt = useAppStore((s) => Boolean(s.pendingAskUser || s.pendingApproval || s.pendingDiffReview));
   const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
@@ -156,6 +157,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const historyCursorRef = useRef(-1);
   const historySavedDraftRef = useRef("");
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
+  const hasComposerAttachments = useAppStore((s) => s.attachments.length > 0);
 
   useEffect(() => {
     if (!dragOver) return;
@@ -672,7 +674,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     <>
       {!minimal && <TurnPlanProgress wide={wideMode} />}
       <QueuedMessageList wide={wideMode} minimal={minimal} />
-      {!minimal && <ProviderRequestStatus wide={wideMode} />}
       <div
         ref={containerRef}
         onDragOver={(e) => {
@@ -688,6 +689,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
         data-command-mode={commandModeActive ? "true" : "false"}
         data-drag-over={dragOver ? "true" : "false"}
+        data-empty={!draft.length && !hasComposerAttachments && !selectedSkills.length && !selectedMentions.length && !quotedMessage && !activeGoal && !activeSlashCommand
+          && !hasPendingPrompt ? "true" : "false"}
         data-layout-mode={codeLayout ? "code" : "cowork"}
         style={{
           position: "relative",

@@ -101,7 +101,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         ? permissionRef.current
         : null;
     if (!root) return;
-    const trigger = root.querySelector<HTMLButtonElement>(effortOpen ? ':scope > button[data-effort-trigger]' : ':scope > button[aria-expanded]');
+    const trigger = root.querySelector<HTMLButtonElement>(':scope > button[aria-expanded]');
     const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
     queueMicrotask(() => {
       const items = options();
@@ -248,7 +248,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     });
   };
 
-  const modelLabel = availableModelLabels[currentModel] || formatModelLabel(currentModel, "选择模型");
+  const modelLabel = formatModelLabel(availableModelLabels[currentModel] || currentModel, "选择模型");
   const selectableModels = selectableModelsForProvider(
     availableModels,
     currentModel,
@@ -269,7 +269,13 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   ) && capabilityEffortLevels.length > 0;
   const composerEffortLevels = capabilityEffortLevels;
   const effortOptions = supportsReasoningEffort
-    ? composerEffortLevels.map(effortOption)
+    ? composerEffortLevels.map((level) => {
+      const option = effortOption(level);
+      const wireMap = providerCapabilities?.reasoning_effort_wire_map as Record<string, string> | undefined;
+      return level === "ultra" && wireMap?.ultra
+        ? { ...option, description: `主动多智能体协作；模型请求使用${effortOption(wireMap.ultra).label}推理` }
+        : option;
+    })
     : [];
   // The pill must show the level the user is actually on. Substituting a
   // declared default (the old `?? medium` fallback) reported 中 for a session
@@ -405,33 +411,23 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             type="button"
             onClick={() => {
               setPermissionOpen(false);
-              setEffortOpen(false);
-              setModelOpen((open) => !open);
+              const open = modelOpen || effortOpen;
+              setModelOpen(!open && !supportsReasoningEffort);
+              setEffortOpen(!open && supportsReasoningEffort);
             }}
             className="composer-model-select"
-            aria-expanded={modelOpen}
-            aria-haspopup="listbox"
+            data-reasoning-supported={supportsReasoningEffort}
+            aria-label={supportsReasoningEffort ? `模型与推理强度：${modelLabel}，${effortLabel}` : undefined}
+            aria-expanded={modelOpen || effortOpen}
+            aria-haspopup={supportsReasoningEffort ? "dialog" : "listbox"}
             style={pill}
-            title={currentModel || "选择模型"}
+            title={supportsReasoningEffort ? effortTitle : currentModel || "选择模型"}
           >
-            <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
+            {!supportsReasoningEffort && <span className="composer-floating-model-icon" aria-hidden="true"><ModelBrandIcon model={currentModel} size={15} /></span>}
+            <span className="composer-model-trigger-label">{modelLabel}</span>
+            {supportsReasoningEffort && <span className="composer-model-trigger-effort" data-effort={displayedEffort}>{effortLabel}</span>}
             <ChevronDown size={13} aria-hidden="true" />
           </button>
-          {supportsReasoningEffort && <button
-            type="button"
-            data-effort-trigger
-            className="composer-effort-label"
-            aria-label={`推理强度：${effortLabel}`}
-            title={effortTitle}
-            aria-haspopup="dialog"
-            aria-expanded={effortOpen}
-            style={{ ...pill, color: "var(--accent-reasoning, var(--accent-primary))" }}
-            onClick={() => {
-              setPermissionOpen(false);
-              setModelOpen(false);
-              setEffortOpen((open) => !open);
-            }}
-          >{effortLabel}</button>}
           {modelOpen && (
             <div className="mc-dropdown-menu composer-picker-menu composer-model-menu" role="listbox" aria-label="选择模型" style={{ ...dropdownStyle("right"), overflow: "hidden" }}>
               <div className="composer-menu-heading">选择模型</div>
@@ -462,7 +458,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             </div>
           )}
         {supportsReasoningEffort && effortOpen && (
-          <div className="mc-dropdown-menu composer-picker-menu" role="dialog" aria-label={effortTitle} style={dropdownStyle("right")}>
+          <div className="mc-dropdown-menu composer-picker-menu composer-reasoning-menu" role="dialog" aria-label="模型与推理强度" style={dropdownStyle("right")}>
             <EffortControl
               key={`${currentModel}:${conversationId}:${composerEffortLevels.join(",")}`}
               options={effortOptions}
@@ -563,13 +559,15 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel 
   };
   return <div className="composer-effort-control">
     <div className="composer-effort-heading">
-      <span className="composer-effort-value">{current.label}</span>
-      <button type="button" className="composer-effort-model-toggle" aria-label="选择模型" aria-haspopup="listbox" onClick={onChooseModel}>
-        <ChevronRight size={14} aria-hidden="true" />
-      </button>
+      <div className="composer-effort-selection">
+        <span className="composer-effort-value">{current.label}</span>
+        <button type="button" className="composer-effort-model-toggle" aria-label="选择模型" title={modelLabel} aria-haspopup="listbox" onClick={onChooseModel}>
+          <span className="composer-effort-model">{modelLabel}</span>
+          <ChevronRight size={14} aria-hidden="true" />
+        </button>
+      </div>
       {options.some((option) => option.id === "medium") && <button type="button" className="composer-effort-reset" title="恢复中等推理强度" aria-label="恢复中等推理强度" onClick={() => onSelect("medium")}><RotateCcw size={16} /></button>}
     </div>
-    <div className="composer-effort-model" title={modelLabel}>{modelLabel}</div>
     {canSlide && <div
       className="composer-effort-slider"
       data-dragging={dragging}
@@ -693,8 +691,7 @@ const ContextUsageRing = memo(() => {
         conversation_id: conversationId || undefined,
         source: "usage_ring",
       })}
-       title="查看上下文占用与会话用量（/usage）"
-       aria-label="查看上下文与会话用量详情"
+       aria-label="查看会话用量详情"
       className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >

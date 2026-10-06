@@ -4,6 +4,15 @@ from __future__ import annotations
 from backend.llm.model_catalog import responses_model_catalog_entry
 
 
+def reasoning_effort_wire_map(model: str) -> dict[str, str]:
+    entry = responses_model_catalog_entry(model)
+    return entry.reasoning_effort_wire_map if entry is not None else {}
+
+
+def reasoning_effort_wire_value(model: str, effort: str) -> str:
+    return reasoning_effort_wire_map(model).get(effort, effort)
+
+
 def _known_reasoning_effort_levels(model: str, wire_api: str) -> tuple[str, ...]:
     if str(wire_api or "").strip().lower() != "responses":
         return ()

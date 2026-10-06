@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { subagentModelPatch } from "../lib/subagent-model";
 import type {
   ConversationListEvent,
   ConversationRecordPayload,
@@ -389,6 +390,7 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
       };
       return {
         id: String(subagent.id ?? subagent.subagent_id ?? "").trim(),
+        ...subagentModelPatch(subagent),
         role: String(subagent.role ?? "subagent"),
         status: SUBAGENT_STATUSES.has(status) ? status : "running",
         cleanupPending: typeof (subagent.cleanupPending ?? subagent.cleanup_pending) === "boolean"
@@ -486,6 +488,10 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
           : undefined,
         errorMessage: maybeString((progress.errorMessage ?? progress.error_message) as string | null | undefined),
         operationId: maybeString((progress.operationId ?? progress.operation_id) as string | null | undefined),
+        subagentId: maybeString((progress.subagentId ?? progress.subagent_id) as string | null | undefined),
+        subagentName: maybeString((progress.subagentName ?? progress.subagent_name) as string | null | undefined),
+        subagentIdentity: maybeString((progress.subagentIdentity ?? progress.subagent_identity) as string | null | undefined),
+        subagentStatus: (progress.subagentStatus ?? progress.subagent_status) as SubagentState["status"] | undefined,
         providerState,
         iterationId: maybeString((progress.iterationId ?? progress.iteration_id) as string | null | undefined),
         timestamp: typeof progress.timestamp === "number" ? progress.timestamp : Date.now(),
@@ -1244,6 +1250,9 @@ export const handleSessionEvent = (
         || stringValue(ev.session?.active_conversation_id)
         || activeConversation?.id
         || "";
+      const pendingNavigation = useAppStore.getState();
+      const pendingConversationId = pendingNavigation.pendingConversationSwitchId ?? pendingNavigation.pendingConversationCreateId;
+      if (pendingConversationId && activeConversationId !== pendingConversationId) return true;
       const activeConversationIsHidden = Boolean(
         activeConversation?.archived || activeConversation?.conversation_type === "side_chat",
       );
@@ -1482,6 +1491,10 @@ export const handleSessionEvent = (
               : null),
           };
         });
+        // A create/switch request already owns navigation. An inventory reply
+        // received during that request may refresh the sidebar, but must not
+        // restore an older owner or send a competing fallback switch.
+        if (storeState.pendingConversationSwitchId || storeState.pendingConversationCreateId) return true;
         const eventActiveConversation = ev.active_conversation ?? null;
         const activeConversation = eventActiveConversation
           && eventActiveConversation.id === effectiveActiveConversationId
@@ -1555,6 +1568,9 @@ export const handleSessionEvent = (
     case "conversation.switched": {
       const ev = e as ConversationSwitchedEvent;
       const switchedConversationId = maybeString(ev.conversation_id) ?? ev.conversation?.id;
+      const pendingNavigation = useAppStore.getState();
+      const pendingConversationId = pendingNavigation.pendingConversationSwitchId ?? pendingNavigation.pendingConversationCreateId;
+      if (pendingConversationId && switchedConversationId !== pendingConversationId) return true;
       const forceAuthoritative = Boolean(
         switchedConversationId
         && pendingAuthoritativeConversationResets.delete(switchedConversationId),

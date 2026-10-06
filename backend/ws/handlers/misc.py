@@ -406,10 +406,16 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
         await emit_command_error(session, "subagent.transcript", exc)
         return True
 
+    from backend.agent.public_projection import project_public_subagent_run
+
+    snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=False)
+    public_snapshot = project_public_subagent_run(snapshot)
+    execution_metadata = {key: public_snapshot[key] for key in (
+        "model", "provider", "reasoning_effort", "agent_path", "mailbox_epoch",
+    ) if key in public_snapshot}
     transcript = runtime.load_agent_transcript(subagent_id)
     events = transcript.get("events") if isinstance(transcript, dict) else None
     if not isinstance(events, list) or not events:
-        snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=False)
         status = str((snapshot or {}).get("status") or "").strip().lower()
         if status in {"pending", "running", "blocked"}:
             await session.emit_command_result(
@@ -421,6 +427,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
                     "seq": 0,
                     "messages": [],
                     "status": status or "running",
+                    **execution_metadata,
                 },
             )
             return True
@@ -435,6 +442,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
                 "messages": [],
                 "status": status or "unknown",
                 "error_kind": "subagent_transcript_missing",
+                **execution_metadata,
             },
         )
         return True
@@ -456,6 +464,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
             "conversation_id": conversation_id,
             "seq": transcript_seq,
             "messages": messages,
+            **execution_metadata,
         },
     )
     return True

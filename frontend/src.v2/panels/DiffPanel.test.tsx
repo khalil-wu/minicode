@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
@@ -78,43 +78,99 @@ afterEach(() => {
 });
 
 describe("DiffPanel", () => {
-  it.each(["history", "git"])("reveals and focuses the conversation on the next frame when quoting from an expanded %s review", async (scope) => {
-    const patch = "diff --git a/src/app.ts b/src/app.ts\n@@ -100 +120 @@\n-old\n+new";
-    const ComposerProbe = () => <textarea data-composer-input aria-label="当前对话输入" disabled={useAppStore((state) => state.rightPanelExpanded)} />;
-    const savedSlots = useAppStore.getState().panelSlots;
-    useAppStore.setState({
-      rightPanelExpanded: true, draft: "已有草稿",
-      panelSlots: [{ id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 }],
-      messages: scope === "history" ? [{ id: "last-answer", turnId: "turn-last", role: "assistant", content: "", artifacts: [], timestamp: 1, blocks: [{ type: "tool_call", record: { id: "edit-last", name: "edit_file", status: "success", startedAt: 1, args: { path: "src/app.ts", patch } } }] }] : [],
+  it.each(["review", "history", "git"] as const)("keeps %s diff rows free of chat and question affordances in both layouts", (scope) => {
+    const patch = "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -10 +10 @@\n-old\n+new";
+    useAppStore.setState({ draft: "Keep the draft", selectedMentions: [], diffReview: scope === "review" ? {
+      requestId: "no-row-chat", conversationId: "conv-diff", mode: "view", status: "viewing", diff: patch,
+      files: [{ path: "src/app.ts", patch }], selectedPath: "src/app.ts", fileDecisions: {}, lineComments: [],
+    } : null,
+      messages: scope === "history" ? [{ id: "answer", role: "assistant", turnId: "turn", timestamp: 1, content: "Done", artifacts: [],
+        turnDiff: { threadId: "conv-diff", turnId: "turn", messageId: "answer", updatedAt: 1, diff: patch } }] : [],
       gitChanges: { staged: [], workingTree: scope === "git" ? [{ path: "src/app.ts", patch, additions: 1, deletions: 1 }] : [], untracked: [], loading: false },
     });
-    try {
-      render(<><DiffPanel /><ComposerProbe /></>);
-      if (scope === "history") {
-        fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-        fireEvent.click(screen.getByRole("option", { name: /轮次记录/ }));
-      } else fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
-      fireEvent.click(screen.getByRole("button", { name: "把 src/app.ts 变更后第 120 行加入对话" }));
-      expect(useAppStore.getState().draft).toContain("已有草稿\n\n关于 src/app.ts");
-      expect(useAppStore.getState().rightPanelExpanded).toBe(false);
-      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "当前对话输入" })));
-      expect(sendClientCommand).not.toHaveBeenCalled();
-    } finally { useAppStore.setState({ panelSlots: savedSlots, draft: "", rightPanelExpanded: false }); }
+    const { container } = render(<DiffPanel />);
+    if (scope === "history") {
+      fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+      fireEvent.click(screen.getByRole("option", { name: /轮次记录/ }));
+    } else if (scope === "git") fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
+    for (const mode of ["unified", "split"]) {
+      expect(screen.queryByRole("button", { name: /加入对话|引用|提问|评论 Diff/ })).toBeNull();
+      expect(container.querySelector(".mc-diff-line-quote")).toBeNull();
+      expect(screen.getByText("new", { exact: true })).toBeTruthy();
+      fireEvent.click(screen.getByText("new", { exact: true }));
+      expect(useAppStore.getState().draft).toBe("Keep the draft");
+      expect(useAppStore.getState().selectedMentions).toEqual([]);
+      if (mode === "unified") fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    }
   });
 
-  it("does not focus another conversation when the owner changes before a quoted Git line's next frame", async () => {
-    const patch = "diff --git a/src/app.ts b/src/app.ts\n@@ -100 +120 @@\n-old\n+new";
-    useAppStore.setState({ gitChanges: { staged: [], workingTree: [{ path: "src/app.ts", patch, additions: 1, deletions: 1 }], untracked: [], loading: false } });
-    render(<><DiffPanel /><textarea data-composer-input aria-label="当前对话输入" /></>);
-    const input = screen.getByRole("textbox", { name: "当前对话输入" });
-    const focus = vi.spyOn(input, "focus");
-    fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
-    fireEvent.click(screen.getByRole("button", { name: "把 src/app.ts 变更后第 120 行加入对话" }));
-    act(() => useAppStore.setState({ conversationId: "other-owner" }));
-    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
-    expect(focus).not.toHaveBeenCalled();
-    focus.mockRestore();
+  it("keeps multiple current-turn files expanded without line chat controls", () => {
+    const patch = (path: string, content: string) => `diff --git a/${path} b/${path}\n@@ -419 +419 @@\n-old\n+${content}`;
+    useAppStore.setState({ draft: "已有问题", diffReview: {
+      requestId: "multi-file-reading", conversationId: "conv-diff", mode: "view", status: "viewing",
+      diff: patch("src/a.ts", "newA"), selectedPath: "src/a.ts", fileDecisions: {},
+      files: [{ path: "src/a.ts", patch: patch("src/a.ts", "newA"), additions: 1, deletions: 1 },
+        { path: "src/b.ts", patch: patch("src/b.ts", "newB"), additions: 1, deletions: 1 }],
+    } });
+    render(<DiffPanel />);
+    const first = screen.getByRole("button", { name: "src/a.ts", exact: true });
+    const second = screen.getByRole("button", { name: "src/b.ts", exact: true });
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(second);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("newA")).toBeTruthy();
+    expect(screen.getByText("newB")).toBeTruthy();
+    expect(screen.getAllByText("418 行未修改")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /加入对话/ })).toBeNull();
+    expect(useAppStore.getState().draft).toBe("已有问题");
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("region", { name: "src/a.ts" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "src/b.ts" })).toBeTruthy();
   });
+
+  it("shows the authoritative multi-file turn patch and opens each file without a file picker", () => {
+    const patch = (path: string, text: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-before\n+${text}`;
+    useAppStore.setState({ diffReview: null, messages: [{ id: "answer", turnId: "turn", role: "assistant", content: "完成", artifacts: [], timestamp: 1,
+      blocks: [{ type: "tool_call", record: { id: "intermediate", name: "edit_file", status: "success", startedAt: 1,
+        args: { path: "src/obsolete.ts", patch: patch("src/obsolete.ts", "intermediate") } } }],
+    }], turnDiffs: { "conv-diff": { threadId: "conv-diff", turnId: "turn", messageId: "answer", updatedAt: 2,
+      diff: `${patch("src/final-a.ts", "finalA")}\n${patch("src/final-b.ts", "finalB")}`,
+    } } });
+    const { container } = render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+    fireEvent.click(screen.getByRole("option", { name: /轮次记录 · 上一轮/ }));
+    expect(screen.queryByRole("combobox", { name: "轮次修改文件" })).toBeNull();
+    expect(screen.queryByText("intermediate")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "src/final-b.ts", exact: true }));
+    expect(screen.getByText("finalA")).toBeTruthy();
+    expect(screen.getByText("finalB")).toBeTruthy();
+    expect(container.querySelector(".mc-diff-total-counts")?.textContent).toBe("+2-2");
+    expect(screen.getByRole("button", { name: "src/final-a.ts", exact: true }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "src/final-b.ts", exact: true }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps two Git file patches open and collapses only the clicked range", () => {
+    const patch = (path: string, text: string) => `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+${text}`;
+    useAppStore.setState({ gitChanges: { staged: [], untracked: [], loading: false, workingTree: [
+      { path: "src/a.ts", patch: patch("src/a.ts", "gitA"), additions: 1, deletions: 1 },
+      { path: "src/b.ts", patch: patch("src/b.ts", "gitB"), additions: 1, deletions: 1 },
+    ] } });
+    render(<DiffPanel />);
+    const first = screen.getByRole("button", { name: "审阅未暂存 src/a.ts" });
+    const second = screen.getByRole("button", { name: "审阅未暂存 src/b.ts" });
+    fireEvent.click(first); fireEvent.click(second);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("gitA")).toBeTruthy();
+    expect(screen.getByText("gitB")).toBeTruthy();
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("keeps feedback draft, true hunk offsets and saved comments when switching reading modes", () => {
     const patch = "diff --git a/src/app.ts b/src/app.ts\n@@ -100 +120 @@\n-old\n+new\n@@ -500 +520 @@\n-later old\n+later new";
     useAppStore.setState({ diffReview: {
@@ -160,71 +216,11 @@ describe("DiffPanel", () => {
     expect(screen.getByText("base")).toBeTruthy();
     expect(screen.queryByText("working value")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
-    expect(screen.queryByText("base")).toBeNull();
+    expect(screen.getByText("base")).toBeTruthy();
     expect(screen.getByText("working value")).toBeTruthy();
     expect(useAppStore.getState().gitReviewRequest?.section).toBe("working");
-    fireEvent.click(screen.getByRole("button", { name: "把 src/app.ts 变更后第 10 行加入对话" }));
-    expect(useAppStore.getState().draft).toContain("Git 未暂存，变更后第 10 行");
+    expect(within(screen.getByRole("region", { name: "审阅未暂存 src/app.ts" })).queryByRole("button", { name: /加入对话/ })).toBeNull();
   });
-  it.each(["unified", "split"])("adds exact old and new source lines to the existing draft without sending in %s view", async (viewMode) => {
-    const patch = "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -40 +60 @@\n-oldValue\n+newValue";
-    const panelSlots = useAppStore.getState().panelSlots;
-    const revealComposer = vi.fn();
-    window.addEventListener("composer:focus", revealComposer);
-    useAppStore.setState({
-      draft: "已有说明", quotedMessage: { id: "quoted", role: "assistant", content: "保留引用" },
-      panelSlots: [
-        { id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: false },
-        { id: "editor", kind: "editor", label: "Code", size: 1, focused: true, maximized: true },
-      ],
-      diffReview: {
-        requestId: "discuss-lines", conversationId: "conv-diff", toolName: "本轮修改", diff: patch,
-        files: [{ path: "src/app.ts", patch }], selectedPath: "src/app.ts",
-        status: "viewing", mode: "view", fileDecisions: {}, lineComments: [],
-      },
-    });
-    try {
-      render(<><DiffPanel /><textarea data-composer-input aria-label="消息输入" /></>);
-      if (viewMode === "split") fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
-      fireEvent.click(screen.getByRole("button", { name: "把 src/app.ts 变更前第 40 行加入对话" }));
-      fireEvent.click(screen.getByRole("button", { name: "把 src/app.ts 变更后第 60 行加入对话" }));
-      expect(useAppStore.getState().draft).toBe("已有说明\n\n关于 src/app.ts（变更前第 40 行）：\n\n    oldValue\n\n关于 src/app.ts（变更后第 60 行）：\n\n    newValue");
-      expect(useAppStore.getState().quotedMessage?.content).toBe("保留引用");
-      expect(useAppStore.getState().panelSlots.find((slot) => slot.kind === "chat")).toMatchObject({ focused: true, maximized: true });
-      expect(revealComposer).toHaveBeenCalledTimes(2);
-      await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "消息输入" })));
-      expect(sendClientCommand).not.toHaveBeenCalled();
-      expect(sendPromptResponseCommand).not.toHaveBeenCalled();
-      expect(useAppStore.getState().diffReview?.lineComments).toEqual([]);
-      act(() => useAppStore.setState({ conversationId: "other" }));
-      expect(screen.queryByRole("button", { name: /变更后第 60 行加入对话/ })).toBeNull();
-    } finally {
-      window.removeEventListener("composer:focus", revealComposer);
-      useAppStore.setState({ panelSlots, draft: "", quotedMessage: null });
-    }
-  });
-
-  it("adds the selected review file to chat without replacing the draft", () => {
-    const panelSlots = useAppStore.getState().panelSlots;
-    useAppStore.setState({
-      draft: "已有问题", selectedMentions: [],
-      diffReview: {
-        requestId: "discuss-file", conversationId: "conv-diff", diff: "@@ -1 +1 @@\n-old\n+new",
-        files: [{ path: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new" }], selectedPath: "src/app.ts",
-        status: "viewing", mode: "view", fileDecisions: {},
-      },
-    });
-    try {
-      render(<DiffPanel />);
-      fireEvent.click(screen.getByRole("button", { name: "把文件加入对话" }));
-      expect(useAppStore.getState().selectedMentions).toEqual([{ kind: "file", path: "src/app.ts", name: "app.ts" }]);
-      expect(useAppStore.getState().draft).toBe("已有问题");
-      expect(sendClientCommand).not.toHaveBeenCalled();
-    } finally {
-      useAppStore.setState({ panelSlots, draft: "", selectedMentions: [] });
-    }
-  });
-
   it.each(["unified", "split"])("uses real source lines across hunks and opens current code in %s view", (viewMode) => {
     const patch = [
       "diff --git a/src/app.ts b/src/app.ts", "--- a/src/app.ts", "+++ b/src/app.ts",
@@ -338,8 +334,8 @@ describe("DiffPanel", () => {
     render(React.createElement(DiffPanel));
 
     expect(screen.getByRole("button", { name: /Diff 来源：当前修改 1/ })).toBeTruthy();
-    expect(screen.getByText("Diff")).toBeTruthy();
-    expect(screen.getByText("edit_file")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "src/app.ts" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.queryByText("edit_file")).toBeNull();
     expect(screen.queryByText("edit_file审批")).toBeNull();
     expect(screen.queryByRole("button", { name: "全部接受" })).toBeNull();
     expect(screen.queryByRole("button", { name: "全部拒绝" })).toBeNull();
@@ -476,12 +472,12 @@ describe("DiffPanel", () => {
 
     render(React.createElement(DiffPanel));
 
-    expect(screen.getByText("src/file-000.ts")).toBeTruthy();
-    expect(screen.queryByText("src/file-052.ts")).toBeNull();
+    expect(screen.getByRole("button", { name: "审阅未暂存 src/file-000.ts" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "审阅未暂存 src/file-052.ts" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "再显示 5 个已修改文件" }));
-    expect(screen.getByText("src/file-052.ts")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "审阅未暂存 src/file-052.ts" })).toBeTruthy();
 
-    fireEvent.click(screen.getByText("src/file-000.ts"));
+    fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/file-000.ts" }));
     expect(screen.getByText(/另有 .* 行 Diff 已隐藏/)).toBeTruthy();
     expect(screen.queryByText("line_999")).toBeNull();
   });

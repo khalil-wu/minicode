@@ -4,6 +4,18 @@ from backend.conversations import public_projection
 from backend.conversations.repository import _normalize_loaded_transcript
 
 
+def test_message_projection_preserves_owned_turn_diff_without_exposing_arbitrary_metadata():
+    payload = {"thread_id": "conversation", "conversation_id": "conversation", "turn_id": "turn-1", "message_id": "assistant-1",
+        "task_id": "task-1", "revision": 6, "diff": "diff --git a/parser.py b/parser.py\n+++ b/parser.py\n@@ -0,0 +1 @@\n+def parse(): pass\n",
+        "source": "workspace_snapshot", "workspace_root": "C:/project", "private_transport": "must be dropped"}
+    projected = public_projection.project_public_transcript_message({"id": "assistant-1", "role": "assistant", "content": "Done",
+        "metadata": {"turn_diff": payload, "private_state": "must be dropped"}})
+    diff = projected["metadata"]["turn_diff"]
+    assert diff["diff"] == payload["diff"]
+    assert diff["message_id"] == "assistant-1" and diff["revision"] == 6
+    assert "private_transport" not in diff and "private_state" not in projected["metadata"]
+
+
 def test_subagent_membership_is_not_limited_by_the_collapsed_preview() -> None:
     rows = [{"id": f"child-{index}", "status": "done", "agentPath": f"/root/{index}"} for index in range(35)]
     projected = public_projection.project_public_conversation({"id": "conversation", "context_snapshot": {

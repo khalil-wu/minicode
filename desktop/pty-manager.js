@@ -375,13 +375,15 @@ async function restartSession(sessionId, conversationId) {
   }
 }
 
-async function killConversation(conversationId) {
+async function killConversation(conversationId, preserveHistory = false) {
   const owner = requireConversationId(conversationId);
   const ownedSessionIds = Array.from(ptySessions.entries())
     .filter(([, session]) => session.conversationId === owner)
     .map(([sessionId]) => sessionId);
   const results = await Promise.all(
-    ownedSessionIds.map((sessionId) => killSession(sessionId, owner)),
+    ownedSessionIds.map((sessionId) => preserveHistory
+      ? terminateSession(sessionId, ptySessions.get(sessionId))
+      : killSession(sessionId, owner)),
   );
   return results.filter(Boolean).length;
 }

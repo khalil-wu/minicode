@@ -1,4 +1,4 @@
-const GLYPHS = ["orbit", "petal", "facets", "links", "spark", "bloom"] as const;
+const GLYPHS = ["orbit", "links", "facets", "petal", "bloom", "spark"] as const;
 const COLORS = ["teal", "blue", "violet", "rose", "amber", "green"] as const;
 
 export type AgentIdentityGlyph = typeof GLYPHS[number];
@@ -11,8 +11,9 @@ export function agentIdentity(identityKey: string): { glyph: AgentIdentityGlyph;
     hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619);
   }
   const value = hash >>> 0;
+  const identityIndex = (value >>> 8) % COLORS.length;
   return {
-    glyph: GLYPHS[value % GLYPHS.length],
-    color: COLORS[(value >>> 8) % COLORS.length],
+    glyph: GLYPHS[identityIndex],
+    color: COLORS[identityIndex],
   };
 }

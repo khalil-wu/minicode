@@ -143,6 +143,16 @@ from backend.tools.subagent_support import (
 )
 
 
+def _subagent_event_is_user_visible(event_type: str, data: dict[str, Any]) -> bool:
+    if data.get("user_visible") is False or str(data.get("visibility") or "").lower() in {"hidden", "internal", "debug", "redacted"}:
+        return False
+    if event_type == "agent.progress" and (
+        data.get("provider_state") or data.get("providerState") or data.get("label") == "provider"
+    ):
+        return False
+    return str(data.get("tool_name") or data.get("name") or "") not in {"tool_exec", "tool_wait"}
+
+
 def _task_tool_parameters(
     agent_types: list[str],
     agent_type_help: str,
@@ -159,7 +169,7 @@ def _task_tool_parameters(
         properties = {
             "description": {
                 "type": "string",
-                "description": f"Short description of this {subject}, shown in the UI.",
+                "description": f"Short task title for this {subject}, shown in the UI and task list.",
             },
             "prompt": {
                 "type": "string",
@@ -225,11 +235,11 @@ def _task_tool_parameters(
         return {
             "name": {
                 "type": "string",
-                "description": "Addressable teammate name. Uses current team context when team_name is omitted.",
+                "description": "Addressable persistent teammate name for a single task call. Uses the existing current team when team_name is omitted.",
             },
             "team_name": {
                 "type": "string",
-                "description": "Existing team name used to spawn a teammate.",
+                "description": "Existing team for the named teammate in this single task call.",
             },
             "mode": {
                 "type": "string",
@@ -246,7 +256,8 @@ def _task_tool_parameters(
             "minItems": 2,
             "maxItems": MAX_PARALLEL_TASKS,
             "description": (
-                "Run 2-8 bounded subtasks in one call; at most four run concurrently. "
+                "Run 2-8 ordinary independent subtasks in one call; at most four run concurrently. "
+                "Each item's description is its task title. Named team members use single task calls. "
                 "Read-only scopes may overlap. Every write-capable item must declare an "
                 "explicit write_scope disjoint from its siblings."
             ),
@@ -254,6 +265,7 @@ def _task_tool_parameters(
                 "type": "object",
                 "properties": delegation_properties(parallel_item=True),
                 "required": ["description", "prompt"],
+                "additionalProperties": False,
             },
         },
         "run_in_background": {
@@ -267,9 +279,26 @@ def _task_tool_parameters(
     return {
         "type": "object",
         "properties": properties,
+        "additionalProperties": False,
         "anyOf": [
-            {"required": ["description", "prompt"]},
-            {"required": ["parallel_tasks"]},
+            {
+                "type": "object",
+                "properties": {key: value for key, value in properties.items() if key not in {"parallel_tasks", "name", "team_name", "mode"}},
+                "required": ["description", "prompt"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {key: value for key, value in properties.items() if key != "parallel_tasks"},
+                "required": ["description", "prompt", "name"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {key: properties[key] for key in ("parallel_tasks", "run_in_background")},
+                "required": ["parallel_tasks"],
+                "additionalProperties": False,
+            },
         ],
     }
 
@@ -293,7 +322,8 @@ class TaskTool(BaseTool):
     description = (
         "Delegate a sub-task to an independent agent. The sub-agent has its own context and tool access. "
         "Use only for broad, complex, independent work. Read or search a known file directly instead. "
-        "Supports parallel sub-tasks via the parallel_tasks parameter (up to 8 tasks, with four running at once). "
+        "Ordinary independent sub-tasks use parallel_tasks (up to 8 tasks, with four running at once); "
+        "each description is its task title. Named persistent teammates use individual task calls with name and an existing team. "
         "The tool returns the sub-agent's final response and terminal status."
     )
     permission = PermissionLevel.AUTO
@@ -311,8 +341,10 @@ class TaskTool(BaseTool):
 
     def model_description(self) -> str:
         return (
-            "Delegate independent work to a subagent. When two or more independent tasks are known, "
-            "use one parallel_tasks call so they start together. "
+            "Delegate independent work to a subagent. For two or more ordinary independent subtasks, "
+            "use parallel_tasks so they start together. Each item's description is its UI/task title; prompt contains the instructions. "
+            "For a persistent named team member, use a single task call with name and an existing team_name "
+            "(team_name may be omitted when the current conversation has exactly one existing team). "
             "Prefer it for bounded work that benefits from independent context. "
             "Use explore for read-only code or web research and plan for planning work. "
             "Give implementation agents specific ownership: name the files or modules they own and the exact change. "
@@ -1187,6 +1219,9 @@ class TaskTool(BaseTool):
                 parent_run_id=parent_run_id,
                 owner_task_id=str(getattr(context, "task_id", "") or ""),
                 session_id=str(getattr(context, "session_id", "") or ""),
+                model=prepared_llm_resolution.model if prepared_llm_resolution is not None else "",
+                provider=prepared_llm_resolution.provider if prepared_llm_resolution is not None else "",
+                reasoning_effort=prepared_llm_resolution.effort if prepared_llm_resolution is not None else "",
                 agent_type=agent_type,
                 prompt_summary=description,
                 background=True,
@@ -1882,6 +1917,9 @@ class TaskTool(BaseTool):
                 background=background,
                 task_id=child_task_name,
                 session_id=str(getattr(context, "session_id", "") or ""),
+                model=llm_resolution.model,
+                provider=llm_resolution.provider,
+                reasoning_effort=llm_resolution.effort,
                 objective=description,
                 cancel_with_parent=cancel_with_parent,
                 detach_from_parent=detach_from_parent,
@@ -1931,6 +1969,12 @@ class TaskTool(BaseTool):
             "agent_path": str(getattr(subagent_record, "agent_path", "") or ""),
             "mailbox_epoch": int(getattr(subagent_record, "mailbox_epoch", 0) or 0),
         }
+        execution_metadata = {
+            "model": llm_resolution.model,
+            "provider": llm_resolution.provider,
+            "reasoning_effort": llm_resolution.effort,
+        }
+        child_run_context: RunContext | None = None
         journal_events: list[dict[str, Any]] = []
         journal: ExecutionJournal | None = None
         cached_transcript_seq = -1
@@ -1987,12 +2031,24 @@ class TaskTool(BaseTool):
             transcript_snapshot: dict[str, Any] | None = None,
             include_transcript: bool = True,
         ) -> bool:
-            nonlocal emitted_transcript_seq
+            nonlocal emitted_transcript_seq, execution_metadata
             if emit_event is None or not _accepts_current_incarnation(
                 require_running=require_running
             ):
                 return False
-            payload = {**data, **subagent_fence}
+            if child_run_context is not None:
+                step_model = child_run_context.active_model_execution or child_run_context.model_execution
+                current_execution = {
+                    "model": step_model.model, "provider": step_model.provider,
+                    "reasoning_effort": step_model.thinking_level,
+                }
+                if current_execution != execution_metadata:
+                    execution_metadata = current_execution
+                    if runtime is not None:
+                        runtime.update_subagent_lifecycle(subagent_id, **subagent_fence, **execution_metadata)
+            # Progress/done constructors provide a generic lifecycle envelope;
+            # this producer owns the actual coordination parent for the child.
+            payload = {**data, **subagent_fence, **execution_metadata, "parent_run_id": parent_run_id}
             if transcript_snapshot is None and include_transcript:
                 transcript_snapshot = _current_transcript_snapshot()
             if transcript_snapshot is not None:
@@ -2781,6 +2837,8 @@ class TaskTool(BaseTool):
                     return
                 if event_type not in {"tool_call", "agent.progress"}:
                     return
+                if not _subagent_event_is_user_visible(event_type, data):
+                    return
                 if not _accepts_current_incarnation():
                     return
                 if emit_event is None:
@@ -2845,7 +2903,7 @@ class TaskTool(BaseTool):
             async def _run_query_turn(turn_prompt: str, turn_state: AgentState) -> None:
                 nonlocal last_tool_name, terminal_status, terminal_reason
                 nonlocal terminal_usage, terminal_provider_raw, last_error
-                nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls, child_model_snapshot
+                nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls, child_model_snapshot, child_run_context
 
                 turn_run_id = new_run_id()
                 terminal_status = "completed"
@@ -3086,6 +3144,8 @@ class TaskTool(BaseTool):
                             # fence; otherwise a persisted send has no UI event.
                             await _emit_incarnation_event(event.type, event.data)
                         elif event.type == "tool_call":
+                            if not _subagent_event_is_user_visible(event.type, event.data):
+                                continue
                             tool_name = str(
                                 event.data.get("tool_name")
                                 or event.data.get("name")
@@ -3155,12 +3215,19 @@ class TaskTool(BaseTool):
                                 or event.data.get("summary")
                                 or event.data.get("title")
                             )
-                            if process_text:
+                            item_id = str(event.data.get("item_id") or event.data.get("id") or "")
+                            process_status = str(event.data.get("status") or "completed")
+                            process_visibility = str(event.data.get("visibility") or "timeline")
+                            visible_process = process_status != "retracted" and _subagent_event_is_user_visible(event.type, event.data)
+                            if process_text or item_id:
                                 if journal is not None:
                                     _record_journal_events(journal.append(
                                         "system",
                                         {
                                             "kind": "process_text",
+                                            "item_id": item_id,
+                                            "status": process_status,
+                                            "visibility": process_visibility,
                                             "content": process_text,
                                             "source": str(
                                                 event.data.get("source")
@@ -3176,19 +3243,16 @@ class TaskTool(BaseTool):
                                     iteration=turn_state.iterations,
                                     max_iterations=sub_settings.max_iterations,
                                     tool_name="",
-                                    detail=process_text,
-                                    current_activity=process_text,
+                                    detail=process_text if visible_process else "",
+                                    current_activity=process_text if visible_process else description,
                                     waiting_on="model",
                                     last_progress_at=int(time.time() * 1000),
                                     activity_kind="narration",
-                                    activity_summary=process_text,
-                                    user_visible=True,
+                                    activity_summary=process_text if visible_process else description,
+                                    user_visible=bool(process_text) and visible_process,
                                     **subagent_fence,
                                 )
                                 progress_event.data["source_event_type"] = "agent.item"
-                                item_id = str(
-                                    event.data.get("item_id") or event.data.get("id") or ""
-                                )
                                 if item_id:
                                     progress_event.data["item_id"] = item_id
                                 await _emit_incarnation_event(
@@ -3212,23 +3276,24 @@ class TaskTool(BaseTool):
                                     persisted.to_dict()
                                     for persisted in journal.read_events()
                                 ]
-                                await _emit_incarnation_event(
-                                    "subagent.progress",
-                                    AgentEvent.subagent_progress(
-                                        subagent_id=subagent_id,
-                                        iteration=turn_state.iterations,
-                                        max_iterations=sub_settings.max_iterations,
-                                        tool_name=last_tool_name,
-                                        detail="",
-                                        current_activity=description,
-                                        waiting_on="tool",
-                                        last_progress_at=int(time.time() * 1000),
-                                        activity_kind="tool_result",
-                                        activity_summary=description,
-                                        user_visible=bool(description),
-                                        **subagent_fence,
-                                    ).data,
-                                )
+                                if _subagent_event_is_user_visible(event.type, event.data):
+                                    await _emit_incarnation_event(
+                                        "subagent.progress",
+                                        AgentEvent.subagent_progress(
+                                            subagent_id=subagent_id,
+                                            iteration=turn_state.iterations,
+                                            max_iterations=sub_settings.max_iterations,
+                                            tool_name=last_tool_name,
+                                            detail="",
+                                            current_activity=description,
+                                            waiting_on="tool",
+                                            last_progress_at=int(time.time() * 1000),
+                                            activity_kind="tool_result",
+                                            activity_summary=description,
+                                            user_visible=bool(description),
+                                            **subagent_fence,
+                                        ).data,
+                                    )
                             try:
                                 from backend.agent.checkpoint import save_run_checkpoint
 

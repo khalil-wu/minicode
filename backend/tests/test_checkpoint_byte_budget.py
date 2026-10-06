@@ -71,7 +71,7 @@ def test_long_interrupted_turn_checkpoint_is_found_and_resumes(tmp_path: Path) -
             session_id="session", user_message="fix", state=state, context_builder=context,
         ) == "saved"
 
-        checkpoint = load_latest_checkpoint("session", conversation_id="conversation-long")
+        checkpoint = load_latest_checkpoint("session", conversation_id="conversation-long", base_dir=runtime.state_root)
         assert checkpoint is not None
         assert checkpoint.stopped_reason == "interrupted"
         assert checkpoint.run_id == kernel.run_record.run_id
@@ -85,6 +85,7 @@ def test_long_interrupted_turn_checkpoint_is_found_and_resumes(tmp_path: Path) -
             context_builder=ContextBuilder(token_budget=TokenBudget()),
             max_iterations_budget=0,
             current_run_id="run-next",
+            checkpoint_base_dir=runtime.state_root,
         )
         assert resumed.restored
     finally:

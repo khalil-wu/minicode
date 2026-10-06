@@ -80,24 +80,30 @@ def test_mcp_runtime_guidance_cache_ignores_unexposed_server_instructions() -> N
     assert "B" * 200 not in second
 
 
-def test_mcp_runtime_guidance_does_not_treat_tool_presence_as_account_identity() -> None:
+def test_mcp_runtime_guidance_does_not_append_custom_account_auditing_rules() -> None:
     guidance = build_tool_runtime_guidance([_tool_schema("mcp__github__search_users")])
 
-    assert "capability evidence, not account-identity evidence" in guidance
-    assert "successful public lookup" in guidance
-    assert "current-user/viewer/whoami" in guidance
-    assert "git config" in guidance
+    assert "account-identity evidence" not in guidance
+    assert "current-user/viewer/whoami" not in guidance
+    assert "git config" not in guidance
 
 
-def test_tool_runtime_guidance_requires_native_calls_and_early_plan_tracking() -> None:
+def test_tool_runtime_guidance_keeps_host_api_without_custom_plan_or_behavior_rules() -> None:
     guidance = build_tool_runtime_guidance(
-        [_tool_schema("update_plan"), _tool_schema("web_fetch")]
+        [_tool_schema(name) for name in ("run_command", "monitor", "ask_user", "apply_patch", "grep_files", "update_plan", "web_fetch")]
     )
 
-    assert "Call it before the first substantive tool action" in guidance
-    assert "native structured tool-call channel" in guidance
-    assert "Never simulate calls with XML" in guidance
-    assert "A tool has not run until its structured result returns" in guidance
+    assert "Shell execution is run_command with command, cwd and env" in guidance
+    assert "monitor and its command_id" in guidance
+    assert "Structured user questions use ask_user" in guidance
+    assert "advertised patch argument, not a command array" in guidance
+    assert "fixed_strings=true means literal text" in guidance
+    assert "Call it before the first substantive tool action" not in guidance
+    assert "native structured tool-call channel" not in guidance
+    assert "Never simulate calls with XML" not in guidance
+    assert "Do NOT use run_command" not in guidance
+    assert "Git safety" not in guidance
+    assert "Sandbox permissions" not in guidance
 
 
 def test_update_plan_does_not_require_permission_prompt():
@@ -200,7 +206,12 @@ def test_common_direct_tool_model_descriptions_stay_short() -> None:
     command_description = RunCommandTool(artifact_store).model_schema().description
     assert command_description.startswith("Execute a shell command")
     assert "sandbox" in command_description.lower()
-    assert WebSearchTool(_HostedSearchProvider()).model_schema().description == "Search the web for current information and return candidate titles, URLs, and snippets."
+    search_description = WebSearchTool(_HostedSearchProvider()).model_schema().description
+    assert search_description.startswith("Search the web and return candidate titles, URLs, and snippets.")
+    assert "allowed_domains" in search_description
+    assert "hosted search" in search_description and "TAVILY_API_KEY" in search_description
+    assert "tool_search" in search_description
+    assert len(search_description) < 400
     assert ToolSearchTool().model_schema().description == (
         "Activate deferred tools named in <available-deferred-tools>. "
         "Until fetched, only each tool's name is known and it cannot be invoked. "
@@ -239,6 +250,7 @@ def test_task_model_schema_exposes_parallel_delegation() -> None:
     assert tool.model_schema().parameters == tool.get_schema().parameters
     assert {tuple(item["required"]) for item in parameters["anyOf"]} == {
         ("description", "prompt"),
+        ("description", "prompt", "name"),
         ("parallel_tasks",),
     }
 
@@ -272,6 +284,8 @@ def test_windows_environment_prompt_matches_run_command_shell(monkeypatch) -> No
     assert "sandbox changes permissions/network" in environment
     assert "run_command uses host" in environment
     assert "cwd and env fields" in environment
-    assert "Windows command contract" in environment
-    assert "NAME=value command" in environment
+    assert "Windows command contract" not in environment
+    assert "NAME=value command" not in environment
+    assert "retry once" not in environment
+    assert "Knowledge cutoff" not in environment
     assert "Git Bash (POSIX sh)" not in environment

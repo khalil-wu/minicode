@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
@@ -71,7 +71,8 @@ describe("ConnectorsTab MCP lifecycle states", () => {
   it("shows configured MCP services without a static marketplace", () => {
     render(<ConnectorsTab />);
 
-    expect(screen.getByText("MCP 服务")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "MCP 服务" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
     expect(screen.queryByRole("tablist", { name: "MCP 视图" })).toBeNull();
     expect(screen.queryByText(/^市场/)).toBeNull();
   });
@@ -120,6 +121,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     useAppStore.setState({ mcpServers: [], marketplaceConnectors: [] });
     render(<ConnectorsTab />);
 
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByPlaceholderText("服务名称"), { target: { value: "quoted" } });
     fireEvent.change(screen.getByPlaceholderText("命令（python、npx、uvx…）"), { target: { value: "node" } });
     fireEvent.change(screen.getByPlaceholderText("参数"), { target: { value: '--flag "two words" --path="C:\\Program Files\\tool"' } });
@@ -133,7 +135,39 @@ describe("ConnectorsTab MCP lifecycle states", () => {
       args: ["--flag", "two words", "--path=C:\\Program Files\\tool"],
       auto_start: true,
     }, "mcp.add", { timeoutMs: 300_000 }));
-    await waitFor(() => expect((screen.getByPlaceholderText("服务名称") as HTMLInputElement).value).toBe(""));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    expect(screen.getByRole("textbox", { name: "服务名称" })).toHaveProperty("value", "");
+  });
+
+  it("opens the editor only on request and closes it only after the save receipt", async () => {
+    let finish!: (value: unknown) => void;
+    awaitCommandResult.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    useAppStore.setState({ mcpServers: [] });
+    render(<ConnectorsTab />);
+    expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "local-review" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "node" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    expect(screen.getByRole("textbox", { name: "服务名称" })).toHaveProperty("value", "local-review");
+    expect(screen.getByRole("button", { name: "正在保存…" })).toHaveProperty("disabled", true);
+    await act(async () => finish({ type: "command.result", command: "mcp.add", level: "success", message: "saved", data: {} }));
+    expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
+    expect(screen.getByRole("button", { name: "添加服务" })).toBeTruthy();
+  });
+
+  it("retains an add draft when the editor is collapsed and reopened", () => {
+    useAppStore.setState({ mcpServers: [] });
+    render(<ConnectorsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "unfinished" } });
+    fireEvent.click(screen.getByRole("button", { name: "收起" }));
+    expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    expect(screen.getByRole("textbox", { name: "服务名称" })).toHaveProperty("value", "unfinished");
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
   it("edits an existing server with cwd, env, pass-through, and auto-start", async () => {
@@ -178,6 +212,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     useAppStore.setState({ mcpServers: [], marketplaceConnectors: [] });
     render(<ConnectorsTab />);
 
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "remote-sse" } });
     fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "sse" } });
     fireEvent.change(screen.getByRole("textbox", { name: "服务地址" }), { target: { value: "https://mcp.example/sse" } });
@@ -205,6 +240,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     useAppStore.setState({ mcpServers: [], marketplaceConnectors: [] });
     const { unmount } = render(<ConnectorsTab />);
 
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "modern-http" } });
     fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "http" } });
     fireEvent.change(screen.getByRole("textbox", { name: "服务地址" }), { target: { value: "https://mcp.example/mcp" } });
@@ -222,6 +258,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     vi.clearAllMocks();
     awaitCommandResult.mockResolvedValue({ type: "command.result", command: "mcp.add", level: "info", message: "", data: {} });
     render(<ConnectorsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "socket" } });
     fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "ws" } });
     fireEvent.change(screen.getByRole("textbox", { name: "服务地址" }), { target: { value: "wss://mcp.example/ws" } });
@@ -245,6 +282,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     useAppStore.setState({ mcpServers: [], marketplaceConnectors: [] });
     render(<ConnectorsTab />);
 
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "node" } });
     fireEvent.change(screen.getByRole("textbox", { name: "命令参数" }), { target: { value: "server.js" } });
     fireEvent.change(screen.getByRole("textbox", { name: "工作目录" }), { target: { value: "C:\\tools" } });
@@ -310,6 +348,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     useAppStore.setState({ mcpServers: [], marketplaceConnectors: [] });
     render(<ConnectorsTab />);
 
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByPlaceholderText("服务名称"), { target: { value: "broken" } });
     fireEvent.change(screen.getByPlaceholderText("命令（python、npx、uvx…）"), { target: { value: "node" } });
     fireEvent.click(screen.getByRole("button", { name: "添加服务" }));

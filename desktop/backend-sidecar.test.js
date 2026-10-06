@@ -59,6 +59,12 @@ function releaseChild(child) {
   backendSidecar.clearBackendRestartTimer();
 }
 
+test.afterEach(() => {
+  const ownedChild = backendSidecar.getBackendProcess();
+  if (ownedChild) releaseChild(ownedChild);
+  backendSidecar.clearBackendRestartTimer();
+});
+
 test("backend readiness retries non-2xx responses and accepts the next 2xx", async () => {
   initialize();
   const originalFetch = global.fetch;
@@ -103,6 +109,7 @@ test("backend receives the packaged resources directory separately from user fol
       pythonCommand: "C:\\Program Files\\MiniCode\\resources\\python-runtime\\python.exe",
       githubCliCommand: "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
       appResourcesDir: "C:\\Program Files\\MiniCode\\resources",
+      editorLanguageServicesDir: "C:\\Program Files\\MiniCode\\resources\\language-services",
       desktopDir: "C:\\Users\\alice\\Desktop",
     },
     spawnProcess: (_command, _args, options) => {
@@ -118,6 +125,7 @@ test("backend receives the packaged resources directory separately from user fol
     "C:\\Program Files\\MiniCode\\resources",
   );
   assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, "C:\\Users\\alice\\Desktop");
+  assert.equal(spawnOptions.env.MINICODE_EDITOR_LANGUAGE_SERVICES_DIR, "C:\\Program Files\\MiniCode\\resources\\language-services");
   assert.equal(
     spawnOptions.env.MINICODE_GH_COMMAND,
     "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
@@ -141,7 +149,7 @@ test("source desktop makes its prepared GitHub runtime available to the backend 
   const githubCliCommand = path.join(sourceRoot, "desktop", "github-runtime", "bin", "gh.exe");
   let spawnOptions;
   initialize({
-    config: { githubCliCommand, appResourcesDir: sourceRoot },
+    config: { githubCliCommand, appResourcesDir: sourceRoot, editorLanguageServicesDir: path.join(__dirname, "language-services") },
     spawnProcess: (_command, _args, options) => {
       spawnOptions = options;
       return child;
@@ -152,6 +160,7 @@ test("source desktop makes its prepared GitHub runtime available to the backend 
 
   assert.equal(spawnOptions.env.MINICODE_APP_RESOURCES_DIR, sourceRoot);
   assert.equal(spawnOptions.env.MINICODE_GH_COMMAND, githubCliCommand);
+  assert.equal(spawnOptions.env.MINICODE_EDITOR_LANGUAGE_SERVICES_DIR, path.join(sourceRoot, "desktop", "language-services"));
   const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
   assert.equal(spawnOptions.env[pathKey].split(path.delimiter)[0], path.dirname(githubCliCommand));
   releaseChild(child);

@@ -10,15 +10,15 @@ import {
   Globe2,
   Keyboard,
   Mic,
-  Palette,
+  Settings,
   Puzzle,
   Search,
   ServerOff,
-  SlidersHorizontal,
+  Sun,
   BookOpenText,
   SquareTerminal,
   UserRoundCog,
-} from "lucide-react";
+} from "../lib/icons";
 import { useAppStore } from "../stores";
 import { fetchLLMSettings } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -179,8 +179,8 @@ export const SettingsCenter = () => {
   }, [activeTab, settingsOpen]);
 
   const tabs = [
-    { id: "general" as const, group: "个人", label: "常规", description: "设置工作方式、消息跟进、过程展示与内容加载。", keywords: "协作 代码 远程 Markdown 图片", icon: <SlidersHorizontal /> },
-    { id: "appearance" as const, group: "个人", label: "外观", description: "调整界面主题、字号与显示密度。", keywords: "系统 浅色 深色 紧凑 缩放", icon: <Palette /> },
+    { id: "general" as const, group: "个人", label: "常规", description: "设置工作方式、消息跟进、过程展示与内容加载。", keywords: "协作 代码 远程 Markdown 图片", icon: <Settings /> },
+    { id: "appearance" as const, group: "个人", label: "外观", description: "调整界面主题、字号与显示密度。", keywords: "系统 浅色 深色 紧凑 字号", icon: <Sun /> },
     { id: "voice" as const, group: "个人", label: "语音", description: "设置麦克风与听写服务，录音转成可编辑草稿。", keywords: "听写 录音 转录 麦克风 词汇", icon: <Mic /> },
     { id: "personalization" as const, group: "个人", label: "个性化", description: "管理影响模型行为的指令、任务记忆与来源。", keywords: "INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则", icon: <UserRoundCog /> },
     { id: "shortcuts" as const, group: "个人", label: "快捷键", description: "查看当前可用的键盘操作。", keywords: "命令面板 终端 侧栏 发送 换行", icon: <Keyboard /> },
@@ -232,10 +232,12 @@ export const SettingsCenter = () => {
       }}
     >
       <aside className="settings-workspace-sidebar">
+        <div className="settings-navigation-heading">
         <button type="button" className="settings-back-button" onClick={toggleSettings} aria-label="返回应用">
           <ArrowLeft size={16} />
-          <span>返回应用</span>
         </button>
+        <h2>设置</h2>
+        </div>
         <label className="settings-search">
           <Search size={15} aria-hidden="true" />
           <input value={settingsQuery} onChange={(event) => { setSettingsQuery(event.target.value); setSearchTarget(null); }} placeholder="搜索设置…" aria-label="搜索设置" />

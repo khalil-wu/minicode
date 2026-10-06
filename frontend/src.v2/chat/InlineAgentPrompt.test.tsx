@@ -662,32 +662,28 @@ describe("InlineAgentPrompt control protocol responses", () => {
     expect(screen.getByRole("alert").textContent).toBe("计划尚未接受");
   });
 
-  it("keeps diagnostics behind a disclosure while preserving its inspector action", () => {
+  it("keeps the prompt focused on the question without a technical action disclosure", () => {
     useAppStore.setState({
       pendingAskUser: { requestId: "diagnostic-prompt", conversationId: "conv-inline", question: "继续吗？" },
     });
     render(<InlineAgentPrompt />);
-    const summary = screen.getByText("更多操作");
-    const details = summary.parentElement as HTMLDetailsElement;
-    expect(details.open).toBe(false);
-    fireEvent.click(summary);
-    expect(details.open).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "技术诊断" }));
-    expect(useAppStore.getState().inspectorFocus).toEqual({ kind: "permission", id: "prompt:diagnostic-prompt", conversationId: "conv-inline" });
+    expect(screen.getByText("继续吗？")).toBeTruthy();
+    expect(screen.queryByText("更多操作")).toBeNull();
+    expect(screen.queryByRole("button", { name: "技术诊断" })).toBeNull();
   });
 
-  it.each(["approval", "diff", "question"])("keeps %s diagnostics owned by the visible side prompt", (kind) => {
+  it.each(["approval", "diff", "question"])("does not add %s technical controls to a scoped side prompt", (kind) => {
     const owner = { requestId: "side-diagnostic", conversationId: "side-owner" };
     useAppStore.setState({ conversationId: "parent-owner", inspectorEntries: [], inspectorFocus: null,
       ...(kind === "approval" ? { pendingApproval: { ...owner, toolName: "read_file", args: { path: "side.ts" } } }
         : kind === "diff" ? { pendingDiffReview: { ...owner, diff: "+side" } }
         : { pendingAskUser: { ...owner, question: "Continue the side task?" } }) });
     render(<InlineAgentPrompt conversationId="side-owner" />);
-    fireEvent.click(screen.getByText("更多操作"));
-    fireEvent.click(screen.getByRole("button", { name: "技术诊断" }));
+    expect(screen.queryByText("更多操作")).toBeNull();
+    expect(screen.queryByRole("button", { name: "技术诊断" })).toBeNull();
     const state = useAppStore.getState();
-    expect(state.inspectorFocus).toEqual({ kind: "permission", id: "prompt:side-diagnostic", conversationId: "side-owner" });
-    expect(state.inspectorEntries[0]).toMatchObject({ targetId: "prompt:side-diagnostic", conversationId: "side-owner", payload: { conversation_id: "side-owner" } });
+    expect(state.inspectorFocus).toBeNull();
+    expect(state.inspectorEntries).toEqual([]);
   });
 
   it.each(["option", "custom"])("resets a local %s answer when switching to a different request", (answerMode) => {

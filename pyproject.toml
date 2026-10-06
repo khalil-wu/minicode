@@ -39,7 +39,7 @@ include = ["backend*"]
 exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 
 [tool.setuptools.package-data]
-"backend.agent" = ["*.js"]
+"backend.agent" = ["*.js", "codex_prompt_resources/*"]
 "backend.memory" = ["templates/*.md"]
 
 [project.optional-dependencies]

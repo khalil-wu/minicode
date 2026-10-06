@@ -10,16 +10,12 @@ export interface WorkbenchPreferences {
   aiModel: string;
   aiProvider: string;
   aiMaxTokens: number;
-  uiFont: string;
-  proseFont: string;
-  codeFont: string;
   proseSize: number;
   wordWrap: boolean;
   minimap: boolean;
   tabSize: number;
   insertSpaces: boolean;
   formatOnSave: boolean;
-  ligatures: boolean;
   lineNumbers: boolean;
   stickyScroll: boolean;
   previewTabs: boolean;
@@ -28,16 +24,13 @@ export interface WorkbenchPreferences {
 export const defaultWorkbenchPreferences: WorkbenchPreferences = {
   speechEnabled: false, speechProvider: "", speechModel: "", speechLanguage: "zh", speechVocabulary: "", microphoneId: "",
   aiEnabled: false, aiModel: "", aiProvider: "", aiMaxTokens: 256,
-  uiFont: "", proseFont: "", codeFont: "", proseSize: 16,
-  wordWrap: true, minimap: false, tabSize: 4, insertSpaces: true,
-  formatOnSave: false, ligatures: false, lineNumbers: true, stickyScroll: true, previewTabs: true, snippets: [],
+  proseSize: 14,
+  wordWrap: true, minimap: true, tabSize: 4, insertSpaces: true,
+  formatOnSave: false, lineNumbers: true, stickyScroll: true, previewTabs: true, snippets: [],
 };
 export function applyWorkbenchPreferences(preferences: WorkbenchPreferences) {
   const style = document.documentElement.style;
-  for (const [property, value] of [["--font-ui", preferences.uiFont], ["--font-prose", preferences.proseFont],
-    ["--font-mono", preferences.codeFont], ["--editor-font-family", preferences.codeFont]]) {
-    if (value) style.setProperty(property, value); else style.removeProperty(property);
-  }
+  for (const property of ["--font-ui", "--font-prose", "--font-mono", "--editor-font-family"]) style.removeProperty(property);
   style.setProperty("--mc-font-reading", preferences.proseSize + "px");
   style.setProperty("--prose-font-size", preferences.proseSize + "px");
 }

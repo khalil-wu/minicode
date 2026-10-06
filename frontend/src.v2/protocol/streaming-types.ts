@@ -417,6 +417,11 @@ export interface AgentProgressEvent {
   operation_id?: string;
   /** Typed provider lifecycle; present on provider retry progress rows. */
   provider_state?: AgentProgressProviderState;
+  subagent_id?: string;
+  subagent_name?: string;
+  subagent_identity?: string;
+  subagent_status?: "done" | "partial" | "cancelled" | "error";
+  timestamp?: string;
 }
 
 export interface RuntimeSpanEvent {
@@ -657,6 +662,9 @@ export interface SubagentTranscriptSnapshot {
 }
 
 export interface SubagentStartEvent {
+  model?: string;
+  provider?: string;
+  reasoning_effort?: string;
   type: "subagent.start";
   subagent_id: string;
   agent_path?: string;
@@ -688,6 +696,9 @@ export interface SubagentEventEvent {
 }
 
 export interface SubagentProgressEvent {
+  model?: string;
+  provider?: string;
+  reasoning_effort?: string;
   type: "subagent.progress";
   subagent_id: string;
   /** A refreshed live state; terminal states are always sent as subagent.done. */
@@ -711,6 +722,9 @@ export interface SubagentProgressEvent {
 }
 
 export interface SubagentDoneEvent {
+  model?: string;
+  provider?: string;
+  reasoning_effort?: string;
   type: "subagent.done";
   subagent_id: string;
   agent_path?: string;

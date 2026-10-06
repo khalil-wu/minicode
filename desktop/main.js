@@ -19,6 +19,7 @@ const ipcHandlers = require("./ipc-handlers");
 const updater = require("./updater");
 const crashReporting = require("./crash-reporter");
 const { setupWindowsSandbox } = require("./windows-sandbox-setup");
+const { popupApplicationMenu } = require("./menu-popup");
 
 // html.to.design capture is an explicitly enabled development aid. Keep the
 // dependency out of the packaged startup path and save captures locally.
@@ -600,92 +601,96 @@ async function captureCurrentWindowForFigma() {
 function buildApplicationMenu() {
   const template = [
     {
-      label: "File",
+      id: "minicode-menu-file",
+      label: "文件",
       submenu: [
         {
-          label: "New Window",
+          label: "新建窗口",
           accelerator: "Ctrl+Shift+N",
           click: () => { void windowManager.createMainWindow(); },
         },
         {
-          label: "New Chat",
+          label: "新建聊天",
           accelerator: "Ctrl+N",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:new-chat"); },
         },
         {
-          label: "Quick Chat",
+          label: "快速聊天",
           accelerator: "Alt+Ctrl+N",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:quick-chat"); },
         },
         {
-          label: "Open Folder...",
+          label: "打开文件夹…",
           accelerator: "Ctrl+O",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:open-folder"); },
         },
         {
-          label: "Extensions Marketplace",
+          label: "扩展市场",
           accelerator: "Ctrl+Shift+X",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:extensions-marketplace"); },
         },
         {
-          label: "Settings...",
+          label: "设置…",
           accelerator: "Ctrl+,",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:settings"); },
         },
         { type: "separator" },
-        { role: "quit" },
+        { role: "quit", label: "退出" },
       ],
     },
     {
-      label: "Edit",
+      id: "minicode-menu-edit",
+      label: "编辑",
       submenu: [
-        { role: "undo" },
-        { role: "redo" },
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
         { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "selectAll" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        { role: "selectAll", label: "全选" },
       ],
     },
     {
-      label: "View",
+      id: "minicode-menu-view",
+      label: "视图",
       submenu: [
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { role: "resetZoom", label: "恢复实际大小" },
+        { type: "separator" },
         {
-          label: "Toggle Sidebar",
+          label: "切换侧边栏",
           accelerator: "Ctrl+B",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:toggle-sidebar"); },
         },
         {
-          label: "Toggle Context Panel",
+          label: "切换上下文面板",
           accelerator: "Ctrl+\\",
           click: () => { sendWorkbenchMenuEvent("minicode:menu:toggle-context"); },
         },
         {
-          label: "Toggle Terminal",
+          label: "切换终端",
           accelerator: "Ctrl+`",
           click: () => { sendWorkbenchMenuEvent("minicode:shortcut:terminal"); },
         },
         {
-          label: "Reload",
+          label: "重新加载",
           accelerator: "F5",
           click: () => {
             const win = windowManager.getMainWindow();
             if (win && !win.isDestroyed()) win.reload();
           },
         },
-        { role: "forceReload" },
-        { role: "toggleDevTools" },
+        { role: "forceReload", label: "强制重新加载" },
+        { role: "toggleDevTools", label: "切换开发者工具" },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
-        { role: "togglefullscreen" },
+        { role: "togglefullscreen", label: "全屏" },
         ...(FIGMA_CAPTURE_ENABLED
           ? [
               { type: "separator" },
               {
-                label: "Capture current window to Figma...",
+                label: "捕获当前窗口到 Figma…",
                 accelerator: "Ctrl+Shift+F12",
                 click: () => { void captureCurrentWindowForFigma(); },
               },
@@ -694,14 +699,15 @@ function buildApplicationMenu() {
       ],
     },
     {
-      label: "Window",
-      submenu: [{ role: "minimize" }, { role: "close" }],
+      label: "窗口",
+      submenu: [{ role: "minimize", label: "最小化" }, { role: "close", label: "关闭窗口" }],
     },
     {
-      label: "Help",
+      id: "minicode-menu-help",
+      label: "帮助",
       submenu: [
         {
-          label: "Reveal Desktop Log",
+          label: "显示桌面日志",
           click: () => {
             const logPath = utils.getDesktopLogPath();
             appendDesktopLog("[desktop] reveal log requested");
@@ -709,7 +715,7 @@ function buildApplicationMenu() {
           },
         },
         {
-          label: "Export Diagnostics",
+          label: "导出诊断信息",
           click: () => {
             const result = exportDesktopDiagnostics();
             shell.showItemInFolder(result.path);
@@ -850,6 +856,7 @@ backendSidecar.init({
     runtimeToken: RUNTIME_TOKEN,
     stateRoot: app.getPath("userData"),
     appResourcesDir: app.isPackaged ? process.resourcesPath : getAppRoot(),
+    editorLanguageServicesDir: app.isPackaged ? path.join(process.resourcesPath, "language-services") : path.join(__dirname, "language-services"),
     desktopDir: app.getPath("desktop"),
     documentsDir: app.getPath("documents"),
     downloadsDir: app.getPath("downloads"),
@@ -908,6 +915,7 @@ embeddedBrowserBridge.init({
 });
 
 ipcHandlers.init({
+  popupApplicationMenu: (key) => popupApplicationMenu(Menu.getApplicationMenu(), key, windowManager.getMainWindow()),
   setupWindowsSandbox: () => setupWindowsSandbox({
     scriptPath: app.isPackaged
       ? path.join(process.resourcesPath, "windows-sandbox", "setup-desktop-user-sandbox.ps1")

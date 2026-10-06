@@ -178,6 +178,20 @@ class QueryTerminalTransaction:
             reason=reason,
         )
 
+        workspace_changes = self.turn_ctx.run_context.workspace_turn_changes
+        if workspace_changes is not None:
+            diff = await to_thread_cancel_safe(workspace_changes.unified_diff)
+            tracker = self.turn_ctx.run_context.turn_diff_tracker
+            revision = tracker.revision + 1 if tracker is not None else 1
+            if diff or (tracker is not None and tracker.revision):
+                change_event = AgentEvent.turn_diff_updated(
+                    thread_id=str(self.turn_ctx.state.conversation_id or self.turn_ctx.metadata.get("conversation_id") or ""),
+                    turn_id=str(self.turn_ctx.metadata.get("run_id") or ""), diff=diff, revision=revision,
+                )
+                change_event.data.update(source="workspace_snapshot", workspace_root=str(workspace_changes.workspace_root))
+                evidence_events.append(change_event)
+                await to_thread_cancel_safe(self.journal.record_event, change_event)
+
         journal_errors: list[BaseException] = []
         terminal_event.data.update(self.turn_ctx.run_context.lifecycle_cleanup_evidence())
         try:

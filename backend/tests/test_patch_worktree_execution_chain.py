@@ -344,3 +344,17 @@ def test_git_environment_selectors_cannot_replace_the_selected_private_repositor
         output.write_text(json.dumps({"source": source, "mixed_case": mixed_case, "control_filter_off": before.content, "after": after.content,
             "selected_repository": str(selected), "foreign_repository": str(foreign), "writes_by_tool": 0}, indent=2), encoding="utf-8")
     asyncio.run(run())
+
+
+def test_git_discovery_does_not_borrow_a_repository_from_the_host_home(tmp_path, monkeypatch):
+    home = tmp_path / "host-home"
+    home.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=home, env=sanitized_git_env(), check=True)
+    workspace = home / "ordinary-folder"
+    workspace.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path / "unrelated-selector"))
+    policy = SandboxPolicy(workspace_root=workspace, disable_os_sandbox=True)
+    result = asyncio.run(git_support._run_git(["git", "rev-parse", "--show-toplevel"], root=workspace, sandbox_policy=policy))
+    assert result.returncode != 0
+    assert b"not a git repository" in result.stderr.lower()

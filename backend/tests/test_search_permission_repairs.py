@@ -16,6 +16,7 @@ from backend.tools import search_support, search_tools
 from backend.tools.ast_tools import FindReferencesTool, GoToDefinitionTool
 from backend.tools.fuzzy_search_tool import FuzzySearchTool
 from backend.tools.git_tools import GitDiffTool
+from backend.sandbox import SandboxPolicy
 
 
 def context(root: Path, *, deny: list[str], allow: list[str] | None = None) -> ToolExecutionContext:
@@ -24,7 +25,8 @@ def context(root: Path, *, deny: list[str], allow: list[str] | None = None) -> T
         constraints["allowlist"] = allow
     permission = PermissionContext(workspace_root=root, filesystem_constraints=constraints)
     checker = PermissionChecker(PermissionSettings(path_denylist=deny), root)
-    return ToolExecutionContext(permission=permission, workspace_root=root, permission_checker=checker)
+    return ToolExecutionContext(permission=permission, workspace_root=root, permission_checker=checker,
+        sandbox_policy=SandboxPolicy.bypass())
 
 
 @pytest.fixture(params=[False, True], ids=["python", "ripgrep"])

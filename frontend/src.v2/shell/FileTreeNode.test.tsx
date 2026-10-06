@@ -49,7 +49,7 @@ describe("TreeNode", () => {
 
     fireEvent.click(screen.getByRole("treeitem"));
 
-    expect(openEditorFile).toHaveBeenCalledWith("app.ts", "app.ts", { exact: true });
+    expect(openEditorFile).toHaveBeenCalledWith("app.ts", "app.ts", { exact: true, preview: true });
     expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 });

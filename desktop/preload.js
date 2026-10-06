@@ -116,7 +116,7 @@ const runtimeConfig = {
       resize: (sessionId, cols, rows, conversationId) => ipcRenderer.invoke("minicode:pty:resize", sessionId, cols, rows, conversationId),
       kill: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:kill", sessionId, conversationId),
       restart: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:restart", sessionId, conversationId),
-      killConversation: (conversationId) => ipcRenderer.invoke("minicode:pty:killConversation", conversationId),
+      killConversation: (conversationId, preserveHistory = false) => ipcRenderer.invoke("minicode:pty:killConversation", conversationId, preserveHistory),
       list: (conversationId) => ipcRenderer.invoke("minicode:pty:list", conversationId),
       snapshot: (sessionId, maxChars, conversationId) => ipcRenderer.invoke("minicode:pty:snapshot", sessionId, maxChars, conversationId),
       clear: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:clear", sessionId, conversationId),
@@ -137,6 +137,9 @@ const runtimeConfig = {
     },
     sandbox: {
       setup: () => ipcRenderer.invoke("minicode:sandbox:setup"),
+    },
+    menu: {
+      popup: (key) => ipcRenderer.invoke("minicode:menu:popup", key),
     },
     browser: {
       discover: (endpoint) => ipcRenderer.invoke("minicode:browser:discover", endpoint),

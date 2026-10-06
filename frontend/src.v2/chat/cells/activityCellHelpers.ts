@@ -3,6 +3,7 @@ import { purifyToolErrorText } from "../errorMessages";
 import { readableToolLabel } from "../toolDisplayName";
 import { previewUrlsShareOrigin, type PreviewProjection } from "../../lib/preview-projection";
 import { safeJsonParse } from "../../lib/safe-parse";
+import { isCommandToolRecord } from "../../lib/tool-call-reducer";
 
 export interface ActivityDetail {
   label: string;
@@ -66,7 +67,7 @@ export function webFetchEvidenceLabel(record: ActivityToolRecord): string {
     return "未获取有效内容";
   }
   if (record.extractionStatus === "partial" || record.status === "partial") return "内容不完整";
-  if (record.extractionStatus === "ok") return "已获取正文";
+  if (record.extractionStatus === "ok") return "";
   return record.status === "success" ? "抓取状态未确认" : "";
 }
 
@@ -123,26 +124,26 @@ export function readableTimelineTitle(cell: ActivityCellState): string {
     && !records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
   // The projection owns classification; persisted render summaries must not
   // replace the operation with a success receipt or a shortened target.
-  if (cell.activityKind === "fileRead") return readableToolLabel("Read", running);
-  if (cell.activityKind === "workspaceList") return readableToolLabel("List", running);
-  if (cell.activityKind === "workspaceSearch") return readableToolLabel("Search", running);
-  if (cell.activityKind === "fileChange") return readableToolLabel("Edit", running);
-  if (cell.activityKind === "commandExecution") return readableToolLabel("Run", running);
-  if (cell.activityKind === "planning") return "Update plan";
-  if (cell.activityKind === "webSearch") return readableToolLabel(isWebFetchActivity(cell) ? "Fetch" : "Search", running);
+  if (cell.activityKind === "fileRead") return running ? "正在读取" : "读取文件";
+  if (cell.activityKind === "workspaceList") return running ? "正在查看目录" : "查看目录";
+  if (cell.activityKind === "workspaceSearch") return running ? "正在搜索" : "搜索";
+  if (cell.activityKind === "fileChange") return running ? "正在编辑" : "编辑文件";
+  if (cell.activityKind === "commandExecution") return running ? "正在运行" : "运行命令";
+  if (cell.activityKind === "planning") return "更新计划";
+  if (cell.activityKind === "skill") return `${running ? "正在读取技能" : "读取技能"}${cell.skill?.name ? ` ${cell.skill.name}` : ""}`;
+  if (cell.activityKind === "webSearch") return isWebFetchActivity(cell) ? running ? "正在读取网页" : "读取网页" : running ? "正在搜索网页" : "搜索网页";
   if (records.length > 0) return [...new Set(records.map(readableRecordLabel))].join(" · ");
   return readableToolLabel(cell.title, running);
 }
 
 export function readableRecordLabel(record: ActivityToolRecord): string {
+  if (record.name === "update_plan") return "更新计划";
   if (isBrowserRecord(record)) {
     const action = stringArg(record.args.action).toLowerCase();
     return BROWSER_ACTION_LABELS[action] || action || "Browser";
   }
-  if (isCodeModeRecord(record)) return readableToolLabel(record.name,
-    record.status === "running" || record.status === "pending"
-    || ["Script yielded", "Script running", "脚本仍在运行"].includes(record.displaySummary || ""),
-  );
+  if (isCodeModeRecord(record)) return ["failed", "blocked", "timeout", "cancelled"].includes(record.status)
+    ? "错误详情" : "操作结果";
   const running = (record.status === "running" || record.status === "pending")
     && record.transition !== "waiting_approval" && record.waitingOn !== "approval";
   if (record.name.startsWith("mcp__") && record.displayHint) return record.displayHint;
@@ -334,7 +335,10 @@ export const isCodeModeRecord = (record: ActivityToolRecord): boolean =>
  * Only these two known tools produce this envelope: code, DOM and stdout
  * that happen to mention cell/call ids must retain their actual bytes. */
 export function getRecordOutputText(record: ActivityToolRecord): string {
-  if (["monitor", "task", "task_status", "task_get", "task_list", "task_create", "task_update", "task_output"].includes(record.name) && record.contentPreview) {
+  // A yielded native command keeps its original tool name. The backend's
+  // typed command presentation, like a monitor receipt, owns its user output.
+  if (record.contentPreview && (isCommandToolRecord(record)
+    || ["monitor", "task", "task_status", "task_get", "task_list", "task_create", "task_update", "task_output"].includes(record.name))) {
     return record.contentPreview;
   }
   const raw = [record.outputPreview, record.summary, record.stdoutPreview, record.contentPreview]
@@ -344,13 +348,11 @@ export function getRecordOutputText(record: ActivityToolRecord): string {
     if (report && typeof report.cell_id === "string" && typeof report.status === "string") {
       const output = Array.isArray(report.output) ? report.output.filter((value): value is string => typeof value === "string") : [];
       const completed = Array.isArray(report.completed_tools) ? report.completed_tools as Array<{ tool: string; status: string; output?: string }> : [];
-      const pending = Array.isArray(report.pending_tools) ? report.pending_tools.filter((value): value is string => typeof value === "string") : [];
       return [
         typeof report.error === "string" ? purifyToolErrorText(report.error) : "",
         ...output,
         typeof report.output_preview === "string" ? report.output_preview : "",
         ...completed.map((tool) => [readableToolLabel(tool.tool), tool.status, tool.output].filter(Boolean).join("\n")),
-        pending.length ? `Still running: ${pending.map((name) => readableToolLabel(name)).join(", ")}` : "",
         typeof report.discarded_unawaited_tool_calls === "number" && report.discarded_unawaited_tool_calls > 0
           ? `${report.discarded_unawaited_tool_calls} unawaited tool calls were discarded; their completion is not confirmed.` : "",
       ].filter(Boolean).join("\n");

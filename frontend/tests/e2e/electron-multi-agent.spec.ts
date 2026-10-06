@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test } from "@playwright/test";
+import { _electron as electron, expect, test, type Page } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
@@ -126,6 +126,7 @@ class MultiAgentBackend {
         if (command.type === "subagent.transcript") {
           const isRunning = command.subagent_id === "subagent-running";
           const isRecovered = command.subagent_id === "subagent-recovered";
+          const isHistorical = command.subagent_id === "subagent-historical";
           ws.send({
             type: "command.result",
             command: "subagent.transcript",
@@ -134,8 +135,20 @@ class MultiAgentBackend {
             data: {
               client_command_id: command.client_command_id,
               subagent_id: command.subagent_id,
+              ...(isHistorical ? {
+                model: "gpt-6.1-sol",
+                provider: "custom",
+                reasoning_effort: "high",
+                agent_path: "/root/historical_review",
+              } : {}),
               seq: isRunning ? 2 : isRecovered ? 1 : 0,
-              messages: isRecovered ? [{
+              messages: isHistorical ? [{
+                id: "child-historical-result",
+                role: "assistant",
+                content: "Historical child journal loaded without an active worker.",
+                timestamp: 25,
+                terminal_status: "completed",
+              }] : isRecovered ? [{
                 id: "child-recovered-result",
                 role: "assistant",
                 content: "Persisted result restored through session replay.",
@@ -204,88 +217,6 @@ class MultiAgentBackend {
             level: "success",
             message: "",
             data: { client_command_id: command.client_command_id },
-          });
-        }
-        if (command.type === "subagent.cancel" && command.subagent_id === "subagent-running") {
-          ws.send({
-            type: "subagent.done",
-            conversation_id: "conv-electron",
-            subagent_id: "subagent-running",
-            summary: "Agent cancelled by user.",
-            result: {
-              status: "cancelled",
-              content: "Partial verification retained after cancellation.",
-              duration_ms: 3100,
-              tool_call_count: 3,
-            },
-            transcript_snapshot: {
-              seq: 3,
-              messages: [
-                {
-                  id: "child-running-user",
-                  role: "user",
-                  content: "Verify restart recovery",
-                  timestamp: 10,
-                },
-                {
-                  id: "child-running-process",
-                  role: "assistant",
-                  content: "",
-                  timestamp: 11,
-                  blocks: [{
-                    type: "process",
-                    id: "child-running-process",
-                    item_kind: "process_text",
-                    content: "Checking the Electron restart path",
-                    source: "model_preamble",
-                    status: "completed",
-                    visibility: "timeline",
-                    timestamp: 11,
-                  }],
-                },
-                {
-                  id: "child-running-result",
-                  role: "assistant",
-                  content: "Partial verification retained after cancellation.",
-                  timestamp: 12,
-                  terminal_status: "cancelled",
-                  blocks: [{
-                    type: "text",
-                    item_id: "child-running-result",
-                    content: "Partial verification retained after cancellation.",
-                    source: "model_final",
-                    status: "completed",
-                  }],
-                },
-              ],
-            },
-          });
-          ws.send({
-            type: "command.result",
-            command: "subagent.cancel",
-            level: "success",
-            message: "",
-            data: { client_command_id: command.client_command_id },
-          });
-        }
-        if (command.type === "send_message" && command.recipient === "subagent-running") {
-          ws.send({
-            type: "subagent.event",
-            conversation_id: "conv-electron",
-            subagent_id: "subagent-running",
-            event: {
-              type: "message",
-              message: {
-                message_id: command.message_id,
-                sender_id: "user",
-                recipient_id: "subagent-running",
-                content: command.message,
-                sender_mailbox_epoch: 0,
-                recipient_mailbox_epoch: 1,
-                created_at: Date.now(),
-                seq: 12,
-              },
-            },
           });
         }
         if (command.type === "conversation.list" && !bootstrapped) {
@@ -462,7 +393,7 @@ class MultiAgentBackend {
     }, 500);
   }
 
-  private activeConversation() {
+  private activeConversation(includeHistorical = false) {
     return {
       id: "conv-electron",
       title: "Electron agents",
@@ -478,9 +409,36 @@ class MultiAgentBackend {
         {
           id: "assistant-current",
           role: "assistant",
-          content: "Checking the current desktop state...",
+          content: includeHistorical ? "The historical desktop review is complete." : "Checking the current desktop state...",
           artifacts: [],
           timestamp: 2,
+          ...(includeHistorical ? {
+            completed_at: 4,
+            terminal_status: "completed",
+            blocks: [
+              {
+                type: "progress",
+                id: "historical-completion",
+                stage: "status",
+                phase: "subagent",
+                status: "completed",
+                message: "Historical desktop review已完成",
+                subagent_id: "subagent-historical",
+                subagent_name: "Historical desktop review",
+                subagent_identity: "/root/historical_review",
+                subagent_status: "done",
+                timestamp: 3,
+                visibility: "timeline",
+              },
+              {
+                type: "text",
+                id: "historical-parent-final",
+                content: "The historical desktop review is complete.",
+                source: "model_final",
+                status: "completed",
+              },
+            ],
+          } : {}),
         },
       ],
     };
@@ -504,8 +462,8 @@ class MultiAgentBackend {
       type: "session.restored",
       restored: true,
       active_conversation_id: "conv-electron",
-      active_conversation: this.activeConversation(),
-      conversation: this.activeConversation(),
+      active_conversation: this.activeConversation(true),
+      conversation: this.activeConversation(true),
       conversation_switched_follows: true,
       last_seq: 0,
       current_seq: 2,
@@ -513,15 +471,16 @@ class MultiAgentBackend {
       session: {
         session_id: "session-electron",
         active_conversation_id: "conv-electron",
-        active_conversation: this.activeConversation(),
+        active_conversation: this.activeConversation(true),
         active_stream_conversation_ids: [],
         pending_turn_inputs: [],
+        subagents: [],
       },
     });
     ws.send({
       type: "conversation.switched",
       conversation_id: "conv-electron",
-      conversation: this.activeConversation(),
+      conversation: this.activeConversation(true),
     });
     this.sendRecoveryReplay(ws);
   }
@@ -651,7 +610,17 @@ async function openAgentsPanel(window: Awaited<ReturnType<Awaited<ReturnType<typ
   await expect(agentsTab).toBeVisible();
 }
 
-test("real Electron workbench supports read-only child transcripts, cancellation, lazy result, and restart recovery", async () => {
+async function expectReadonlyAgentDetail(window: Page, title: string) {
+  const detail = window.getByRole("region", { name: `子智能体任务详情：${title}` });
+  await expect(detail).toBeVisible();
+  await expect(detail.getByRole("textbox")).toHaveCount(0);
+  await expect(detail.getByRole("button", {
+    name: /补充指令|刷新子智能体工作详情|停止子智能体|发送给子智能体/,
+  })).toHaveCount(0);
+  await expect(detail.locator(".subagents-detail-header-actions")).toHaveCount(0);
+}
+
+test("real Electron workbench supports read-only child transcripts, lazy results, and persisted history recovery", async () => {
   test.setTimeout(90_000);
   const backend = new MultiAgentBackend();
   await cleanupStaleUserDataDirs();
@@ -676,20 +645,16 @@ test("real Electron workbench supports read-only child transcripts, cancellation
     await expect(window.locator("body")).not.toContainText(/workflow-electron|subagent-running|node_id|task_id|iteration|tool_call/i);
 
     await runningTask.click();
-    await expect(window.getByRole("region", { name: "子智能体任务详情：Verify restart recovery" })).toBeVisible();
+    await expectReadonlyAgentDetail(window, "Verify restart recovery");
     await expect(window.locator('[aria-label="子智能体工作记录"]')).toContainText("Checking the Electron restart path");
-    await expect(window.getByRole("textbox", { name: "给这个子智能体发送消息" })).toHaveCount(0);
-    await expect(window.getByRole("button", { name: "发送给子智能体" })).toHaveCount(0);
-    expect(backend.commands.some((command) => command.type === "send_message")).toBe(false);
-    await window.getByRole("button", { name: "停止子智能体" }).click();
     await expect.poll(() => backend.commands.some((command) =>
-      command.type === "subagent.cancel" && command.subagent_id === "subagent-running",
+      command.type === "subagent.transcript" && command.subagent_id === "subagent-running"
+      && command.conversation_id === "conv-electron",
     )).toBe(true);
-    await expect(window.getByText("Partial verification retained after cancellation.")).toBeVisible();
 
     await window.getByRole("button", { name: "返回子智能体列表" }).click();
     await window.getByRole("button", { name: "打开子智能体任务：Review persisted state", exact: true }).click();
-    await expect(window.getByRole("region", { name: "子智能体任务详情：Review persisted state" })).toBeVisible();
+    await expectReadonlyAgentDetail(window, "Review persisted state");
     await expect.poll(() => backend.commands.some((command) =>
       command.type === "subagent.status" && command.subagent_id === "subagent-complete",
     )).toBe(true);
@@ -708,10 +673,25 @@ test("real Electron workbench supports read-only child transcripts, cancellation
       name: "打开子智能体任务：Recover completed desktop verification",
       exact: true,
     }).click();
-    await expect(restartedWindow.getByRole("region", {
-      name: "子智能体任务详情：Recover completed desktop verification",
-    })).toBeVisible();
+    await expectReadonlyAgentDetail(restartedWindow, "Recover completed desktop verification");
     await expect(restartedWindow.getByText("Persisted result restored through session replay.")).toBeVisible();
+
+    await restartedWindow.getByRole("button", { name: "返回子智能体列表" }).click();
+    await expect(restartedWindow.getByRole("button", {
+      name: "打开子智能体任务：Historical desktop review", exact: true,
+    })).toHaveCount(0);
+    await restartedWindow.locator('.chat-turn[data-message-id="assistant-current"]')
+      .getByRole("button", { name: "展开处理步骤", exact: true }).click();
+    await restartedWindow.getByRole("button", { name: "打开子智能体：Historical desktop review", exact: true }).click();
+    await expectReadonlyAgentDetail(restartedWindow, "Historical desktop review");
+    await expect.poll(() => backend.commands.some((command) =>
+      command.type === "subagent.transcript" && command.subagent_id === "subagent-historical"
+      && command.conversation_id === "conv-electron",
+    )).toBe(true);
+    await expect(restartedWindow.locator('[aria-label="子智能体工作记录"]'))
+      .toContainText("Historical child journal loaded without an active worker.");
+    await expect(restartedWindow.getByText("6.1 Sol · high", { exact: true })).toBeVisible();
+    expect(backend.commands.some((command) => ["send_message", "subagent.cancel"].includes(String(command.type)))).toBe(false);
     await restarted.close();
   } finally {
     await backend.close();

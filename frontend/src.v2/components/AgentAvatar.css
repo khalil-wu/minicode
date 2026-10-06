@@ -1,4 +1,4 @@
-/* Identity stays fixed; the small corner mark alone communicates status. */
+/* Match the desktop's stable, pastel identity art. Status stays in the task row. */
 .mc-agent-avatar {
   --agent-avatar-size: 30px;
   --agent-avatar-color: var(--agent-identity-teal);
@@ -13,12 +13,12 @@
 
 .mc-agent-avatar[data-size="small"] { --agent-avatar-size: 24px; }
 .mc-agent-avatar[data-size="large"] { --agent-avatar-size: 38px; }
-.mc-agent-avatar[data-identity-color="teal"] { --agent-avatar-color: var(--agent-identity-teal); }
-.mc-agent-avatar[data-identity-color="blue"] { --agent-avatar-color: var(--agent-identity-blue); }
-.mc-agent-avatar[data-identity-color="violet"] { --agent-avatar-color: var(--agent-identity-violet); }
-.mc-agent-avatar[data-identity-color="rose"] { --agent-avatar-color: var(--agent-identity-rose); }
-.mc-agent-avatar[data-identity-color="amber"] { --agent-avatar-color: var(--agent-identity-amber); }
-.mc-agent-avatar[data-identity-color="green"] { --agent-avatar-color: var(--agent-identity-green); }
+.mc-agent-avatar[data-identity-color="teal"] { --agent-avatar-color: #82c6bc; }
+.mc-agent-avatar[data-identity-color="blue"] { --agent-avatar-color: #8ec6ce; }
+.mc-agent-avatar[data-identity-color="violet"] { --agent-avatar-color: #b58bed; }
+.mc-agent-avatar[data-identity-color="rose"] { --agent-avatar-color: #eca3c7; }
+.mc-agent-avatar[data-identity-color="amber"] { --agent-avatar-color: #edc58e; }
+.mc-agent-avatar[data-identity-color="green"] { --agent-avatar-color: #9dce86; }
 
 .mc-agent-avatar-art {
   display: block;

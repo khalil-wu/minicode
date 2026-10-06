@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil, Wifi, WifiOff } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil } from "lucide-react";
+import { Blocks } from "../../lib/icons";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import {
@@ -10,6 +11,7 @@ import {
   describeRecordDetails,
   getOutputPreview,
   getRecordOutputPreview,
+  getRecordOutputText,
   isHttpUrl,
   fileLabel,
   recordInputTarget,
@@ -21,6 +23,7 @@ import {
   webFetchEvidenceLabel,
   isBrowserRecord,
   browserFailureGuidance,
+  isCodeModeRecord,
 } from "./activityCellHelpers";
 import { getToolDiffStats, toolCleanupNotice } from "../../lib/tool-call-reducer";
 import {
@@ -48,12 +51,12 @@ import {
   recordHasImageArtifact,
 } from "../../lib/artifact-projection";
 import {
-  isProviderRetryProgress,
-  providerProgressLabel,
+  isProviderRequestProgress,
   type ProviderProgressSnapshot,
 } from "../../lib/provider-progress";
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
+import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "../tool-calls/renderers/ToolTextRenderer";
 
 /**
  * ActivityCell — compact action + original target, with evidence on disclosure.
@@ -116,20 +119,20 @@ export const ActivityCell = memo(function ActivityCell({
   const isFailed = cell.status === "failed" || cell.status === "interrupted";
   const isPartial = cell.status === "partial";
   const needsApproval = records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
-  const attentionLabel = needsApproval ? "Awaiting approval"
-    : cell.status === "interrupted" ? "Interrupted"
-    : isPartial ? "Partial"
+  const attentionLabel = needsApproval ? "等待批准"
+    : cell.status === "interrupted" ? "已中断"
+    : isPartial ? "部分完成"
     : [
-    records.some((record) => record.status === "cancelled") ? "Interrupted" : "",
+    records.some((record) => record.status === "cancelled") ? "已中断" : "",
     records.some((record) => record.status === "failed")
-      || (cell.status === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "Failed" : "",
-    records.some((record) => record.status === "blocked") ? "Blocked" : "",
-    records.some((record) => record.status === "timeout") ? "Timed out" : "",
-    isPartial || records.some((record) => record.status === "partial") ? "Partial" : "",
+      || (cell.status === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "失败" : "",
+    records.some((record) => record.status === "blocked") ? "已阻止" : "",
+    records.some((record) => record.status === "timeout") ? "超时" : "",
+    isPartial || records.some((record) => record.status === "partial") ? "部分完成" : "",
   ].filter(Boolean).join(" · ");
   const recordDetails = useMemo(
     () => hasRecords
-      ? describeRecordDetails(records.filter(record => record.name !== "update_plan" && (!isBrowserRecord(record) || records.length > 1)), developerMode)
+      ? describeRecordDetails(records.filter(record => record.name !== "update_plan" && !isUserQuestionRecord(record) && (!isBrowserRecord(record) || records.length > 1)), developerMode)
       : [],
     [records, developerMode, hasRecords],
   );
@@ -138,9 +141,10 @@ export const ActivityCell = memo(function ActivityCell({
     [records],
   );
   const nonPlanRecords = useMemo(
-    () => records.filter((record) => record.name !== "update_plan" && !isBrowserRecord(record)),
+    () => records.filter((record) => record.name !== "update_plan" && !isBrowserRecord(record) && !isUserQuestionRecord(record)),
     [records],
   );
+  const questionRecords = records.filter(isUserQuestionRecord);
   const imageArtifactRecords = useMemo(
     () => records.filter(isImageArtifactRecord),
     [records],
@@ -187,20 +191,23 @@ export const ActivityCell = memo(function ActivityCell({
   });
   const errorDetails = records.flatMap((record) => {
     if (isBrowserRecord(record) || !["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)) return [];
-    const rawError = purifyToolErrorText(record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
+    const rawError = purifyToolErrorText((isCodeModeRecord(record) ? getRecordOutputText(record) : "")
+      || record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
     if (isInlineAction && rawError.trim() === getRecordOutputPreview(record).trim()) return [];
     const error = record.providerErrorType
       ? normalizeAgentErrorMessage(rawError, { includeProviderDetails: false })
       : normalizeToolErrorMessage(rawError);
-    return error.trim() ? [{ error, label: readableRecordLabel(record) }] : [];
+    return error.trim() ? [{ error, label: readableRecordLabel(record), record }] : [];
   });
   const hasChangeEvidence = isFileChange && changeDetails.length > 0;
   const hasInlineEvidence = isInlineAction && inlineDisclosureRecords.length > 0;
   const hasArtifactEvidence = !isFileChange && imageArtifactRecords.length > 0;
   const hasGenericEvidence = !isFileChange
     && !isInlineAction
-    && (showDetailRows || showOutputPreview);
-  const hasErrorEvidence = !hasInlineEvidence && errorDetails.length > 0;
+    && (showDetailRows || showOutputPreview || questionRecords.length > 0);
+  const progressError = cell.progress?.errorMessage?.trim();
+  const hasErrorEvidence = (!hasInlineEvidence && errorDetails.length > 0) || Boolean(progressError);
+  const hasSkillEvidence = Boolean(cell.skill?.reason || cell.skill?.content);
   const glyphKind = activityGlyphKind(cell.activityKind, records[0]);
   const useToolIcon = !isFileChange && cell.activityKind !== "genericTool";
   const providerProgress: ProviderProgressSnapshot | undefined = cell.progress && {
@@ -217,11 +224,7 @@ export const ActivityCell = memo(function ActivityCell({
     message: cell.progress.text || "",
     providerState: cell.progress.providerState,
   };
-  const isProviderRetry = isProviderRetryProgress(providerProgress);
-  const providerLabel = providerProgressLabel(providerProgress);
-  const providerIsDisconnected = isFailed
-    || providerProgress?.providerState === "failed"
-    || providerProgress?.providerState === "interrupted";
+  const isProviderRequest = isProviderRequestProgress(providerProgress);
   const progressLabel = readableToolLabel(cell.progress?.text, isRunning);
   const settledDuration = formatCellDuration(
     cell.completedAt != null && cell.startedAt != null
@@ -232,7 +235,7 @@ export const ActivityCell = memo(function ActivityCell({
         ) || undefined,
   );
   const canToggle = hasChangeEvidence || hasInlineEvidence || hasArtifactEvidence
-    || hasGenericEvidence || hasErrorEvidence
+    || hasGenericEvidence || hasErrorEvidence || hasSkillEvidence
     || fetchBodyRecords.length > 0 || browserDetails.length > 0
     || Boolean(hasRecords && settledDuration);
   const showUnifiedEvidence = isExpanded && canToggle;
@@ -245,15 +248,16 @@ export const ActivityCell = memo(function ActivityCell({
         ? "activity-cell-partial"
         : "activity-cell-completed";
 
+  if (isProviderRequest && !progressError) return null;
+  if (hasRecords && records.every(isCodeModeRecord) && !records.some(record =>
+    getRecordOutputText(record).trim() || record.userSummary || record.errorInfo?.user_message || record.errorInfo?.user_summary
+  )) return null;
+
   return (
     <div
       className={`activity-cell ${cellStateClass}`}
       data-activity-kind={cell.activityKind}
       data-web-action={isWebAction ? (isWebFetchAction ? "fetch" : "search") : undefined}
-      data-provider-retry={isProviderRetry ? "true" : undefined}
-      data-provider-state={isProviderRetry ? providerProgress?.providerState : undefined}
-      data-retry-attempt={isProviderRetry && providerProgress?.retryAttempt != null ? String(providerProgress.retryAttempt) : undefined}
-      data-max-retries={isProviderRetry && providerProgress?.maxRetries != null ? String(providerProgress.maxRetries) : undefined}
     >
       <div className="activity-cell-line">
         <button
@@ -269,19 +273,9 @@ export const ActivityCell = memo(function ActivityCell({
             setIsExpanded((value) => !value);
           }}
         >
-          {isFileChange ? (
+          {cell.activityKind === "skill" ? <Blocks size={15} className="activity-cell-tool-icon" aria-hidden="true" /> : isFileChange ? (
             <span className="activity-cell-file-change-icon" aria-hidden="true">
               <Pencil size={14} />
-            </span>
-          ) : isProviderRetry ? (
-            <span
-              className="activity-cell-provider-icon"
-              data-running={isRunning}
-              data-failed={providerIsDisconnected}
-              data-partial={isPartial}
-              aria-hidden="true"
-            >
-              {providerIsDisconnected ? <WifiOff size={16} /> : <Wifi size={16} />}
             </span>
           ) : useToolIcon ? (
             <span
@@ -320,9 +314,8 @@ export const ActivityCell = memo(function ActivityCell({
             <span
               className="activity-cell-name"
               data-failed={isFailed}
-              aria-live={isProviderRetry ? "polite" : undefined}
             >
-              {providerLabel || name}
+              {progressError ? "错误详情" : name}
             </span>
           )}
 
@@ -337,7 +330,7 @@ export const ActivityCell = memo(function ActivityCell({
             <span className="activity-cell-detail-meta" role="status">{attentionLabel}</span>
           )}
 
-          {isRunning && progressLabel && !providerLabel && progressLabel !== name && (
+          {isRunning && progressLabel && !isProviderRequest && progressLabel !== name && (
             <span className="activity-cell-progress">{progressLabel}</span>
           )}
 
@@ -372,6 +365,10 @@ export const ActivityCell = memo(function ActivityCell({
           hasInlineEvidence ? "activity-cell-tool-expanded" : "",
           hasArtifactEvidence ? "activity-cell-artifact-gallery" : "",
         ].filter(Boolean).join(" ")}>
+          {hasSkillEvidence && <div className="activity-cell-skill-details">
+            {cell.skill?.reason && <p>{cell.skill.reason}</p>}
+            {cell.skill?.content && <div className="activity-cell-output-text tool-result-text">{cell.skill.content}</div>}
+          </div>}
           {hasChangeEvidence && changeDetails.map((change, index) => (
             <div key={`${change.path}-${index}`} className="activity-cell-change-card">
               <div className="activity-cell-change-card-header">
@@ -403,7 +400,7 @@ export const ActivityCell = memo(function ActivityCell({
                     {recordDetail.lineInfo && <span className="activity-cell-detail-meta">{recordDetail.lineInfo}</span>}
                   </div>
                 )}
-                {output.trim() && <pre className="activity-cell-inline-output">{output}</pre>}
+                {output.trim() && <ToolResultText record={record} text={output} className="activity-cell-inline-output" />}
               </div>
             );
           })}
@@ -418,6 +415,7 @@ export const ActivityCell = memo(function ActivityCell({
 
           {hasGenericEvidence && (
             <>
+              {questionRecords.map((record) => <UserQuestionResult key={record.id} record={record} text={getRecordOutputText(record)} />)}
               {showDetailRows && planRecords.map((record, i) => (
                 <PlanUpdateDetail
                   key={`plan-update-${record.id || i}`}
@@ -435,27 +433,29 @@ export const ActivityCell = memo(function ActivityCell({
                   {count > 1 && <span className="activity-cell-detail-count">{`x${count}`}</span>}
                 </div>
               ))}
-              {showOutputPreview && (
-                <pre className="activity-cell-output-pre">{outputPreview}</pre>
-              )}
+              {showOutputPreview && nonPlanRecords.map((record) => {
+                const output = getRecordOutputPreview(record);
+                return output.trim() ? <ToolResultText key={record.id} record={record} text={output} className="activity-cell-output-pre" /> : null;
+              })}
             </>
           )}
 
           {browserDetails.map(({ record, expression, output, error }) => (
             <div key={`browser-details-${record.id}`} className="activity-cell-tool-detail-card">
               {expression.trim() && <pre className="activity-cell-inline-output" aria-label="JavaScript">{expression}</pre>}
-              {output.trim() && <pre className="activity-cell-output-pre" aria-label="操作结果">{output}</pre>}
-              {error.trim() && <pre className="activity-cell-error-pre" aria-label="错误详情">{error}</pre>}
+              {output.trim() && <ToolResultText record={record} text={output} className="activity-cell-output-pre" label="操作结果" />}
+              {error.trim() && <ToolResultText record={record} text={error} className="activity-cell-error-pre" label="错误详情" error />}
             </div>
           ))}
 
           {/* Failed records use the same evidence frame as every other tool. */}
           {hasErrorEvidence && (
             <div className="activity-cell-error-detail">
-              {errorDetails.map(({ error, label }, i) => (
+              {progressError && <pre className="activity-cell-error-pre" role="alert">{progressError}</pre>}
+              {errorDetails.map(({ error, label, record }, i) => (
                 <div key={`error-${i}`} className="activity-cell-error-item">
                   {records.length > 1 && label && <div className="activity-cell-error-label">{label}</div>}
-                  <pre className="activity-cell-error-pre">{error}</pre>
+                  <ToolResultText record={record} text={error} className="activity-cell-error-pre" error />
                 </div>
               ))}
             </div>

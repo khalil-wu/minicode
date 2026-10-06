@@ -530,7 +530,7 @@ export interface ControlProviderAuthPromptRequest {
 }
 
 export type ControlRequestPayload =
-  | { subtype: "conversation_resources_cleanup"; workspace_root: string }
+  | { subtype: "conversation_resources_cleanup"; workspace_root: string; operation?: "archive" | "delete" }
   | ControlCanUseToolRequest
   | ControlElicitationRequest
   | ControlProviderAuthPromptRequest;

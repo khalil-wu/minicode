@@ -1,4 +1,4 @@
-import { Check, Monitor, Moon, Sun, Type } from "lucide-react";
+import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { KeyboardEvent } from "react";
 import { EditorPreferencesSettings } from "./EditorPreferencesSettings";
@@ -20,39 +20,18 @@ const THEMES = [
   { id: "dark", label: "深色", icon: Moon },
 ] as const;
 
-const TEXT_SCALES = [
-  { value: 0.92, label: "紧凑" },
-  { value: 1, label: "默认" },
-  { value: 1.12, label: "较大" },
-] as const;
-
-const CODE_TEXT_SCALES = [
-  { value: 0.9, label: "紧凑" },
-  { value: 1, label: "默认" },
-  { value: 1.15, label: "较大" },
-] as const;
-
 export const AppearanceTab = () => {
   const themeMode = useAppStore((s) => s.themeMode);
-  const textScale = useAppStore((s) => s.textScale);
-  const codeTextScale = useAppStore((s) => s.codeTextScale);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
-  const setTextScale = useAppStore((s) => s.setTextScale);
-  const setCodeTextScale = useAppStore((s) => s.setCodeTextScale);
   const setReducedMotion = useAppStore((s) => s.setReducedMotion);
-
-  const selectedScale = TEXT_SCALES.reduce((nearest, item) => (
-    Math.abs(item.value - textScale) < Math.abs(nearest.value - textScale) ? item : nearest
-  ), TEXT_SCALES[0]);
-  const selectedCodeScale = CODE_TEXT_SCALES.reduce((nearest, item) => (
-    Math.abs(item.value - codeTextScale) < Math.abs(nearest.value - codeTextScale) ? item : nearest
-  ), CODE_TEXT_SCALES[0]);
 
   return (
     <>
       <section className="settings-group settings-appearance-theme">
-        <h3 className="settings-group-title">主题</h3>
+        <h3 className="settings-group-title">视觉风格</h3>
+        <div className="settings-card"><div className="settings-row settings-mode-row">
+        <div className="settings-row-copy"><div className="settings-row-title">模式</div></div>
         <div className="settings-theme-grid" role="radiogroup" aria-label="应用主题" onKeyDown={onRadioGroupKeyDown}>
           {THEMES.map(({ id, label, icon: Icon }) => (
             <button
@@ -77,69 +56,16 @@ export const AppearanceTab = () => {
                 </span>
                 {themeMode === id && <span className="settings-theme-selected"><Check /></span>}
               </span>
-              <span className="settings-theme-label"><Icon aria-hidden="true" />{label}</span>
+              <span className="sr-only"><Icon aria-hidden="true" />{label}</span>
             </button>
           ))}
         </div>
+        </div></div>
       </section>
 
       <section className="settings-group">
         <h3 className="settings-group-title">偏好设置</h3>
         <div className="settings-card">
-          <div className="settings-row">
-            <div className="settings-row-copy">
-              <div className="settings-row-title">界面字号</div>
-              <div className="settings-row-description">调整导航与设置页面的基础字号；正文可单独设置。</div>
-            </div>
-            <div className="settings-row-control">
-              <div className="settings-segmented" role="radiogroup" aria-label="界面字号" onKeyDown={onRadioGroupKeyDown}>
-                {TEXT_SCALES.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className="settings-segment"
-                    data-active={selectedScale.value === option.value ? "true" : "false"}
-                    role="radio"
-                    aria-checked={selectedScale.value === option.value}
-                    tabIndex={selectedScale.value === option.value ? 0 : -1}
-                    onClick={() => setTextScale(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <span className="settings-scale-value" aria-label={`当前缩放 ${Math.round(textScale * 100)}%`}>
-                <Type aria-hidden="true" /> {Math.round(textScale * 100)}%
-              </span>
-            </div>
-          </div>
-          <div className="settings-row">
-            <div className="settings-row-copy">
-              <div className="settings-row-title">代码字号</div>
-              <div className="settings-row-description">单独调整编辑器和代码块字号。</div>
-            </div>
-            <div className="settings-row-control">
-              <div className="settings-segmented" role="radiogroup" aria-label="代码字号" onKeyDown={onRadioGroupKeyDown}>
-                {CODE_TEXT_SCALES.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className="settings-segment"
-                    data-active={selectedCodeScale.value === option.value ? "true" : "false"}
-                    role="radio"
-                    aria-checked={selectedCodeScale.value === option.value}
-                    tabIndex={selectedCodeScale.value === option.value ? 0 : -1}
-                    onClick={() => setCodeTextScale(option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <span className="settings-scale-value" aria-label={`当前代码缩放 ${Math.round(codeTextScale * 100)}%`}>
-                <Type aria-hidden="true" /> {Math.round(codeTextScale * 100)}%
-              </span>
-            </div>
-          </div>
           <div className="settings-row">
             <div className="settings-row-copy">
               <div className="settings-row-title">减少动态效果</div>

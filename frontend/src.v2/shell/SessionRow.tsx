@@ -12,6 +12,7 @@ import {
 
 export type SessionRowProps = {
   conversation: ConversationMeta;
+  rowId?: string;
   sessionStatus: "running" | "waiting" | "idle";
   isHydrating: boolean;
   active: boolean;
@@ -22,7 +23,7 @@ export type SessionRowProps = {
   waitingLabel: string | null;
   onSwitch: (id: string) => void;
   onSetMenuFor: (id: string | null) => void;
-  onStartRename: (id: string, title: string) => void;
+  onStartRename: (id: string, title: string, rowId?: string) => void;
   onCommitRename: () => void;
   onCancelRename: () => void;
   onSetRenameValue: (value: string) => void;
@@ -39,6 +40,7 @@ export type SessionRowProps = {
 
 const SessionRowComponent = ({
   conversation,
+  rowId,
   sessionStatus,
   isHydrating,
   active,
@@ -65,7 +67,8 @@ const SessionRowComponent = ({
 }: SessionRowProps) => {
   const c = conversation;
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
-  const menuId = `conversation-actions-${c.id}`;
+  const presentationId = rowId || c.id;
+  const menuId = `conversation-actions-${presentationId}`;
   return (
     <div
       className="session-row-hover"
@@ -73,7 +76,7 @@ const SessionRowComponent = ({
       data-active={active || undefined}
       style={{
         ...sessionRowStyle,
-        paddingLeft: 40 + Math.min(treeDepth, 6) * 16,
+        paddingLeft: `calc(var(--conversation-row-indent, 40px) + ${Math.min(treeDepth, 6) * 16}px)`,
         borderColor: "transparent",
         background: active ? "var(--surface-active)" : "transparent",
         opacity: c.archived || deleting ? 0.6 : 1,
@@ -114,8 +117,8 @@ const SessionRowComponent = ({
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
-              onDoubleClick={(e) => { e.stopPropagation(); onStartRename(c.id, c.title); }}
-              style={{ ...sessionTitleStyle, fontWeight: active ? 550 : 430 }}
+              onDoubleClick={(e) => { e.stopPropagation(); onStartRename(c.id, c.title, presentationId); }}
+              style={{ ...sessionTitleStyle, fontWeight: 400 }}
             >
               {c.title}
               {c.branchKind === "context_fork" && (
@@ -166,7 +169,7 @@ const SessionRowComponent = ({
           expanded={menuOpen}
           controls={menuOpen ? menuId : undefined}
           disabled={deleting}
-          onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuOpen ? null : c.id); }}
+          onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuOpen ? null : presentationId); }}
         >
           <MoreHorizontal size={14} />
         </IconAction>
@@ -180,7 +183,7 @@ const SessionRowComponent = ({
           canReveal={Boolean((c.worktreePath || c.workspaceRoot) && isDesktop())}
           canCopy={Boolean(c.worktreePath || c.workspaceRoot)}
           canMerge={Boolean(c.parentConversationId && !c.mergedIntoConversationId && !c.archived)}
-          onRename={() => { onSetMenuFor(null); onStartRename(c.id, c.title); }}
+          onRename={() => { onSetMenuFor(null); onStartRename(c.id, c.title, presentationId); }}
           onClone={() => { onSetMenuFor(null); onClone(c.id); }}
           onMerge={() => { onSetMenuFor(null); onMerge(c.id); }}
           onExport={() => { onSetMenuFor(null); onExport(c.id); }}

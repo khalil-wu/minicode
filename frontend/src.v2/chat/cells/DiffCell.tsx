@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from "lucide-react";
-import { fileIcon } from "../../lib/file-icons";
 import type { DiffCellState, DiffFileChange } from "./cellTypes";
 import { diffCellTitle, diffFileChangeType } from "./diffCellLabels";
 import { useAppStore } from "../../stores";
@@ -82,16 +81,21 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
     };
     if (!canRevert || reverting || reverted || !isCurrent()) return;
     const patch = files.map((file) => file.patch).join("\n");
+    const ownerTitle = useAppStore.getState().conversations.find((conversation) => conversation.id === ownerConversationId)?.title || "原任务";
     setReverting(true);
     try {
       const confirmed = await showConfirm({
         title: "撤销更改",
-        message: `撤销此处显示的 ${files.length} 个文件更改？`,
+        message: `撤销 ${ownerTitle} 中显示的 ${files.length} 个文件更改？\n工作区：${workingDirectory}`,
         confirmLabel: "撤销",
         cancelLabel: "取消",
         danger: true,
       });
-      if (!confirmed || !isCurrent()) return;
+      if (!confirmed) return;
+      if (!isCurrent()) {
+        pushToast(`任务或工作区已切换，未撤销 ${ownerTitle} 中的更改。返回原任务后重试。`, "info", 5000);
+        return;
+      }
       const result = await sendClientCommandAwaitResult({
         type: "diff.git_revert_patch",
         conversation_id: ownerConversationId,
@@ -99,13 +103,12 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
         patch,
         confirmed: true,
       }, "diff.git_revert_patch");
-      if (!isCurrent()) return;
       if (!commandResultSucceeded(result)) throw new Error(result.message || "撤销更改失败");
-      setReverted(true);
-      useAppStore.getState().requestGitChanges();
-      pushToast("显示的更改已撤销。", "success", 3000);
+      if (isSameCell()) setReverted(true);
+      if (isCurrent()) useAppStore.getState().requestGitChanges();
+      pushToast(`${ownerTitle} 中的更改已撤销。`, "success", 3000);
     } catch (error) {
-      if (isCurrent()) pushToast(error instanceof Error ? error.message : "撤销更改失败", "error", 5000);
+      pushToast(`${ownerTitle} 撤销失败：${error instanceof Error ? error.message : "撤销更改失败"}`, "error", 5000);
     } finally {
       if (isSameCell()) setReverting(false);
     }
@@ -115,7 +118,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
     <div className="diff-cell">
       <div className="diff-cell-header-row">
         <div className="diff-cell-header-button diff-cell-header-static">
-          <span className="diff-cell-icon-tile" aria-hidden="true"><FileDiff size={15} /></span>
+          <span className="diff-cell-icon-tile" aria-hidden="true"><FileDiff size={18} /></span>
           <span className="diff-cell-heading">
             <span className="diff-cell-title" title={cell.historical ? "后续操作可能改变文件；这里展示编辑完成时的记录。" : undefined}>{diffCellTitle(cell)} {cell.files.length} 个文件</span>
             <span className="diff-cell-stats diff-cell-header-stats">
@@ -133,8 +136,8 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
               disabled={!canRevert || reverting || reverted}
               title="撤销这些更改"
             >
-              <RotateCcw size={14} aria-hidden="true" />
               <span>{reverted ? "已撤销" : reverting ? "正在撤销" : "撤销"}</span>
+              <RotateCcw size={14} aria-hidden="true" />
             </button>}
             <button
               type="button"
@@ -143,7 +146,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
               disabled={!files.some((file) => Boolean(file.patch))}
               title="在审核面板查看更改"
             >
-              <span>审核</span>
+              <span>查看变更</span>
             </button>
           </div>
         )}
@@ -173,7 +176,6 @@ function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () =
     : file.path;
   return <section className="diff-file-section">
     <div className="diff-file-section-header">
-      {fileIcon(file.path, { size: 16, className: "diff-cell-file-icon" })}
       {onOpen
         ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen}>{displayPath}</button>
         : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}

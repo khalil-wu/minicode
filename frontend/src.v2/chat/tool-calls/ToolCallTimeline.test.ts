@@ -180,8 +180,8 @@ describe("ToolCallTimeline helpers", () => {
     } as ChatMessage;
 
     expect(buildRunTimelineItems([message], [])).toEqual([
-      expect.objectContaining({ label: "Fetch", toolName: "web_fetch" }),
-      expect.objectContaining({ label: "Search official docs", toolName: "web_search" }),
+      expect.objectContaining({ label: "读取网页", toolName: "web_fetch" }),
+      expect.objectContaining({ label: "搜索 official docs", toolName: "web_search" }),
     ]);
     expect(runTimelineExportJsonl([message], [])).toContain('"tool_name":"web_fetch"');
   });

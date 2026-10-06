@@ -30,6 +30,7 @@ from backend.sandbox.policy import ResolvedSandboxPolicy
 _RUNNER_ENV = "MINICODE_WINDOWS_SANDBOX_EXECUTABLE"
 _HOME_ENV = "MINICODE_WINDOWS_SANDBOX_HOME"
 _APP_RESOURCES_ENV = "MINICODE_APP_RESOURCES_DIR"
+POLICY_SCOPE_ENV = "MINICODE_WINDOWS_SANDBOX_POLICY_SCOPE"
 _PRIVATE_DESKTOP_PREFIX = "MiniCodeSandboxDesktop-"
 _RUNTIME_VERSION = "minicode-windows-sandbox 0.158.0-alpha.2.1 owner-v3"
 _DESKTOP_ALL_ACCESS = 0x000F01FF
@@ -227,7 +228,8 @@ def _json(value: Any) -> str:
 
 
 def _permission_profile(resolved: ResolvedSandboxPolicy, cwd: Path) -> dict[str, Any]:
-    entries: list[dict[str, Any]] = []
+    entries: dict[str, dict[str, Any]] = {}
+    precedence = {"read": 0, "write": 1, "deny": 2}
     for entry in resolved.entries:
         if entry.path.kind == "special":
             value = {"kind": entry.path.value.value}
@@ -240,8 +242,10 @@ def _permission_profile(resolved: ResolvedSandboxPolicy, cwd: Path) -> dict[str,
             raw = Path(entry.path.value)
             absolute = raw if raw.is_absolute() else cwd / raw
             path = {"type": "path", "path": str(absolute.resolve())}
-        entries.append({"path": path, "access": entry.access.value})
-    file_system: dict[str, Any] = {"type": "restricted", "entries": entries}
+        key = _json(path)
+        if key not in entries or precedence[entry.access.value] > precedence[entries[key]["access"]]:
+            entries[key] = {"path": path, "access": entry.access.value}
+    file_system: dict[str, Any] = {"type": "restricted", "entries": list(entries.values())}
     if resolved.glob_scan_max_depth:
         file_system["glob_scan_max_depth"] = resolved.glob_scan_max_depth
     return {
@@ -249,6 +253,21 @@ def _permission_profile(resolved: ResolvedSandboxPolicy, cwd: Path) -> dict[str,
         "file_system": file_system,
         "network": "enabled" if resolved.allow_network else "restricted",
     }
+
+
+def command_launcher_env(args: list[str], private_temp: Path) -> dict[str, str]:
+    """Keep policy-specific capability identities out of the workload environment."""
+    profile = json.loads(args[args.index("--permission-profile") + 1])
+    profile["file_system"]["entries"].sort(key=_json)
+    roots = json.loads(args[args.index("--write-roots-json") + 1])
+    scope = {
+        "profile": profile,
+        "write_roots": sorted("<private-temp>" if root == str(private_temp.resolve()) else root for root in roots),
+    }
+    for option in ("--deny-read-paths-json", "--deny-write-paths-json"):
+        scope[option] = sorted(json.loads(args[args.index(option) + 1])) if option in args else []
+    digest = hashlib.sha256(_json(scope).encode("utf-8")).hexdigest()
+    return {POLICY_SCOPE_ENV: digest}
 
 
 def _powershell_argv(command: str) -> list[str]:
@@ -312,7 +331,7 @@ def prepare_command(
         ]
         write_roots.append(str(private_temp.resolve()))
         profile = _permission_profile(resolved, cwd)
-        child_env = dict(env)
+        child_env = {key: value for key, value in env.items() if key.upper() != POLICY_SCOPE_ENV}
         if not resolved.allow_network:
             child_env = {
                 key: value for key, value in child_env.items()

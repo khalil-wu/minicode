@@ -369,6 +369,7 @@ def _project_block(value: Any) -> dict[str, Any] | None:
                 "id", "stage", "phase", "status", "message", "label", "summary", "visibility",
                 "detail", "toolCallId", "toolName", "groupId", "stepId", "iterationId",
                 "providerState", "retryAttempt", "maxRetries", "retryAfterMs", "errorMessage", "operationId",
+                "subagentId", "subagentName", "subagentIdentity", "subagentStatus",
             ),
         }[block_type]
         block = {"type": block_type}
@@ -677,6 +678,20 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         if errors:
             safe_metadata["errors"] = errors
         projected["metadata"] = safe_metadata
+    if isinstance(metadata, Mapping) and isinstance(metadata.get("turn_diff"), Mapping):
+        source_diff = metadata["turn_diff"]
+        turn_diff: dict[str, Any] = {}
+        for key in ("thread_id", "turn_id", "conversation_id", "message_id", "task_id", "tool_call_id", "source", "workspace_root"):
+            text = public_text(source_diff.get(key), max_chars=4_096, single_line=True)
+            if text:
+                turn_diff[key] = text
+        diff = source_diff.get("diff")
+        if isinstance(diff, str) or diff is None:
+            turn_diff["diff"] = public_text(diff, max_chars=4_194_304) if isinstance(diff, str) else None
+        revision = _nonnegative_int(source_diff.get("revision"))
+        if revision is not None:
+            turn_diff["revision"] = revision
+        projected.setdefault("metadata", {})["turn_diff"] = turn_diff
     return projected
 
 

@@ -1,9 +1,10 @@
-import { Check, ChevronDown, ChevronRight, Copy, Square, TerminalSquare } from "lucide-react";
+import { Check, ChevronRight, Copy, Square, TerminalSquare } from "../../lib/icons";
 import { useEffect, useRef, useState } from "react";
 import type { ExecCellState } from "./cellTypes";
 import { StatusIcon } from "../../components/icons";
 import {
   cellStatusTone,
+  cellStatusLabel,
   execCellStatus,
   formatCellDuration,
   isRunningCellStatus,
@@ -27,13 +28,13 @@ export function ExecCell({
 }) {
   const status = execCellStatus(cell.status);
   const statusColor = cellStatusTone(status);
-  const title = commandTitle(cell.status, Boolean(cell.background));
   const duration = cell.background ? "" : formatCellDuration(cell.durationMs);
   const outputMeta = [cell.exitCode != null ? `exit ${cell.exitCode}` : "", duration].filter(Boolean).join(" · ");
   const running = isRunningCellStatus(status);
   const shouldAutoExpand = !cell.collapsed || cell.status === "failed" || cell.status === "partial";
   const [expansionPreference, setExpanded] = useState(shouldAutoExpand);
   const expanded = useTranscriptSearch() || expansionPreference;
+  const title = commandTitle(cell.status, Boolean(cell.background), duration, expanded);
   const [copied, setCopied] = useState(false);
   const userToggled = useRef(false);
   const previousId = useRef(cell.id);
@@ -92,9 +93,9 @@ export function ExecCell({
             )}
           </span>
           <span className="exec-cell-title">{title}</span>
-          <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
+          {!expanded && <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>}
           <span className="exec-cell-toggle" aria-hidden="true">
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <ChevronRight size={14} className="mc-process-disclosure" data-expanded={expanded} />
           </span>
         </button>
         {cell.status === "running" && onStop && (
@@ -130,18 +131,22 @@ export function ExecCell({
             {stderr && <span className="exec-cell-output-stderr">{stderr}</span>}
             {!hasOutput && <span className="exec-cell-no-output">无输出</span>}
           </pre>
+          <div className="exec-cell-output-status" data-status={status}>
+            {cell.status === "success" && !cell.background && <Check size={13} aria-hidden="true" />}
+            <span>{cell.background && cell.status === "success" ? "已在后台启动" : cell.status === "pending_approval" ? "等待批准" : cellStatusLabel(status)}</span>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function commandTitle(status: ExecCellState["status"], background: boolean): string {
-  if (status === "pending_approval") return "Run · Awaiting approval";
-  if (status === "running") return "Running";
-  if (background && status === "success") return "Run · Started in background";
-  if (status === "partial") return "Run · Partial";
-  if (status === "cancelled") return "Run · Cancelled";
-  if (status === "failed") return "Run · Failed";
-  return "Run";
+function commandTitle(status: ExecCellState["status"], background: boolean, duration: string, expanded: boolean): string {
+  if (status === "pending_approval") return "等待批准运行命令";
+  if (status === "running") return "正在运行";
+  if (background && status === "success") return "已在后台启动";
+  if (status === "partial") return "命令未完整结束";
+  if (status === "cancelled") return "命令已取消";
+  if (status === "failed") return "命令运行失败";
+  return expanded && duration ? `命令已在 ${duration} 内运行完成` : "已运行";
 }

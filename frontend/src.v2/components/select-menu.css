@@ -97,7 +97,7 @@
   box-shadow: var(--shadow-medium);
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
-  animation: mc-select-enter var(--duration-micro) var(--easing-enter);
+  animation: mc-select-enter var(--duration-fast) var(--easing-enter-snappy);
 }
 
 .mc-select-popover[data-placement="bottom"] {
@@ -146,8 +146,7 @@
 }
 
 .mc-select-option[aria-selected="true"] {
-  background: var(--surface-soft);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
 }
 
 .mc-select-option:disabled {
@@ -179,8 +178,8 @@
 }
 
 @keyframes mc-select-enter {
-  from { opacity: 0; transform: translateY(-3px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @media (prefers-reduced-motion: reduce) {

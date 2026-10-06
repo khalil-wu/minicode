@@ -770,7 +770,7 @@ def _reasoning_effort_projection(
     levels: list[str],
     default_effort: str = "",
 ) -> dict[str, Any]:
-    from backend.llm.reasoning_effort import normalize_reasoning_effort
+    from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_wire_value, reasoning_effort_wire_map
 
     normalized_configured = str(configured or "").strip().lower()
     effective = normalize_reasoning_effort(
@@ -783,6 +783,8 @@ def _reasoning_effort_projection(
     return {
         "configured_reasoning_effort": normalized_configured,
         "effective_reasoning_effort": effective,
+        "wire_reasoning_effort": reasoning_effort_wire_value(model, effective),
+        "reasoning_effort_wire_map": reasoning_effort_wire_map(model),
         "reasoning_effort_supported": bool(levels),
     }
 

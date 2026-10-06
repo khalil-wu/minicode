@@ -16,6 +16,8 @@ export const ChatPane = () => {
   const messageContainerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
+  const floating = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
+  useEffect(() => { if (messageContainerRef.current) messageContainerRef.current.inert = floating; }, [floating]);
   const isHydrating = useAppStore((state) => Boolean(
     conversationId && state.conversationHydration[conversationId]?.isHydrating,
   ));

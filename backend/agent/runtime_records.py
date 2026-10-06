@@ -117,6 +117,9 @@ class SubagentRunRecord:
     background: bool = False
     task_id: str = ""
     session_id: str = ""
+    model: str = ""
+    provider: str = ""
+    reasoning_effort: str = ""
     objective: str = ""
     depends_on: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
@@ -467,6 +470,7 @@ def _swarm_task_from_dict(data: dict[str, Any]) -> SwarmTaskRecord:
 
 
 def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
+    resume_config = dict(data.get("resume_config") or {}) if isinstance(data.get("resume_config"), dict) else {}
     return SubagentRunRecord(
         subagent_id=str(data.get("subagent_id") or ""),
         parent_run_id=str(data.get("parent_run_id") or ""),
@@ -477,6 +481,9 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         background=bool(data.get("background", False)),
         task_id=str(data.get("task_id") or ""),
         session_id=str(data.get("session_id") or ""),
+        model=str(data.get("model", resume_config.get("model")) or ""),
+        provider=str(data.get("provider", resume_config.get("provider")) or ""),
+        reasoning_effort=str(data.get("reasoning_effort", resume_config.get("reasoning_effort")) or ""),
         objective=str(data.get("objective") or ""),
         depends_on=_string_list(data.get("depends_on")),
         blocked_by=_string_list(data.get("blocked_by")),
@@ -489,11 +496,7 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         detach_from_parent=bool(data.get("detach_from_parent", False)),
         read_only=bool(data.get("read_only", False)),
         write_scope=_string_list(data.get("write_scope")),
-        resume_config=(
-            dict(data.get("resume_config") or {})
-            if isinstance(data.get("resume_config"), dict)
-            else {}
-        ),
+        resume_config=resume_config,
         # Durable round-trips must retain teammate and permission lifecycle fields.
         teammate_name=str(data.get("teammate_name") or ""),
         team_name=str(data.get("team_name") or ""),

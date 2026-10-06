@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +35,13 @@ from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.conversation_runtime import ConversationRuntime
 from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.utils import build_summary_from_transcript
+
+
+@pytest.fixture(autouse=True)
+def runner_memory_state(monkeypatch, isolate_runtime_data_dirs):
+    runtime_state = Path(os.environ["MINICODE_STATE_ROOT"]) / "runner-done"
+    monkeypatch.setattr("backend.memory.file_memory.DATA_ROOT", runtime_state)
+    monkeypatch.setattr("backend.memory.file_memory.MEMORY_DIR", runtime_state / "memory")
 
 
 def _run_session_scenario(awaitable):
@@ -74,6 +82,93 @@ def test_only_provider_reasoning_summary_is_persistent() -> None:
 
     assert _is_persistent_reasoning_event(raw) is False
     assert _is_persistent_reasoning_event(summary) is True
+
+
+@pytest.mark.parametrize("route", ["query", "runtime_callback"])
+@pytest.mark.parametrize(("terminal", "progress_status", "subagent_status"), [
+    ("completed", "completed", "done"),
+    ("partial", "partial", "partial"),
+    ("interrupted", "partial", "cancelled"),
+    ("failed", "failed", "error"),
+])
+def test_subagent_completion_survives_reload_at_its_stream_position_without_duplicate_notification(
+    tmp_path, monkeypatch, route, terminal, progress_status, subagent_status,
+) -> None:
+    events: list[dict] = []
+    session = _Session(tmp_path, events)
+    completed_at = 1_791_238_400_123
+    completion = AgentEvent.subagent_done("subagent-real-worker", status=terminal, mailbox_epoch=4)
+    completion.data["record"] = {
+        "agent_path": "/root/verify_prediction",
+        "teammate_name": "Verify prediction",
+        "mailbox_epoch": 4,
+    }
+    completion.data["result"] = {"status": terminal, "content": "Actual child result", "completed_at": completed_at}
+    second = AgentEvent.subagent_done("subagent-runtime-audit", status="completed", mailbox_epoch=1)
+    second.data["record"] = {"agent_path": "/root/runtime_audit", "mailbox_epoch": 1}
+    second.data["result"] = {"status": "completed", "content": "Second actual result", "completed_at": completed_at + 200}
+    batch = AgentEvent.subagent_done("parallel-batch", status="completed")
+
+    async def runner(**kwargs):
+        await _admit_runner_turn(kwargs)
+        yield AgentEvent.agent_message_completed("Before completion", item_id="before-child", source="commentary")
+        if route == "runtime_callback":
+            await kwargs["emit_event"]("subagent.done", completion.data)
+            await kwargs["emit_event"]("subagent.done", completion.data)
+            await kwargs["emit_event"]("subagent.done", batch.data)
+        yield completion
+        yield completion
+        yield batch
+        yield second
+        yield AgentEvent.agent_message_completed("After completion", item_id="after-child", source="model_final")
+        yield AgentEvent.done()
+
+    session.query_engine = QueryEngine(runner=runner)
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+
+    _run_session_scenario(session._run_agent_locked(
+        "Inspect the child result", conversation_id="conv_runnerdone",
+        metadata={"agent_runtime": default_runtime(), "assistant_message_id": "assistant-child-completion",
+                  "user_message_id": "user-child-completion"},
+    ))
+
+    progress_events = [event for event in events if event.get("type") == "agent.progress" and event.get("subagent_id")]
+    assert len(progress_events) == 2
+    wire = progress_events[0]
+    assert wire["message_id"] == "assistant-child-completion"
+    assert wire["conversation_id"] == "conv_runnerdone"
+    assert wire["id"] == "subagent-completed:subagent-real-worker:4"
+    assert wire["stage"] == "status" and wire["phase"] == "subagent"
+    assert wire["status"] == progress_status and wire["subagent_status"] == subagent_status
+    assert wire["subagent_name"] == "Verify prediction"
+    assert wire["subagent_identity"] == "/root/verify_prediction"
+    assert progress_events[1]["subagent_name"] == "Runtime audit"
+    assert progress_events[1]["id"] == "subagent-completed:subagent-runtime-audit:1"
+    assert isinstance(wire["timestamp"], str)
+    assert not any(event.get("type") == "parent.notifications" for event in events)
+
+    restored = ConversationRepository(session.conversation_repo._base_dir).get_conversation("conv_runnerdone")
+    assert restored is not None
+    assert [message["role"] for message in restored.transcript] == ["user", "assistant"]
+    blocks = restored.transcript[-1]["blocks"]
+    assert [block["type"] for block in blocks] == ["text", "progress", "progress", "text"]
+    progress = blocks[1]
+    assert progress["id"] == wire["id"]
+    assert progress["subagentId"] == "subagent-real-worker"
+    assert progress["subagentName"] == "Verify prediction"
+    assert progress["subagentIdentity"] == "/root/verify_prediction"
+    assert progress["subagentStatus"] == subagent_status
+    assert progress["timestamp"] == completed_at
+    snapshot = restored.context_snapshot["ui_agent_state"]["agentProgress"]
+    assert [entry["id"] for entry in snapshot] == [wire["id"], progress_events[1]["id"]]
+    assert snapshot[0]["timestamp"] == completed_at
+    assert snapshot[0]["subagentStatus"] == subagent_status
+    assert [child["id"] for child in restored.context_snapshot["ui_agent_state"]["subagents"]] == [
+        "subagent-real-worker", "subagent-runtime-audit",
+    ]
 
 
 def test_runner_streams_raw_reasoning_but_persists_only_summary(tmp_path, monkeypatch) -> None:
@@ -164,7 +259,11 @@ async def _admit_query_submission(submission) -> None:
 class _Session(SessionAgentRunnerMixin):
     def __init__(self, tmp_path: Path, events: list[dict], runner_events: list[AgentEvent] | None = None):
         self.session_id = "session_runner_done"
-        self.conversation_repo = ConversationRepository(tmp_path / "conversations")
+        # Match the desktop composition root: host stores and their queue lease
+        # files belong to the isolated runtime state, outside user workspace.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        runtime_state = Path(os.environ["MINICODE_STATE_ROOT"]) / "runner-done" / tmp_path.name
+        self.conversation_repo = ConversationRepository(runtime_state / "conversations")
         conversation = self.conversation_repo.create_conversation(
             conversation_id="conv_runnerdone",
             title="Runner done fallback",
@@ -174,7 +273,7 @@ class _Session(SessionAgentRunnerMixin):
         self.active_conversation = conversation
         self.query_engine = QueryEngine(runner=self._runner)
         self.tool_registry = ToolRegistry()
-        self.artifact_store = ArtifactStore(storage_dir=str(tmp_path / "artifacts"))
+        self.artifact_store = ArtifactStore(storage_dir=str(runtime_state / "artifacts"))
         self.permission_checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
         self.config = AppConfig(llm=LLMSettings(api_key="test-key"))
         self.llm = _NoopLLM()
@@ -221,7 +320,7 @@ class _Session(SessionAgentRunnerMixin):
         self.conversation_lifecycle_lock = conversation_lifecycle_lock
         self.command_dispatcher = SessionCommandDispatcher(
             self,
-            root_dir=tmp_path / "client-command-log",
+            root_dir=runtime_state / "client-command-log",
         )
         self.run_manager = SessionRunManager(self)
         self._interrupted = False

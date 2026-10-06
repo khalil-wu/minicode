@@ -257,13 +257,12 @@
   pointer-events: none;
 }
 
-.mc-sidebar-mode-tab:focus-visible,
+.mc-navigation-rail button:focus-visible,
 .mc-sidebar-action:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
 
-.mc-sidebar-mode-icon,
 .mc-sidebar-action-icon,
 .mc-sidebar-tab-icon {
   display: inline-flex;
@@ -273,15 +272,10 @@
   color: var(--text-muted);
 }
 
-.mc-sidebar-mode-icon > svg,
 .mc-sidebar-action-icon > svg,
 .mc-sidebar-tab-icon > svg {
   width: var(--mc-icon-md);
   height: var(--mc-icon-md);
-}
-
-.mc-sidebar-mode-tab .mc-sidebar-mode-icon {
-  color: inherit;
 }
 
 .settings-center-tab-icon {
@@ -322,6 +316,16 @@
   width: var(--mc-icon-lg);
   height: var(--mc-icon-lg);
   stroke-width: var(--mc-icon-stroke);
+}
+
+.app-route-loading[data-scope="settings"] {
+  inset: var(--header-height) 6px 6px var(--desktop-rail-width);
+  border: 1px solid var(--desktop-frame-border);
+  border-radius: 16px;
+}
+
+@media (max-width: 1199px) {
+  .app-route-loading[data-scope="settings"] { inset: var(--header-height) 0 0 var(--desktop-rail-width); border: 0; border-radius: 0; }
 }
 
 /* 导航项文字始终显示；此前为「仅图标」导航时代设为 display:none，
@@ -1086,11 +1090,6 @@ body:has(.settings-workspace.settings-center) .toast-container {
     min-height: 44px;
   }
 
-  .mc-sidebar-mode-tab {
-    height: 34px !important;
-    min-height: 34px !important;
-  }
-
   .mc-sidebar-nav {
     gap: 8px !important;
   }
@@ -1402,31 +1401,4 @@ body:has(.settings-workspace.settings-center) .toast-container {
 }
 .agent-edit-review-keepall {
   color: var(--text-muted);
-}
-
-.provider-request-status {
-  display: flex;
-  margin: 0 auto;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  padding: 6px 4px;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
-.provider-request-status > svg {
-  flex-shrink: 0;
-}
-
-.provider-request-status-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.provider-request-status-elapsed {
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
 }

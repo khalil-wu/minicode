@@ -11,6 +11,7 @@ import { WorkspaceHTMLWorker } from "./workspaceHtmlService";
 import { useAppStore } from "../stores";
 import { StandaloneServices } from "monaco-editor/editor/standalone/browser/standaloneServices.js";
 import { ILanguageFeaturesService } from "monaco-editor/editor/common/services/languageFeatures.js";
+import { IAccessibilitySignalService } from "monaco-editor/platform/accessibilitySignal/browser/accessibilitySignalService.js";
 
 vi.hoisted(() => {
   Object.defineProperty(document, "queryCommandSupported", { configurable: true, value: () => false });
@@ -52,11 +53,13 @@ function editorFor(model: monaco.editor.ITextModel) {
   document.body.append(host);
   const editor = monaco.editor.create(host, {
     ...miniCodeCodeEditingOptions,
+    inlineSuggest: { enabled: true },
     model, dimension: { width: 800, height: 420 },
     automaticLayout: false, minimap: { enabled: false },
     wordBasedSuggestions: "off",
   });
   disposables.push(editor);
+  editor.getContribution("editor.contrib.inlineCompletionsController");
   editor.focus();
   return editor;
 }
@@ -243,6 +246,32 @@ describe("production Monaco interaction and language service integration", () =>
     ]);
     expect(useAppStore.getState().activeEditorPath).toBe("site/js/game.js");
   });
+});
+
+it("automatically requests C++ prediction after typing and accepts it into the real Monaco model", async () => {
+  const previousFetch = globalThis.fetch;
+  const previous = useAppStore.getState();
+  const request = vi.fn(async () => new Response(JSON.stringify({ text: 'std::cout << "Hello";', usage: { input_tokens: 9, output_tokens: 6 }, model: "test" }), { status: 200 }));
+  globalThis.fetch = request;
+  useAppStore.setState({ workingDirectory: "/completion-test", workbenchPreferences: { ...previous.workbenchPreferences, aiEnabled: true } });
+  const model = textModel("void greet() {\n", "cpp", "prediction.cpp");
+  const editor = editorFor(model);
+  const signalService = StandaloneServices.get<{ playSignal(signal: unknown): Promise<void> }>(IAccessibilitySignalService);
+  const playSignal = vi.spyOn(signalService, "playSignal");
+  editor.setPosition({ lineNumber: 2, column: 1 });
+  expect(editor.hasTextFocus()).toBe(true);
+  try {
+    editor.trigger("keyboard", "type", { text: "    " });
+    await waitFor(() => expect(request).toHaveBeenCalled(), { timeout: 4000 });
+    await waitFor(() => expect(document.querySelector(".ghost-text-decoration, .ghost-text")?.textContent).toContain("std::cout"), { timeout: 4000 });
+    // Monaco announces the rendered prediction after 50ms. Accepting before that
+    // native callback finishes cancels its unhandled promise in Monaco 0.56.
+    await waitFor(() => expect(playSignal).toHaveBeenCalled());
+    expect(model.getValue()).not.toContain("std::cout");
+    editor.trigger("keyboard", "editor.action.inlineSuggest.commit", null);
+    await waitFor(() => expect(model.getValue()).toContain('std::cout << "Hello";'));
+    expect(useAppStore.getState().inlineCompletionUsage.pending).toBe(false);
+  } finally { playSignal.mockRestore(); globalThis.fetch = previousFetch; useAppStore.setState(previous, true); }
 });
 
 it("uses the real inline provider with cancellation and keeps stale responses out of the model", async () => {

@@ -38,6 +38,7 @@ frontend/tsconfig.tsbuildinfo
 desktop/dist/
 desktop/release/
 desktop/*.log
+desktop/language-services/clangd/
 
 # Test
 .pytest_cache/

@@ -218,6 +218,17 @@ describe("SidebarRight activity", () => {
     expect(screen.queryByRole("tab", { name: /打开产物/ })).toBeNull();
   });
 
+  it("opens the requested agent panel without adding a default context placeholder", async () => {
+    useAppStore.setState({ rightPanelOpen: false, rightStackTab: "tasks" });
+    render(<SidebarRight />);
+    act(() => useAppStore.getState().setRightStackTab("subagents"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "打开子智能体" })).toBeTruthy());
+    expect(screen.queryByRole("tab", { name: "打开上下文" })).toBeNull();
+    act(() => useAppStore.getState().setRightStackTab("diff"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "打开变更" })).toBeTruthy());
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+  });
+
   it("keeps panel actions outside the scrollable tab strip", () => {
     render(<SidebarRight />);
 
@@ -535,8 +546,8 @@ describe("SidebarRight activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看最近事件" }));
 
     expect(screen.getByText("回放预览")).toBeTruthy();
-    expect(screen.getAllByText("Run command").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Read").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("运行").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("读取").length).toBeGreaterThan(0);
     expect(screen.getByText("回放已完成")).toBeTruthy();
     expect(screen.getAllByText("tool.completed").length).toBeGreaterThan(0);
     expect(screen.getByText("400ms")).toBeTruthy();
@@ -546,12 +557,12 @@ describe("SidebarRight activity", () => {
     const exported = String(writeTextMock.mock.calls[0][0])
       .split("\n")
       .map((line) => JSON.parse(line))
-      .find((event) => event.label === "Run command");
+      .find((event) => event.label === "运行");
     expect(exported).toMatchObject({
       kind: "minicode_run_timeline_event",
       phase: "tool",
       status: "completed",
-      label: "Run command",
+      label: "运行",
       tool_name: "run_command",
     });
 
@@ -561,13 +572,13 @@ describe("SidebarRight activity", () => {
     const replayed = String(writeTextMock.mock.calls[0][0])
       .split("\n")
       .map((line) => JSON.parse(line))
-      .find((event) => event.label === "Run command");
+      .find((event) => event.label === "运行");
     expect(replayed).toMatchObject({
       kind: "minicode_run_replay_event",
       schema_version: 1,
       phase: "tool",
       status: "completed",
-      label: "Run command",
+      label: "运行",
       tool_name: "run_command",
     });
 
@@ -1097,7 +1108,7 @@ describe("SidebarRight activity", () => {
 
     render(<SidebarRight />);
 
-    const reviewTab = screen.getByRole("tab", { name: /打开审阅/i });
+    const reviewTab = screen.getByRole("tab", { name: /打开变更/i });
     expect(reviewTab).toBeTruthy();
 
     fireEvent.click(reviewTab);
@@ -1123,7 +1134,7 @@ describe("SidebarRight activity", () => {
     expect(screen.getByRole("menuitem", { name: "上下文" })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: "预览" })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: "产物" })).toBeTruthy();
-    expect(screen.getByRole("tabpanel", { name: "打开审阅" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel", { name: "打开变更" })).toBeTruthy();
     expect(useAppStore.getState().quickOpenVisible).toBe(false);
     expect(useAppStore.getState().rightStackTab).toBe("diff");
   });

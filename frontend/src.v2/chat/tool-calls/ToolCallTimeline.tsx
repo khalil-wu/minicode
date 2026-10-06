@@ -133,7 +133,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
                 <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
                   <span
                     style={{
-                      fontFamily: "var(--font-mono)",
+                      fontFamily: "var(--font-ui)",
                       color: "var(--text-primary)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",

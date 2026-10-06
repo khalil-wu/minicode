@@ -231,7 +231,9 @@ async def test_auth_refresh_obeys_query_cancellation_and_deadline(tmp_path, monk
         fixture.owner.refresh_model_auth = refresh
         if stop == "deadline":
             fixture.session.agent_settings = replace(fixture.session.agent_settings, max_turn_seconds=2)
-        task = asyncio.create_task(run_query(fixture, tmp_path, cancel_event=cancel_event))
+        # Authentication owns this deadline. There are no workspace tools in
+        # this scenario; filesystem preflight is covered by workspace tests.
+        task = asyncio.create_task(run_query(fixture, None, cancel_event=cancel_event))
         await asyncio.wait_for(entered.wait(), 3)
         if stop == "cancel":
             cancel_event.set()

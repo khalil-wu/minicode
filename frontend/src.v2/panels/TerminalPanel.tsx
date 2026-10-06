@@ -728,7 +728,14 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
     }
     const key = sessionId === "web-fallback" ? `fallback:${owner}` : sessionId;
     const view = terminalViewsRef.current.get(key);
-    if (view?.owner === owner) writeViewOutput(view, `${missingOutput ? "\r\n[断开期间的部分输出未保留]\r\n" : ""}${appendedData}`, endCursor);
+    if (view?.owner === owner) {
+      if (missingOutput) {
+        view.term.reset();
+        view.output = "";
+        view.term.writeln("[断开期间的部分输出未保留]");
+      }
+      writeViewOutput(view, appendedData, endCursor);
+    }
     if (!isCurrentConversation(owner)) return;
     const found = Array.from(appendedData.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
     if (found.length > 0) {
@@ -814,8 +821,18 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
     const view = terminalViewsRef.current.get(sessionId);
     if (!view || !view.hydrated) return;
     if (endCursor !== undefined && view.cursor !== undefined) {
-      if (endCursor <= view.cursor) return;
       const startCursor = endCursor - output.length;
+      if (endCursor <= view.cursor) {
+        // A late snapshot can fill the prefix of an already displayed live
+        // suffix without advancing its end cursor. Repaint that recovered
+        // contiguous range once; repeated snapshots retain the same bounds.
+        if (endCursor === view.cursor && startCursor < view.cursor - view.output.length) {
+          view.term.reset();
+          view.output = "";
+          writeViewOutput(view, output, endCursor);
+        }
+        return;
+      }
       const skipped = startCursor > view.cursor;
       writeViewOutput(view, `${skipped ? "\r\n[断开期间的部分输出未保留]\r\n" : ""}${output.slice(Math.max(0, view.cursor - startCursor))}`, endCursor);
     } else if (output.startsWith(view.output)) {

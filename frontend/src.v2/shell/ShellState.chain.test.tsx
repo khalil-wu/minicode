@@ -18,7 +18,7 @@ vi.mock("../chat/ChatPane", () => ({ ChatPane: () => <><textarea aria-label="Act
 const initial = useAppStore.getState();
 let frames: FrameRequestCallback[] = [];
 const flushFrames = () => act(() => { for (const frame of frames.splice(0)) frame(0); });
-const Harness = () => { useKeyboardShortcuts(); return <MainSlots mode="tabs" />; };
+const Harness = () => { useKeyboardShortcuts(); const mode = useAppStore((state) => state.appMode); return <MainSlots mode="tabs" forceChat={mode !== "code"} />; };
 const key = (key: string, shiftKey = false) => fireEvent.keyDown(window, { key, ctrlKey: true, shiftKey });
 beforeEach(() => {
   useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A", appMode: "code",
@@ -107,6 +107,7 @@ describe("actual code-mode keyboard routes", () => {
     key("l");
     flushFrames();
     expect(useAppStore.getState().draft).toBe("");
+    expect(useAppStore.getState().appMode).toBe("cowork");
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Actual composer" }));
     expect(useAppStore.getState().editorTabs[0].content).toBe("dirty");
   });

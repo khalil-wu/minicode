@@ -214,7 +214,7 @@ def test_reasoning_effort_from_footer_uses_command_result_not_system_notice(monk
         "active_model": "gpt-5",
     }
 
-    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings_file)
+    monkeypatch.setattr("backend.config.SETTINGS_FILE", settings_file)
     monkeypatch.setattr(
         "backend.config.load_config",
         lambda: AppConfig(llm=LLMSettings(api_key="test-key", model="gpt-5")),

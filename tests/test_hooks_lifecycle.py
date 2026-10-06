@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from backend.agent.loop_preflight import prepare_turn_input
 from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.hooks import manager as hook_manager_module
+from backend.hooks.runtime import run_session_end_hook
 from backend.hooks.manager import (
     HookEvent,
     HookManager,
@@ -374,10 +375,14 @@ def test_session_end_clears_only_the_registered_session_owner() -> None:
     session_manager = HookManager()
     global_manager = HookManager()
     register_hook_manager_for_session("session-a", session_manager)
+    register_hook_manager_for_session("session-b", global_manager)
     set_hook_manager(global_manager)
     try:
         assert get_hook_manager_for_session("session-a") is session_manager
-        asyncio.run(session_manager.run_session_end(session_id="session-a", reason="closed"))
+        asyncio.run(run_session_end_hook(session_id="session-a", reason="closed"))
         assert get_hook_manager_for_session("session-a") is None
+        assert get_hook_manager_for_session("session-b") is global_manager
+        assert hook_manager_module.get_hook_manager() is global_manager
     finally:
+        asyncio.run(run_session_end_hook(session_id="session-b", reason="closed"))
         set_hook_manager(None)

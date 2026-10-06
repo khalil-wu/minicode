@@ -746,6 +746,8 @@ const REGION_PICKER_SCRIPT = `new Promise((resolve) => {
 })`;
 
 function emit(entry, type, extra = {}) {
+  // Live callbacks from a disposed tab must not republish it after closure.
+  if (views.get(entry.id) !== entry) return;
   const mainWindow = getMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("minicode:embeddedBrowser:event", navigationState(entry, type, extra));
@@ -1103,6 +1105,19 @@ function closeEntry(entry) {
   entriesByWebContentsId.delete(entry.view.webContents.id);
   if (activeViewId === requestedId) activeViewId = null;
   if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("minicode:embeddedBrowser:event", {
+      id: entry.id,
+      conversationId: entry.conversationId,
+      conversation_id: entry.conversationId,
+      type: "closed",
+      url: entry.url || "",
+      title: entry.title || "",
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
+    });
+  }
   return true;
 }
 

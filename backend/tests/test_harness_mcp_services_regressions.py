@@ -485,12 +485,14 @@ def test_handoff_stash_keeps_its_identity_when_another_stash_is_created(tmp_path
 
 @pytest.mark.asyncio
 async def test_slash_archive_does_not_announce_success_after_real_handler_refuses(monkeypatch):
+    from backend.tasks import scheduler as scheduler_module
     outcomes = []
     async def emit(command, message, **kwargs): outcomes.append((command, message, kwargs))
-    ws = SimpleNamespace(active_conversation_id="conv", command_registry=CommandRegistry(), emit_command_result=emit,
+    ws = SimpleNamespace(active_conversation_id="conv", ws_manager=None, cleanup_tasks=set(), command_registry=CommandRegistry(), emit_command_result=emit,
                          conversation_repo=SimpleNamespace(get_conversation=lambda _: SimpleNamespace(id="conv")))
     ws.command_registry.register("conversation.archive", lambda payload: conversation_handlers.handle_conversation_archive(ws, payload))
-    monkeypatch.setattr(conversation_handlers, "_conversation_activity_blockers", lambda *args: {"terminal_sessions": 1})
+    monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: SimpleNamespace(pause_for_conversation=AsyncMock(return_value=0)))
+    monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", AsyncMock(return_value=False))
     await slash_commands._handle_archive(ws, "", None)
     assert len(outcomes) == 1 and outcomes[0][2]["level"] == "error"
     memory = next(entry for entry in catalog._COMPOSER_COMMAND_CATALOG if entry["command"] == "memory")

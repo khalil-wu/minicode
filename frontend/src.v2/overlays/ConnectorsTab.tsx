@@ -28,7 +28,6 @@ import {
   inputStyle,
   primaryActionStyle,
   secondaryActionStyle,
-  emptyInlineStyle,
   mcpServerRowStyle,
   mcpNameStyle,
   mcpErrorStyle,
@@ -126,6 +125,7 @@ export const ConnectorsTab = () => {
   const [newServerEnvVars, setNewServerEnvVars] = useState<PassThroughRow[]>([]);
   const [newServerAutoStart, setNewServerAutoStart] = useState(true);
   const [editingServerName, setEditingServerName] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [addingServer, setAddingServer] = useState(false);
   const [togglingServer, setTogglingServer] = useState("");
   const [pendingServerActions, setPendingServerActions] = useState<Record<string, string>>({});
@@ -133,7 +133,7 @@ export const ConnectorsTab = () => {
   const [inventoryViews, setInventoryViews] = useState<Record<string, InventoryViewState>>({});
   const currentDraft = { newServerName, newServerCommand, newServerArgs, newServerTransport, newServerUrl, newServerCwd,
     newServerEnv, newServerHeaders, newServerHeadersHelper, newServerOAuthClientId, newServerOAuthCallbackPort,
-    newServerEnvVars, newServerAutoStart, editingServerName };
+    newServerEnvVars, newServerAutoStart, editingServerName, editorOpen };
   const currentDraftRef = useRef(currentDraft);
   currentDraftRef.current = currentDraft;
   const draftScope = useRef(inventoryScope);
@@ -145,6 +145,7 @@ export const ConnectorsTab = () => {
     scopedDrafts.current.set(inventoryScope, scope);
   }
   const restoreDraft = (draft: typeof currentDraft) => {
+    setEditorOpen(draft.editorOpen);
     setNewServerName(draft.newServerName); setNewServerCommand(draft.newServerCommand); setNewServerArgs(draft.newServerArgs);
     setNewServerTransport(draft.newServerTransport); setNewServerUrl(draft.newServerUrl); setNewServerCwd(draft.newServerCwd);
     setNewServerEnv(draft.newServerEnv); setNewServerHeaders(draft.newServerHeaders); setNewServerHeadersHelper(draft.newServerHeadersHelper);
@@ -247,6 +248,7 @@ export const ConnectorsTab = () => {
   };
 
   const clearEditor = () => {
+    setEditorOpen(false);
     setEditingServerName(null);
     setNewServerName("");
     setNewServerCommand("");
@@ -292,7 +294,8 @@ export const ConnectorsTab = () => {
 
   const editServer = (server: typeof mcpServers[number]) => {
     const draft = scopedDrafts.current.get(inventoryScope)?.drafts.get(server.name);
-    if (draft) { restoreDraft(draft); return; }
+    if (draft) { restoreDraft({ ...draft, editorOpen: true }); return; }
+    setEditorOpen(true);
     setEditingServerName(server.name);
     setNewServerName(server.name);
     setNewServerTransport(server.transport ?? "stdio");
@@ -388,7 +391,10 @@ export const ConnectorsTab = () => {
         result,
         editingServerName ? `已保存 MCP 服务：${name}` : `已添加 MCP 服务：${name}`,
       ), "success");
-      if (draftScope.current === inventoryScope && JSON.stringify(currentDraftRef.current) === submittedDraft) resetEditor();
+      if (draftScope.current === inventoryScope && JSON.stringify(currentDraftRef.current) === submittedDraft) {
+        resetEditor();
+        setEditorOpen(false);
+      }
     } catch (error) {
       pushToast(`${editingServerName ? "保存" : "添加"} MCP 服务失败：${operationError(error)}`, "error");
     } finally {
@@ -510,9 +516,18 @@ export const ConnectorsTab = () => {
 
   return (
     <>
-      <Section title="MCP 服务" description="运行时服务、协商能力与工具数。">
-            <div className="settings-mcp-list">
-            {mcpServers.length === 0 && <div style={emptyInlineStyle}>尚未配置 MCP 服务。</div>}
+      <section className="settings-group settings-mcp-services" aria-label="MCP 服务">
+        <div className="settings-mcp-services-heading">
+          <h3>服务<small>{mcpServers.length}</small></h3>
+          <div className="settings-mcp-services-actions">
+            <button type="button" className="settings-icon-button" aria-label="刷新 MCP 服务" title="刷新服务"
+              disabled={refreshingServers || addingServer} onClick={() => void refreshServers()}><RefreshCw size={14} className={refreshingServers ? "settings-spin" : undefined} /></button>
+            {!editorOpen && <button type="button" className="settings-action-button settings-mcp-add" aria-expanded={false} aria-controls="mcp-server-editor"
+              disabled={addingServer} onClick={() => setEditorOpen(true)}><Plus size={14} aria-hidden="true" />添加服务</button>}
+          </div>
+        </div>
+            <div className="settings-card settings-mcp-list">
+            {mcpServers.length === 0 && <div className="settings-mcp-empty">尚未配置 MCP 服务。</div>}
             {mcpServers.map((server) => {
               const inventoryView = inventoryViews[inventoryKey(server.name)];
               const inventory = inventoryView?.data;
@@ -758,13 +773,13 @@ export const ConnectorsTab = () => {
               );
             })}
             </div>
-          </Section>
+          </section>
 
-          <Section
+          {editorOpen && <Section
             title={editingServerName ? `编辑 ${editingServerName}` : "添加服务"}
             description="stdio 启动本地进程；HTTP 使用 streamable HTTP；SSE 为旧版远程传输。"
           >
-            <div className="settings-mcp-editor">
+            <div id="mcp-server-editor" className="settings-mcp-editor">
               <div className="flex gap-2">
                 <input aria-label="服务名称" type="text" value={newServerName} onChange={(e) => setNewServerName(e.target.value)} placeholder="服务名称" style={{ ...inputStyle, flex: 1 }} />
                 <SelectMenu ariaLabel="传输方式" value={newServerTransport} onValueChange={(value) => changeServerTransport(value as McpTransport)} style={{ width: 150 }}>
@@ -868,13 +883,10 @@ export const ConnectorsTab = () => {
                 ><span /></button>
               </div>
               <div className="flex justify-between gap-2">
-                {editingServerName ? (
-                  <button type="button" onClick={resetEditor} style={secondaryActionStyle}>取消</button>
-                ) : (
-                  <button type="button" onClick={() => void refreshServers()} disabled={refreshingServers} style={secondaryActionStyle}>
-                    {refreshingServers ? "刷新中…" : "刷新"}
-                  </button>
-                )}
+                <button type="button" disabled={addingServer} onClick={() => {
+                  if (editingServerName) resetEditor();
+                  setEditorOpen(false);
+                }} style={secondaryActionStyle}>{editingServerName ? "取消" : "收起"}</button>
                 <button
                   type="button"
                   onClick={() => void saveServer()}
@@ -885,7 +897,7 @@ export const ConnectorsTab = () => {
                 </button>
               </div>
             </div>
-      </Section>
+      </Section>}
     </>
   );
 };

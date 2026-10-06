@@ -53,10 +53,12 @@ export const ChatTurn = memo(function ChatTurn({
     const command = buildInterruptCommand(state, conversationId);
     sendClientCommand(command);
   }, [conversationId]);
-  const agentTurn = useMemo(
-    () => projectChatTurnToAgentLoop(turn, committedCells, processDetailMode),
-    [turn, committedCells, processDetailMode],
-  );
+  const agentTurn = useMemo(() => {
+    const projected = projectChatTurnToAgentLoop(turn, committedCells, processDetailMode);
+    // The child provider receives its parent's dispatch as user input, but the
+    // child work record must never present that dispatch as the human's bubble.
+    return isTranscriptMode ? { ...projected, userCell: null } : projected;
+  }, [turn, committedCells, processDetailMode, isTranscriptMode]);
   const resourceKey = turn.resourceKey ?? agentTurn.processCells;
   const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap(knownFilePathsForCell))], [resourceKey]);
   const renderCell = useCallback(

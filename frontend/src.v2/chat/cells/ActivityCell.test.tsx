@@ -68,10 +68,43 @@ afterEach(() => {
 });
 
 describe("ActivityCell", () => {
+  it("renders completed user questions and answers without a raw protocol code block", () => {
+    const cell: ActivityCellState = { kind: "activity", id: "ask-result", activityKind: "genericTool", title: "Ask user",
+      status: "done", collapsed: false, toolCallRecords: [{ id: "ask", name: "ask_user", startedAt: 1,
+        args: { question: "你想选哪个？" }, status: "success", outputPreview: "User answer: 随便" }] };
+    const view = render(<ActivityCell cell={cell} />);
+    expect(screen.getByText("你想选哪个？")).toBeTruthy();
+    expect(screen.getByText("随便").closest("pre")).toBeNull();
+    expect(view.container.textContent).not.toContain("User answer:");
+    expect(cell.toolCallRecords?.[0].outputPreview).toBe("User answer: 随便");
+  });
+
+  it("uses ordinary text for a tool explanation while retaining code typography for actual file contents", () => {
+    const view = render(<ActivityCell cell={{ kind: "activity", id: "ordinary-result", activityKind: "genericTool", title: "工具",
+      status: "done", collapsed: false, toolCallRecords: [{ id: "tool", name: "custom_tool", args: {}, status: "success", startedAt: 1,
+        outputPreview: "已完成本次调查，可以继续提问。" }] }} />);
+    expect(screen.getByText("已完成本次调查，可以继续提问。").tagName).toBe("DIV");
+    view.rerender(<ActivityCell cell={{ kind: "activity", id: "file-result", activityKind: "fileRead", title: "Read",
+      status: "done", collapsed: false, toolCallRecords: [{ id: "read", name: "read_file", args: { path: "a.ts" },
+        status: "success", startedAt: 1, outputPreview: "const result = 1;" }] }} />);
+    expect(screen.getByText("const result = 1;").tagName).toBe("PRE");
+  });
+
+  it("keeps skill identity in the short row and only discloses actual instructions on request", () => {
+    render(<ActivityCell cell={{ kind: "activity", id: "skill-read", activityKind: "skill", title: "skill",
+      status: "done", collapsed: true, startedAt: 1,
+      skill: { name: "review-workflow", reason: "核对项目约定", content: "先阅读项目的审阅规则。" },
+    }} />);
+    expect(screen.getByText("读取技能 review-workflow")).toBeTruthy();
+    expect(screen.queryByText("先阅读项目的审阅规则。")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(screen.getByText("核对项目约定")).toBeTruthy();
+    expect(screen.getByText("先阅读项目的审阅规则。")).toBeTruthy();
+  });
   it.each([
-    ["failed", "Failed"],
-    ["interrupted", "Interrupted"],
-    ["partial", "Partial"],
+    ["failed", "失败"],
+    ["interrupted", "已中断"],
+    ["partial", "部分完成"],
   ] as const)("does not claim an edit was applied after %s", (status, label) => {
     render(<ActivityCell cell={{ kind: "activity", id: "edit", activityKind: "fileChange", title: "Edit", status,
       toolCallRecords: [{ id: "edit", name: "edit_file", args: { file_path: "pricing.py" }, status: "failed" }] }} />);
@@ -87,7 +120,7 @@ describe("ActivityCell", () => {
     expect(screen.getByRole("button", { name: "展开活动详情" }).getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("renders the typed provider reconnect ladder in the main transcript", () => {
+  it("hides the provider request ladder while retaining expandable actual errors", () => {
     const baseCell: ActivityCellState = {
       kind: "activity",
       id: "provider:connection:turn-1:iteration-1",
@@ -104,11 +137,7 @@ describe("ActivityCell", () => {
     };
 
     const { container, rerender } = render(React.createElement(ActivityCell, { cell: baseCell }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Reconnecting 1/5");
-    expect(container.querySelector(".activity-cell-running")).toBeTruthy();
-    expect(container.querySelector(".activity-cell[data-provider-retry=\"true\"]")).toBeTruthy();
-    expect(container.querySelector(".activity-cell-provider-icon .lucide-wifi")).toBeTruthy();
-    expect(container.querySelector(".activity-cell-tool-icon")).toBeNull();
+    expect(container.querySelector(".activity-cell")).toBeNull();
 
     rerender(React.createElement(ActivityCell, {
       cell: {
@@ -116,7 +145,7 @@ describe("ActivityCell", () => {
         progress: { ...baseCell.progress, text: "连接失败，正在重连（第 5/5 次）", retryAttempt: 5 },
       },
     }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Reconnecting 5/5");
+    expect(container.querySelector(".activity-cell")).toBeNull();
 
     rerender(React.createElement(ActivityCell, {
       cell: {
@@ -125,8 +154,15 @@ describe("ActivityCell", () => {
         progress: { ...baseCell.progress, text: "提供商请求失败（重试 5/5 后）", retryAttempt: 5 },
       },
     }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Connection failed after 5/5 retries");
-    expect(container.querySelector(".activity-cell-provider-icon .lucide-wifi-off")).toBeTruthy();
+    expect(container.querySelector(".activity-cell")).toBeNull();
+    rerender(<ActivityCell cell={{ ...baseCell, status: "failed", collapsed: true,
+      progress: { ...baseCell.progress, providerState: "failed", errorMessage: "The server closed the stream before returning an answer." },
+    }} />);
+    expect(screen.getByText("错误详情")).toBeTruthy();
+    expect(container.querySelector(".activity-cell-expanded")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(screen.getByRole("alert").textContent).toBe("The server closed the stream before returning an answer.");
+    expect(container.textContent).not.toContain("Connection failed after");
   });
 
   it("renders the explicit title for completed reasoning", () => {
@@ -220,7 +256,7 @@ describe("ActivityCell", () => {
     expect(screen.getByText("抓取北京天气")).toBeTruthy();
     expect(screen.getByText("汇总正式结果")).toBeTruthy();
     expect(document.body.textContent).not.toContain("Plan updated");
-    expect(screen.queryAllByText("Update plan")).toHaveLength(1);
+    expect(screen.queryAllByText("更新计划")).toHaveLength(1);
     expect(container.querySelector(".activity-cell-plan-spinner")).toBeNull();
     const inProgressStep = container.querySelector('[data-status="in_progress"]');
     const pendingStep = container.querySelector('[data-status="pending"]');
@@ -274,7 +310,7 @@ describe("ActivityCell", () => {
 
     expect(screen.queryByRole("button", { name: "展开活动详情" })).toBeNull();
     expect(container.querySelector(".activity-cell-tool-expanded")).toBeNull();
-    expect(container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe("Reading");
+    expect(container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe("正在读取");
     expect(document.body.textContent).toContain("src/live.ts");
   });
 
@@ -513,7 +549,7 @@ describe("ActivityCell", () => {
       </>,
     );
     const labels = [...container.querySelectorAll(".activity-cell-name")].map((node) => node.textContent);
-    expect(labels).toEqual(["List", "Search"]);
+    expect(labels).toEqual(["查看目录", "搜索"]);
     expect(container.querySelectorAll(".activity-cell-detail")[0]?.textContent).toBe("frontend/src.v2/lib");
     expect(container.querySelectorAll(".activity-cell-detail")[1]?.textContent)
       .toBe("AgentTimeline · frontend/src.v2/agent-loop");
@@ -696,7 +732,7 @@ describe("ActivityCell", () => {
     };
 
     const { rerender, container } = render(React.createElement(ActivityCell, { cell: fetchCell }));
-    expect(screen.getByText("Fetch")).toBeTruthy();
+    expect(screen.getByText("读取网页")).toBeTruthy();
     expect(container.querySelector(".activity-cell-tool-icon")).toBeTruthy();
     expect(container.querySelector(".activity-cell[data-web-action=\"fetch\"]")).toBeTruthy();
 
@@ -713,7 +749,7 @@ describe("ActivityCell", () => {
         inputSummary: "MiniCode",
       }],
     } }));
-    expect(screen.getByText("Search")).toBeTruthy();
+    expect(screen.getByText("搜索网页")).toBeTruthy();
   });
 
   it("does not repeat a single fetch URL inside a second disclosure card", () => {
@@ -967,7 +1003,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getAllByText("Read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("读取文件").length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")).toBeNull();
     expect(document.body.textContent).toContain("Dimensions: 1029x1071");
   });
@@ -997,7 +1033,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(document.body.textContent).toContain("Failed");
+    expect(screen.getByText("失败", { selector: ".activity-cell-detail-meta" })).toBeTruthy();
     const disclosure = screen.getByRole("button", { name: "展开活动详情" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
@@ -1106,7 +1142,7 @@ describe("ActivityCell", () => {
     expect(container.querySelectorAll(".activity-cell-expanded")).toHaveLength(1);
     expect(container.querySelector(".activity-cell-output-preview")).toBeNull();
     expect(container.querySelector(".activity-cell-detail-duration")?.textContent).toBe("4.1s");
-    expect(container.querySelector(".activity-cell-expanded pre[aria-label=\"操作结果\"]")?.textContent)
+    expect(container.querySelector(".activity-cell-expanded [aria-label=\"操作结果\"]")?.textContent)
       .toContain("Navigation requested.");
   });
 
@@ -1148,7 +1184,7 @@ describe("ActivityCell", () => {
     expect(image?.src).toContain("session_id=session-screen");
     expect(image?.src).toContain("conversation_id=conv-screen");
     expect(container.querySelectorAll(".activity-cell-expanded")).toHaveLength(1);
-    expect(container.querySelector(".activity-cell-expanded pre[aria-label=\"操作结果\"]")?.textContent)
+    expect(container.querySelector(".activity-cell-expanded [aria-label=\"操作结果\"]")?.textContent)
       .toContain("Screenshot captured.");
     expect(document.body.textContent).toContain("Capture screenshot");
   });

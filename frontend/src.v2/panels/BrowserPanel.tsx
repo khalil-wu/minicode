@@ -71,6 +71,8 @@ interface BrowserTab {
 type InspectorKind = "console" | "network";
 
 const RENDERER_OVERLAYS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]';
+const COMPOSER_REGION = ".workbench-primary .chat-pane-composer-region";
+const RENDERER_BOUNDS_ELEMENTS = `${RENDERER_OVERLAYS}, ${COMPOSER_REGION}`;
 
 const navigateTabList = (event: KeyboardEvent<HTMLDivElement>) => {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -180,6 +182,7 @@ const updateTabFromEvent = (tab: BrowserTab, event: EmbeddedBrowserState): Brows
 
 export const BrowserPanel = () => {
   const conversationId = useAppStore((state) => state.conversationId) || "";
+  const floatingComposerVisible = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
   const { summary: turnChanges, openReview } = useTurnChanges();
@@ -351,11 +354,19 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     if (!owner || !element || !id || !createdIdsRef.current.has(id) || !visibleIdsRef.current.has(id)) return;
     const rect = element.getBoundingClientRect();
+    const trackedElements = Array.from(overlaysRef.current);
+    const composer = trackedElements.find((item) => item.matches('.workbench-primary[data-floating="true"] .chat-pane-composer-region'));
+    const composerRect = composer?.getBoundingClientRect();
+    // A native WebContentsView cannot be covered by an HTML composer. Reserve
+    // its bottom strip while keeping the same page, tab, and browser viewport.
+    const bottom = composerRect && composerRect.width > 0
+      && composerRect.left < rect.right && composerRect.right > rect.left
+      ? Math.min(rect.bottom, composerRect.top - 8) : rect.bottom;
     // WebContentsView sits above the renderer, regardless of CSS z-index.
     // Yield its surface to overlapping menus and modal backdrops; retain the
     // same tab and navigation state when the renderer overlay closes.
-    const obscured = Array.from(overlaysRef.current).some((overlay) => {
-      if (overlay.contains(element)) return false;
+    const obscured = trackedElements.some((overlay) => {
+      if (overlay.matches(COMPOSER_REGION) || overlay.contains(element)) return false;
       const bounds = overlay.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0 && getComputedStyle(overlay).visibility !== "hidden"
         && (overlay.getAttribute("aria-modal") === "true"
@@ -367,11 +378,11 @@ export const BrowserPanel = () => {
       x: rect.left,
       y: rect.top,
       width: obscured ? 0 : rect.width,
-      height: obscured ? 0 : rect.height,
+      height: obscured ? 0 : Math.max(0, bottom - rect.top),
       viewport: viewportRef.current,
     });
   }, []);
-  useEffect(() => { syncBounds(); }, [viewport, syncBounds]);
+  useEffect(() => { syncBounds(); }, [viewport, floatingComposerVisible, syncBounds]);
 
   const reconcileNativeTab = useCallback(async (tabId: string): Promise<boolean> => {
     const owner = ownerRef.current;
@@ -451,8 +462,8 @@ export const BrowserPanel = () => {
     observer.observe(element);
     const trackOverlays = (node: Node, added: boolean) => {
       if (!(node instanceof HTMLElement)) return false;
-      const overlays = [...node.querySelectorAll<HTMLElement>(RENDERER_OVERLAYS)];
-      if (node.matches(RENDERER_OVERLAYS)) overlays.push(node);
+      const overlays = [...node.querySelectorAll<HTMLElement>(RENDERER_BOUNDS_ELEMENTS)];
+      if (node.matches(RENDERER_BOUNDS_ELEMENTS)) overlays.push(node);
       for (const overlay of overlays) {
         if (added) {
           overlaysRef.current.add(overlay);
@@ -536,10 +547,36 @@ export const BrowserPanel = () => {
     }
   }, [performNativeNavigation]);
 
+  const removeClosedTab = useCallback((tabId: string) => {
+    visibleIdsRef.current.delete(tabId);
+    createdIdsRef.current.delete(tabId);
+    navigationRequestsRef.current.delete(tabId);
+    const index = tabsRef.current.findIndex((tab) => tab.id === tabId);
+    if (index < 0) return;
+    const liveTabs = tabsRef.current.filter((tab) => tab.id !== tabId);
+    if (liveTabs.length === 0) {
+      const replacement = blankTab();
+      setTabs([replacement]);
+      activeIdRef.current = replacement.id;
+      setActiveId(replacement.id);
+    } else {
+      setTabs(liveTabs);
+      if (activeIdRef.current === tabId) {
+        const next = liveTabs[Math.min(index, liveTabs.length - 1)];
+        activeIdRef.current = next.id;
+        setActiveId(next.id);
+      }
+    }
+  }, [setTabs]);
+
   useEffect(() => {
     if (!isDesktop()) return;
     const unsubscribe = onEmbeddedBrowserEvent((event) => {
       if (event.conversationId !== ownerRef.current) return;
+      if (event.type === "closed") {
+        removeClosedTab(event.id);
+        return;
+      }
       if (event.type === "new-tab-request" && event.requestedUrl) {
         openTab(event.requestedUrl);
         return;
@@ -564,7 +601,7 @@ export const BrowserPanel = () => {
       }
     });
     return () => unsubscribe?.();
-  }, [openTab]);
+  }, [openTab, removeClosedTab]);
 
   useEffect(() => () => {
     ownerGenerationRef.current += 1;
@@ -690,22 +727,7 @@ export const BrowserPanel = () => {
         return;
       }
     }
-    visibleIdsRef.current.delete(tabId);
-    createdIdsRef.current.delete(tabId);
-    navigationRequestsRef.current.delete(tabId);
-    const liveTabs = tabsRef.current.filter((tab) => tab.id !== tabId);
-    if (liveTabs.length === 0) {
-      const replacement = blankTab();
-      setTabs([replacement]);
-      setActiveId(replacement.id);
-      return;
-    }
-    const liveIndex = tabsRef.current.findIndex((tab) => tab.id === tabId);
-    setTabs(liveTabs);
-    if (activeIdRef.current === tabId) {
-      const next = liveTabs[Math.min(Math.max(liveIndex, 0), liveTabs.length - 1)];
-      setActiveId(next.id);
-    }
+    removeClosedTab(tabId);
   };
 
   const saveAnnotation = () => {

@@ -62,7 +62,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     setLeftSidebarWidth: (w) => {
       const v = w <= 0 ? 0 : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, w);
       writeLS(LS.layout.leftWidth, String(v));
-      set({ leftSidebarWidth: v });
+      if (v > 0) writeLS(LS.layout.leftExpandedWidth, String(v));
+      set({ leftSidebarWidth: v, leftSidebarExpandedWidth: v || get().leftSidebarExpandedWidth });
     },
     setRightSidebarWidth: (w) => {
       const v = clamp(320, RIGHT_SIDEBAR_MAX, w);
@@ -178,7 +179,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         persistPanelSlots(normalized);
         return { panelSlots: normalized };
       }),
-    focusPanel: (id) =>
+    focusPanel: (id, options) =>
       set((s) => {
         const maximized = s.panelSlots.some((panel) => panel.maximized);
         const next = normalizePanelSlots(s.panelSlots.map((p) => ({
@@ -187,7 +188,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           ...(maximized ? { maximized: p.id === id } : {}),
         })));
         persistPanelSlots(next);
-        return { panelSlots: next, rightPanelExpanded: false };
+        return { panelSlots: next, rightPanelExpanded: options?.preserveRightPanelExpanded ? s.rightPanelExpanded : false };
       }),
     movePanel: (id, direction) =>
       set((s) => {

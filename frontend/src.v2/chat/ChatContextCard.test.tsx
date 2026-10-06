@@ -1,11 +1,13 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ChatContextCard, collectAttachments } from "./ChatContextCard";
 import { hydrateMessages } from "./transcriptHydration";
+import * as desktopRuntime from "../desktop/runtime";
+import type { EmbeddedBrowserState } from "../desktop/runtime";
 
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-context-image" }),
@@ -31,6 +33,8 @@ vi.hoisted(() => {
 describe("ChatContextCard", () => {
   beforeEach(() => {
     useAppStore.setState({
+      appMode: "cowork",
+      contextCardCollapsed: false,
       conversationId: "conv-active",
       messages: [{
         id: "assistant-1",
@@ -76,7 +80,23 @@ describe("ChatContextCard", () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it("removes a closed browser target from the summary while retaining targets owned by this conversation", async () => {
+    let onBrowserEvent!: (event: EmbeddedBrowserState) => void;
+    const first: EmbeddedBrowserState = { id: "page-one", conversationId: "conv-active", type: "updated", url: "https://one.example/", title: "First preview", loading: false, canGoBack: false, canGoForward: false };
+    const second = { ...first, id: "page-two", url: "https://two.example/", title: "Second preview" };
+    vi.spyOn(desktopRuntime, "isDesktop").mockReturnValue(true);
+    vi.spyOn(desktopRuntime, "embeddedBrowserList").mockResolvedValue([first, second]);
+    vi.spyOn(desktopRuntime, "onEmbeddedBrowserEvent").mockImplementation((callback) => { onBrowserEvent = callback; return vi.fn(); });
+    render(<ChatContextCard />);
+    await screen.findByText("First preview");
+    act(() => onBrowserEvent({ ...first, conversationId: "conv-other", type: "closed", url: "" }));
+    expect(screen.getByText("First preview")).toBeTruthy();
+    act(() => onBrowserEvent({ ...first, type: "closed", url: "" }));
+    await waitFor(() => expect(screen.queryByText("First preview")).toBeNull());
+    expect(screen.getByText("Second preview")).toBeTruthy();
+  });
 
   it("summarizes failed, stopped, waiting and completed agents truthfully", () => {
     useAppStore.setState({ subagents: [
@@ -105,36 +125,44 @@ describe("ChatContextCard", () => {
     expect(onRender).toHaveBeenCalled();
   });
 
-  it("renders a focused context summary with separate attachments and web sources", () => {
+  it("renders a focused context summary with shared sources and compact workspace", () => {
     const { container } = render(<ChatContextCard />);
 
     expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
     expect(container.querySelector(".mc-chat-context-card-header")?.textContent).toContain("MiniCode");
-    expect(screen.getByText("附件")).toBeTruthy();
+    expect(screen.queryByText("附件")).toBeNull();
+    expect(screen.getByRole("region", { name: "来源摘要" })).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     expect(screen.getByText("Layout guide")).toBeTruthy();
     expect(screen.getByText("后台任务")).toBeTruthy();
     expect(screen.getByRole("region", { name: "环境信息" })).toBeTruthy();
-    expect(screen.getByText("本地工作区")).toBeTruthy();
-    expect(screen.getByTitle("codex/ui-polish")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看工作区：MiniCode" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看工作区：MiniCode" }).title).toContain("codex/ui-polish");
     expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe(
       "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fdocs.example.com&sz=64",
     );
   });
 
-  it("collapses and restores the context card from its top control", () => {
+  it("closes the summary without leaving a second toolbar glyph in Cowork", () => {
     render(<ChatContextCard />);
+    fireEvent.click(screen.getByRole("button", { name: "摘要操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "收起上下文卡片" }));
+    expect(useAppStore.getState().contextCardCollapsed).toBe(true);
+    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "展开上下文卡片" })).toBeNull();
+    act(() => useAppStore.getState().setContextCardCollapsed(false));
+    expect(screen.getByText("layout-reference.png")).toBeTruthy();
+    expect(screen.getByText("Layout guide")).toBeTruthy();
+  });
 
-    const card = screen.getByRole("complementary", { name: "工作区上下文摘要" });
-    fireEvent.click(screen.getByRole("button", { name: "收起上下文卡片" }));
-
-    expect(card.getAttribute("data-collapsed")).toBe("true");
-    expect(screen.getByText("附件").closest(".mc-chat-context-card-body")?.hidden).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "展开上下文卡片" }));
-
-    expect(card.getAttribute("data-collapsed")).toBe("false");
-    expect(screen.getByText("附件").closest(".mc-chat-context-card-body")?.hidden).toBe(false);
-    expect(screen.getByText("附件")).toBeTruthy();
+  it("leaves the chat summary closed without an overlapping floating glyph", () => {
+    useAppStore.setState({ appMode: "chat", contextCardCollapsed: true });
+    render(<ChatContextCard />);
+    expect(screen.queryByRole("button", { name: "展开上下文卡片" })).toBeNull();
+    act(() => useAppStore.getState().setContextCardCollapsed(false));
+    expect(useAppStore.getState().contextCardCollapsed).toBe(false);
+    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" }).getAttribute("data-collapsed")).toBe("false");
+    expect(screen.getByText("来源").closest(".mc-chat-context-card-body")?.hidden).toBe(false);
   });
 
   it("renders provider document locations as informative non-web context", () => {
@@ -407,7 +435,7 @@ describe("ChatContextCard", () => {
     document.body.append(otherTarget, ownTarget);
 
     render(<ChatContextCard />);
-    expect(screen.getByRole("region", { name: "执行结果摘要" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "来源摘要" })).toBeTruthy();
     expect(screen.queryByText("生成文件")).toBeNull();
     expect(screen.queryByText("Script completed")).toBeNull();
     const outputButtons = screen.getAllByRole("button", { name: /^查看执行结果：代码执行输出/ });
@@ -543,39 +571,38 @@ describe("ChatContextCard", () => {
     expect(screen.getByText("1 个等待输入")).toBeTruthy();
   });
 
-  it("hides the floating card while the full right sidebar is open", () => {
-    useAppStore.setState({ messages: [], subagents: [], backgroundTasks: [], terminalSessions: [], rightPanelOpen: true });
-    const { container } = render(<ChatContextCard />);
+  it("hides the summary while the right pane opens and restores it when the pane closes", () => {
+    useAppStore.setState({ rightPanelOpen: true, rightStackTab: "subagents" });
+    render(<ChatContextCard />);
+    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
+    expect(useAppStore.getState().contextCardCollapsed).toBe(false);
+    act(() => useAppStore.setState({ rightPanelOpen: false }));
+    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
+    expect(screen.getByText("layout-reference.png")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "摘要操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "收起上下文卡片" }));
+    expect(useAppStore.getState()).toMatchObject({ contextCardCollapsed: true, rightPanelOpen: false, rightStackTab: "subagents" });
+  });
 
+  it("does not reopen a closed summary when a details pane opens or closes", () => {
+    useAppStore.setState({ contextCardCollapsed: true });
+    const { container } = render(<ChatContextCard />);
+    act(() => useAppStore.setState({ rightPanelOpen: true }));
+    expect(container.firstChild).toBeNull();
+    act(() => useAppStore.setState({ rightPanelOpen: false }));
     expect(container.firstChild).toBeNull();
   });
 
-  it("fades the floating card out before removing it", () => {
-    vi.useFakeTimers();
+  it("keeps summary content and its chosen visibility across Code and Cowork modes", () => {
     const { container } = render(<ChatContextCard />);
-
-    act(() => {
-      useAppStore.setState({ rightPanelOpen: true });
-    });
-
-    expect(container.querySelector('.mc-chat-context-card')?.getAttribute("data-state")).toBe("exiting");
-    act(() => vi.advanceTimersByTime(190));
+    act(() => useAppStore.setState({ appMode: "code" }));
+    expect(screen.getByText("layout-reference.png")).toBeTruthy();
+    act(() => useAppStore.getState().setContextCardCollapsed(true));
+    act(() => useAppStore.setState({ appMode: "cowork" }));
     expect(container.firstChild).toBeNull();
-    vi.useRealTimers();
+    act(() => useAppStore.getState().setContextCardCollapsed(false));
+    expect(screen.getByText("layout-reference.png")).toBeTruthy();
+    expect(screen.getByText("Layout guide")).toBeTruthy();
   });
 
-  it("prepares the full card invisibly before bringing it back", () => {
-    vi.useFakeTimers();
-    useAppStore.setState({ rightPanelOpen: true });
-    const { container } = render(<ChatContextCard />);
-
-    act(() => {
-      useAppStore.setState({ rightPanelOpen: false });
-    });
-
-    expect(container.querySelector('.mc-chat-context-card')?.getAttribute("data-state")).toBe("preparing");
-    act(() => vi.advanceTimersByTime(220));
-    expect(container.querySelector('.mc-chat-context-card')?.getAttribute("data-state")).toBe("visible");
-    vi.useRealTimers();
-  });
 });

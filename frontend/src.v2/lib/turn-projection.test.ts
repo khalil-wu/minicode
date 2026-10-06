@@ -32,12 +32,33 @@ describe("projectTurn explicit event contract", () => {
       toolBlock({ id: "exec", name: "tool_exec" }),
       toolBlock({ id: "leaf", name: "read_file", callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell-1", runtime_call_id: "1" } }),
       toolBlock({ id: "wait", name: "tool_wait", args: { cell_id: "cell-1" } }),
-      toolBlock({ id: "standalone", name: "tool_exec" }),
-      toolBlock({ id: "failed", name: "tool_exec", status: "failed" }),
+      toolBlock({ id: "standalone", name: "tool_exec", outputPreview: '{"cell_id":"standalone-cell","status":"completed","output":["actual result"]}' }),
+      toolBlock({ id: "failed", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"failed-cell","status":"failed","error":"permission denied"}' }),
     ];
     expect(projectTurn(blocks).activityItems.flatMap(item => item.records?.map(record => record.id) ?? []))
       .toEqual(["leaf", "standalone", "failed"]);
     expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(5);
+  });
+  it.each(["running", "pending", "success"])("projects real nested file/command/search work without a %s execute wrapper", (status) => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status }),
+      ...["read_file", "run_command", "grep_files"].map((name, index) => toolBlock({
+        id: `leaf-${index}`, name, status: "success", args: { file_path: "source.py", command: "python verify.py", pattern: "total" },
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: `${index}` },
+      })),
+      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" } }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf-0", "leaf-1", "leaf-2"]);
+  });
+  it("keeps a real wrapper error while hiding provider and execute pipeline status", () => {
+    const projection = projectTurn([
+      { type: "progress", id: "child:provider", stage: "status", phase: "model", label: "provider", providerState: "connecting", status: "running", message: "连接供应商", timestamp: 1 },
+      { type: "progress", id: "code-status", stage: "tool", toolName: "tool_exec", status: "running", message: "正在执行代码", timestamp: 1 },
+      toolBlock({ id: "actual-failure", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"failed","status":"failed","error":"Connection reset while reading file"}' }),
+    ]);
+    expect(projection.activityItems.map(item => item.id)).toEqual(["actual-failure"]);
+    expect(projection.hasFailure).toBe(true);
+    expect(projection.activityItems[0].records?.[0].outputPreview).toContain("Connection reset");
   });
   it("uses only a completed agent-message item as the final answer", () => {
     const projection = projectTurn([

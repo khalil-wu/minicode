@@ -18,7 +18,7 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByText("Worked for 26s")).toBeTruthy();
+    expect(screen.getByText("用时 26秒")).toBeTruthy();
     expect(screen.queryByText(/个工具|个失败|输入|输出|推理/)).toBeNull();
   });
 
@@ -35,11 +35,11 @@ describe("AgentProcessSummary", () => {
     );
 
     expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByRole("status", { name: "Working" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "处理中" })).toBeTruthy();
     const processingStatus = container.querySelector(".agent-loop-process-summary-status");
     expect(processingStatus?.getAttribute("data-running")).toBe("true");
     expect(processingStatus?.querySelector(".agent-loop-process-summary-status-label")?.textContent)
-      .toBe("Working");
+      .toBe("处理中");
     expect(processingStatus?.querySelector(".agent-loop-process-summary-status-sheen"))
       .toBeNull();
     expect(container.querySelector(".agent-loop-thinking-spinner")).toBeNull();
@@ -77,7 +77,7 @@ describe("AgentProcessSummary", () => {
     );
 
     expect(container.querySelector(".agent-loop-process-summary-status-label")?.textContent)
-      .toBe("Working");
+      .toBe("处理中");
     expect(screen.queryByText(/个工具|个失败/)).toBeNull();
   });
 
@@ -92,8 +92,8 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByRole("status", { name: "Failed 1.5s" })).toBeTruthy();
-    expect(screen.getByText("Failed 1.5s")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "处理失败 · 1.5秒" })).toBeTruthy();
+    expect(screen.getByText("处理失败 · 1.5秒")).toBeTruthy();
   });
 
   it("keeps the concrete failure visible even when work details are collapsible", () => {

@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from backend.llm.provider_contracts import ReasoningPolicy
+from backend.llm.reasoning_effort import reasoning_effort_wire_value
 
 
 REASONING_LEVEL_ORDER = (
@@ -121,6 +122,7 @@ def default_model_thinking_level(model: Any, available: tuple[str, ...]) -> str:
 
 def apply_model_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
     effective = str(requested or "").strip().lower()
+    model_id = model.id if model is not None else ""
     mapping = getattr(model, "thinking_level_map", None)
     provider_level = effective
     if isinstance(mapping, Mapping) and effective in mapping:
@@ -131,11 +133,11 @@ def apply_model_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
             value
             for canonical in canonical_levels
             if (
-                value := str(
+                value := reasoning_effort_wire_value(model_id, str(
                     mapping.get(canonical, canonical)
                     if isinstance(mapping, Mapping)
                     else canonical
-                ).strip().lower()
+                ).strip().lower())
             )
             and not (
                 canonical == "off"
@@ -147,7 +149,7 @@ def apply_model_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
             )
         )
     )
-    wire_effort = provider_level
+    wire_effort = reasoning_effort_wire_value(model_id, provider_level)
     if effective == "off" and not (
         isinstance(mapping, Mapping)
         and "off" in mapping
@@ -162,6 +164,7 @@ def apply_model_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
             level=effective or "off",
             wire_level=wire_effort,
             wire_levels=declared_provider_levels,
+            levels=canonical_levels,
         )
     )
     return effective

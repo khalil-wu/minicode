@@ -116,11 +116,11 @@ const tokenStyle: React.CSSProperties = {
   maxWidth: "100%",
   minHeight: 24,
   padding: "0 7px",
-  background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)",
-  border: "1px solid color-mix(in oklch, var(--accent-primary) 32%, transparent)",
+  background: "var(--surface-soft)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-sm, 6px)",
   fontSize: "var(--text-xs)",
-  color: "var(--accent-primary)",
+  color: "var(--text-secondary)",
 };
 
 const tokenButtonStyle: React.CSSProperties = {
@@ -131,9 +131,9 @@ const tokenButtonStyle: React.CSSProperties = {
   maxWidth: 220,
   height: 24,
   padding: "0 7px",
-  background: "color-mix(in oklch, var(--accent-primary) 10%, transparent)",
-  color: "var(--accent-primary)",
-  border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)",
+  background: "var(--surface-soft)",
+  color: "var(--text-secondary)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-sm, 6px)",
   cursor: "pointer",
   fontSize: "var(--text-xs)",

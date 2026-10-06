@@ -12,6 +12,7 @@ from .service import WorkspaceService
 class EditorDocument(BaseModel):
     path: str
     content: str
+    language: Literal["python", "yaml", "c", "cpp"] | None = None
 
 
 class EditorLanguageRequest(BaseModel):
@@ -48,17 +49,22 @@ async def editor_language_request(
             operation="read",
             resolved_path=path,
         )
-        if path.suffix.lower() not in {".py", ".pyi", ".yaml", ".yml"}:
+        language = document.language or {
+            ".py": "python", ".pyi": "python", ".yaml": "yaml", ".yml": "yaml",
+            ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+            ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+        }.get(path.suffix.lower())
+        if language is None:
             raise HTTPException(
-                status_code=422, detail="语言服务只接受 Python 或 YAML 文档。"
+                status_code=422, detail="语言服务只接受 Python、YAML、C 或 C++ 文档。"
             )
-        documents.append({"path": str(path), "content": document.content})
+        documents.append({"path": str(path), "content": document.content, "language": language})
     path = service.resolve_workspace_path(request.documents[0].path)
-    language = "python" if path.suffix.lower() in {".py", ".pyi"} else "yaml"
+    language = documents[0]["language"]
     documents = [
         doc
         for doc in documents
-        if (doc["path"].lower().endswith((".py", ".pyi"))) == (language == "python")
+        if doc["language"] == language or (language in {"c", "cpp"} and doc["language"] in {"c", "cpp"})
     ]
     params = {
         "textDocument": {"uri": path.as_uri()},

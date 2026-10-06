@@ -43,6 +43,23 @@ def test_provider_progress_state_remains_a_string_in_snapshot() -> None:
     assert progress["retryAttempt"] == 1
 
 
+def test_progress_metadata_uses_completion_time_only_for_subagent_rows() -> None:
+    state = AgentTurnState(now_ms=lambda: 1234)
+    completion = {"id": "subagent-completed:child:2", "stage": "status", "phase": "subagent",
+                  "status": "completed", "message": "Reviewer已完成", "subagent_id": "child",
+                  "subagent_name": "Reviewer", "subagent_identity": "/root/reviewer", "subagent_status": "done",
+                  "timestamp": "2026-10-06T05:00:00+00:00"}
+    state.record_progress(completion)
+    state.record_progress(completion)
+    state.record_progress({"id": "ordinary", "stage": "status", "status": "info", "message": "Working",
+                           "timestamp": "2026-10-06T05:00:00+00:00"})
+    blocks = state.finalize(terminal_status="completed").blocks
+    assert len(blocks) == 2
+    assert blocks[0]["timestamp"] == 1_791_262_800_000
+    assert blocks[0]["subagentStatus"] == "done"
+    assert blocks[1]["timestamp"] == 1234
+
+
 def test_cancelled_turn_persists_unfinished_tool_as_cancelled() -> None:
     snapshot = _running_state().finalize(terminal_status="cancelled")
 

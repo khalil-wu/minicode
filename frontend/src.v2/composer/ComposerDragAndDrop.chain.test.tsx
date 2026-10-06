@@ -22,7 +22,6 @@ vi.mock("./FooterRow", () => ({ FooterRow: () => <button type="button">Composer 
 vi.mock("./MenuOverlay", () => ({ MenuOverlay: () => null }));
 vi.mock("./ActionChipRegion", () => ({ ContextChipRegion: () => null }));
 vi.mock("./AttachmentStrip", () => ({ AttachmentStrip: () => null }));
-vi.mock("./ProviderRequestStatus", () => ({ ProviderRequestStatus: () => null }));
 vi.mock("./QueuedMessageList", () => ({ QueuedMessageList: () => null }));
 vi.mock("../chat/InlineAgentPrompt", () => ({ InlineAgentPrompt: () => null }));
 vi.mock("../chat/components/TurnPlanProgress", () => ({ TurnPlanProgress: () => null }));
@@ -85,6 +84,17 @@ const leaveTo = (target: HTMLElement, relatedTarget: EventTarget | null) => {
 };
 
 describe.each([false, true])("real composer file drop (minimal=%s)", (minimal) => {
+  it("keeps provider handshakes out of the composer while retaining the active run and draft", () => {
+    useAppStore.setState({ isStreaming: true, draft: "next question", agentProgress: [{
+      type: "progress", id: "provider:request", stage: "status", status: "running", label: "provider", providerState: "connecting",
+      message: "连接供应商", visibility: "debug", conversationId: "drop-owner", timestamp: 1,
+    }] });
+    const { input, composer } = renderComposer(minimal);
+    expect(input.value).toBe("next question");
+    expect(composer.parentElement?.textContent).not.toMatch(/连接供应商|Connecting|Waiting for model/);
+    expect(document.querySelector(".provider-request-status")).toBeNull();
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
   it("clears the border after the textarea consumes the drop and uploads exactly once", () => {
     const { input, composer } = renderComposer(minimal);
     const file = new File(["image"], "reference.png", { type: "image/png" });

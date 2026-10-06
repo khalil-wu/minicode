@@ -19,6 +19,7 @@ import { handleArtifactEvent } from "./artifactEvents";
 import { handleControlEvent } from "./controlEvents";
 import { handleSessionEvent } from "./sessionEvents";
 import { handleChatStreamEvent } from "./chatStreamEvents";
+import { pushToast } from "../overlays/ToastContainer";
 
 const mocks = vi.hoisted(() => ({
   preview: vi.fn(() => true),
@@ -132,7 +133,7 @@ describe("repaired transcript and resource contracts", () => {
     await waitFor(() => expect(useAppStore.getState().pendingDiffReview).toBeNull());
   });
 
-  it("sends the exact displayed patch with the original owner after a dialog-time switch", async () => {
+  it("cancels undo before dispatch when the dialog owner changes and reports the original task", async () => {
     let confirm!: (value: boolean) => void;
     mocks.confirm.mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve; }));
     const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n";
@@ -141,10 +142,40 @@ describe("repaired transcript and resource contracts", () => {
       summary: { added: 1, deleted: 1, modifiedFiles: 1 }, collapsed: false, createdAt: 1,
     }} />);
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Parent 中显示的 1 个文件更改") }));
+    expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("C:/parent") }));
     act(() => { useAppStore.setState({ conversationId: "other", workingDirectory: "C:/other" }); confirm(true); });
-    await waitFor(() => expect(sent.some((command) => command.type === "diff.git_revert_patch")).toBe(true));
-    expect(sent.find((command) => command.type === "diff.git_revert_patch")).toMatchObject({ conversation_id: "parent", workspace_root: "C:/parent", patch });
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith("任务或工作区已切换，未撤销 Parent 中的更改。返回原任务后重试。", "info", 5000));
+    expect(sent.some((command) => command.type === "diff.git_revert_patch")).toBe(false);
     expect(sent.some((command) => command.type === "diff.git_revert_file")).toBe(false);
+    expect(vi.mocked(pushToast).mock.calls.some(([, tone]) => tone === "success")).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "other", workingDirectory: "C:/other" });
+  });
+
+  it.each(["success", "error"] as const)("keeps a dispatched undo in its original owner and reports its %s result after switching", async (level) => {
+    registerWebSocketSender((command) => { sent.push(command); return true; });
+    const refresh = vi.fn();
+    useAppStore.setState({ requestGitChanges: refresh });
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    const originalCell = { kind: "diff" as const, id: "edit", status: "updated" as const,
+      files: [{ path: "file.txt", patch, additions: 1, deletions: 1 }],
+      summary: { added: 1, deleted: 1, modifiedFiles: 1 }, collapsed: false, createdAt: 1 };
+    const view = render(<DiffCell conversationId="parent" workspaceRoot="C:/parent" cell={originalCell} />);
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(sent.some((command) => command.type === "diff.git_revert_patch")).toBe(true));
+    const command = sent.find((command) => command.type === "diff.git_revert_patch")!;
+    expect(command).toMatchObject({ conversation_id: "parent", workspace_root: "C:/parent", patch, confirmed: true });
+    act(() => useAppStore.setState({ conversationId: "other", workingDirectory: "C:/other" }));
+    view.rerender(<DiffCell conversationId="other" workspaceRoot="C:/other" cell={{ ...originalCell, id: "other-edit" }} />);
+    act(() => resolveClientCommandResult({ type: "command.result", command: "diff.git_revert_patch", level,
+      message: level === "error" ? "Patch no longer applies" : "Displayed changes reverted.",
+      data: { client_command_id: command.client_command_id, conversation_id: "parent", workspace_root: "C:/parent" } }));
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(level === "success" ? "Parent 中的更改已撤销。" : "Parent 撤销失败：Patch no longer applies", level, level === "success" ? 3000 : 5000));
+    expect(refresh).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "已撤销" })).toBeNull();
+    expect((screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(sent.filter((command) => command.type === "diff.git_revert_patch")).toHaveLength(1);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "other", workingDirectory: "C:/other" });
   });
 
   it("hydrates turn ownership, image progress, and attachment-only messages", () => {

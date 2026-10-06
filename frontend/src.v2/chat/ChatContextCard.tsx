@@ -1,15 +1,14 @@
 import {
   ChevronRight,
-  FileDiff,
+  SquarePlus,
   FileImage,
   FileText,
-  GitBranch,
+  MoreHorizontal,
   ListChecks,
-  Monitor,
   PanelRightOpen,
   Terminal,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+} from "../lib/icons";
+import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
@@ -22,7 +21,8 @@ import {
   type EmbeddedBrowserState,
 } from "../desktop/runtime";
 import { agentStatusSummary, projectAgentViews } from "../lib/agent-view-model";
-import { fileIcon, folderIcon } from "../lib/file-icons";
+import { fileIcon } from "../lib/file-icons";
+import { ContextMenu } from "../components/ContextMenu";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { mediaTypeForPath } from "../lib/media-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
@@ -69,9 +69,6 @@ interface ContextAttachment {
   conversationId?: string;
   relatedCount: number;
 }
-
-const CONTEXT_CARD_EXIT_MS = 190;
-const CONTEXT_CARD_PREPARE_MS = 220;
 
 const shortPath = (path: string): string => {
   const normalized = path.replace(/[\\/]+$/, "");
@@ -348,42 +345,20 @@ export const ChatContextCard = () => {
   const workspaceGit = useAppStore((state) => state.workspaceGit);
   const { summary: changes, openReview } = useTurnChanges();
   const rightPanelOpen = useAppStore((state) => state.rightPanelOpen);
+  const collapsed = useAppStore((state) => state.contextCardCollapsed);
+  const setCollapsed = useAppStore((state) => state.setContextCardCollapsed);
   const setRightStackTab = useAppStore((state) => state.setRightStackTab);
   const setFocusedSubagentId = useAppStore((state) => state.setFocusedSubagentId);
   const [browserTargets, setBrowserTargets] = useState<EmbeddedBrowserState[]>([]);
-  const [collapsed, setCollapsed] = useState(false);
-  const [cardPresence, setCardPresence] = useState<"visible" | "exiting" | "preparing" | "hidden">(
-    rightPanelOpen ? "hidden" : "visible",
-  );
-  const previousRightPanelOpenRef = useRef(rightPanelOpen);
+  const [summaryMenu, setSummaryMenu] = useState<{ x: number; y: number } | null>(null);
+  const [showAllSources, setShowAllSources] = useState(false);
+  useEffect(() => { setSummaryMenu(null); setShowAllSources(false); }, [conversationId]);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
   // Collect final Markdown link labels without recomputing on every stream delta.
   const { sources, attachments } = useMemo(() => {
     const messages = useAppStore.getState().messages;
     return { sources: collectConversationSources(messages), attachments: collectAttachments(messages, conversationId || undefined) };
   }, [conversationId, contextInputs]);
-
-  useEffect(() => {
-    const wasOpen = previousRightPanelOpenRef.current;
-    previousRightPanelOpenRef.current = rightPanelOpen;
-
-    if (!rightPanelOpen) {
-      if (!wasOpen) {
-        setCardPresence("visible");
-        return;
-      }
-      setCardPresence("preparing");
-      const timeout = window.setTimeout(() => setCardPresence("visible"), CONTEXT_CARD_PREPARE_MS);
-      return () => window.clearTimeout(timeout);
-    }
-    if (cardPresence === "hidden" || cardPresence === "preparing") {
-      setCardPresence("hidden");
-      return;
-    }
-    setCardPresence("exiting");
-    const timeout = window.setTimeout(() => setCardPresence("hidden"), CONTEXT_CARD_EXIT_MS);
-    return () => window.clearTimeout(timeout);
-  }, [rightPanelOpen]);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -399,6 +374,10 @@ export const ChatContextCard = () => {
     refresh();
     const unsubscribe = onEmbeddedBrowserEvent((event) => {
       if (event.conversationId !== conversationId) return;
+      if (event.type === "closed") {
+        setBrowserTargets((current) => current.filter((target) => target.id !== event.id));
+        return;
+      }
       if (!event.url || event.url === "about:blank" || event.type === "new-tab-request") return;
       setBrowserTargets((current) => {
         const nextTarget = { ...event, active: true };
@@ -415,7 +394,7 @@ export const ChatContextCard = () => {
   }, [conversationId]);
 
   useEffect(() => {
-    if (!rightPanelOpen && isDesktop()) {
+    if (!collapsed && isDesktop()) {
       if (!conversationId) return;
       void Promise.resolve(embeddedBrowserList(conversationId)).then((targets) => {
         if (Array.isArray(targets)) {
@@ -423,7 +402,7 @@ export const ChatContextCard = () => {
         }
       });
     }
-  }, [conversationId, rightPanelOpen]);
+  }, [conversationId, collapsed]);
 
   const agentSummary = agentStatusSummary(agentViews);
   const scopedBackgroundTasks = backgroundTasks.filter((task) =>
@@ -516,33 +495,23 @@ export const ChatContextCard = () => {
   };
   const openBackgroundTasks = () => useAppStore.getState().setRightStackTab("tasks");
 
-  if (contextCount === 0 || cardPresence === "hidden") return null;
+  if (contextCount === 0 || collapsed || rightPanelOpen) return null;
 
   return (
     <aside
       className="mc-chat-context-card"
-      data-state={cardPresence}
+      data-state="visible"
       data-collapsed={collapsed ? "true" : "false"}
       aria-label="工作区上下文摘要"
     >
-      <button
-        type="button"
-        className="mc-chat-context-card-compact"
-        aria-label={collapsed ? "展开上下文卡片" : "打开上下文详情"}
-        title={collapsed ? "展开上下文卡片" : "打开上下文详情"}
-        onClick={() => collapsed ? setCollapsed(false) : openPanel("tasks")}
-      >
-        <PanelRightOpen size={18} strokeWidth={1.8} />
-      </button>
-
       <header className="mc-chat-context-card-header" hidden={collapsed}>
         <span>{hasWorkspace ? shortPath(workingDirectory) : "上下文"}</span>
         <span className="mc-chat-context-card-header-actions">
-          <button type="button" aria-label="打开上下文详情" title="打开上下文详情" onClick={() => openPanel("tasks")}>
-            <PanelRightOpen size={16} strokeWidth={1.8} />
-          </button>
-          <button type="button" aria-label="收起上下文卡片" title="收起上下文卡片" onClick={() => setCollapsed(true)}>
-            <ChevronRight size={16} strokeWidth={1.8} />
+          <button type="button" aria-label="摘要操作" title="摘要操作" aria-haspopup="menu" aria-expanded={Boolean(summaryMenu)} onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            setSummaryMenu(summaryMenu ? null : { x: rect.right - 220, y: rect.bottom + 4 });
+          }}>
+            <MoreHorizontal size={16} />
           </button>
         </span>
       </header>
@@ -550,26 +519,22 @@ export const ChatContextCard = () => {
       <div className="mc-chat-context-card-body" hidden={collapsed}>
         {(hasWorkspace || changes) && <section className="mc-chat-context-card-section" aria-label="环境信息">
           {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title="审阅本轮文件更改">
-            <FileDiff size={17} aria-hidden="true" />
+            <SquarePlus size={16} aria-hidden="true" />
             <span>变更</span>
             <span className="mc-chat-context-change-stats"><RollingNumber className="chat-change-added" prefix="+" value={changes.additions} /><RollingNumber className="chat-change-deleted" prefix="-" value={changes.deletions} /></span>
-            <ChevronRight size={14} aria-hidden="true" />
           </button>}
-          {hasWorkspace && <>
-            <div className="mc-chat-context-environment-row"><Monitor size={17} aria-hidden="true" /><span>{workspaceGit?.isWorktree ? "独立工作树" : "本地工作区"}</span></div>
-            <div className="mc-chat-context-environment-row" title={workingDirectory}>{folderIcon(false, 17, workingDirectory)}<span>{shortPath(workingDirectory)}</span></div>
-            {workspaceGit?.branch && <button type="button" className="mc-chat-context-environment-row" onClick={() => openPanel("diff")} title={workspaceGit.branch}>
-              <GitBranch size={17} aria-hidden="true" /><span>{workspaceGit.branch}</span><ChevronRight size={14} aria-hidden="true" />
-            </button>}
-          </>}
+          {hasWorkspace && <button type="button" className="mc-chat-context-environment-row mc-chat-context-workspace"
+            aria-label={`查看工作区：${shortPath(workingDirectory)}`} title={`${workingDirectory}${workspaceGit?.branch ? `\n${workspaceGit.branch}` : ""}`}
+            onClick={() => useAppStore.getState().requestFileTreeReveal(workingDirectory, "folder")}>
+            <span>{shortPath(workingDirectory)}</span><ChevronRight size={14} aria-hidden="true" />
+          </button>}
         </section>}
         {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label="子智能体摘要">
           <button type="button" className="mc-chat-context-section-title" onClick={() => openAgent()}>
             <span>子智能体</span>
-            <small>{agentViews.length}</small>
           </button>
           <div className="mc-chat-context-agents" aria-label="最近的子智能体">
-            {agentViews.slice(0, 5).map((agent) => (
+            {agentViews.slice(0, 4).map((agent) => (
               <button
                 key={agent.id}
                 type="button"
@@ -587,17 +552,12 @@ export const ChatContextCard = () => {
           </div>
         </section>}
 
-        {[
-          { label: "附件", items: attachments.filter((item) => item.source === "attachment") },
-          { label: "生成文件", items: attachments.filter((item) => item.source !== "attachment" && !item.executionResult) },
-          { label: "执行结果", items: attachments.filter((item) => item.executionResult) },
-        ].filter((group) => group.items.length > 0).map(({ label, items }) => (
-          <section key={label} className="mc-chat-context-card-section" aria-label={`${label}摘要`}>
-            <button type="button" className="mc-chat-context-section-title" onClick={() => openPanel("artifacts")}>
-              <span>{label}</span>
-              <small>{items.length}</small>
+        {(attachments.length > 0 || sources.length > 0) && <section className="mc-chat-context-card-section" aria-label="来源摘要">
+            <button type="button" className="mc-chat-context-section-title" onClick={() => setShowAllSources((value) => !value)} aria-expanded={showAllSources}>
+              <span>来源</span><ChevronRight size={14} aria-hidden="true" className="mc-chat-context-source-disclosure" data-expanded={showAllSources} />
             </button>
-            {items.slice(0, 3).map((attachment) => {
+            {(showAllSources ? attachments : attachments.slice(0, 3)).map((attachment) => {
+              const label = attachment.executionResult ? "执行结果" : attachment.source === "attachment" ? "附件" : "生成文件";
               const executionTime = attachment.executionResult && attachment.occurredAt
                 ? new Date(attachment.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
                 : "";
@@ -630,20 +590,7 @@ export const ChatContextCard = () => {
                 </button>
               );
             })}
-            {items.length > 3 && (
-              <button type="button" className="mc-chat-context-more" onClick={() => openPanel("artifacts")}>
-                还有 {items.length - 3} 项 <ChevronRight size={14} />
-              </button>
-            )}
-          </section>
-        ))}
-
-        {sources.length > 0 && <section className="mc-chat-context-card-section" aria-label="来源摘要">
-          <button type="button" className="mc-chat-context-section-title" onClick={openSources}>
-            <span>来源</span>
-            <small>{sources.length}</small>
-          </button>
-          {sources.slice(0, 3).map((source) => source.url ? (
+          {(showAllSources ? sources : sources.slice(0, Math.max(1, 3 - attachments.length))).map((source) => source.url ? (
             <button
               key={source.id}
               type="button"
@@ -679,9 +626,9 @@ export const ChatContextCard = () => {
               </span>
             </div>
           ))}
-          {sources.length > 3 && (
-            <button type="button" className="mc-chat-context-more" onClick={openSources}>
-              还有 {sources.length - 3} 项 <ChevronRight size={14} />
+          {attachments.length + sources.length > 3 && (
+            <button type="button" className="mc-chat-context-more" onClick={() => setShowAllSources((value) => !value)}>
+              {showAllSources ? "收起" : "查看全部"}<ChevronRight size={14} />
             </button>
           )}
         </section>}
@@ -734,6 +681,12 @@ export const ChatContextCard = () => {
           </section>
         )}
       </div>
+      {summaryMenu && <ContextMenu position={summaryMenu} onClose={() => setSummaryMenu(null)} items={[
+        { label: "打开上下文详情", icon: <PanelRightOpen size={15} />, onClick: () => openPanel("tasks") },
+        ...(sources.length ? [{ label: "查看全部来源", icon: <FileText size={15} />, onClick: openSources }] : []),
+        ...(workspaceGit?.branch ? [{ label: `分支：${workspaceGit.branch}`, onClick: () => openPanel("diff") }] : []),
+        { label: "收起上下文卡片", onClick: () => setCollapsed(true) },
+      ]} />}
     </aside>
   );
 };

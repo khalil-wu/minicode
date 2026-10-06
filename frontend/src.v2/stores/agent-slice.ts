@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AgentSlice } from "./types";
-import { progressConversationKey } from "./shared-helpers";
+import { progressConversationKey, updateMessagesForConversation } from "./shared-helpers";
+import { inheritMessageTopology } from "../lib/message-changes";
 import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
@@ -256,7 +257,15 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const next = { ...s.turnDiffs };
       if (diff) next[owner] = diff;
       else delete next[owner];
-      return { turnDiffs: next };
+      return { ...(diff ? updateMessagesForConversation(s, owner, (messages) => {
+        const index = messages.findIndex((message) => message.role === "assistant" && message.turnId === diff.turnId
+          && (!diff.messageId || message.id === diff.messageId));
+        if (index < 0 || messages[index].turnDiff === diff) return null;
+        const updated = messages.slice();
+        updated[index] = { ...messages[index], turnDiff: diff };
+        inheritMessageTopology(messages, updated);
+        return updated;
+      }) : {}), turnDiffs: next };
     }),
   setTodos: (t, conversationId) =>
     set((s) => {

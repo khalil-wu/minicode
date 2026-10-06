@@ -6,6 +6,9 @@ import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
 import { MessageList } from "./MessageList";
 import { handleDiffEvent } from "./diffEvents";
+import { hydrateMessages } from "./transcriptHydration";
+import { projectMessagesToTurns } from "./chatSurfaceState";
+import { ChatTurn } from "./components/ChatTurn";
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({
   openWorkspaceFolder: vi.fn(),
@@ -92,7 +95,45 @@ describe("MessageList cell UI", () => {
       messages: [],
       isStreaming: false,
       turnDiffs: {},
+      diffReview: null,
+      gitReviewRequest: null,
+      workingDirectory: "",
     });
+  });
+
+  it("opens every persisted parent file change without a parent file-tool receipt or Git tab", () => {
+    const patch = (path: string) => `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+${path}\n`;
+    const paths = ["ledger_check/parser.py", "tests/test_parser.py", "ledger_check/__main__.py"];
+    const diff = paths.map(patch).join("");
+    const messages = hydrateMessages([{ id: "parent-answer", role: "assistant", turn_id: "parent-turn", content: "Done", timestamp: 1,
+      blocks: [{ type: "text", content: "Done", item_id: "final", source: "model_final", status: "completed" }],
+      metadata: { turn_diff: { thread_id: "conv-message-list-test", conversation_id: "conv-message-list-test",
+        turn_id: "parent-turn", message_id: "parent-answer", diff, revision: 5 } } }]);
+    useAppStore.setState({ workingDirectory: "C:\\ledger", diffReview: null, gitReviewRequest: null });
+    useAppStore.getState().hydrateConversationMessages("conv-message-list-test", messages, { activate: true });
+    expect(useAppStore.getState().turnDiffs["conv-message-list-test"].diff).toBe(diff);
+    const { container } = render(<MessageList />);
+    expect(container.querySelectorAll(".diff-cell")).toHaveLength(1);
+    for (const path of paths) expect(screen.getByText(path, { exact: true })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看变更", exact: true }));
+    expect(useAppStore.getState().rightStackTab).toBe("diff");
+    expect(useAppStore.getState().diffReview?.files.map((file) => file.path)).toEqual(paths);
+    expect(useAppStore.getState().diffReview?.files.map((file) => file.patch)).toEqual(paths.map(patch));
+  });
+
+  it("shows a child journal's own change card without borrowing the concurrent parent or peer patch", () => {
+    const own = "diff --git a/ledger_check/parser.py b/ledger_check/parser.py\n--- /dev/null\n+++ b/ledger_check/parser.py\n@@ -0,0 +1 @@\n+parser_ready = True\n";
+    useAppStore.setState({ turnDiffs: { "conv-message-list-test": { threadId: "conv-message-list-test", turnId: "parent-turn", updatedAt: 1,
+      diff: "diff --git a/tests/test_parser.py b/tests/test_parser.py\n--- /dev/null\n+++ b/tests/test_parser.py\n@@ -0,0 +1 @@\n+peer_ready = True\n" } } });
+    const child = hydrateMessages([{ id: "child-answer", role: "assistant", turn_id: "child-turn", content: "Parser done", timestamp: 2,
+      blocks: [{ type: "text", content: "Parser done", item_id: "child-final", source: "model_final", status: "completed" }],
+      metadata: { turn_diff: { thread_id: "conv-message-list-test", conversation_id: "conv-message-list-test",
+        turn_id: "child-turn", message_id: "child-answer", diff: own, revision: 3 } } }]);
+    const { container } = render(<ChatTurn turn={projectMessagesToTurns(child, false)[0]} isTranscriptMode conversationId="conv-message-list-test" />);
+    expect(container.querySelectorAll(".diff-cell")).toHaveLength(1);
+    expect(screen.getByText("ledger_check/parser.py", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("tests/test_parser.py")).toBeNull();
+    expect(screen.queryByRole("button", { name: "撤销", exact: true })).toBeNull();
   });
 
   it("uses turn-based HistoryCell rendering by default", () => {

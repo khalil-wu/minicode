@@ -791,6 +791,9 @@ class AgentRuntime:
         background: bool = False,
         task_id: str = "",
         session_id: str = "",
+        model: str = "",
+        provider: str = "",
+        reasoning_effort: str = "",
         objective: str = "",
         depends_on: list[str] | None = None,
         blocked_by: list[str] | None = None,
@@ -880,6 +883,9 @@ class AgentRuntime:
             background=background,
             task_id=task_id,
             session_id=str(session_id or "").strip(),
+            model=model,
+            provider=provider,
+            reasoning_effort=reasoning_effort,
             objective=objective,
             depends_on=depends_on or [],
             blocked_by=blocked_by or [],
@@ -1112,6 +1118,9 @@ class AgentRuntime:
         parent_run_id: str = "",
         owner_task_id: str = "",
         session_id: str = "",
+        model: str = "",
+        provider: str = "",
+        reasoning_effort: str = "",
         agent_type: str = "",
         prompt_summary: str = "",
         background: bool = False,
@@ -1136,6 +1145,9 @@ class AgentRuntime:
             "task_name": clean_task_name,
             "agent_path": candidate_agent_path,
             "session_id": str(session_id or "").strip(),
+            "model": model,
+            "provider": provider,
+            "reasoning_effort": reasoning_effort,
             "agent_type": str(agent_type or "").strip(),
             "prompt_summary": str(prompt_summary or "").strip(),
             "objective": str(prompt_summary or "").strip(),
@@ -2327,6 +2339,9 @@ class AgentRuntime:
         awaiting_plan_approval: bool | None = None,
         active_plan_request_id: str | None = None,
         is_idle: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> SubagentRunRecord | None:
         record = self._subagents.get(str(subagent_id or "").strip())
         if record is None or record.status != "running":
@@ -2347,6 +2362,13 @@ class AgentRuntime:
             candidate.active_plan_request_id = str(active_plan_request_id or "")
         if is_idle is not None:
             candidate.is_idle = bool(is_idle)
+        execution = {key: value for key, value in {
+            "model": model, "provider": provider, "reasoning_effort": reasoning_effort,
+        }.items() if value is not None}
+        for key, value in execution.items():
+            setattr(candidate, key, value)
+        if execution:
+            candidate.resume_config = {**candidate.resume_config, **execution}
         persisted = self._swarm_store.upsert_subagent(
             candidate.to_dict(),
             expected_owner_token=self._runtime_owner_token,

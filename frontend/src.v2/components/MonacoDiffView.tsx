@@ -135,7 +135,6 @@ export function MonacoDiffView({
   const instanceId = useId();
   const theme = useAppStore((state) => state.resolvedTheme);
   const codeTextScale = useAppStore((state) => state.codeTextScale);
-  const preferences = useAppStore((state) => state.workbenchPreferences);
   useLayoutEffect(() => {
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
   }, [theme]);
@@ -224,10 +223,10 @@ export function MonacoDiffView({
             renderSideBySide: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            fontFamily: preferences.codeFont || getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
+            fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
             fontSize: Math.round(14 * codeTextScale),
             lineHeight: Math.round(22 * codeTextScale),
-            fontLigatures: preferences.ligatures,
+            fontLigatures: false,
             lineNumbers: "on",
             wordWrap: "on",
             padding: { top: 8 },

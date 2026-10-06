@@ -1092,19 +1092,33 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
         )
         return True
 
-    resource_counts = _conversation_activity_blockers(session, conversation_id)
-    blocking_resources = {
-        name: count for name, count in resource_counts.items() if count > 0
-    }
-    if blocking_resources:
+    from backend.tasks.scheduler import get_global_scheduler
+    from backend.preview.launcher import stop_preview_launches_for_conversation
+
+    owner_sessions = _all_live_sessions(session)
+    cleanup_owner = _conversation_cleanup_owner(session, conversation_id)
+    try:
+        scheduler_stopped = await await_with_deadline(
+            get_global_scheduler().pause_for_conversation(conversation_id),
+            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label=f"scheduled work for archived conversation {conversation_id}",
+            owner=cleanup_owner,
+        )
+    except RuntimeError as exc:
+        logger.info("Conversation %s archive schedules did not settle: %s", conversation_id, exc)
+        scheduler_stopped = False
+    runs_stopped = await asyncio.gather(*(
+        _stop_conversation_run(owner, conversation_id, reason="conversation_archived")
+        for owner in owner_sessions
+    ))
+    if not scheduler_stopped or not all(runs_stopped):
         await session.emit_command_result(
             "conversation.archive",
-            "Stop or remove the conversation's live subagents, terminals, previews, background commands, and scheduled tasks before archiving it.",
+            "本会话的任务仍在退出，归档尚未完成，请稍后重试。",
             level="error",
             data={
                 "conversation_id": conversation_id,
-                "reason": "runtime_resource_active",
-                "resources": blocking_resources,
+                "reason": "run_still_active",
                 "retryable": True,
             },
         )
@@ -1118,7 +1132,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
     if mutation_claim is None:
         await session.emit_command_result(
             "conversation.archive",
-            "Stop the running task before archiving this conversation.",
+            "本会话仍有执行任务，归档尚未完成，请稍后重试。",
             level="error",
             data={
                 "conversation_id": conversation_id,
@@ -1128,6 +1142,52 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
         )
         return True
     try:
+        background_commands = [
+            (owner, command)
+            for owner in owner_sessions
+            for command in owner.background_manager.list_commands(include_completed=True, conversation_id=conversation_id)
+            if command["status"] == "running" or command.get("cleanup_pending")
+        ]
+        try:
+            resources_stopped = await await_with_deadline(
+                asyncio.gather(
+                    *(owner.background_manager.cancel(command["command_id"], conversation_id=conversation_id)
+                      for owner, command in background_commands),
+                    *(owner.terminal_manager.destroy_sessions_for_conversation(conversation_id)
+                      for owner in owner_sessions),
+                    stop_preview_launches_for_conversation(conversation_id),
+                ),
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label=f"resources for archived conversation {conversation_id}",
+                owner=cleanup_owner,
+            )
+        except RuntimeError as exc:
+            logger.info("Conversation %s archive resources did not settle: %s", conversation_id, exc)
+            resources_stopped = False
+        remaining_resources = {
+            name: count for name, count in _conversation_activity_blockers(session, conversation_id).items()
+            if count > 0
+        }
+        if not resources_stopped or remaining_resources:
+            await session.emit_command_result(
+                "conversation.archive",
+                "本会话的终端或关联进程仍在退出，归档尚未完成，请稍后重试。",
+                level="error",
+                data={"conversation_id": conversation_id, "reason": "runtime_resource_active",
+                      "resources": remaining_resources, "retryable": True},
+            )
+            return True
+        if data.get("client_resource_cleanup") is True:
+            for owner in owner_sessions:
+                if not owner.is_connected:
+                    continue
+                response = await _request_conversation_resource_cleanup(owner, target, operation="archive")
+                if response.get("action") != "approve":
+                    await session.emit_command_result(
+                        "conversation.archive", response.get("guidance") or "本地终端仍在退出，归档尚未完成。",
+                        level="error", data={"conversation_id": conversation_id, "reason": "client_resource_active", "retryable": True},
+                    )
+                    return True
         updated = session.conversation_repo.set_archived(conversation_id, True)
         if updated is None:
             await emit_conversation_not_found(session, conversation_id)
@@ -1159,9 +1219,9 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
         await session.emit_command_result(
             "conversation.archive",
             (
-                "Conversation archived, but one or more windows need to resynchronize."
+                "会话已归档，部分窗口需要重新同步。"
                 if projection_errors
-                else "Conversation archived."
+                else "会话已归档。"
             ),
             level="warning" if projection_errors else "success",
             data={
@@ -1374,7 +1434,7 @@ async def _handle_conversation_delete_fenced(session: "WebSocketSession", data: 
         _release_conversation_mutation(mutation_claim)
 
 
-async def _request_conversation_resource_cleanup(session: "WebSocketSession", target: Any) -> dict[str, Any]:
+async def _request_conversation_resource_cleanup(session: "WebSocketSession", target: Any, *, operation: str = "delete") -> dict[str, Any]:
     request_id = f"conversation-cleanup-{secrets.token_hex(12)}"
     payload = {
         "type": "control_request",
@@ -1383,6 +1443,7 @@ async def _request_conversation_resource_cleanup(session: "WebSocketSession", ta
         "request": {
             "subtype": "conversation_resources_cleanup",
             "workspace_root": str(target.worktree_path or target.workspace_root or ""),
+            "operation": operation,
         },
     }
     session.turn_wait_state.pending_approval_payloads[request_id] = payload

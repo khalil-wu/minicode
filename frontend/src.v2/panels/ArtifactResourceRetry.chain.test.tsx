@@ -16,6 +16,7 @@ vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "cur
 const artifact = { artifactId: "signed-resource", kind: "image" as const, mediaType: "image/png", summary: "Signed image" };
 beforeEach(() => useAppStore.setState({
   conversationId: "resource-owner", isConnected: true, workingDirectory: "C:/owner", liveArtifactsOpen: true,
+  contextCardCollapsed: false, rightPanelOpen: false,
   messages: [{ id: "assistant-image", role: "assistant", content: "", timestamp: 1, artifacts: [artifact] }],
   subagents: [], backgroundTasks: [], terminalSessions: [], turnDiffs: {},
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },

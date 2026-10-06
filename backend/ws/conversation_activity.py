@@ -26,8 +26,16 @@ def conversation_activity_blockers(session: "WebSocketSession", conversation_id:
     bootstrap = api_state.bootstrap
     scheduler = (bootstrap.task_scheduler if bootstrap is not None else None) or scheduler_module._GLOBAL_SCHEDULER
     return {
-        "background_commands": sum(len(owner.background_manager.list_commands(conversation_id=conversation_id)) for owner in owners),
-        "terminal_sessions": sum(len(owner.terminal_manager.list_sessions_for_conversation(conversation_id)) for owner in owners),
+        "background_commands": sum(
+            1 for owner in owners
+            for command in owner.background_manager.list_commands(include_completed=True, conversation_id=conversation_id)
+            if command["status"] == "running" or command.get("cleanup_pending")
+        ),
+        "terminal_sessions": sum(
+            1 for owner in owners
+            for terminal in owner.terminal_manager.list_sessions_for_conversation(conversation_id)
+            if terminal.is_alive or terminal.cleanup_pending
+        ),
         "preview_processes": sum(len(running_preview_processes(session_id=owner.session_id, conversation_id=conversation_id)) for owner in owners),
         "scheduled_tasks": sum(1 for task in scheduler.list_tasks() if task["conversation_id"] == conversation_id and task["enabled"]) if scheduler is not None else 0,
         "subagents": live_subagent_count(conversation_id),

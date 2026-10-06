@@ -18,6 +18,7 @@ from backend.tools.agent_tools import TaskTool
 from backend.tools.base import ToolResult, ToolSchema
 from backend.tools.code_execution import ToolExecTool, ToolWaitTool
 from backend.tools.code_execution import _present_result
+from backend.tests.git_sandbox_policy import readable_host_git_policy
 from backend.tools.contracts import ToolSpec
 from backend.tools.registry import ToolRegistry
 from backend.tools.schema import code_mode_parameters
@@ -79,8 +80,12 @@ def test_unavailable_cell_keeps_recovery_receipt_when_outcomes_are_large(tmp_pat
     asyncio.run(scenario())
 
 
-def test_nested_directory_preserves_task_object_and_alternative_required_fields():
-    signature = code_mode_parameters(TaskTool.get_schema(TaskTool.__new__(TaskTool)).parameters)
+def test_nested_directory_preserves_task_object_and_alternative_required_fields(tmp_path):
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    try:
+        signature = code_mode_parameters(TaskTool(artifact_store=artifacts, workspace_root=tmp_path).get_schema().parameters)
+    finally:
+        artifacts.shutdown()
     assert "description: string" in signature
     assert "prompt: string" in signature
     assert "parallel_tasks: Array<{" in signature
@@ -393,8 +398,8 @@ async def test_git_launch_review_real_fsmonitor_and_commit_boundary(tmp_path, mo
     host("config", "user.email", "git-boundary@example.invalid")
     host("add", "-A")
     host("commit", "-m", "fixture")
-    readonly = SandboxPolicy(workspace_root=root, readable_roots=(outside,))
-    write = SandboxPolicy(workspace_root=root, writable_roots=(root,), readable_roots=(outside,))
+    readonly = readable_host_git_policy(SandboxPolicy(workspace_root=root, readable_roots=(outside,)))
+    write = readable_host_git_policy(SandboxPolicy(workspace_root=root, writable_roots=(root,), readable_roots=(outside,)))
     capability = SandboxRunner(readonly).capability(cwd=root)
     assert capability.available and capability.filesystem_isolated, capability.reason
     resolved = readonly.resolve(cwd=root)
@@ -478,7 +483,7 @@ async def test_git_launch_review_real_cancel_stops_hook_before_late_mutation(tmp
     monitor.write_text("#!/bin/sh\nprintf started > hook-started\nsleep 60\nprintf late > hook-late\nprintf 'token\\0'\n",
                        encoding="utf-8", newline="\n")
     monitor.chmod(0o755)
-    policy = SandboxPolicy.workspace_default(root, timeout=10)
+    policy = readable_host_git_policy(SandboxPolicy.workspace_default(root, timeout=10))
     capability = SandboxRunner(policy).capability(cwd=root)
     assert capability.available and capability.filesystem_isolated, capability.reason
     event = asyncio.Event()
@@ -636,7 +641,7 @@ async def test_git_linked_review_real_status_diff_prompt_commit_and_cancel(tmp_p
     git_dir = primary / ".git" / "worktrees" / "linked"
     common = primary / ".git"
     common_bytes = (git_dir / "commondir").read_bytes()
-    readonly = SandboxPolicy(workspace_root=linked, readable_roots=(common, outside))
+    readonly = readable_host_git_policy(SandboxPolicy(workspace_root=linked, readable_roots=(common, outside)))
     capability = SandboxRunner(readonly).capability(cwd=linked)
     assert capability.available and capability.filesystem_isolated, capability.reason
     mapper = SandboxRunner(readonly)
@@ -672,15 +677,15 @@ async def test_git_linked_review_real_status_diff_prompt_commit_and_cancel(tmp_p
     assert "Current branch: linked-review" in prompt and "M tracked.py" in prompt
     assert not (outside / "marker").exists()
 
-    no_external_write = SandboxPolicy(workspace_root=linked, writable_roots=(linked,), readable_roots=(common, outside))
+    no_external_write = readable_host_git_policy(SandboxPolicy(workspace_root=linked, writable_roots=(linked,), readable_roots=(common, outside)))
     refused_context = ToolExecutionContext(PermissionContext(), workspace_root=linked, sandbox_policy=no_external_write)
     before_index = hashlib.sha256((git_dir / "index").read_bytes()).hexdigest()
-    refused = await GitCommitTool(linked).execute({"message": "must not grant external", "add_all": True}, refused_context)
-    assert refused.is_error and "explicit write authority" in refused.content
+    with pytest.raises(PermissionError, match="explicit write authority"):
+        await GitCommitTool(linked).execute({"message": "must not grant external", "add_all": True}, refused_context)
     assert hashlib.sha256((git_dir / "index").read_bytes()).hexdigest() == before_index
 
-    authorized = SandboxPolicy(workspace_root=linked,
-                               writable_roots=(linked, common, git_dir), readable_roots=(outside,))
+    authorized = readable_host_git_policy(SandboxPolicy(workspace_root=linked,
+                               writable_roots=(linked, common, git_dir), readable_roots=(outside,)))
     approved = ToolExecutionContext(PermissionContext(), workspace_root=linked, sandbox_policy=authorized)
     committed = await GitCommitTool(linked).execute({"message": "linked approved", "add_all": True}, approved)
     assert not committed.is_error, committed.content

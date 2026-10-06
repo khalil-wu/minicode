@@ -31,6 +31,7 @@ const resetChatState = () => {
   useAppStore.setState({
     conversationId: null,
     pendingConversationSwitchId: null,
+    pendingConversationCreateId: null,
     conversations: [],
     messages: [],
     conversationMessages: {},
@@ -96,7 +97,7 @@ describe("conversation deletion store behavior", () => {
 
     expect(useAppStore.getState().usageTotals).toEqual({
       input: 200,
-      ordinaryInput: 0,
+      ordinaryInput: 145,
       output: 25,
       cacheRead: 50,
       cacheWrite: 5,
@@ -190,13 +191,13 @@ describe("conversation deletion store behavior", () => {
     expect(state.conversationMessages["conv-only"]).toBeUndefined();
   });
 
-  it("binds the current workspace when Code mode creates a conversation", async () => {
+  it("binds the current workspace when an explicit Code workflow creates a conversation", async () => {
     useAppStore.setState({
       workingDirectory: "C:\\Desktop\\MiniCode",
       workspaceGit: { branch: "main", isWorktree: false, currentPath: "C:\\Desktop\\MiniCode" },
     });
 
-    await useAppStore.getState().createConversation();
+    await useAppStore.getState().createConversation({ appMode: "code" });
 
     const command = vi.mocked(sendClientCommandAwaitResult).mock.calls[0]?.[0] as { workspace_root?: string; type?: string };
     const state = useAppStore.getState();
@@ -204,6 +205,128 @@ describe("conversation deletion store behavior", () => {
     expect(command.workspace_root).toBe("C:\\Desktop\\MiniCode");
     expect(state.workingDirectory).toBe("C:\\Desktop\\MiniCode");
     expect(state.conversations).toEqual([]);
+    expect(state.appMode).toBe("code");
+  });
+
+  it("opens a default new conversation in chat while retaining the canonical owner, editor and draft", async () => {
+    const editorTabs = [{ id: "kept-editor", path: "README.md", content: "unsaved code", original: "", loading: false, error: null }];
+    const panelSlots = [{ id: "main-chat", kind: "chat" as const, label: "Chat", focused: false }, { id: "main-editor", kind: "editor" as const, label: "File", focused: true }];
+    useAppStore.setState({
+      appMode: "code", conversationId: "conv-active", workingDirectory: "C:\\Desktop\\MiniCode",
+      conversations: [{ id: "conv-active", title: "Active", updatedAt: "2026-10-05" }],
+      draft: "unfinished prompt", editorTabs, panelSlots, activeTabPath: "README.md", activeEditorPath: "README.md",
+    });
+    await useAppStore.getState().createConversation();
+    const command = vi.mocked(sendClientCommandAwaitResult).mock.calls[0]?.[0] as { workspace_root?: string };
+    const state = useAppStore.getState();
+    expect(command.workspace_root).toBe("C:\\Desktop\\MiniCode");
+    expect(state).toMatchObject({ appMode: "cowork", conversationId: "conv-active", draft: "unfinished prompt", activeTabPath: "README.md", activeEditorPath: "README.md" });
+    expect(state.editorTabs).toBe(editorTabs);
+    expect(state.panelSlots).toBe(panelSlots);
+    expect(state.conversations).toHaveLength(1);
+  });
+
+  it.each([
+    { activeId: undefined, confirmed: false }, { activeId: "conv-old", confirmed: false },
+    { activeId: undefined, confirmed: true }, { activeId: "conv-old", confirmed: true },
+  ])("keeps a first create ahead of a delayed startup catalog with $activeId, confirmed=$confirmed", async ({ activeId, confirmed }) => {
+    let completeCreate!: () => void;
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce((_command, expectedCommand) => new Promise((resolve) => {
+      completeCreate = () => resolve({ type: "command.result", command: expectedCommand, level: "success", message: "", data: {} });
+    }));
+    const editorTabs = [{ id: "dirty", path: "wu.cpp", content: "unsaved", original: "", loading: false, error: null }];
+    useAppStore.setState({ draft: "new task draft", editorTabs, currentModel: "selected-model", effortLevel: "high" });
+    const creation = useAppStore.getState().createConversation({ bindWorkspace: false, appMode: "cowork" });
+    const createdId = useAppStore.getState().pendingConversationSwitchId!;
+    expect(createdId).toBeTruthy();
+    expect(vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0]).toMatchObject({
+      type: "conversation.create", conversation_id: createdId,
+    });
+    if (confirmed) handleSessionEvent({ type: "conversation.switched", conversation_id: createdId,
+      conversation: { id: createdId, title: "New chat", updated_at: "2026-10-06", messages: [] },
+    } as never, { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never);
+
+    handleSessionEvent({ type: "conversation.list", active_conversation_id: activeId,
+      conversations: [{ id: "conv-old", title: "Old chat", updated_at: "2026-10-06" }],
+      ...(activeId ? { active_conversation: { id: activeId, title: "Old chat", updated_at: "2026-10-06", messages: [] } } : {}),
+      session: { active_conversation_id: activeId, selected_model: "startup-model" },
+    } as never, { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: confirmed ? createdId : null,
+      pendingConversationSwitchId: confirmed ? null : createdId, pendingConversationCreateId: createdId,
+      draft: confirmed ? "" : "new task draft", currentModel: "selected-model", effortLevel: "high" });
+    expect(useAppStore.getState().editorTabs).toBe(editorTabs);
+    expect(useAppStore.getState().conversations.map((conversation) => conversation.id)).toEqual(["conv-old"]);
+    expect(sendClientCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.switch" }));
+
+    handleSessionEvent({ type: "conversation.switched", conversation_id: createdId,
+      conversation: { id: createdId, title: "New chat", updated_at: "2026-10-06", messages: [] },
+    } as never, { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never);
+    completeCreate();
+    expect(await creation).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: createdId, pendingConversationSwitchId: null,
+      pendingConversationCreateId: null, appMode: "cowork" });
+    expect(sendClientCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.switch" }));
+  });
+
+  it("keeps newer navigation ahead of delayed startup restore and older switch pages", () => {
+    const messages = [{ id: "old-answer", role: "assistant" as const, content: "Current answer", timestamp: 1, artifacts: [] }];
+    useAppStore.setState({ conversationId: "conv-current", conversations: [{ id: "conv-current", title: "Current", updatedAt: "2026-10-06" }],
+      messages, draft: "keep draft", currentModel: "current-model", effortLevel: "high" });
+    useAppStore.getState().requestConversationSwitch("conv-target");
+    const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never;
+    for (const type of ["session.restored", "session.synced"] as const) {
+      handleSessionEvent({ type, active_conversation_id: "conv-old", current_model: "startup-model",
+        session: { active_conversation_id: "conv-old", selected_model: "startup-model", active_stream_conversation_ids: [] },
+        active_conversation: { id: "conv-old", title: "Old", updated_at: "2026-10-06", messages: [] },
+      } as never, buffers);
+    }
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-old",
+      conversation: { id: "conv-old", title: "Old", updated_at: "2026-10-06", messages: [] },
+    } as never, buffers);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-current", pendingConversationSwitchId: "conv-target",
+      draft: "keep draft", currentModel: "current-model", effortLevel: "high" });
+    expect(useAppStore.getState().messages).toBe(messages);
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-target",
+      conversation: { id: "conv-target", title: "Target", updated_at: "2026-10-06", messages: [] },
+    } as never, buffers);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-target", pendingConversationSwitchId: null });
+  });
+
+  it.each(["error", "throw"] as const)("releases only its own failed create intent for %s", async (failure) => {
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async (_command, expectedCommand) => {
+      if (failure === "throw") throw new Error("Create failed");
+      return { type: "command.result", command: expectedCommand, level: "error", message: "Create failed", data: {} };
+    });
+    useAppStore.setState({ conversationId: "conv-current", draft: "keep draft" });
+    expect(await useAppStore.getState().createConversation({ bindWorkspace: false })).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-current", pendingConversationSwitchId: null, draft: "keep draft" });
+  });
+
+  it("does not let an older create failure clear a newer requested owner", async () => {
+    let completeCreate!: () => void;
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce((_command, expectedCommand) => new Promise((resolve) => {
+      completeCreate = () => resolve({ type: "command.result", command: expectedCommand, level: "error", message: "Old create failed", data: {} });
+    }));
+    const creation = useAppStore.getState().createConversation({ bindWorkspace: false });
+    useAppStore.getState().requestConversationSwitch("conv-later");
+    completeCreate();
+    expect(await creation).toBe(false);
+    expect(useAppStore.getState().pendingConversationSwitchId).toBe("conv-later");
+  });
+
+  it("does not let an older successful create overwrite the mode of a newer confirmed navigation", async () => {
+    let completeCreate!: () => void;
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce((_command, expectedCommand) => new Promise((resolve) => {
+      completeCreate = () => resolve({ type: "command.result", command: expectedCommand, level: "success", message: "", data: {} });
+    }));
+    const creation = useAppStore.getState().createConversation({ bindWorkspace: false, appMode: "code" });
+    useAppStore.getState().requestConversationSwitch("conv-later");
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-later",
+      conversation: { id: "conv-later", title: "Later", updated_at: "2026-10-06", messages: [] },
+    } as never, { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never);
+    completeCreate();
+    expect(await creation).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-later", pendingConversationSwitchId: null, appMode: "cowork" });
   });
 
   it("preserves an explicit request for a global conversation", async () => {
@@ -216,7 +339,7 @@ describe("conversation deletion store behavior", () => {
 
     const command = vi.mocked(sendClientCommandAwaitResult).mock.calls[0]?.[0] as { workspace_root?: string };
     expect(command.workspace_root).toBeUndefined();
-    expect(useAppStore.getState().appMode).toBe("code");
+    expect(useAppStore.getState().appMode).toBe("cowork");
   });
 
   it("includes workspace scope in the canonical create request", async () => {
@@ -266,6 +389,8 @@ describe("conversation deletion store behavior", () => {
     };
 
     useAppStore.setState({
+      appMode: "code",
+      draft: "unsubmitted prompt",
       conversationId: "conv-active",
       conversations: [
         { id: "conv-active", title: "Active", updatedAt: "2026-05-24T00:00:00.000Z" },
@@ -288,11 +413,28 @@ describe("conversation deletion store behavior", () => {
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "conversation.switch", conversation_id: "conv-next" });
     expect(state.conversationId).toBe("conv-active");
     expect(state.pendingConversationSwitchId).toBe("conv-next");
+    expect(state.appMode).toBe("cowork");
+    expect(state.draft).toBe("unsubmitted prompt");
     expect(state.messages).toEqual([activeMessage]);
 
     useAppStore.getState().applyConversationSwitched({ conversationId: "conv-next" });
     expect(useAppStore.getState().messages).toEqual([nextMessage]);
     expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+  });
+
+  it("returns to chat when reselecting the canonical active conversation without requesting a switch", () => {
+    const editorTabs = [{ id: "kept-editor", path: "README.md", content: "unsaved code", original: "", loading: false, error: null }];
+    const panelSlots = [{ id: "main-chat", kind: "chat" as const, label: "Chat", focused: false }, { id: "main-editor", kind: "editor" as const, label: "File", focused: true }];
+    useAppStore.setState({
+      appMode: "code", conversationId: "conv-active", draft: "unfinished prompt", editorTabs, panelSlots,
+      conversations: [{ id: "conv-active", title: "Active", updatedAt: "2026-10-05" }],
+    });
+    useAppStore.getState().requestConversationSwitch("conv-active");
+    const state = useAppStore.getState();
+    expect(state).toMatchObject({ appMode: "cowork", conversationId: "conv-active", pendingConversationSwitchId: null, draft: "unfinished prompt" });
+    expect(state.editorTabs).toBe(editorTabs);
+    expect(state.panelSlots).toBe(panelSlots);
+    expect(sendClientCommand).not.toHaveBeenCalled();
   });
 
   it("keeps the latest visible switch pending across an earlier switch response", () => {
@@ -372,6 +514,21 @@ describe("conversation deletion store behavior", () => {
       totalBudgetPercent: 0.4,
       lastUsage,
       usageTotals,
+    });
+  });
+
+  it("keeps user-chosen browser view and draft when startup acknowledgement arrives before the catalogue", () => {
+    useAppStore.setState({ conversationId: "conv-startup", conversations: [], workingDirectory: "C:/project",
+      conversationWorkbenchStates: {}, draft: "typed while reconnecting", selectedMentions: [{ kind: "file", path: "src/main.ts", name: "main.ts" }],
+      rightPanelOpen: false, rightPanelExpanded: false, rightStackTabLocked: false,
+    });
+    useAppStore.getState().setRightStackTab("browser");
+    useAppStore.getState().setRightPanelExpanded(true);
+    useAppStore.getState().applyConversationSwitched({ conversationId: "conv-startup" });
+    expect(useAppStore.getState()).toMatchObject({
+      conversationId: "conv-startup", workingDirectory: "C:/project", draft: "typed while reconnecting",
+      rightStackTab: "browser", rightPanelOpen: true, rightPanelExpanded: true, rightStackTabLocked: true,
+      selectedMentions: [{ kind: "file", path: "src/main.ts", name: "main.ts" }],
     });
   });
 

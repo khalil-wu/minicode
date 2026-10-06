@@ -591,7 +591,7 @@ describe("chat surface explicit projection", () => {
     expect(turns[0]?.committedCells).toEqual([
       expect.objectContaining({
         kind: "activity",
-        title: "Edit src/running.ts",
+        title: "编辑 src/running.ts",
       }),
       expect.objectContaining({ kind: "activity", id: "edit-0" }),
       expect.objectContaining({ kind: "activity", id: "edit-1" }),

@@ -18,6 +18,9 @@ export interface AgentLink {
  */
 export interface AgentView {
   id: string;
+  model?: string;
+  provider?: string;
+  reasoningEffort?: string;
   title: string;
   summary: string;
   status: AgentDisplayStatus;
@@ -42,7 +45,7 @@ export interface AgentView {
 }
 
 const titleFor = (agent: SubagentState): string => {
-  return String(agent.objective || agent.summary || "").trim() || "子任务";
+  return String(agent.objective || agent.summary || agent.teammateName || "").trim() || "子任务";
 };
 
 const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
@@ -214,6 +217,9 @@ export function projectAgentViews(
       const parent = source.parentRunId ? resolve(source.parentRunId) : undefined;
       return {
         id: source.id,
+        model: source.model,
+        provider: source.provider,
+        reasoningEffort: source.reasoningEffort,
         title: titleFor(source),
         summary: summaryFor(source),
         status,

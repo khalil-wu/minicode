@@ -64,6 +64,8 @@ beforeEach(() => {
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: mocks.writeText } });
   useAppStore.setState({
     conversationId: "A", workingDirectory: "C:/A", messages: [message("user-a", "user", "question")],
+    conversations: [{ id: "A", title: "任务 A", workspaceRoot: "C:/A", updatedAt: "2026-10-06" },
+      { id: "B", title: "任务 B", workspaceRoot: "C:/B", updatedAt: "2026-10-06" }],
     isStreaming: false, sideChats: {}, conversationMessages: {},
     recallMessage: mocks.recall, requestGitChanges: mocks.requestGit,
   });
@@ -123,7 +125,7 @@ describe("turn actions and outcome ownership", () => {
     expect(screen.queryByText("已撤销")).toBeNull();
     expect((screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement).disabled).toBe(false);
     expect(mocks.requestGit).not.toHaveBeenCalled();
-    expect(mocks.pushToast).not.toHaveBeenCalled();
+    expect(mocks.pushToast).toHaveBeenCalledWith("任务 A 中的更改已撤销。", "success", 3000);
   });
 
   it("prevents a second diff prompt while the first confirmation is pending", () => {

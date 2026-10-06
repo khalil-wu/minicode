@@ -1353,6 +1353,18 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
             "type": "message", "message": {"message_id": "child-report", "sender_id": child_id,
                 "recipient_id": "parent", "content": "FACT_1=value-17"},
         }})
+        await bridge("agent.progress", {
+            "id": "provider:connection:child:iter:1", "message": "Provider first byte",
+            "label": "provider", "provider_state": "responding", "visibility": "debug",
+        })
+        await bridge("agent.progress", {
+            "message": "Typed provider reconnect", "provider_state": "reconnecting",
+            "visibility": "timeline",
+        })
+        await bridge("agent.progress", {"message": "Internal checkpoint bookkeeping", "visibility": "internal"})
+        for wrapper in ("tool_exec", "tool_wait"):
+            await bridge("tool_call", {"id": f"callback-{wrapper}", "name": wrapper})
+            await bridge("agent.progress", {"message": "Wrapper transport", "tool_name": wrapper})
         await bridge("tool_call", {"id": "child-tool-1", "name": "read_file"})
         await bridge(
             "agent.progress",
@@ -1362,6 +1374,9 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
                 "tool_call_id": "child-tool-1",
             },
         )
+        for wrapper in ("tool_exec", "tool_wait"):
+            yield AgentEvent.tool_call(f"stream-{wrapper}", wrapper, {})
+            yield AgentEvent.tool_result(f"stream-{wrapper}", "Wrapper completed", tool_name=wrapper)
         await bridge(
             "tool_call",
             {
@@ -1373,7 +1388,11 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
             id="process-1",
             kind="process_text",
             content="I am narrowing the search to the authentication path.",
+            status="running",
         )
+        yield AgentEvent.agent_item(id="process-1", kind="process_text", content="", status="retracted")
+        yield AgentEvent.agent_item(id="process-2", kind="process_text", content="I am checking the actual file result.")
+        yield AgentEvent.agent_item(id="process-private", kind="process_text", content="Private provider bookkeeping", visibility="debug")
         yield AgentEvent.agent_message_completed("delegated result")
 
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
@@ -1410,11 +1429,27 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     assert progress_events[2]["current_activity"] == "inspect files"
     assert not progress_events[2].get("detail")
     assert progress_events[2]["waiting_on"] == "tool"
+    assert not any(item.get("tool_name") in {"tool_exec", "tool_wait"} for item in progress_events)
+    assert not any(item.get("current_activity") in {"Provider first byte", "Typed provider reconnect", "Internal checkpoint bookkeeping", "Wrapper transport"} for item in progress_events)
     process_progress = next(
         item for item in progress_events if item.get("source_event_type") == "agent.item"
     )
     assert process_progress["detail"] == "I am narrowing the search to the authentication path."
     assert process_progress["waiting_on"] == "model"
+    narration = [item for item in progress_events if item.get("source_event_type") == "agent.item"]
+    assert [item.get("item_id") for item in narration] == ["process-1", "process-1", "process-2", "process-private"]
+    assert [item["user_visible"] for item in narration] == [True, False, True, False]
+    assert not narration[1].get("detail")
+    assert narration[1]["current_activity"] == "inspect files"
+    snapshots = [item["transcript_snapshot"] for item in narration]
+    assert [item["seq"] for item in snapshots] == sorted({item["seq"] for item in snapshots})
+    def process_rows(snapshot):
+        return [block for message in snapshot["messages"] for block in message.get("blocks", []) if block.get("type") == "process"]
+    assert process_rows(snapshots[0])[0]["id"] == "process-1"
+    assert process_rows(snapshots[0])[0]["status"] == "running"
+    assert process_rows(snapshots[1]) == []
+    assert [row["id"] for row in process_rows(snapshots[2])] == ["process-2"]
+    assert [row["id"] for row in process_rows(snapshots[3])] == ["process-2"]
     mailbox_events = [data for event_type, data in events if event_type == "subagent.event"]
     assert len(mailbox_events) == 1
     assert mailbox_events[0]["event"]["message"]["content"] == "FACT_1=value-17"

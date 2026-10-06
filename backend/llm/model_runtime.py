@@ -29,7 +29,7 @@ from backend.config import (
     get_openai_settings,
     resolve_context_window_details,
 )
-from backend.llm.reasoning_effort import normalize_reasoning_effort
+from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_wire_value, reasoning_effort_wire_map
 from backend.llm.model_selection import (
     apply_model_thinking_level,
     clamp_model_thinking_level,
@@ -3315,6 +3315,8 @@ class ModelRuntime:
             "reasoning_effort": configured_effort,
             "configured_reasoning_effort": configured_effort,
             "effective_reasoning_effort": effective_effort,
+            "wire_reasoning_effort": reasoning_effort_wire_value(model.id if model is not None else "", effective_effort),
+            "reasoning_effort_wire_map": reasoning_effort_wire_map(model.id if model is not None else ""),
             "reasoning_effort_supported": bool(levels),
             "reasoning_effort_levels": levels,
             "context_window": metadata["context_window"],

@@ -61,6 +61,14 @@ export function buildReviewHistory(messages: ChatMessage[], turnDiff?: TurnDiffS
         }
       }
     }
+    const persisted = message.turnDiff;
+    if (persisted && persisted.turnId === messageTurnId && (!conversationId || persisted.threadId === conversationId)) {
+      const turn = ensureTurn(messageTurnId, userLabel);
+      const summary = summarizeTurnDiff(persisted);
+      if (persisted.diff === "") turn.files = [];
+      if (summary) turn.files = summary.files.map((file) => ({ path: file.path,
+        revisions: [{ id: `turn-${persisted.turnId}:${file.path}`, name: "本轮修改", diff: file.patch! }] }));
+    }
   }
   // The runtime's final turn patch is the aggregate result, rather than a list of intermediate edits.
   if (turnDiff && (!conversationId || turnDiff.threadId === conversationId) && turns.has(turnDiff.turnId)

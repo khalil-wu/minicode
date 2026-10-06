@@ -19,11 +19,10 @@ def test_injected_instruction_content_is_marked_as_already_loaded():
     assert PromptParts(stable='system').render_user_instructions() == ''
 
 
-def test_model_is_not_instructed_to_assume_conventional_instruction_files_exist():
+def test_official_base_does_not_add_minicode_instruction_file_conventions():
     prompt = build_stable_prompt()
-    assert 'Instruction files are optional' in prompt
-    assert 'Do not blindly probe or create an instruction file' in prompt
-    assert 'Its absence alone is not a task blocker' in prompt
+    assert '.minicode/INSTRUCTIONS.md' not in prompt
+    assert 'Do not blindly probe or create an instruction file' not in prompt
     assert '`INSTRUCTIONS.md` is where' not in prompt
 
 

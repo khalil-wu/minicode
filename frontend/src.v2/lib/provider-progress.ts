@@ -4,7 +4,7 @@ import type { ProgressContentBlock } from "../stores/types";
 export type ProviderProgressSnapshot = Pick<
   ProgressContentBlock,
   "id" | "status" | "retryAttempt" | "maxRetries" | "message" | "providerState"
->;
+> & Partial<Pick<ProgressContentBlock, "label" | "phase">>;
 
 const PROVIDER_PROGRESS_STATUS_RANK: Record<string, number> = {
   "": 0,
@@ -62,12 +62,11 @@ export function isProviderRetryProgress(
 ): boolean {
   return Boolean(
     progress
-    && String(progress.id || "").startsWith("provider:")
-    && (
+    && (Boolean(progress.providerState)
+      || (String(progress.id || "").startsWith("provider:") && (
       typeof progress.retryAttempt === "number"
       || typeof progress.maxRetries === "number"
-      || Boolean(progress.providerState)
-    )
+    )))
   );
 }
 
@@ -80,7 +79,8 @@ export function isProviderRequestProgress(
   progress: ProviderProgressSnapshot | undefined,
 ): boolean {
   const id = String(progress?.id || "");
-  return id.startsWith("provider-request:") || isProviderRetryProgress(progress);
+  return id.startsWith("provider-request:") || isProviderRetryProgress(progress)
+    || (progress?.label === "provider" && ["model", "provider", "recover"].includes(progress.phase || ""));
 }
 
 /**

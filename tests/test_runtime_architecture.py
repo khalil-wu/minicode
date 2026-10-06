@@ -684,12 +684,13 @@ def test_legacy_search_and_git_tools_return_current_tool_result_shape(
     (tmp_path / "sample.py").write_text(
         "def hello():\n    return 'world'\n", encoding="utf-8"
     )
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass", source="test"), workspace_root=tmp_path)
 
     async def _exercise() -> list[ToolResult]:
         return [
-            await GitStatusTool(tmp_path).execute({}),
-            await GitDiffTool(tmp_path).execute({}),
-            await GitLogTool(tmp_path).execute({"limit": 1}),
+            await GitStatusTool(tmp_path).execute({}, context),
+            await GitDiffTool(tmp_path).execute({}, context),
+            await GitLogTool(tmp_path).execute({"limit": 1}, context),
             await GlobFilesTool(tmp_path).execute({"pattern": "*.py"}),
             await GrepFilesTool(tmp_path).execute({"pattern": "hello", "glob": "*.py"}),
         ]
@@ -705,19 +706,23 @@ def test_git_status_uses_execution_context_workspace_root(tmp_path: Path) -> Non
     repo.mkdir()
     src = repo / "src"
     src.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (src / "workspace-marker.txt").write_text("active workspace", encoding="utf-8")
+    subprocess.run(["git", "add", "src/workspace-marker.txt"], cwd=repo, check=True)
 
     async def _exercise() -> ToolResult:
         return await GitStatusTool(Path.cwd()).execute(
             {"path": "./src"},
             context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
+                permission=PermissionContext(mode="bypass", source="test"),
                 workspace_root=repo,
             ),
         )
 
     result = asyncio.run(_exercise())
 
-    assert "src" in result.content or result.is_error is False
+    assert result.is_error is False
+    assert "workspace-marker.txt" in result.content
 
 
 def test_legacy_search_tools_use_execution_context_workspace_root(
@@ -2272,13 +2277,13 @@ def test_websocket_session_initializes_workspace_context_before_starting_file_wa
     assert workspace_context_index < start_file_watcher_index
 
 
-def test_workspace_file_watcher_schedules_changes_on_captured_event_loop(
+@pytest.mark.asyncio
+async def test_workspace_file_watcher_schedules_changes_on_captured_event_loop(
     monkeypatch,
 ) -> None:
     from backend.workspace.file_watcher import WorkspaceFileWatcher
 
-    fallback_loop = object()
-    monkeypatch.setattr(asyncio, "get_event_loop", lambda: fallback_loop)
+    captured_loop = asyncio.get_running_loop()
 
     watcher = WorkspaceFileWatcher(
         workspace_root=Path.cwd(),
@@ -2306,11 +2311,12 @@ def test_workspace_file_watcher_schedules_changes_on_captured_event_loop(
 
     assert len(scheduled) == 1
     coroutine, loop = scheduled[0]
-    assert loop is fallback_loop
+    assert loop is captured_loop
     coroutine.close()
 
 
-def test_workspace_file_watcher_reports_directory_move_destination(
+@pytest.mark.asyncio
+async def test_workspace_file_watcher_reports_directory_move_destination(
     monkeypatch, tmp_path
 ) -> None:
     from backend.workspace.file_watcher import WorkspaceFileWatcher
@@ -2343,7 +2349,8 @@ def test_workspace_file_watcher_reports_directory_move_destination(
         coroutine.close()
 
 
-def test_workspace_file_watcher_ignores_runtime_data_directory(tmp_path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_workspace_file_watcher_ignores_runtime_data_directory(tmp_path, monkeypatch) -> None:
     from backend.workspace import file_watcher
     from backend.workspace.file_watcher import WorkspaceFileWatcher
 

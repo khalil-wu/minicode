@@ -693,10 +693,12 @@ def test_git_stage_commands_reject_absolute_or_parent_paths(monkeypatch, tmp_pat
     sent = asyncio.run(scenario())
 
     assert calls == [(str(workspace.resolve()), "src/app.py")]
-    types = [item["type"] for item in sent]
+    receipts = [item for item in sent if item["type"] != "command.result"]
+    types = [item["type"] for item in receipts]
     assert types[-1] == "diff.git_stage_file"
     assert all(t in {"error", "command.result"} for t in types[:-1])
-    assert sent[-1]["path"] == "src/app.py"
+    assert receipts[-1]["path"] == "src/app.py"
+    assert sent[-1]["type"] == "command.result" and sent[-1]["level"] == "success"
 
 
 def test_git_revert_command_rejects_absolute_or_parent_paths(monkeypatch, tmp_path) -> None:
@@ -732,10 +734,12 @@ def test_git_revert_command_rejects_absolute_or_parent_paths(monkeypatch, tmp_pa
     sent = asyncio.run(scenario())
 
     assert calls == [(str(workspace.resolve()), "src/app.py")]
-    types = [item["type"] for item in sent]
+    receipts = [item for item in sent if item["type"] != "command.result"]
+    types = [item["type"] for item in receipts]
     assert types[-1] == "diff.git_revert_file"
     assert all(t in {"error", "command.result"} for t in types[:-1])
-    assert sent[-1]["path"] == "src/app.py"
+    assert receipts[-1]["path"] == "src/app.py"
+    assert sent[-1]["type"] == "command.result" and sent[-1]["level"] == "success"
 
 
 def test_git_stage_all_commands_reject_workspace_outside_session(monkeypatch, tmp_path) -> None:
@@ -780,9 +784,11 @@ def test_git_stage_all_commands_reject_workspace_outside_session(monkeypatch, tm
 
     resolved = str(workspace.resolve())
     assert calls == [("stage", resolved), ("unstage", resolved)]
-    types = [item["type"] for item in sent]
+    types = [item["type"] for item in sent if item["type"] != "command.result"]
     assert types[-2:] == ["diff.git_stage_all", "diff.git_unstage_all"]
     assert all(t in {"error", "command.result"} for t in types[:-2])
+    results = [item for item in sent if item["type"] == "command.result"]
+    assert [result["level"] for result in results] == ["error", "error", "success", "success"]
 
 
 def test_git_stage_all_commands_are_scoped_to_workspace(monkeypatch) -> None:
@@ -922,7 +928,7 @@ def test_preview_launch_start_rejects_workspace_outside_session(monkeypatch, tmp
         assert conversation_id == "conv-preview-start-boundary"
         return FakeLaunch()
 
-    async def fake_wait_until_ready(url: str, timeout: float = 20.0, interval: float = 1.0):
+    async def fake_wait_until_ready(url: str, timeout: float = 20.0, interval: float = 1.0, *, process=None):
         return PreviewVerification(url=url, ok=True, status_code=200, elapsed_ms=1, error="")
 
     async def fake_mark_preview_ready(process, broadcast=None):

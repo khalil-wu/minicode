@@ -73,6 +73,8 @@ export interface DesktopSandboxSetupResult {
   error?: string;
 }
 
+export type DesktopMenuKey = "file" | "edit" | "view" | "help";
+
 export interface BrowserTargetInfo {
   id: string;
   type: string;
@@ -120,7 +122,7 @@ export interface EmbeddedBrowserState {
   id: string;
   conversationId: string;
   conversation_id?: string;
-  type: "page" | "loading" | "updated" | "error" | "new-tab-request";
+  type: "page" | "loading" | "updated" | "error" | "new-tab-request" | "closed";
   url: string;
   title: string;
   faviconUrl?: string;
@@ -249,7 +251,7 @@ interface MiniCodeDesktop {
     resize(sessionId: string, cols: number, rows: number, conversationId: string): Promise<void>;
     kill(sessionId: string, conversationId: string): Promise<boolean>;
     restart(sessionId: string, conversationId: string): Promise<Record<string, unknown> | null>;
-    killConversation(conversationId: string): Promise<number>;
+    killConversation(conversationId: string, preserveHistory?: boolean): Promise<number>;
     list(conversationId?: string): Promise<Record<string, unknown>[]>;
     snapshot(sessionId: string, maxChars: number | undefined, conversationId: string): Promise<Record<string, unknown> | null>;
     clear(sessionId: string, conversationId: string): Promise<{ cleared?: boolean; outputCursor?: number }>;
@@ -262,6 +264,9 @@ interface MiniCodeDesktop {
   };
   sandbox: {
     setup(): Promise<DesktopSandboxSetupResult>;
+  };
+  menu: {
+    popup(key: DesktopMenuKey): Promise<void>;
   };
   browser: {
     discover(endpoint?: string): Promise<BrowserDiscoveryResult>;
@@ -530,7 +535,7 @@ export const ptyRestart = async (sessionId: string, conversationId: string): Pro
   const session = normalizePtySession(await desktop()?.pty.restart(sessionId, owner));
   return session?.conversationId === owner ? session : null;
 };
-export const ptyKillConversation = (conversationId: string) => desktop()?.pty.killConversation(conversationId);
+export const ptyKillConversation = (conversationId: string, preserveHistory = false) => desktop()?.pty.killConversation(conversationId, preserveHistory);
 export const ptyAckExit = (sessionId: string, conversationId: string) => desktop()?.pty.ackExit(sessionId, conversationId);
 export const ptyList = async (conversationId: string): Promise<PtySession[]> => {
   const owner = conversationId.trim();

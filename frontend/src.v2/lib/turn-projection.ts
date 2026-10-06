@@ -7,6 +7,7 @@ import {
 import type { ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
 import { isProviderRequestProgress, providerProgressLabel } from "./provider-progress";
+import { getRecordOutputText } from "../chat/cells/activityCellHelpers";
 import {
   isProviderReasoning,
   isProviderReasoningSummary,
@@ -399,13 +400,16 @@ export function projectTurn(
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
-      // Leaf calls already show the actual read, edit, command and approval.
-      // Successful orchestration receipts add duplicate rows on every poll.
-      // Preserve failures, standalone scripts and the complete debug history.
-      if (!options.includeHiddenActivity && block.record.status === "success" && (
-        (block.record.name === "tool_exec" && composedParents.has(block.record.id))
-        || (block.record.name === "tool_wait" && composedCells.has(String(block.record.args.cell_id || "")))
-      )) return;
+      // Execute/wait are transport wrappers. Leaves own the visible action;
+      // a standalone wrapper contributes only actual output or error evidence.
+      if (!options.includeHiddenActivity && ["tool_exec", "tool_wait"].includes(block.record.name)) {
+        const hasLeaf = block.record.name === "tool_exec" ? composedParents.has(block.record.id)
+          : composedCells.has(String(block.record.args.cell_id || ""));
+        const failed = ["failed", "blocked", "timeout", "cancelled", "partial"].includes(block.record.status);
+        const evidence = getRecordOutputText(block.record).trim()
+          || block.record.userSummary || block.record.errorInfo?.user_message || block.record.errorInfo?.user_summary;
+        if ((!failed && hasLeaf) || !evidence) return;
+      }
       if (!block.record.temporaryRemoved) activityItems.push(projectToolBlock(block, segment));
       return;
     }
@@ -416,7 +420,12 @@ export function projectTurn(
       // Codex keeps provider request/retry lifecycle in its transient status
       // surface, never as a transcript item. Keep the same boundary here;
       // typed tool activity (MCP/image) is not classified as this lifecycle.
-      if (isProviderRequestProgress(block)) return;
+      if (isProviderRequestProgress(block) || ["tool_exec", "tool_wait"].includes(block.toolName || "")) {
+        if (block.status === "failed" && block.errorMessage?.trim()) {
+          activityItems.push({ ...progressItem(block, segment), title: "错误详情", summary: undefined });
+        }
+        return;
+      }
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       activityItems.push(progressItem(block, segment));
       return;

@@ -122,14 +122,14 @@ def test_stopped_long_turn_restores_full_context_via_production_checkpoint(tmp_p
     try:
         assert kernel.finalize_checkpoint(session_id="long-session", user_message="continue",
             state=state, context_builder=context) == "saved"
-        checkpoint = load_latest_checkpoint("long-session", conversation_id="long-context")
+        checkpoint = load_latest_checkpoint("long-session", conversation_id="long-context", base_dir=runtime.state_root)
         assert checkpoint.context_snapshot["history"] == before["history"]
         restored = ContextBuilder(token_budget=TokenBudget())
         resumed_state = AgentState(user_message="continue")
         metadata = {"resume_from_checkpoint": True}
         result = prepare_query_recovery(session_id="long-session", conversation_id="long-context",
             metadata=metadata, state=resumed_state, context_builder=restored, max_iterations_budget=10,
-            current_run_id="new-run")
+            current_run_id="new-run", checkpoint_base_dir=runtime.state_root)
         assert result.restored
         assert restored.export_snapshot()["history"] == before["history"]
         assert metadata["run_id"] == "new-run"

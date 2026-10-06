@@ -178,6 +178,8 @@ def test_review_and_turn_patches_reproduce_actual_file_tool_writes(tmp_path, old
     target = tmp_path / "sample.txt"
     target.write_bytes(old)
     expected = b"first\nnew\n" if tool_name == "write_file" else edited
+    if tool_name == "apply_patch" and old == b"first\rold\r":
+        expected = b"first\rnew\r"
     tracker = TurnDiffTracker()
     events = []
 

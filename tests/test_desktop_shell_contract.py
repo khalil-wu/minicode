@@ -17,7 +17,7 @@ def test_desktop_main_supports_single_instance_and_runtime_handlers() -> None:
     assert "minicode:menu:new-chat" in main_source
     assert "minicode:menu:quick-chat" in main_source
     assert "minicode:menu:open-folder" in main_source
-    assert "Extensions Marketplace" in main_source
+    assert "扩展市场" in main_source
     assert "minicode:menu:extensions-marketplace" in main_source
     assert "minicode:menu:settings" in main_source
     assert "minicode:menu:toggle-sidebar" in main_source
@@ -188,7 +188,7 @@ def test_desktop_shell_can_export_diagnostics() -> None:
 
     assert "buildDiagnosticsPayload" in (main_source + ipc_source)
     assert 'ipcMain.handle("minicode:diagnostics:export"' in ipc_source
-    assert "Export Diagnostics" in (main_source + ipc_source)
+    assert "导出诊断信息" in (main_source + ipc_source)
     assert "desktop.diagnostics.json" in (main_source + ipc_source)
     assert "desktop: {" in preload_source
     assert "diagnostics:" in preload_source

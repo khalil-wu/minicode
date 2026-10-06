@@ -15,8 +15,9 @@ test.describe("Modal routing and layering", () => {
 
     await expect(page.getByRole("main", { name: "设置" })).toBeVisible();
     await expect(commandPalette).toHaveCount(0);
-    // Keep the workspace mounted for state continuity while the settings route hides it.
-    await expect(page.locator(".header-bar")).toBeHidden();
+    // Desktop chrome remains available while Settings hides the work area.
+    await expect(page.locator(".header-bar")).toBeVisible();
+    await expect(page.locator(".chat-pane-main")).toBeHidden();
   });
 
   test("only one modal overlay is mounted", async ({ page }) => {

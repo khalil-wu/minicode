@@ -55,7 +55,7 @@ export function ProjectEnvironmentSettings({ workspaceRoot }: { workspaceRoot: s
     {!workspaceRoot ? <p className="settings-section-description">打开项目后配置开发环境。</p> : <div className="settings-card">
       <div className="settings-row"><span>后端解释器</span><code title={environment?.backend_python}>{environment?.backend_python}</code></div>
       <div className="settings-row"><span>项目解释器</span><code>{environment?.project_python || "尚未创建 .venv"}</code></div>
-      <div className="settings-row"><span>Node.js 路径</span><code>{environment?.node || "未检测到"}</code></div>
+      <div className="settings-row"><span>Node.js 路径</span><code title={environment?.node ?? undefined}>{environment?.node || "未检测到"}</code></div>
       {Object.keys(environment?.commands ?? {}).filter((action) => action !== "python_venv" || !environment?.project_python).map((action) => <div className="settings-row" key={action}><div className="settings-row-copy"><div className="settings-row-title">{labels[action]}</div><code className="settings-row-description">{environment!.display_commands[action]}</code></div><button className="settings-action-button" type="button" disabled={Boolean(busy)} onClick={() => void run(action)}>运行</button></div>)}
       {busy && <button className="settings-action-button" type="button" onClick={() => operation.current?.abort()}>取消 {labels[busy]}</button>}
       {output && <pre className="settings-environment-output">{output}</pre>}{error && <p role="alert">{error}</p>}

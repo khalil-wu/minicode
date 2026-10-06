@@ -39,6 +39,16 @@ const ShortcutHarness = () => {
 };
 
 describe("useKeyboardShortcuts modal routing", () => {
+  it("leaves native zoom chords active without mutating configured font sizes", () => {
+    useAppStore.setState({ textScale: 1.1, codeTextScale: 1.2 });
+    render(<ShortcutHarness />);
+    for (const [key, code] of [["-", "Minus"], ["=", "Equal"], ["+", "Equal"], ["0", "Digit0"], ["+", "NumpadAdd"], ["-", "NumpadSubtract"]]) {
+      const event = new KeyboardEvent("keydown", { key, code, ctrlKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(useAppStore.getState()).toMatchObject({ textScale: 1.1, codeTextScale: 1.2 });
+  });
   beforeEach(() => {
     useAppStore.setState({
       commandPaletteOpen: false,

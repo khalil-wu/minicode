@@ -293,6 +293,7 @@ function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
   conversationId: null,
   pendingConversationSwitchId: null,
+  pendingConversationCreateId: null,
   messageRevealTarget: null,
   conversations: [],
   conversationInventoryInstanceId: null,
@@ -597,6 +598,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
     if (!targetId) return;
+    get().setAppMode("cowork");
     if (targetId === get().conversationId && !get().pendingConversationSwitchId) return;
     // `conversation.switched` is the causal event and the only authority on
     // which conversation is active — the backend refuses a stale or archived
@@ -605,7 +607,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // every later command then carried a conversation_id its scope check
     // rejects. Keep the authority unchanged while presenting the requested
     // conversation as an empty view until its public page arrives.
-    set((state) => ({ pendingConversationSwitchId: targetId,
+    set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null,
       messageRevealTarget: state.messageRevealTarget?.conversationId === targetId ? state.messageRevealTarget : null,
     }));
     if (!sendClientCommand({ type: "conversation.switch", conversation_id: targetId })) {
@@ -616,13 +618,19 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const id = conversationId.trim();
     if (!id) return;
     const currentConversationId = get().conversationId;
-    if (currentConversationId && get().conversations.some((conversation) => conversation.id === currentConversationId)) {
+    const currentConversationKnown = get().conversations.some((conversation) => conversation.id === currentConversationId);
+    if (currentConversationId && currentConversationKnown) {
       get().snapshotAgentState(currentConversationId);
+    }
+    // A startup/reconnect acknowledgement can precede the conversation list.
+    // Its matching owner confirms the active UI state; retain choices and
+    // drafts made while the server was restoring the same conversation.
+    if (currentConversationId && (currentConversationKnown || currentConversationId === id)) {
       get().snapshotWorkbenchState(currentConversationId);
     }
     const targetConversation = get().conversations.find((c) => c.id === id);
     const targetWorkspace = conversationWorkspacePath(targetConversation);
-    const workspaceChanged = !workspaceRootsEqual(targetWorkspace, get().workingDirectory);
+    const workspaceChanged = Boolean(targetConversation) && !workspaceRootsEqual(targetWorkspace, get().workingDirectory);
     if (workspaceChanged) {
       const current = get();
       cacheEditorStateForWorkspace(
@@ -710,7 +718,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   createConversation: async (options) => {
     const state = get();
     const id = newConversationId();
-    const nextAppMode = options?.appMode ?? state.appMode;
+    const nextAppMode = options?.appMode ?? "cowork";
     const requestedWorkspace = canonicalWorkspacePath(
       options?.workspaceRoot ?? state.workingDirectory,
     );
@@ -718,7 +726,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       || options?.bindWorkspace === true
       || (
         options?.bindWorkspace === undefined
-        && nextAppMode === "code"
+        && (options?.appMode ?? state.appMode) === "code"
         && Boolean(state.workingDirectory)
       );
     if (shouldBindWorkspace && !requestedWorkspace) {
@@ -728,6 +736,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const workspaceRoot = shouldBindWorkspace
       ? requestedWorkspace
       : "";
+    set({ pendingConversationSwitchId: id, pendingConversationCreateId: id });
     try {
       const result = await sendClientCommandAwaitResult({
         type: "conversation.create",
@@ -738,17 +747,25 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         permission_mode: toBackendPermissionMode(state.permissionMode),
       }, "conversation.create");
       if (!commandResultSucceeded(result)) {
+        if (get().pendingConversationSwitchId === id) set({ pendingConversationSwitchId: null });
         pushToast(result.message || "Unable to create the conversation.", "error", 4000);
         return false;
       }
-      get().setAppMode(nextAppMode);
+      const current = get();
+      if (current.pendingConversationSwitchId === id
+        || (current.pendingConversationSwitchId === null && current.conversationId === id)) {
+        current.setAppMode(nextAppMode);
+      }
       return true;
     } catch (error) {
+      if (get().pendingConversationSwitchId === id) set({ pendingConversationSwitchId: null });
       const message = error instanceof Error && error.message.trim()
         ? error.message
         : "Unable to create the conversation.";
       pushToast(message, "error", 4000);
       return false;
+    } finally {
+      if (get().pendingConversationCreateId === id) set({ pendingConversationCreateId: null });
     }
   },
   removeConversation: async (id) => sendConversationDeleteCommand({
@@ -787,6 +804,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     set((s) => {
       const activate = options?.activate ?? id === s.conversationId;
       const guardedMessages = applyRecallTruncation(id, messages, s);
+      const restoredDiff = guardedMessages.slice().reverse().find((message) => message.role === "assistant")?.turnDiff;
       const nextStreaming = options?.isStreaming ?? guardedMessages.some((message) => message.isStreaming);
       const cachedCurrent = activate
         ? cacheMessagesForConversation(s, s.conversationId)
@@ -797,6 +815,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return {
         ...(activate ? { conversationId: id, messages: guardedMessages, isStreaming: nextStreaming, toolCallCount: computeToolCallCount(guardedMessages) } : {}),
         ...(options?.historyPage ? { conversationHistoryPages: { ...s.conversationHistoryPages, [id]: options.historyPage } } : {}),
+        ...(restoredDiff?.threadId === id ? { turnDiffs: { ...s.turnDiffs, [id]: restoredDiff } } : {}),
         conversationMessages: {
           ...cachedCurrent.conversationMessages,
           [id]: guardedMessages,
@@ -1070,7 +1089,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const incoming: ProgressContentBlock = {
         ...progress,
         type: "progress",
-        timestamp: Date.now(),
+        timestamp: progress.timestamp ?? Date.now(),
       };
       const provider = isProviderProgressId(incoming.id);
       let pendingKey: string | undefined;
@@ -1542,6 +1561,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     isConnected: phase === "connected",
     connectionPhase: phase,
     pendingConversationSwitchId: phase === "connected" ? s.pendingConversationSwitchId : null,
+    pendingConversationCreateId: phase === "connected" ? s.pendingConversationCreateId : null,
     runtimeSession: phase === "connected" ? s.runtimeSession : null,
     reconnectAttempt: details?.attempt ?? (phase === "connected" ? 0 : s.reconnectAttempt),
     reconnectMaxAttempts: details?.maxAttempts === undefined

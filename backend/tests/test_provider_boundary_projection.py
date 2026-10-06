@@ -172,6 +172,7 @@ async def test_web_fetch_keeps_fetched_artifact_when_model_extraction_fails(tmp_
     assert result.artifact_id
     assert result.artifact_preview
     assert "模型二次提取失败" in result.content
+    assert result.content == f"网页已抓取；模型二次提取失败。原始清洗内容保存在 artifact {result.artifact_id}。"
     assert result.provider == "custom_anthropic"
     assert result.provider_error_type == "protocol"
     assert result.error_kind == "provider_protocol"

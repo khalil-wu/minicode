@@ -33,7 +33,6 @@ import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { Button } from "../components/Button";
 import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
 import { safeJsonParse } from "../lib/safe-parse";
-import { addInspectorPayload } from "./inspectorEntries";
 import "./InlineAgentPrompt.css";
 
 export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string } = {}) => {
@@ -81,23 +80,6 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
       {visibleAskUser && (visibleAskUser.planReview
         ? <SubagentPlanReviewCard key={visibleAskUser.requestId} request={visibleAskUser} review={visibleAskUser.planReview} />
         : <AskUserCard key={visibleAskUser.requestId} request={visibleAskUser} />)}
-      <details className="inline-prompt-more">
-        <summary>更多操作</summary>
-        <Button variant="ghost" size="sm" onClick={() => {
-          const prompt = visibleApproval ?? visibleDiffReview ?? visibleAskUser!;
-          const id = prompt.requestId;
-          addInspectorPayload("permission", `prompt:${id}`, {
-            kind: "pending_agent_prompts",
-            conversation_id: prompt.conversationId,
-            approvals: [visibleApproval, ...queuedApprovals].filter(Boolean),
-            diff_review: visibleDiffReview,
-            ask_user: visibleAskUser,
-          });
-          const store = useAppStore.getState();
-          store.setInspectorFocus({ kind: "permission", id: `prompt:${id}`, conversationId: prompt.conversationId });
-          store.setRightStackTab("inspector");
-        }}>技术诊断</Button>
-      </details>
     </div>
   );
 };

@@ -73,6 +73,15 @@ describe("groupByWorkspace", () => {
     expect(Array.from(groups.values())[0]?.items).toHaveLength(2);
   });
 
+  it("names a worktree-only saved project without changing its effective path", () => {
+    const worktreePath = "C:/Desktop/MiniCode/.minicode/worktrees/conv_5c136af99610";
+    const groups = groupByWorkspace([conversation("isolated", worktreePath)], [worktreePath]);
+
+    expect([...groups.values()].map(({ path, label }) => ({ path, label }))).toEqual([
+      { path: worktreePath, label: "MiniCode" },
+    ]);
+  });
+
   it("uses the effective protected worktree path when both workspace fields exist", () => {
     const groups = groupByWorkspace([
       { ...conversation("owner", "C:\\repo"), worktreePath: "C:\\repo\\.minicode\\worktrees\\conv_owner" },

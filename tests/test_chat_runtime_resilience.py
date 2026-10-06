@@ -3,7 +3,6 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.llm.base import LLMAdapter
 from backend.main import app
 
 
@@ -59,27 +58,8 @@ def test_websocket_surfaces_unexpected_agent_run_failure(monkeypatch) -> None:
 
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", _failing_agent_loop)
 
-    # The shared conftest double returns a bare ``object()`` for the session
-    # adapter. That no longer satisfies MiniCode's adapter contract: resolving
-    # the run's thinking level now *requires* ``apply_reasoning_policy`` and
-    # fails closed with a TypeError otherwise
-    # (backend/llm/model_selection.py::apply_model_thinking_level). With a bare
-    # object the run dies at LLM initialization
-    # (done reason ``llm_initialization_failed``) and never reaches the runner
-    # patched above, so the unexpected-run-failure path under test was never
-    # exercised. Supply a conforming adapter instead.
-    class _NeverCalledAdapter(LLMAdapter):
-        async def stream_chat(self, messages, tools=None):  # pragma: no cover
-            raise AssertionError("the patched runner must be used instead")
-            yield  # noqa: PLE0101 - keep this an async generator
-
-        async def simple_chat(self, messages) -> str:  # pragma: no cover
-            raise AssertionError("the patched runner must be used instead")
-
-    monkeypatch.setattr(
-        "backend.llm.model_registry.create_session_llm",
-        lambda config, model_override=None, **_kwargs: _NeverCalledAdapter(),
-    )
+    # The shared fixture supplies a complete adapter at both websocket startup
+    # and run admission. The failing runner above must own the terminal event.
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_agent_failure") as ws:

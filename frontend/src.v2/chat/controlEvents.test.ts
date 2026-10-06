@@ -1,10 +1,24 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleControlEvent } from "./controlEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
+import { isDesktop, ptyKillConversation, ptyList, embeddedBrowserCloseConversation, embeddedBrowserList } from "../desktop/runtime";
+import { sendPromptResponseCommand } from "../protocol/ws-outbox";
+
+vi.mock("../desktop/runtime", () => ({
+  isDesktop: vi.fn(() => false),
+  ptyKillConversation: vi.fn(async () => 1),
+  ptyList: vi.fn(async () => []),
+  embeddedBrowserCloseConversation: vi.fn(async () => 0),
+  embeddedBrowserList: vi.fn(async () => []),
+}));
+vi.mock("../protocol/ws-outbox", () => ({ sendPromptResponseCommand: vi.fn(async () => true) }));
 
 describe("handleControlEvent", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(ptyList).mockResolvedValue([]);
     useAppStore.setState({
       pendingApproval: null,
       approvalQueue: [],
@@ -14,6 +28,34 @@ describe("handleControlEvent", () => {
       pendingAskUser: null,
       askUserQueue: [],
     });
+  });
+
+  it("archives desktop resources by the event owner without saving or dropping dirty editors", async () => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(ptyList).mockResolvedValue([{ sessionId: "archive-terminal", conversationId: "archive-owner", isAlive: false, shell: "pwsh", cwd: "C:/A", terminalMode: "pty" }]);
+    const tabs = [{ id: "dirty-editor", path: "C:/A/draft.ts", content: "unsaved draft", original: "saved", loading: false, language: "typescript" }];
+    useAppStore.setState({ conversationId: "other-owner", workingDirectory: "C:/A", editorTabs: tabs });
+    handleControlEvent({ type: "control_request", request_id: "archive-cleanup", conversation_id: "archive-owner",
+      request: { subtype: "conversation_resources_cleanup", workspace_root: "C:/A", operation: "archive" } });
+    await vi.waitFor(() => expect(sendPromptResponseCommand).toHaveBeenCalledWith({
+      type: "control_response", request_id: "archive-cleanup", conversation_id: "archive-owner",
+      response: { subtype: "success", response: { action: "approve" } },
+    }));
+    expect(ptyKillConversation).toHaveBeenCalledExactlyOnceWith("archive-owner", true);
+    expect(embeddedBrowserCloseConversation).toHaveBeenCalledExactlyOnceWith("archive-owner");
+    expect(embeddedBrowserList).toHaveBeenCalledExactlyOnceWith("archive-owner");
+    expect(useAppStore.getState().editorTabs).toBe(tabs);
+    expect(useAppStore.getState().conversationId).toBe("other-owner");
+  });
+
+  it("does not acknowledge successful archive cleanup while an owned shell remains alive", async () => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(ptyList).mockResolvedValue([{ sessionId: "still-live", conversationId: "archive-owner", isAlive: true, shell: "pwsh", cwd: "C:/A", terminalMode: "pty" }]);
+    handleControlEvent({ type: "control_request", request_id: "archive-pending", conversation_id: "archive-owner",
+      request: { subtype: "conversation_resources_cleanup", workspace_root: "C:/A", operation: "archive" } });
+    await vi.waitFor(() => expect(sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({
+      response: { subtype: "success", response: { action: "reject", guidance: "本地终端或浏览器尚未关闭，任务已保留。" } },
+    })));
   });
 
   it("clears cancelled approval, diff, and ask-user state", () => {

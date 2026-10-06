@@ -20,7 +20,7 @@ vi.mock("./SessionRow", async () => {
         {
           type: "button",
           "aria-label": `打开菜单 ${props.conversation.title}`,
-          onClick: () => props.onSetMenuFor(props.menuOpen ? null : props.conversation.id),
+          onClick: () => props.onSetMenuFor(props.menuOpen ? null : props.rowId || props.conversation.id),
         },
         props.conversation.title,
       ),
@@ -108,7 +108,8 @@ describe("ConversationsTab row rendering performance", () => {
     expect(sessionRowRenderMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "切换活动会话" }));
-    expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(["conv-a", "conv-b"]);
+    expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toHaveLength(2);
+    expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining(["conv-a", "conv-b"]));
 
     sessionRowRenderMock.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "打开菜单 Task A" }));

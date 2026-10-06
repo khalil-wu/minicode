@@ -17,7 +17,8 @@ from backend.ws.handlers.mcp import (
 
 
 class _FakeSession:
-    def __init__(self) -> None:
+    def __init__(self, mcp_manager: Any = None) -> None:
+        self.mcp_manager = mcp_manager
         self.payloads: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.refreshed = False
@@ -45,6 +46,7 @@ class _FakeSession:
 
 class _FakeMcpManager:
     def __init__(self) -> None:
+        self.workspace_root = Path.cwd()
         self.started: list[Any] = []
         self.saved: list[Any] = []
         self.stopped: list[str] = []
@@ -175,9 +177,8 @@ def test_scheduler_handlers_share_global_fallback_scheduler(monkeypatch, tmp_pat
 def test_mcp_add_persists_manual_http_server_config(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / ".mcp.json"
     manager = _FakeMcpManager()
-    session = _FakeSession()
+    session = _FakeSession(manager)
     _patch_mcp_config(monkeypatch, config_path)
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: manager)
 
     asyncio.run(handle_mcp_add(
         session,
@@ -204,9 +205,8 @@ def test_mcp_add_persists_manual_http_server_config(monkeypatch, tmp_path) -> No
 def test_mcp_add_reports_invalid_http_server_without_mutating_config(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / ".mcp.json"
     manager = _FakeMcpManager()
-    session = _FakeSession()
+    session = _FakeSession(manager)
     _patch_mcp_config(monkeypatch, config_path)
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: manager)
 
     asyncio.run(handle_mcp_add(
         session,
@@ -226,9 +226,8 @@ def test_mcp_add_reports_invalid_http_server_without_mutating_config(monkeypatch
 def test_mcp_add_persists_manual_stdio_server_config(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / ".mcp.json"
     manager = _FakeMcpManager()
-    session = _FakeSession()
+    session = _FakeSession(manager)
     _patch_mcp_config(monkeypatch, config_path)
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: manager)
 
     asyncio.run(handle_mcp_add(
         session,
@@ -272,9 +271,8 @@ def test_mcp_remove_deletes_server_from_config(monkeypatch, tmp_path) -> None:
         encoding="utf-8",
     )
     manager = _FakeMcpManager()
-    session = _FakeSession()
+    session = _FakeSession(manager)
     _patch_mcp_config(monkeypatch, config_path)
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: manager)
 
     asyncio.run(handle_mcp_remove(session, {"name": "remove-me"}))
 

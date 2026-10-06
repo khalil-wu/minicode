@@ -272,6 +272,7 @@ class _PersistentTeammateHooks(_OrdinaryChildHooks):
         super().__init__(runtime)
         self.trigger = trigger
         self.idle = asyncio.Event()
+        self.finished_gate = asyncio.Event()
         self.gate_calls = 0
 
     async def run_subagent_stop(self, *, subagent_id: str, summary: str, **_: Any) -> HookResult:
@@ -286,6 +287,7 @@ class _PersistentTeammateHooks(_OrdinaryChildHooks):
                 blocked=self.trigger != "mailbox",
                 message="Finish the second audit step.",
             )
+        self.finished_gate.set()
         return HookResult(prevent_continuation=True, stop_reason="audit finished")
 
     async def run_task_completed(self, **_: Any) -> HookResult:
@@ -326,7 +328,7 @@ def test_named_teammate_keeps_mailbox_identity_across_query_turns(
         tool_registry_provider=registry,
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
         permission_checker_provider=checker,
-        agent_settings_provider=AgentSettings(max_iterations=2),
+        agent_settings_provider=AgentSettings(max_iterations=2, code_mode_only=False),
         token_budget_provider=TokenBudget(),
     )
     registry.register(tool)
@@ -361,6 +363,10 @@ def test_named_teammate_keeps_mailbox_identity_across_query_turns(
                     "recipient": agent_id, "message": "Answer the next audit step."
                 }, context=context)
                 assert not sent.is_error
+            # Two query turns precede the terminal seal. Observe their real
+            # final gate before checking runtime completion, as cold startup
+            # shares the backend worker pool during the full test suite.
+            await asyncio.wait_for(hooks.finished_gate.wait(), timeout=30)
             assert await runtime.wait_for_subagent(agent_id, timeout=5)
             await asyncio.sleep(0)
         finally:
@@ -389,7 +395,7 @@ def test_named_teammate_keeps_mailbox_identity_across_query_turns(
         assert all(row["status"] == "completed" for row in runs)
         assert all(row["agent_path"] == record.agent_path for row in runs)
         assert all(row["mailbox_epoch"] == record.mailbox_epoch for row in runs)
-        checkpoint = load_latest_run_checkpoint(agent_id, conversation_id="conversation")
+        checkpoint = load_latest_run_checkpoint(agent_id, conversation_id="conversation", base_dir=runtime.state_root)
         assert checkpoint is not None
         assert checkpoint.run_id in run_ids
         assert checkpoint.reply == "revised answer"

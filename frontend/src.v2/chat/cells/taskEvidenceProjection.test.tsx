@@ -51,10 +51,10 @@ describe("activity disclosure content", () => {
       const tool = { ...base, ...report };
       const original = JSON.stringify(tool);
       ui.rerender(<ActivityCell cell={{ ...cell(tool), collapsed: false }} />);
-      expect(ui.container.querySelector(".activity-cell-name")?.textContent).toMatch(/code|Wait/i);
+      expect(ui.container.querySelector(".activity-cell")).toBeNull();
       expect(ui.container.querySelector(".activity-cell-expanded")).toBeNull();
       expect(ui.container.querySelector(".activity-cell-toggle")).toBeNull();
-      expect(ui.container.querySelector(".activity-cell-main-button")?.hasAttribute("aria-expanded")).toBe(false);
+      expect(ui.container.querySelector(".activity-cell-main-button")).toBeNull();
       expectTaskEvidenceOnly(ui.container);
       expect(JSON.stringify(tool)).toBe(original);
     }
@@ -81,6 +81,7 @@ describe("activity disclosure content", () => {
 
   it("retains code errors as expandable evidence", () => {
     const tool = record({ name: "tool_wait", status: "failed", activityKind: "genericTool", resultKind: "generic", durationMs: undefined,
+      userSummary: "工具执行失败。",
       args: { cell_id: source.cell_id }, outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "failed", error: "operation could not complete" }) });
     const ui = render(<ActivityCell cell={cell(tool)} />);
     fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
@@ -132,13 +133,19 @@ describe("task evidence and runtime diagnostics have separate projections", () =
     expect(JSON.stringify(tool)).toBe(original);
   });
 
-  it.each(["failed", "blocked", "timeout", "cancelled", "partial"] as const)("keeps %s visible without leaking the runtime envelope", (status) => {
+  it.each([
+    ["failed", "失败"],
+    ["blocked", "已阻止"],
+    ["timeout", "超时"],
+    ["cancelled", "已中断"],
+    ["partial", "部分完成"],
+  ] as const)("keeps %s visible without leaking the runtime envelope", (status, expectedLabel) => {
     const tool = record({ name: "tool_wait", activityKind: "genericTool", resultKind: "generic", status,
       args: { cell_id: source.cell_id }, inputSummary: source.cell_id,
       outputPreview: JSON.stringify({ cell_id: source.cell_id, status, error: "operation could not complete", output: ["verified partial output"] }),
     });
     const ui = render(<ActivityCell cell={cell(tool)} conversationId="conv_owner" />);
-    expect(ui.getByRole("status").textContent).toMatch(/Failed|Blocked|Timed out|Interrupted|Partial/);
+    expect(ui.getByRole("status").textContent).toBe(expectedLabel);
     expectTaskEvidenceOnly(ui.container);
     fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
     expectTaskEvidenceOnly(ui.container);
@@ -150,7 +157,7 @@ describe("task evidence and runtime diagnostics have separate projections", () =
   it("keeps approval actionable, not a raw transition or dependency id", () => {
     const tool = record({ status: "pending", transition: "waiting_approval", waitingOn: "approval", blockingReason: source.parent_call_id });
     const ui = render(<ActivityCell cell={cell(tool)} conversationId="conv_owner" />);
-    expect(ui.getByRole("status").textContent).toBe("Awaiting approval");
+    expect(ui.getByRole("status").textContent).toBe("等待批准");
     fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
     expectTaskEvidenceOnly(ui.container);
     expect(tool.waitingOn).toBe("approval");
@@ -243,7 +250,7 @@ describe("tool protocol result presentation", () => {
   });
   it("reports pending and discarded operations instead of implying success", () => {
     const tool = record({ name: "tool_exec", outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "running", output: [], pending_tools: ["read_file"], discarded_unawaited_tool_calls: 2 }) });
-    expect(getRecordOutputText(tool)).toContain("Still running: Read");
+    expect(getRecordOutputText(tool)).not.toContain("Still running");
     expect(getRecordOutputText(tool)).toContain("2 unawaited tool calls were discarded");
   });
   it.each(["get_dom", "get_text", "get_html", "evaluate"])("does not redact user browser data from %s", (action) => {

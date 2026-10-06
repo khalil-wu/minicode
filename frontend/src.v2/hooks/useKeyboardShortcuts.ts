@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -7,15 +7,6 @@ import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { matchesShortcut, matchesShiftedShortcutVariant, type ShortcutActionId } from "../lib/keyboard-shortcuts";
 import { buildInterruptCommand } from "../lib/interrupt-command";
-
-let lastZoomToastAt = 0;
-
-const announceZoom = (scale: number) => {
-  const now = Date.now();
-  if (now - lastZoomToastAt < 350) return;
-  lastZoomToastAt = now;
-  pushToast(`Zoom ${Math.round(scale * 100)}%`, "info", 1200);
-};
 
 const announceViewMode = (mode: string) => {
   pushToast(`View mode: ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`, "info", 1200);
@@ -31,7 +22,6 @@ const isTopLevelModalOpen = (state: ReturnType<typeof useAppStore.getState>): bo
   || (state.agentEditorOpen && capabilityFeatureEnabled(state.runtimeCapabilities, "agent_editor", true));
 
 export const useKeyboardShortcuts = () => {
-  const sidebarWidthRef = useRef(280);
   useEffect(() => {
     const onFileSearch = (event: KeyboardEvent) => {
       const state = useAppStore.getState();
@@ -44,6 +34,8 @@ export const useKeyboardShortcuts = () => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       const mod = e.metaKey || e.ctrlKey;
+      // Native/browser zoom owns these chords; leave numeric font settings alone.
+      if (mod && !e.altKey && ["=", "+", "-", "0"].includes(e.key)) return;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {
         s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
@@ -54,7 +46,10 @@ export const useKeyboardShortcuts = () => {
         window.dispatchEvent(new Event("composer:focus"));
         if (s.skillsMarketplaceOpen) useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
         const chat = s.panelSlots.find((slot) => slot.kind === "chat");
-        if (s.appMode === "code" && chat) s.focusPanel(chat.id);
+        if (s.appMode === "code") {
+          s.setAppMode("cowork");
+          if (chat) s.focusPanel(chat.id);
+        }
         requestAnimationFrame(() => {
           const current = useAppStore.getState();
           if (current.conversationId !== s.conversationId
@@ -176,19 +171,6 @@ export const useKeyboardShortcuts = () => {
       if (match("newConversation")) { e.preventDefault(); createConversationInCurrentMode(); return; }
       if (match("settings")) { e.preventDefault(); s.toggleSettings(); return; }
       if (match("shortcutHelp")) { e.preventDefault(); s.toggleShortcutsHelp(); return; }
-      if (match("zoomIn")) {
-        e.preventDefault();
-        s.setTextScale(s.textScale + 0.04);
-        announceZoom(useAppStore.getState().textScale);
-        return;
-      }
-      if (match("zoomOut")) {
-        e.preventDefault();
-        s.setTextScale(s.textScale - 0.04);
-        announceZoom(useAppStore.getState().textScale);
-        return;
-      }
-      if (match("zoomReset")) { e.preventDefault(); s.setTextScale(1); announceZoom(1); return; }
       if (match("terminal")) {
         e.preventDefault();
         s.setAppMode("code");
@@ -204,12 +186,7 @@ export const useKeyboardShortcuts = () => {
       }
       if (match("leftSidebar")) {
         e.preventDefault();
-        if (s.leftSidebarWidth > 0) {
-          sidebarWidthRef.current = s.leftSidebarWidth;
-          s.setLeftSidebarWidth(0);
-        } else {
-          s.setLeftSidebarWidth(sidebarWidthRef.current);
-        }
+        s.setLeftSidebarWidth(s.leftSidebarWidth > 0 ? 0 : s.leftSidebarExpandedWidth);
         return;
       }
       if (match("sideChat")) { e.preventDefault(); s.toggleSideChat(); return; }

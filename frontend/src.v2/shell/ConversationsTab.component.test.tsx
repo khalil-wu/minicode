@@ -1,18 +1,20 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { sendClientCommandMock } = vi.hoisted(() => ({
+const { sendClientCommandMock, openWorkspaceFolderMock } = vi.hoisted(() => ({
   sendClientCommandMock: vi.fn(() => true),
+  openWorkspaceFolderMock: vi.fn(async (): Promise<string | null> => 'C:\\OpenedProject'),
 }))
 
 vi.mock('../desktop/runtime', () => ({ isDesktop: () => false, revealPath: vi.fn() }))
 vi.mock('../overlays/ToastContainer', () => ({ pushToast: vi.fn() }))
+vi.mock('../workspace/openWorkspaceFolder', () => ({ openWorkspaceFolder: openWorkspaceFolderMock }))
 vi.mock('../protocol/ws-outbox', () => ({
   sendClientCommand: sendClientCommandMock,
   sendClientCommandAwaitResult: vi.fn(async (command: { type: string }) => ({
-    type: 'command_result', command: command.type, level: 'success', message: '', data: {},
+    type: 'command.result', command: command.type, level: 'success', message: '', data: {},
   })),
   sendConversationDeleteCommand: vi.fn(async () => true),
   commandResultSucceeded: (event: { level?: string }) => !['error', 'failed'].includes(String(event.level || '')),
@@ -27,6 +29,9 @@ describe('ConversationsTab project navigation', () => {
   beforeEach(() => {
     localStorage.removeItem('minicode.sidebar.conversations.state')
     sendClientCommandMock.mockClear()
+    openWorkspaceFolderMock.mockReset()
+    openWorkspaceFolderMock.mockResolvedValue('C:\\OpenedProject')
+    vi.mocked(sendClientCommandAwaitResult).mockClear()
     useAppStore.setState({
       appMode: 'cowork',
       conversationId: 'conv-represented',
@@ -55,8 +60,9 @@ describe('ConversationsTab project navigation', () => {
       { id: 'conv-next', title: 'Next task', updatedAt: '2026-08-15T00:00:01.000Z', workspaceRoot: 'C:\\Represented' },
     ] })
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
-    const previous = screen.getByText('Existing workspace task').closest('button')
-    const next = screen.getByText('Next task').closest('button')
+    const project = screen.getByRole('region', { name: '工作区 Represented' })
+    const previous = within(project).getByText('Existing workspace task').closest('button')
+    const next = within(project).getByText('Next task').closest('button')
     expect(previous?.getAttribute('aria-current')).toBe('page')
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: 'conv-next' }))
@@ -78,9 +84,10 @@ describe('ConversationsTab project navigation', () => {
     expect(sendConversationDeleteCommand).not.toHaveBeenCalled()
     unmount()
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
-    expect(screen.queryByText('Existing workspace task')).toBeNull()
+    expect(screen.queryByRole('region', { name: '工作区 Represented' })).toBeNull()
+    expect(within(screen.getByRole('region', { name: '最近' })).getByText('Existing workspace task')).toBeTruthy()
     act(() => useAppStore.getState().setRecentWorkspaces(workspaces))
-    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
   })
 
   it('keeps the workspace visible if preserving history fails', async () => {
@@ -91,17 +98,19 @@ describe('ConversationsTab project navigation', () => {
     fireEvent.contextMenu(screen.getByRole('button', { name: 'Represented', exact: true }))
     fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('无法保存历史会话', 'error', 5000))
-    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
   })
 
   it('uses one project list and refreshes its saved folders after connecting', () => {
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     expect(screen.getByText('项目')).toBeTruthy()
-    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '选择会话' })).toBeNull()
     expect(screen.queryByRole('region', { name: '最近工作区' })).toBeNull()
     expect(screen.queryByRole('button', { name: '清空最近工作区' })).toBeNull()
     expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.getByRole('region', { name: '最近' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '普通任务' })).toBeNull()
     act(() => useAppStore.setState({ isConnected: true }))
     expect(sendClientCommandMock).toHaveBeenCalledWith({ type: 'workspace.recent' })
     expect(useAppStore.getState().recentWorkspaces).toHaveLength(2)
@@ -119,6 +128,32 @@ describe('ConversationsTab project navigation', () => {
       expect(screen.getByRole('region', { name: '工作区 Tools' })).toBeTruthy()
       fireEvent.click(screen.getByRole('button', { name: '在 Tools 中新建任务' }))
       expect(create).toHaveBeenCalledWith({ bindWorkspace: true, workspaceRoot: 'D:\\External\\Tools', appMode: 'cowork' })
+    } finally { useAppStore.setState({ createConversation: original }) }
+  })
+
+  it('labels a registered MiniCode worktree by its project while keeping its actual action path', () => {
+    const worktreePath = 'C:/Desktop/MiniCode/.minicode/worktrees/conv_5c136af99610'
+    useAppStore.setState({
+      appMode: 'code', conversationId: 'isolated',
+      conversations: [{ id: 'isolated', title: 'Isolated MiniCode task', updatedAt: '2026-10-05', workspaceRoot: worktreePath, worktreePath }],
+      recentWorkspaces: [{ path: worktreePath, name: 'conv_5c136af99610', projectType: 'python', lastOpened: 1_791_202_126 }],
+    })
+    const original = useAppStore.getState().createConversation
+    const create = vi.fn(async () => true)
+    useAppStore.setState({ createConversation: create })
+    try {
+      render(<ConversationsTab conversationId="isolated" onSetConfirmDialog={vi.fn()} />)
+      const project = screen.getByRole('region', { name: '工作区 MiniCode' })
+      expect(within(project).getByRole('button', { name: 'MiniCode', exact: true })).toBeTruthy()
+      expect(within(project).getByText('Isolated MiniCode task')).toBeTruthy()
+      expect(screen.queryByRole('region', { name: '工作区 Computer' })).toBeNull()
+      fireEvent.click(within(project).getByText('Isolated MiniCode task').closest('button')!)
+      expect(useAppStore.getState().appMode).toBe('cowork')
+      expect(useAppStore.getState().conversationId).toBe('isolated')
+      expect(sendClientCommandMock).not.toHaveBeenCalled()
+      act(() => useAppStore.setState({ appMode: 'code' }))
+      fireEvent.click(within(project).getByRole('button', { name: '在 MiniCode 中新建任务' }))
+      expect(create).toHaveBeenCalledExactlyOnceWith({ bindWorkspace: true, workspaceRoot: worktreePath, appMode: 'cowork' })
     } finally { useAppStore.setState({ createConversation: original }) }
   })
 
@@ -142,15 +177,151 @@ describe('ConversationsTab project navigation', () => {
     ] })
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     expect(screen.queryByText('Archived task')).toBeNull()
-    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
   })
 
   it('does not expose session deletion from the conversation menu', () => {
     const onSetConfirmDialog = vi.fn()
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={onSetConfirmDialog} />)
-    fireEvent.click(screen.getByRole('button', { name: '会话操作' }))
+    fireEvent.click(within(screen.getByRole('region', { name: '工作区 Represented' })).getByRole('button', { name: '会话操作' }))
     expect(screen.queryByRole('menuitem', { name: '删除' })).toBeNull()
     expect(onSetConfirmDialog).not.toHaveBeenCalled()
+  })
+
+  it('isolates duplicate project and recent rows while renaming through the canonical conversation id', async () => {
+    render(<ConversationsTab conversationId="conv-represented" showRecent onSetConfirmDialog={vi.fn()} />)
+    const project = screen.getByRole('region', { name: '工作区 Represented' })
+    const recent = screen.getByRole('region', { name: '最近' })
+    expect(within(project).getByText('Existing workspace task')).toBeTruthy()
+    expect(within(recent).getByText('Existing workspace task')).toBeTruthy()
+    const projectAction = within(project).getByRole('button', { name: '会话操作' })
+    const recentAction = within(recent).getByRole('button', { name: '会话操作' })
+
+    fireEvent.click(projectAction)
+    expect(screen.getAllByRole('menu', { name: '会话操作' })).toHaveLength(1)
+    expect(projectAction.getAttribute('aria-expanded')).toBe('true')
+    expect(recentAction.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(recentAction)
+    const menu = screen.getByRole('menu', { name: '会话操作' })
+    expect(screen.getAllByRole('menu', { name: '会话操作' })).toHaveLength(1)
+    expect(menu.id).toBe('conversation-actions-recent:conv-represented')
+    expect(projectAction.getAttribute('aria-expanded')).toBe('false')
+    expect(recentAction.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.click(within(menu).getByRole('menuitem', { name: '重命名' }))
+    expect(screen.getAllByRole('textbox', { name: '重命名 Existing workspace task' })).toHaveLength(1)
+    const input = within(recent).getByRole('textbox', { name: '重命名 Existing workspace task' })
+    expect(within(project).queryByRole('textbox')).toBeNull()
+    expect(within(project).getByText('Existing workspace task')).toBeTruthy()
+    fireEvent.change(input, { target: { value: 'Renamed canonical task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledExactlyOnceWith({
+      type: 'conversation.rename', conversation_id: 'conv-represented', title: 'Renamed canonical task',
+    }, 'conversation.rename'))
+    expect(useAppStore.getState().conversationId).toBe('conv-represented')
+  })
+
+  it('keeps the add-project entry available on an empty sidebar and navigates after a real folder opens', async () => {
+    useAppStore.setState({ conversations: [], recentWorkspaces: [] })
+    const onNavigate = vi.fn()
+    render(<ConversationsTab conversationId="" onNavigate={onNavigate} onSetConfirmDialog={vi.fn()} />)
+    expect(screen.getByText('项目')).toBeTruthy()
+    expect(screen.getByText('开始你的第一个任务')).toBeTruthy()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加项目' })) })
+    expect(openWorkspaceFolderMock).toHaveBeenCalledExactlyOnceWith()
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('region', { name: '工作区 OpenedProject' })).toBeNull()
+
+    onNavigate.mockClear()
+    openWorkspaceFolderMock.mockResolvedValueOnce(null)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加项目' })) })
+    expect(onNavigate).not.toHaveBeenCalled()
+  })
+
+  it('shows five chats per project and retains the chosen expansion through modes and activity', () => {
+    useAppStore.setState({ conversations: Array.from({ length: 7 }, (_, index) => ({
+      id: `project-${index}`, title: `Project chat ${index}`, updatedAt: '2026-10-05', workspaceRoot: 'C:\\Represented',
+    })) })
+    const props = { conversationId: 'project-0', onSetConfirmDialog: vi.fn() }
+    const { container, rerender } = render(<ConversationsTab {...props} />)
+    const project = () => screen.getByRole('region', { name: '工作区 Represented' })
+    const rows = () => project().querySelectorAll('[data-session-row="true"]')
+    expect(rows()).toHaveLength(5)
+    expect(container.querySelector('.mc-workspace-session-count')).toBeNull()
+    expect(within(project()).queryByText('Project chat 6')).toBeNull()
+    fireEvent.click(within(project()).getByRole('button', { name: '展开显示' }))
+    expect(rows()).toHaveLength(7)
+
+    act(() => useAppStore.setState({ appMode: 'code' }))
+    expect(rows()).toHaveLength(7)
+    rerender(<ConversationsTab {...props} activityView />)
+    expect(screen.queryByRole('region', { name: '工作区 Represented' })).toBeNull()
+    rerender(<ConversationsTab {...props} />)
+    expect(rows()).toHaveLength(7)
+    fireEvent.click(within(project()).getByRole('button', { name: 'Represented', exact: true }))
+    expect(rows()).toHaveLength(0)
+    fireEvent.click(within(project()).getByRole('button', { name: 'Represented', exact: true }))
+    expect(rows()).toHaveLength(7)
+    fireEvent.click(within(project()).getByRole('button', { name: '收起' }))
+    expect(rows()).toHaveLength(5)
+    expect(within(screen.getByRole('region', { name: '最近' })).getByText('Project chat 6')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '普通任务' })).toBeNull()
+  })
+
+  it('groups real activity by priority and local calendar dates with only recorded summaries', () => {
+    vi.useFakeTimers()
+    const now = new Date(2026, 9, 5, 12)
+    vi.setSystemTime(now)
+    const localDate = (day: number) => new Date(2026, 9, day, 10).toISOString()
+    useAppStore.setState({ conversations: [
+      { id: 'running', title: 'Running earlier', updatedAt: localDate(1), sessionStatus: 'running' },
+      { id: 'waiting', title: 'Waiting earlier', updatedAt: localDate(2), sessionStatus: 'waiting' },
+      { id: 'today', title: 'Today task', updatedAt: localDate(5), summary: 'Recorded summary only' },
+      { id: 'yesterday', title: 'Yesterday task', updatedAt: localDate(4) },
+      { id: 'earlier', title: 'Earlier task', updatedAt: localDate(3) },
+      { id: 'archived', title: 'Archived task', updatedAt: localDate(5), archived: true },
+    ] })
+    const { container } = render(<ConversationsTab conversationId="conv-represented" activityView onSetConfirmDialog={vi.fn()} />)
+    const priority = screen.getByRole('region', { name: '优先级' })
+    expect(within(priority).getByText('Running earlier')).toBeTruthy()
+    expect(within(priority).getByText('Waiting earlier')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '今天' })).getByText('Today task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '昨天' })).getByText('Yesterday task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '更早' })).getByText('Earlier task')).toBeTruthy()
+    expect(screen.queryByText('Archived task')).toBeNull()
+    expect(container.querySelectorAll('.mc-sidebar-activity-summary')).toHaveLength(1)
+    expect(screen.getByText('Recorded summary only')).toBeTruthy()
+    fireEvent.click(screen.getByText('Today task').closest('button')!)
+    expect(sendClientCommandMock).toHaveBeenCalledExactlyOnceWith({ type: 'conversation.switch', conversation_id: 'today' })
+    expect(useAppStore.getState().conversationId).toBe('conv-represented')
+  })
+
+  it('retains the existing twenty-row more pagination in the activity view', () => {
+    useAppStore.setState({ conversations: Array.from({ length: 25 }, (_, index) => ({
+      id: `activity-${index}`, title: `Activity ${index}`, updatedAt: new Date().toISOString(),
+    })) })
+    const { container } = render(<ConversationsTab conversationId="conv-represented" activityView onSetConfirmDialog={vi.fn()} />)
+    expect(container.querySelectorAll('[data-session-row="true"]')).toHaveLength(20)
+    fireEvent.click(screen.getByRole('button', { name: '显示更多' }))
+    expect(container.querySelectorAll('[data-session-row="true"]')).toHaveLength(25)
+    expect(screen.queryByRole('button', { name: '显示更多' })).toBeNull()
+  })
+
+  it('projects producer role summaries as real plain assistant text without inventing missing previews', () => {
+    useAppStore.setState({ conversations: [
+      { id: 'assistant', title: 'Assistant summary', updatedAt: new Date().toISOString(),
+        summary: 'User: 调研**代码**界面 | Assistant: 较早的结果 | User: 继续 | Assistant: **已完成** [检查记录](https://example.com/checks) 与 `代码`。' },
+      { id: 'user-only', title: 'User summary', updatedAt: new Date().toISOString(), summary: 'User: **保留真实要求** [文档](https://example.com/docs)' },
+      { id: 'plain', title: 'Saved summary', updatedAt: new Date().toISOString(), summary: '**原有摘要** [来源](https://example.com/source)' },
+      { id: 'missing', title: 'No summary', updatedAt: new Date().toISOString() },
+    ] })
+    const { container } = render(<ConversationsTab conversationId="conv-represented" activityView onSetConfirmDialog={vi.fn()} />)
+    const previews = [...container.querySelectorAll('.mc-sidebar-activity-summary')].map((node) => node.textContent)
+    expect(previews).toHaveLength(3)
+    expect(previews).toEqual(expect.arrayContaining(['已完成 检查记录 与 代码。', '保留真实要求 文档', '原有摘要 来源']))
+    expect(previews.join(' ')).not.toMatch(/User:|Assistant:|\*\*|https:\/\//)
+    expect(previews.join(' ')).not.toContain('较早的结果')
+    expect(screen.getByText('No summary').closest('.mc-sidebar-activity-task')!.querySelector('.mc-sidebar-activity-summary')).toBeNull()
   })
 
   it('debounces sidebar scroll persistence off the interaction path', () => {

@@ -230,7 +230,7 @@ def test_status_endpoint_exposes_runtime_snapshot() -> None:
 def test_status_endpoint_does_not_expose_cross_session_runtime_metadata(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: object())
+    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: _StubLLM())
     monkeypatch.setattr(
         "backend.ws.handler.get_available_models",
         lambda provider=None: ["gpt-5.4", "gpt-5.4-mini"],
@@ -284,7 +284,7 @@ class _StubLLM(LLMAdapter):
 
 
 def test_upload_document_stays_draft_until_user_message_is_sent(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: object())
+    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: _StubLLM())
     # The websocket turn builds its own session adapter; without a stub it would
     # construct a real provider adapter for a test-only API key.
     monkeypatch.setattr(
@@ -438,7 +438,7 @@ def test_upload_document_stays_draft_until_user_message_is_sent(monkeypatch, tmp
 
 
 def test_rest_chat_streams_agent_loop_events_into_response(monkeypatch) -> None:
-    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: object())
+    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: _StubLLM())
     # The REST route delegates to QueryEngine, which resolves the loop from its
     # own module global; that is the single seam a run passes through.
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", _fake_agent_loop)
@@ -456,7 +456,7 @@ def test_rest_chat_streams_agent_loop_events_into_response(monkeypatch) -> None:
 
 
 def test_rest_chat_keeps_recoverable_errors_separate_from_final_reply(monkeypatch) -> None:
-    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: object())
+    monkeypatch.setattr("backend.main._create_session_llm", lambda config, model_override=None, **_kwargs: _StubLLM())
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", _fake_recovered_agent_loop)
 
     with TestClient(app) as client:

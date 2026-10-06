@@ -1,44 +1,17 @@
-.collaboration-cell-avatars {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex: 0 0 auto;
-}
-.collaboration-cell-avatars .mc-agent-avatar,
-.collaboration-agent-link .mc-agent-avatar { --agent-avatar-size: 18px; }
-.collaboration-cell-live-summary {
-  margin-left: 6px;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: normal;
-  overflow-wrap: anywhere;
-}
-.collaboration-agent-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  max-width: 100%;
-  padding: 2px 4px;
-  margin-left: -4px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-}
-.collaboration-agent-link strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.collaboration-agent-link:hover { background: var(--surface-soft); color: var(--text-primary); }
-.collaboration-agent-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.collaboration-agent-status { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; }
-.collaboration-task-instructions { display: inline-block; margin: 0 0 4px 8px; vertical-align: middle; }
-.collaboration-task-instructions[open] { display: block; margin-left: 0; }
-.collaboration-task-instructions > summary { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; list-style: none; cursor: pointer; }
-.collaboration-task-instructions > summary::-webkit-details-marker { display: none; }
-.collaboration-task-instructions > summary:hover { color: var(--text-secondary); }
-.collaboration-task-instructions > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
-.collaboration-task-instructions[open] > summary > svg { transform: rotate(90deg); }
-.collaboration-task-instructions .collaboration-cell-message { padding: 5px 0 0 16px; font-size: var(--text-xs); line-height: 1.6; }
-@media (max-width: 600px) { .collaboration-cell-live-summary { display: none; } }
+.collaboration-delegated { gap: 2px; font-family: var(--font-ui); font-size: var(--mc-font-body); }
+.collaboration-delegated-row { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; min-height: 26px; padding: 3px 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; line-height: 1.4; text-align: left; }
+.collaboration-delegated-row .mc-agent-avatar { --agent-avatar-size: 22px; }
+.collaboration-delegated-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+button.collaboration-delegated-row { cursor: pointer; }
+button.collaboration-delegated-row:hover .collaboration-delegated-name { color: var(--text-secondary); }
+button.collaboration-delegated-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: 4px; }
+.collaboration-delegated-state { color: var(--text-muted); font-size: var(--mc-font-secondary); line-height: 1.6; }
+.collaboration-delegated-error { color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaboration-completion { display: grid; gap: 4px; font-family: var(--font-ui); font-size: var(--mc-font-body); }
+.collaboration-completion-row .mc-agent-avatar { --agent-avatar-size: 22px; }
+.collaboration-completion-row { display: flex; align-items: center; gap: 6px; min-height: 28px; width: fit-content; max-width: 100%; padding: 2px 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-family: var(--font-ui); text-align: left; }
+button.collaboration-completion-row { cursor: pointer; }
+button.collaboration-completion-row:hover { color: var(--text-secondary); }
+button.collaboration-completion-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: 4px; }
+.collaboration-completion-row > span:nth-child(2) { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.collaboration-completion-status { flex-shrink: 0; white-space: nowrap; font-size: var(--mc-font-secondary); }

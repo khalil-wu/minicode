@@ -18,9 +18,10 @@ const BUILTIN_TOOL_LABELS: Record<string, string> = {
   websearch: "Search",
   update_plan: "Update plan",
   tool_exec: "Run code",
-  tool_wait: "Wait",
+  tool_wait: "Run code",
   monitor: "Read command output",
   task_status: "Check agents",
+  ask_user: "Ask user",
   task_create: "Create task",
   task_get: "Read task",
   task_list: "List tasks",
@@ -35,6 +36,7 @@ const BUILTIN_TOOL_NAME_RE = new RegExp(
 );
 
 const RUNTIME_ACTION_LABELS: Record<string, string> = {
+  ...Object.fromEntries(Object.values(BUILTIN_TOOL_LABELS).map((label) => [label, label])),
   Read: "Read",
   Reading: "Read",
   "Read file": "Read",
@@ -56,6 +58,9 @@ const RUNTIME_ACTION_LABELS: Record<string, string> = {
   Run: "Run",
   Ran: "Run",
   Running: "Run",
+  "Run command": "Run",
+  "Ran command": "Run",
+  "Running command": "Run",
   "Run code": "Run code",
   "Running code": "Run code",
   Fetch: "Fetch",
@@ -71,6 +76,9 @@ const RUNTIME_ACTION_LABELS: Record<string, string> = {
   "Tool combination": "Run code",
   "code-mode": "Run code",
   code_mode: "Run code",
+  正在执行代码: "Run code",
+  正在运行代码: "Run code",
+  运行代码: "Run code",
   读取文件: "Read",
   读取: "Read",
   已读取: "Read",
@@ -115,6 +123,23 @@ const RUNTIME_ACTION_RE = new RegExp(
   `^(?:${Object.keys(RUNTIME_ACTION_LABELS).sort((a, b) => b.length - a.length).join("|")})(?=$|[\\s,:·(])`,
 );
 
+const ACTION_CHROME: Record<string, [string, string]> = {
+  Read: ["读取", "正在读取"], List: ["查看目录", "正在查看目录"],
+  Search: ["搜索", "正在搜索"], Edit: ["编辑", "正在编辑"],
+  Run: ["运行", "正在运行"], Fetch: ["读取网页", "正在读取网页"],
+  "Run code": ["操作结果", "操作结果"], "Running code": ["操作结果", "操作结果"],
+  Wait: ["等待", "等待中"], "Read command output": ["读取命令输出", "正在读取命令输出"],
+  "Update plan": ["更新计划", "正在更新计划"], "Start subagent": ["启动子智能体", "正在启动子智能体"],
+  "Check agents": ["查看子智能体", "正在查看子智能体"], "Ask user": ["向你提问", "等待你回复"],
+  "Create task": ["创建任务", "正在创建任务"], "Read task": ["读取任务", "正在读取任务"],
+  "List tasks": ["查看任务", "正在查看任务"], "Update task": ["更新任务", "正在更新任务"],
+  "Save task result": ["保存任务结果", "正在保存任务结果"], Preview: ["预览", "正在预览"],
+  "Run code · Failed": ["错误详情", "错误详情"],
+  "Run code · Cancelled": ["操作结果", "操作结果"],
+};
+const actionChrome = (action: string, running: boolean): string => ACTION_CHROME[action]?.[running ? 1 : 0] ?? action;
+const FAILURE_CHROME: Record<string, string> = { failed: "失败", blocked: "已阻止", cancelled: "已取消", "timed out": "超时" };
+
 /** Render runtime protocol identifiers as user-facing MiniCode labels.
  * Runtime records keep the original name for execution, policy matching,
  * replay export, and diagnostics. */
@@ -123,14 +148,14 @@ export function readableToolLabel(value: string | undefined, isRunning = false):
   const completion = text.match(/^Completed:\s*(.+)$/i);
   if (completion) return readableToolLabel(completion[1], isRunning);
   const failure = text.match(/^(Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i);
-  if (failure) return `${failure[1]}: ${readableToolLabel(failure[2])}`;
+  if (failure) return `${FAILURE_CHROME[failure[1].toLowerCase()]}：${readableToolLabel(failure[2])}`;
 
   const mcpName = text.match(/^mcp__([A-Za-z0-9_.-]+?)__([A-Za-z0-9_.-]+)(?=$|[\s,:·(])/);
   if (mcpName) return `${mcpName[1]}.${mcpName[2]}${text.slice(mcpName[0].length)}`;
   const joinedWebNames = text.match(/^(?:(?:webfetch|web_fetch|web_search)[\s,·]*)+$/i)?.[0];
   if (joinedWebNames) {
     const actions = [...new Set(joinedWebNames.match(/webfetch|web_fetch|web_search/gi)!.map(name => BUILTIN_TOOL_LABELS[name.toLowerCase()]))];
-    return `${actions.join(" · ")}${text.slice(joinedWebNames.length)}`;
+    return `${actions.map((action) => actionChrome(action, isRunning)).join(" · ")}${text.slice(joinedWebNames.length)}`;
   }
 
   // Only translate the leading render label. Paths, commands, URLs and MCP
@@ -139,18 +164,8 @@ export function readableToolLabel(value: string | undefined, isRunning = false):
   const runtimeAction = text.match(RUNTIME_ACTION_RE)?.[0];
   const matched = protocolName || runtimeAction;
   if (!matched) return text;
-  let action = protocolName
+  const action = protocolName
     ? BUILTIN_TOOL_LABELS[protocolName.toLowerCase()]
     : RUNTIME_ACTION_LABELS[runtimeAction!];
-  if (isRunning) {
-    if (action === "Read") action = "Reading";
-    else if (action === "List") action = "Listing";
-    else if (action === "Search") action = "Searching";
-    else if (action === "Edit") action = "Editing";
-    else if (action === "Run") action = "Running";
-    else if (action === "Run code") action = "Running code";
-    else if (action === "Wait") action = "Waiting";
-    else if (action === "Fetch") action = "Fetching";
-  }
-  return action + text.slice(matched.length);
+  return actionChrome(action, isRunning) + text.slice(matched.length);
 }

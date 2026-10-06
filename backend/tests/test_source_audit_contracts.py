@@ -186,9 +186,9 @@ def test_plugin_checkpoint_restores_canonical_ids_against_current_inventory(tmp_
     builder = ContextBuilder()
     builder.append_user("original request")
     kernel = object.__new__(TurnKernel)
+    kernel.runtime = SimpleNamespace(state_root=tmp_path / "checkpoints")
     kernel.metadata = {}
     kernel.run_record = AgentRunRecord("old-run", conversation_id="audit")
-    monkeypatch.setattr("backend.agent.turn_kernel.save_run_checkpoint", lambda **kwargs: save_run_checkpoint(base_dir=tmp_path / "checkpoints", **kwargs))
     assert kernel._save_checkpoint(session_id="audit-session", user_message=state.user_message,
         state=state, context_builder=builder, reason="interrupted") == "saved"
     checkpoint = load_latest_checkpoint("audit-session", tmp_path / "checkpoints", conversation_id="audit")

@@ -352,36 +352,34 @@
   transform: none;
 }
 
-/* ========== Footer grid ========== */
+/* ========== Footer controls ========== */
 /* Polish owns footer chrome (min-height, border, background); the internal
- * grid layout is component structure. */
+ * row includes every control, including dictation and the optional stop. */
 .composer-container .composer-footer {
-  display: grid;
-  grid-template-columns: auto minmax(8px, 1fr) auto minmax(0, auto) auto auto;
-  grid-template-areas: "primary spacer usage model stop send";
+  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 5px;
   margin-top: 1px;
 }
 
 .composer-footer-primary {
-  grid-area: primary;
+  flex: 0 1 auto;
 }
 
 .composer-footer-spacer {
-  grid-area: spacer;
+  flex: 1 1 8px;
 }
 
 .composer-context-usage {
-  grid-area: usage;
+  flex: 0 0 auto;
 }
 
 .composer-model-controls {
   position: relative;
-  grid-area: model;
   display: flex;
   align-items: center;
-  justify-self: end;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
 }
@@ -395,11 +393,6 @@
   min-width: 0;
 }
 
-.composer-effort-label {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
 .composer-effort-control {
   padding: 8px;
 }
@@ -409,12 +402,22 @@
   align-items: center;
   justify-content: center;
   position: relative;
-  min-height: 32px;
+  min-height: 52px;
   padding-inline: 32px;
 }
 
+.composer-effort-selection {
+  display: grid;
+  justify-items: center;
+  min-width: 0;
+  padding: 4px 9px;
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
 .composer-effort-value {
-  color: var(--accent-primary);
+  color: #9762ee;
+  font-size: var(--text-sm);
   font-weight: var(--fw-semibold);
 }
 
@@ -424,19 +427,21 @@
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-height: 30px;
-  padding: 3px 6px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-normal);
   cursor: pointer;
 }
 
 .composer-effort-reset {
   position: absolute;
+  top: 2px;
   right: 0;
   width: 30px;
   height: 30px;
@@ -486,7 +491,7 @@
   position: absolute;
   inset: 0 auto 0 -16px;
   width: calc(var(--effort-progress) + 16px);
-  background: var(--accent-primary);
+  background: linear-gradient(100deg, #4054e8, #9357ff);
   transition: width var(--transition-slow);
 }
 
@@ -569,7 +574,10 @@
 }
 
 .composer-send-btn {
-  grid-area: send;
+  flex: 0 0 auto;
+}
+
+.composer-dictation {
   flex: 0 0 auto;
 }
 
@@ -613,6 +621,15 @@
   transition: background-color var(--duration-base) var(--easing-standard),
               color var(--duration-base) var(--easing-standard);
 }
+
+.composer-model-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-model-trigger-effort { flex-shrink: 0; white-space: nowrap; color: var(--text-secondary); }
+.composer-model-trigger-effort:is([data-effort="high"], [data-effort="xhigh"], [data-effort="max"], [data-effort="ultra"]) { color: #9762ee; }
 
 .composer-model-select > svg { flex-shrink: 0; color: var(--text-muted); transition: transform var(--transition-fast); }
 .composer-model-select[aria-expanded="true"] > svg { transform: rotate(180deg); }
@@ -702,7 +719,7 @@
 /* Per-message stop chip (distinct from the send button, polish does not
  * style it). */
 .composer-stop-current-btn {
-  grid-area: stop;
+  flex: 0 0 auto;
   width: 32px;
   height: 32px;
   min-width: 32px;
@@ -933,27 +950,13 @@
   color: var(--text-primary);
 }
 
-/* ========== Responsive re-flow ========== */
+/* ========== Responsive controls ========== */
 /* Follow the actual pane width, including split views and side chat. */
-@container composer (max-width: 640px) {
+@container composer (max-width: 480px) {
   .composer-container .composer-footer {
     --composer-menu-left: 0px;
     --composer-menu-right: 0px;
     --composer-menu-min-width: 0px;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-    grid-template-areas:
-      "primary primary primary primary usage"
-      "model model model stop send";
-    row-gap: 8px;
-  }
-
-  .composer-footer-spacer {
-    display: none;
-  }
-
-  .composer-context-usage,
-  .composer-send-btn {
-    justify-self: end;
   }
 
   .composer-permission-picker,
@@ -973,16 +976,31 @@
   .composer-model-select > span {
     min-width: 0;
   }
+
+  .composer-permission-btn > .composer-control-label,
+  .composer-permission-btn > svg:last-child {
+    display: none;
+  }
 }
 
 @container composer (max-width: 400px) {
   .composer-container .composer-footer {
-    column-gap: 4px;
+    gap: 4px;
   }
 
   .composer-footer-primary {
     gap: 4px;
   }
+}
+
+@container composer (max-width: 360px) {
+  .composer-context-usage .mc-usage-ring-label {
+    display: none;
+  }
+}
+
+@container composer (max-width: 320px) {
+  .composer-model-trigger-label { max-width: 76px; }
 }
 
 @media (max-width: 768px) {
@@ -999,5 +1017,5 @@
 .composer-dictation-status { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .composer-dictation[data-phase='recording'] .composer-dictation-status { color: var(--state-danger); }
 .composer-dictation-meter { display: inline-block; width: 32px; height: 3px; overflow: hidden; border-radius: 2px; background: var(--border-subtle); }
-.composer-dictation-meter i { display: block; width: 100%; height: 100%; background: var(--state-danger); transform-origin: left; transition: transform 150ms linear; }
+.composer-dictation-meter i { display: block; width: 100%; height: 100%; background: var(--state-danger); transform-origin: left; transition: transform var(--duration-fast) linear; }
 @media (prefers-reduced-motion: reduce) { .composer-dictation-meter i { transition: none; } }

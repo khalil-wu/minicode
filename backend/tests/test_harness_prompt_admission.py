@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 
 from backend.agent.message import UserCommand
 from backend.artifact.store import ArtifactStore
@@ -26,8 +27,8 @@ class Provider(LLMAdapter):
         return ""
 
 
-@pytest.fixture
-def session(tmp_path, monkeypatch):
+@pytest_asyncio.fixture
+async def session(tmp_path, monkeypatch):
     owner = WebSocketSession(
         session_id="admission-session", websocket=SimpleNamespace(), llm=Provider(),
         artifact_store=ArtifactStore(storage_dir=str(tmp_path / "artifacts")), tool_registry=ToolRegistry(),
@@ -54,7 +55,8 @@ def session(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("behavior", ["follow_up", "steer"])
 @pytest.mark.parametrize("different_workspace", [False, True])
-def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp_path, behavior, different_workspace):
+@pytest.mark.asyncio
+async def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp_path, behavior, different_workspace):
     next_workspace = tmp_path / "next-workspace" if different_workspace else tmp_path
     next_workspace.mkdir(exist_ok=True)
     conversation_id = session.active_conversation_id
@@ -105,10 +107,11 @@ def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp
                 await running
             session.run_manager.run_tasks.clear()
 
-    asyncio.run(scenario())
+    await scenario()
 
 
-def test_same_profile_steer_reaches_current_turn_without_changing_permissions(session, tmp_path):
+@pytest.mark.asyncio
+async def test_same_profile_steer_reaches_current_turn_without_changing_permissions(session, tmp_path):
     conversation_id = session.active_conversation_id
 
     async def scenario():
@@ -131,10 +134,11 @@ def test_same_profile_steer_reaches_current_turn_without_changing_permissions(se
                 await running
             session.run_manager.run_tasks.clear()
 
-    asyncio.run(scenario())
+    await scenario()
 
 
-def test_rejected_message_identity_does_not_apply_prompt_settings(session, tmp_path):
+@pytest.mark.asyncio
+async def test_rejected_message_identity_does_not_apply_prompt_settings(session, tmp_path):
     conversation_id = session.active_conversation_id
     current = session.conversation_repo.get_conversation(conversation_id)
     current.transcript = [{"id": "existing-user", "role": "user", "content": "already admitted"}]
@@ -143,10 +147,10 @@ def test_rejected_message_identity_does_not_apply_prompt_settings(session, tmp_p
     other = tmp_path / "other"
     other.mkdir()
 
-    asyncio.run(session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
+    await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
         "content": "different content", "conversation_id": conversation_id, "user_message_id": "existing-user",
         "client_command_id": "conflicting-command", "permission_mode": "bypass", "workspace_root": str(other),
-    })))
+    }))
 
     saved = session.conversation_repo.get_conversation(conversation_id)
     assert saved.permission_mode == "confirm"

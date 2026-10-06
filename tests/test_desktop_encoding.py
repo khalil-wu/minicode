@@ -23,9 +23,8 @@ def test_desktop_manual_launchers_force_utf8() -> None:
     assert "chcp.com 65001" in ps1
     assert "pythonutf8" in ps1
     assert "pythonioencoding" in ps1
-    assert "chcp 65001" in bat
-    assert "pythonutf8=1" in bat
-    assert "pythonioencoding=utf-8" in bat
+    assert 'powershell -noprofile -executionpolicy bypass -file "%~dp0run-desktop.ps1"' in bat
+    assert "exit /b %errorlevel%" in bat
 
 
 def test_desktop_backend_sidecar_decodes_utf8_incrementally() -> None:

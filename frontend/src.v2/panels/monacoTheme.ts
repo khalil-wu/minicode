@@ -48,6 +48,7 @@ export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name
     colors: {
       "editor.background": color("--editor-background"),
       "editor.foreground": color("--editor-foreground"),
+      "editorGhostText.foreground": color("--editor-ghost-foreground"),
       "editorGutter.background": color("--editor-background"),
       "editorLineNumber.foreground": color("--editor-line-number"),
       "editorLineNumber.activeForeground": color("--editor-line-number-active"),
@@ -76,6 +77,10 @@ export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name
       "editorSuggestWidget.border": color("--editor-border"),
       "editorSuggestWidget.foreground": color("--editor-foreground"),
       "editorSuggestWidget.selectedBackground": color("--editor-widget-selection"),
+      "editorSuggestWidget.selectedForeground": color("--editor-foreground"),
+      "editorSuggestWidget.selectedIconForeground": color("--editor-foreground"),
+      "editorSuggestWidget.highlightForeground": color("--editor-foreground"),
+      "editorSuggestWidget.focusHighlightForeground": color("--editor-foreground"),
       "editorStickyScroll.background": color("--editor-background"),
       "editorStickyScrollHover.background": color("--editor-line-highlight"),
       "editorOverviewRuler.border": color("--editor-border"),
@@ -83,8 +88,12 @@ export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name
       "scrollbarSlider.hoverBackground": color("--border-strong"),
       "scrollbarSlider.activeBackground": color("--border-strong"),
       "minimap.background": color("--editor-background"),
-      "diffEditor.insertedTextBackground": color("--state-success-soft"),
-      "diffEditor.removedTextBackground": color("--state-danger-soft"),
+      "diffEditor.insertedLineBackground": color("--diff-added-background"),
+      "diffEditor.removedLineBackground": color("--diff-removed-background"),
+      "diffEditor.insertedTextBackground": color("--diff-added-word-background"),
+      "diffEditor.removedTextBackground": color("--diff-removed-word-background"),
+      "diffEditorGutter.insertedLineBackground": color("--diff-added-background"),
+      "diffEditorGutter.removedLineBackground": color("--diff-removed-background"),
     },
   });
 }

@@ -879,6 +879,7 @@ class ControlProviderAuthPromptRequestData(TypedDict):
 
 class ControlConversationResourcesCleanupRequestData(TypedDict):
     subtype: Literal["conversation_resources_cleanup"]
+    operation: NotRequired[Literal["archive", "delete"]]
     workspace_root: str
 
 

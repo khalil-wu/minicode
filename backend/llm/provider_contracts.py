@@ -229,6 +229,7 @@ class ReasoningPolicy:
     level: str
     wire_level: str = ""
     wire_levels: tuple[str, ...] = ()
+    levels: tuple[str, ...] = ()
 
 
 __all__ = [

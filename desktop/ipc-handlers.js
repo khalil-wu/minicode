@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { ipcMain, dialog, shell, app } = require("electron");
+const { NATIVE_MENU_KEYS } = require("./menu-popup");
 
 const {
   isHttpUrl,
@@ -214,6 +215,7 @@ function registerIpcHandlers() {
 
   const {
     setupWindowsSandbox,
+    popupApplicationMenu,
     getMainWindow,
     showDesktopNotification,
     dispatchDeepLink,
@@ -698,8 +700,8 @@ function registerIpcHandlers() {
     return ptyManager.restartSession(sessionId, conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:killConversation", withMainSender("minicode:pty:killConversation", (_event, conversationId) => {
-    return ptyManager.killConversation(conversationId);
+  ipcMain.handle("minicode:pty:killConversation", withMainSender("minicode:pty:killConversation", (_event, conversationId, preserveHistory) => {
+    return ptyManager.killConversation(conversationId, preserveHistory === true);
   }));
 
   ipcMain.handle("minicode:pty:list", withMainSender("minicode:pty:list", (_event, conversationId) => {
@@ -753,6 +755,10 @@ function registerIpcHandlers() {
     };
   }));
   ipcMain.handle("minicode:sandbox:setup", withMainSender("minicode:sandbox:setup", () => setupWindowsSandbox()));
+  ipcMain.handle("minicode:menu:popup", withMainSender("minicode:menu:popup", (_event, key) => {
+    if (!NATIVE_MENU_KEYS.has(key)) throw new TypeError("请选择文件、编辑、视图或帮助菜单。");
+    return popupApplicationMenu(key);
+  }));
 }
 
 // ---------------------------------------------------------------------------

@@ -270,6 +270,7 @@ describe("editor workspace isolation", () => {
 
     const state = useAppStore.getState();
     expect(state.editorTabs).toEqual([]);
+    expect(state.appMode).toBe("cowork");
     expect(state.activeTabPath).toBeNull();
     expect(state.activeEditorPath).toBeNull();
     expect(state.panelSlots).toEqual([
@@ -303,13 +304,13 @@ describe("editor workspace isolation", () => {
 
     useAppStore.getState().setLeftSidebarWidth(50);
 
-    expect(useAppStore.getState().leftSidebarWidth).toBe(272);
-    expect(storage.get("minicode.layout.left-width")).toBe("272");
+    expect(useAppStore.getState().leftSidebarWidth).toBe(240);
+    expect(storage.get("minicode.layout.left-width")).toBe("240");
 
-    useAppStore.getState().setLeftSidebarWidth(500);
+    useAppStore.getState().setLeftSidebarWidth(700);
 
-    expect(useAppStore.getState().leftSidebarWidth).toBe(400);
-    expect(storage.get("minicode.layout.left-width")).toBe("400");
+    expect(useAppStore.getState().leftSidebarWidth).toBe(520);
+    expect(storage.get("minicode.layout.left-width")).toBe("520");
   });
 
   it("persists right sidebar open state when toggled or opened by a tab", () => {

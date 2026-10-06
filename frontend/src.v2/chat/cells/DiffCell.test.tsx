@@ -30,7 +30,7 @@ describe("DiffCell", () => {
     expect(screen.queryByText("oldA")).toBeNull();
     expect(screen.queryByText("newA")).toBeNull();
     expect(screen.queryByText("newB")).toBeNull();
-    expect(screen.getByRole("button", { name: "审核" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看变更" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "撤销" })).toBeTruthy();
     expect(container.querySelectorAll(".diff-file-toggle")).toHaveLength(0);
     expect(container.querySelectorAll(".diff-file-section")).toHaveLength(2);

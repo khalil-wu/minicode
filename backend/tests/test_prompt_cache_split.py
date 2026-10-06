@@ -226,7 +226,7 @@ def test_prompt_builder_keeps_dynamic_turn_context_out_of_stable_prefix(tmp_path
     )
 
     assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY in parts.render_system()
-    assert "You are an agent for MiniCode" in parts.stable
+    assert "You are a coding agent running in the Codex CLI" in parts.stable
 
     for dynamic_fact in (
         "DYNAMIC WORKSPACE SUMMARY",

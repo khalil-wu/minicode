@@ -376,6 +376,8 @@ export type SettingsTab =
   | "archived";
 
 export interface UISlice {
+  contextCardCollapsed: boolean;
+  setContextCardCollapsed: (collapsed: boolean) => void;
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
   textScale: number;
@@ -693,6 +695,7 @@ export interface GitReviewRequest {
 
 export interface WorkspaceSlice {
   leftSidebarWidth: number;
+  leftSidebarExpandedWidth: number;
   rightSidebarWidth: number;
   rightPanelOpen: boolean;
   rightPanelExpanded: boolean;
@@ -723,7 +726,7 @@ export interface WorkspaceSlice {
   setActiveBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
   addPanel: (slot: PanelSlot | (Omit<PanelSlot, "kind"> & { kind: LegacyPanelKind })) => void;
   removePanel: (id: string) => void;
-  focusPanel: (id: string) => void;
+  focusPanel: (id: string, options?: { preserveRightPanelExpanded?: boolean }) => void;
   movePanel: (id: string, direction: -1 | 1) => void;
   reorderPanels: (fromIndex: number, toIndex: number) => void;
   resizePanel: (id: string, delta: number) => void;
@@ -1162,6 +1165,10 @@ export interface ProgressContentBlock {
   errorMessage?: string;
   operationId?: string;
   providerState?: AgentProgressProviderState;
+  subagentId?: string;
+  subagentName?: string;
+  subagentIdentity?: string;
+  subagentStatus?: SubagentState["status"];
   timestamp: number;
 }
 export interface AgentProgressEntry extends ProgressContentBlock {
@@ -1175,6 +1182,8 @@ export interface ChatMessage {
   id: string;
   turnId?: string;
   toolPage?: ToolHistoryPage;
+  /** Authoritative file changes owned by this assistant turn. */
+  turnDiff?: TurnDiffState;
   role: MessageRole;
   content: string;
   /** Exact assembled model input for a user message with separate display text. */
@@ -1315,6 +1324,7 @@ export interface ChatSlice {
   messageRevealTarget: { conversationId: string; messageId: string; requestId: string } | null;
   conversationId: string | null;
   pendingConversationSwitchId: string | null;
+  pendingConversationCreateId: string | null;
   conversations: ConversationMeta[];
   conversationInventoryInstanceId: string | null;
   conversationInventoryRevision: number;
@@ -1384,7 +1394,7 @@ export interface ChatSlice {
     messageId?: string,
   ) => void;
   upsertMessageProgress: (
-    progress: Omit<ProgressContentBlock, "type" | "timestamp">,
+    progress: Omit<ProgressContentBlock, "type" | "timestamp"> & { timestamp?: number },
     conversationId?: string,
     messageId?: string,
   ) => void;
@@ -1576,6 +1586,9 @@ export interface SubagentMessageState {
 
 export interface SubagentState {
   id: string;
+  model?: string;
+  provider?: string;
+  reasoningEffort?: string;
   role: string;
   status: "pending" | "running" | "blocked" | "done" | "partial" | "cancelled" | "error";
   cleanupPending?: boolean;
@@ -1953,6 +1966,7 @@ export interface InspectorSlice {
 // ── Editor Slice ─────────────────────────────────────────────────
 
 export interface EditorTab {
+  language?: string;
   pinned?: boolean;
   preview?: boolean;
   lastActivated?: number;
@@ -1974,13 +1988,15 @@ export interface EditorTab {
 }
 
 export interface EditorSlice {
-  inlineCompletionUsage: { requests: number; inputTokens: number; outputTokens: number; lastError: string };
+  inlineCompletionUsage: { requests: number; inputTokens: number; outputTokens: number; lastError: string; pending: boolean };
   workbenchPreferences: import("../lib/workbench-preferences").WorkbenchPreferences;
   setWorkbenchPreferences: (patch: Partial<import("../lib/workbench-preferences").WorkbenchPreferences>) => void;
   pinEditorTab: (path: string, pinned: boolean) => void;
   keepEditorTab: (path: string) => void;
   editorTabs: EditorTab[];
   activeTabPath: string | null;
+  editorExplorerOpen: boolean;
+  setEditorExplorerOpen: (open: boolean) => void;
   workspaceSearchOpen: boolean;
   openWorkspaceSearch: () => void;
   closeWorkspaceSearch: () => void;
@@ -1994,6 +2010,7 @@ export interface EditorSlice {
   closeAllEditorTabs: () => void;
   renameEditorPath: (path: string, newPath: string, workspaceRoot: string) => void;
   setActiveTab: (path: string) => void;
+  setEditorTabLanguage: (path: string, language?: string) => void;
   updateTabContent: (path: string, content: string) => void;
   adoptEditorModelChanges: (changes: Array<{ path: string; content: string; original: string; contentHash: string; sizeBytes?: number }>, workspaceRoot: string) => void;
   markTabLoaded: (

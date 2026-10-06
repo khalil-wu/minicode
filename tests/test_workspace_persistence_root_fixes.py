@@ -63,7 +63,8 @@ def test_worktree_backup_matches_removed_files_and_preserves_index(tmp_path, ign
         git(worktree, "add", "tracked.txt")
         (worktree / "tracked.txt").write_bytes(b"unstaged\n")
         (worktree / "new.txt").write_bytes(b"untracked\n")
-    manager = WorktreeManager(repo, snapshot_store=WorktreeSnapshotStore(tmp_path / "snapshots"))
+    manager = WorktreeManager(repo, snapshot_store=WorktreeSnapshotStore(tmp_path / "snapshots"),
+        git_runner=lambda *args, index_file=None, **kwargs: subprocess.run(*args, **kwargs))
     assert manager.has_local_changes(worktree)
     denied = manager.safe_remove_worktree(worktree)
     assert not denied.removed and denied.needs_force

@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-import { fileIcon, folderIcon } from "../../lib/file-icons";
+import { folderIcon } from "../../lib/file-icons";
 import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
@@ -17,6 +17,7 @@ import { openWebTarget } from "../openWebTarget";
 import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
+import { File } from "../../lib/icons";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
@@ -1002,12 +1003,6 @@ const fileExtensionFromPath = (value: string): string => {
   return match?.[1]?.toLowerCase() ?? "";
 };
 
-const FileTypeIcon = ({ path, extension }: { path: string; extension: string }) => (
-  <span className="md-official-file-icon" data-document-type={extension || "file"} aria-hidden="true">
-    {fileIcon(path, { size: 18, className: "md-official-file-icon-svg" })}
-  </span>
-);
-
 const displayPathParts = (value: string): { directory: string; name: string } => {
   const normalized = normalizeSlashes(value).replace(/^\.\/+/g, "");
   const index = normalized.lastIndexOf("/");
@@ -1058,7 +1053,7 @@ function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageR
   return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : requireKnown ? null : target;
 }
 
-const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: EditorTarget; children: React.ReactNode } & MessageResourceScope) => {
+const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: EditorTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
   const activeWorkspace = useAppStore((s) => s.workingDirectory);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
   const opensInPreview = workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
@@ -1096,10 +1091,11 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: 
         onClick={openFile}
         title={`${opensInPreview ? "预览" : "在编辑器中打开"} ${titlePath}`}
         aria-label={label}
-        className={fileChipClassName}
+        className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
+        data-presentation={presentation}
         data-ext={extension || "file"}
       >
-        <FileTypeIcon path={target.path} extension={extension} />
+        {presentation === "link" && <File size={14} className="md-file-link-icon" aria-hidden="true" />}
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{fileName}</span>
@@ -1111,7 +1107,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: 
   );
 };
 
-const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: FileTarget; children: React.ReactNode } & MessageResourceScope) => {
+const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: FileTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
@@ -1146,10 +1142,11 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
         }}
         title={previewInsideWorkspace ? `预览 ${titlePath}` : `打开 ${titlePath}`}
         aria-label={label}
-        className={fileChipClassName}
+        className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
+        data-presentation={presentation}
         data-ext={extension || "file"}
       >
-        <FileTypeIcon path={target.path} extension={extension} />
+        {presentation === "link" && <File size={14} className="md-file-link-icon" aria-hidden="true" />}
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{name}</span>
@@ -1370,11 +1367,11 @@ const mdComponents = (
     }
     const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
     if (inlineEditorTarget) {
-      return <FileReferenceChip target={inlineEditorTarget} {...resourceScope}>{children}</FileReferenceChip>;
+      return <FileReferenceChip target={inlineEditorTarget} presentation="code" {...resourceScope}>{children}</FileReferenceChip>;
     }
     const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
     if (inlineFileTarget) {
-      return <GenericFileReferenceChip target={inlineFileTarget} {...resourceScope}>{children}</GenericFileReferenceChip>;
+      return <GenericFileReferenceChip target={inlineFileTarget} presentation="code" {...resourceScope}>{children}</GenericFileReferenceChip>;
     }
     if (isProseOptionList(text)) {
       return <InlineOptionList text={text} />;

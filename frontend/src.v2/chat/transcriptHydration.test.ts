@@ -2,6 +2,26 @@ import { describe, expect, it } from "vitest";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
 
 describe("hydrateMessages", () => {
+  it("restores the authoritative parent turn patch from its public message metadata", () => {
+    const diff = "diff --git a/cli.py b/cli.py\nnew file mode 100644\n--- /dev/null\n+++ b/cli.py\n@@ -0,0 +1 @@\n+print('ready')\n";
+    const [message] = hydrateMessages([{ id: "parent-answer", role: "assistant", timestamp: 1,
+      metadata: { turn_diff: { type: "turn.diff.updated", conversation_id: "parent", thread_id: "parent",
+        message_id: "parent-answer", turn_id: "parent-turn", task_id: "parent-task", revision: 6,
+        diff, source: "workspace_snapshot" } } }]);
+    expect(message.turnId).toBe("parent-turn");
+    expect(message.turnDiff).toMatchObject({ threadId: "parent", turnId: "parent-turn", messageId: "parent-answer",
+      taskId: "parent-task", revision: 6, diff });
+  });
+
+  it("does not attach a different message, turn or conversation's persisted patch", () => {
+    const owned = { thread_id: "parent", conversation_id: "parent", message_id: "answer", turn_id: "turn", diff: "" };
+    for (const patch of [{ message_id: "other" }, { turn_id: "other" }, { conversation_id: "other" }]) {
+      const [message] = hydrateMessages([{ id: "answer", turn_id: "turn", role: "assistant", content: "Ready",
+        metadata: { turn_diff: { ...owned, ...patch } } }]);
+      expect(message.turnDiff).toBeUndefined();
+    }
+  });
+
   it("preserves scheduled-task origin metadata on hydrated user messages", () => {
     const messages = hydrateMessages([{
       id: "scheduled-user-message",

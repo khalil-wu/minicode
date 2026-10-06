@@ -2,9 +2,11 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 import type { Root, RootContent } from "mdast";
 
+export { fromMarkdown };
+
 export const CITATION_MARKER_RE = /(?<![A-Za-z0-9_])\[\d{1,3}\](?=([\s，。！？；：、,.!?;:)）\[]|$))/g;
 
-const markdownNodeText = (node: Root | RootContent): string => {
+export const markdownNodeText = (node: Root | RootContent): string => {
   if (node.type === "text" || node.type === "inlineCode") return node.value;
   if (node.type === "image" || node.type === "imageReference") return node.alt ?? "";
   return "children" in node ? node.children.map(markdownNodeText).join("") : "";

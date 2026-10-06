@@ -467,24 +467,6 @@
   }
 }
 
-.inline-prompt-more {
-  justify-self: end;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.inline-prompt-more > summary {
-  padding: 3px 6px;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-}
-
-.inline-prompt-more > summary:hover {
-  color: var(--text-primary);
-  background: var(--surface-soft);
-}
-
-.inline-prompt-more > summary:focus-visible,
 .inline-prompt-plan-document:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;

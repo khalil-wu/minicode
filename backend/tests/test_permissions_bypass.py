@@ -248,6 +248,5 @@ def test_git_diff_permission_failure_fails_closed(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="policy unavailable"):
         _is_denied_path(context, ".env")
-    result = asyncio.run(GitDiffTool().execute({"file_path": ".env"}, context=context))
-    assert result.is_error
-    assert "policy unavailable" in result.content
+    with pytest.raises(RuntimeError, match="policy unavailable"):
+        asyncio.run(GitDiffTool().execute({"file_path": ".env"}, context=context))

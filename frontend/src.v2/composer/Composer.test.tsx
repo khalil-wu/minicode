@@ -742,7 +742,7 @@ describe("Composer goal bar", () => {
 
     const { container } = render(<Composer />);
 
-    expect(container.querySelector(".composer-container")?.textContent).toContain("允许使用 Run？");
+    expect(container.querySelector(".composer-container")?.textContent).toContain("允许使用 运行？");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

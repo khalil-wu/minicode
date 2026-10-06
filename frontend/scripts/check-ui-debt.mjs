@@ -8,7 +8,9 @@ const limits = {
   // Frozen after the 2026-07-17 workbench visual consolidation. New changes
   // must reduce or preserve this count; they must not silently raise it.
   importantTotal: 1034,
-  tsWorkerBytes: 0,
+  // Code completion uses Monaco's lazy compiler worker. Match the existing
+  // per-worker bundle budget; disabling the worker would remove TS semantics.
+  tsWorkerBytes: 7 * 1024 * 1024,
   mainJsBytes: 1_280_000,
   // Icon entry-point consolidation (2026-07-25): semantic icons must come
   // from src.v2/lib/icons.ts. Direct lucide-react imports may only shrink.

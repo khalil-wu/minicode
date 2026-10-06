@@ -173,6 +173,7 @@ def test_repository_eval_allows_new_tests_without_changing_existing_tests(tmp_pa
 def test_eval_resume_uses_production_checkpoint_history(tmp_path, monkeypatch, capsys, resume):
     from backend.agent.checkpoint import save_checkpoint
     from backend.agent.context import ContextBuilder
+    from backend.agent.runtime import AgentRuntime
 
     context = ContextBuilder()
     context.append_user("Original acceptance: never reserve stock before validating every quote.")
@@ -202,7 +203,12 @@ def test_eval_resume_uses_production_checkpoint_history(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(driver, "build_wire_adapter", lambda *_args, **_kwargs: FixtureLLM())
     monkeypatch.setattr(driver, "ArtifactStore", lambda: ArtifactStore(storage_dir=tmp_path / "artifacts"))
-    assert asyncio.run(driver._run("Continue.")) == 0
+    runtime = AgentRuntime(enable_lease_heartbeat=False)
+    monkeypatch.setattr("backend.agent.query_engine.default_runtime", lambda: runtime)
+    try:
+        assert asyncio.run(driver._run("Continue.")) == 0
+    finally:
+        runtime.close(release_lease=True)
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
     notices = [r for r in records if r["type"] == "system_notice" and r["data"].get("title") == "Resumed from checkpoint"]
     assert bool(notices) is resume

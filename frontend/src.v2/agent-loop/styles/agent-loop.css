@@ -516,8 +516,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-timeline-group-title:hover {
-  background: var(--workbench-tool);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 .agent-loop-timeline-group[data-group-expanded="true"] > .agent-loop-timeline-group-title {
@@ -553,7 +553,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   display: grid;
   gap: 2px;
   margin: 4px 0 0;
-  padding-left: 22px;
+  padding-left: 0;
+  animation: mc-process-details-in var(--duration-fast) var(--easing-enter) both;
 }
 
 .agent-loop-timeline-group-work > .agent-loop-timeline-group-items {

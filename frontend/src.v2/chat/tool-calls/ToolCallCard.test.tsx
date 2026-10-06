@@ -54,6 +54,25 @@ vi.mock("../../overlays/ToastContainer", () => ({
 }));
 
 describe("ToolCallCard", () => {
+  it("projects questions and user answers as readable conversation text", () => {
+    const record = { id: "question", name: "ask_user", args: { question: "你想选择哪种布局？" },
+      status: "success" as const, summary: "User answer: 随便", startedAt: 1 };
+    const view = render(<ToolCallCard record={record} viewMode="verbose" />);
+    expect(screen.getByText("你想选择哪种布局？")).toBeTruthy();
+    expect(screen.getByText("你的回答")).toBeTruthy();
+    expect(screen.getByText("随便").closest("pre")).toBeNull();
+    expect(view.container.textContent).not.toContain("User answer:");
+    expect(record.summary).toBe("User answer: 随便");
+  });
+
+  it("matches structured user answers to each question", () => {
+    render(<ToolCallCard viewMode="verbose" record={{ id: "questions", name: "request_user_input", startedAt: 1,
+      args: { questions: [{ id: "layout", question: "选择布局" }, { id: "theme", question: "选择主题" }] },
+      status: "success", summary: JSON.stringify({ answers: { layout: { answers: ["并排"] }, theme: { answers: ["浅色"] } } }) }} />);
+    expect(screen.getByText("并排").closest(".tool-question-result-item")?.textContent).toContain("选择布局");
+    expect(screen.getByText("浅色").closest(".tool-question-result-item")?.textContent).toContain("选择主题");
+  });
+
   it("shows the projected MCP label when server and tool protocol separators are ambiguous", () => {
     const record = { id: "mcp-qualified", name: "mcp__team__internal__find__notes", displayHint: "team__internal.find__notes",
       args: { query: "read_file.ts" }, status: "success" as const, activityKind: "mcpToolCall", summary: "[]" };
@@ -90,7 +109,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: /Run/ }));
+    fireEvent.click(screen.getByRole("button", { name: /运行/ }));
 
     expect(screen.getByText("$")).toBeTruthy();
     expect(screen.getAllByText("npx tsc --noEmit").length).toBeGreaterThanOrEqual(1);
@@ -166,7 +185,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("Run")).toBeTruthy();
+    expect(screen.getByText("运行")).toBeTruthy();
     expect(screen.getByText("npm test")).toBeTruthy();
     expect(screen.queryByTestId("tool-call-summary-command")).toBeNull();
     expect(screen.queryByText("all tests passed")).toBeNull();
@@ -224,7 +243,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("Fetch")).toBeTruthy();
+    expect(screen.getByText("读取网页")).toBeTruthy();
     expect(document.body.textContent).not.toContain("web_fetch");
   });
 
@@ -244,7 +263,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("Search")).toBeTruthy();
+    expect(screen.getByText("正在搜索")).toBeTruthy();
     expect(screen.getAllByText("MiniCode documentation").length).toBeGreaterThanOrEqual(1);
     expect(document.body.textContent).not.toContain("web_search");
   });
@@ -295,7 +314,7 @@ describe("ToolCallCard", () => {
     }));
 
     expect(screen.getByText("Diff")).toBeTruthy();
-    expect(screen.getByText("Edit")).toBeTruthy();
+    expect(screen.getByText("编辑")).toBeTruthy();
     expect(screen.getAllByText(/frontend\/src\.v2\/chat\/tool-calls\/ToolCallCard\.tsx$/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("+2").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("-1").length).toBeGreaterThanOrEqual(1);

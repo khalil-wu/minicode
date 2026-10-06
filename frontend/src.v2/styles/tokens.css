@@ -21,6 +21,8 @@
 
 :root {
   color-scheme: dark;
+  --desktop-shell-background: #151719;
+  --desktop-frame-border: #ffffff0d;
 
   /* ── Surface layers (9) — Pillar 1.1
      Tonal monotonicity invariant (P1.2):
@@ -50,18 +52,25 @@
   --editor-line-number: #73777e;
   --editor-line-number-active: #c5c7cc;
   --editor-line-highlight: #222222;
-  --editor-selection: #364454;
-  --editor-selection-inactive: #2e333a;
+  --editor-selection: #3b3b3d;
+  --editor-selection-inactive: #303032;
   --editor-indent-guide: #303033;
   --editor-indent-guide-active: #56565c;
   --editor-widget: #222222;
+  --editor-ghost-foreground: #8d949e;
+  --diff-added-foreground: #65d78b;
+  --diff-added-background: #1d3325;
+  --diff-added-word-background: #2b4b34;
+  --diff-removed-foreground: #f1847d;
+  --diff-removed-background: #3b2526;
+  --diff-removed-word-background: #573235;
   --editor-border: #36363a;
-  --editor-widget-selection: #34383f;
+  --editor-widget-selection: #343436;
   --editor-find-match: #76633866;
   --editor-find-range: #76633833;
-  --editor-syntax-comment: #81878e;
-  --editor-syntax-keyword: #93b5a5;
-  --editor-syntax-string: #d7a6cd;
+  --editor-syntax-comment: #6a9955;
+  --editor-syntax-keyword: #c586c0;
+  --editor-syntax-string: #ce9178;
   --editor-syntax-number: #d6bd82;
   --editor-syntax-type: #a6bcc9;
   --editor-syntax-function: #dcca92;
@@ -80,7 +89,7 @@
   --text-secondary: oklch(0.800 0.003 250);
   --text-muted:     oklch(0.680 0.004 250);
   --text-disabled:  oklch(0.930 0.002 250 / 0.40);
-  --text-on-accent: oklch(0.985 0.005 250);
+  --text-on-accent: oklch(0.18 0 0);
 
   /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
   --border-subtle: oklch(0.870 0.006 250 / 0.12);
@@ -88,13 +97,13 @@
   --border-strong: oklch(0.870 0.006 250 / 0.30);
   --border-focus:  var(--accent-primary);
 
-  /* ── Accent (7) — restrained cool blue for focused workbench actions. ── */
-  --accent-primary:   oklch(0.65 0.18 250);
-  --accent-secondary: oklch(0.72 0.16 248);
-  --accent-strong:    oklch(0.58 0.22 255);
-  --accent-hover:     oklch(0.70 0.17 250);
-  --accent-active:    oklch(0.55 0.19 252);
-  --accent-soft:      oklch(0.65 0.18 250 / 0.12);
+  /* Neutral interaction colors shared by controls, links and selected text. */
+  --accent-primary:   oklch(0.82 0 0);
+  --accent-secondary: oklch(0.76 0 0);
+  --accent-strong:    oklch(0.93 0 0);
+  --accent-hover:     oklch(0.90 0 0);
+  --accent-active:    oklch(0.70 0 0);
+  --accent-soft:      oklch(0.82 0 0 / 0.12);
   --accent-glow:      none;
 
   /* Legacy component aliases. Keep them solid so primary actions do not
@@ -110,8 +119,8 @@
   --state-warning-soft: oklch(0.78 0.14 78 / 0.12);
   --state-danger:       oklch(0.71 0.16 28);
   --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
-  --state-info:         oklch(0.74 0.10 240);
-  --state-info-soft:    oklch(0.74 0.10 240 / 0.12);
+  --state-info:         oklch(0.76 0 0);
+  --state-info-soft:    oklch(0.76 0 0 / 0.12);
   /* Agent identity colors remain independent of execution state. */
   --agent-identity-teal:   oklch(0.76 0.10 183);
   --agent-identity-blue:   oklch(0.75 0.10 242);
@@ -119,19 +128,20 @@
   --agent-identity-rose:   oklch(0.77 0.11 12);
   --agent-identity-amber:  oklch(0.79 0.11 77);
   --agent-identity-green:  oklch(0.76 0.11 149);
-  --command-accent:        oklch(0.82 0.045 245);
-  --command-accent-strong: oklch(0.86 0.055 245);
-  --command-border:        oklch(0.82 0.045 245 / 0.48);
+  --command-accent:        oklch(0.82 0 0);
+  --command-accent-strong: oklch(0.86 0 0);
+  --command-border:        oklch(0.82 0 0 / 0.48);
 
-  /* Desktop-native typography: fast offline startup and stable CJK metrics. */
-  --font-ui:    "Manrope", "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
-  --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", "Noto Sans SC", monospace;
-  --editor-font-family: Consolas, "SFMono-Regular", Menlo, "Liberation Mono", "Noto Sans SC", monospace;
-  --font-cjk:   "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
-  --font-prose: var(--font-ui);
+  /* Claude's interface uses Sans; Serif is reserved for Latin prose. */
+  --font-cjk:   "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-app:   "Anthropic Sans", var(--font-cjk);
+  --font-ui:    var(--font-app);
+  --font-mono:  "SFMono-Regular", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
+  --editor-font-family: var(--font-mono);
+  --font-prose: "Anthropic Serif", var(--font-cjk);
   --app-text-scale: 1;
   --code-text-scale: 1;
-  --code-font-size: calc(15px * var(--code-text-scale));
+  --code-font-size: calc(14px * var(--code-text-scale));
   --editor-font-size: calc(14px * var(--code-text-scale));
   --editor-line-height: calc(22px * var(--code-text-scale));
 
@@ -175,7 +185,7 @@
   /* ── Icon rhythm ─────────────────────────────────────
      Single stroke language for every glyph (lucide and custom svg alike).
      Declared here; components.css / ui-polish.css only consume it. ──── */
-  --mc-icon-stroke: 1.6;
+  --mc-icon-stroke: 1.5;
 
   /* ── Radius (5) — soft desktop geometry shared by navigation and cards. ─── */
   --radius-sm:   8px;
@@ -214,8 +224,9 @@
 
   /* ── Easing ────────────────────────────────────────── */
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
-  --easing-enter: cubic-bezier(0.16, 1, 0.3, 1);
-  --easing-exit: cubic-bezier(0.4, 0, 1, 1);
+  --easing-enter: cubic-bezier(0.19, 1, 0.22, 1);
+  --easing-enter-snappy: cubic-bezier(0.23, 1, 0.32, 1);
+  --easing-exit: cubic-bezier(0.8, 0, 0.4, 1);
   --easing-pulse: cubic-bezier(0.42, 0, 0.18, 1);
   --easing-status-sweep: cubic-bezier(0.2, 0.7, 0.25, 1);
   /* Panels settle without overshooting the text baseline. */
@@ -270,7 +281,7 @@
      Shell layout density (sidebar widths, chat axis, conversation rhythm
      --space-turn-gap / --space-cell-internal) is owned by shell/ shell.css —
      do not re-declare it here. ──────────────────────────────── */
-  --header-height:       40px;
+  --header-height:       44px;
   --dock-height:         280px;
   --app-text-scale:      1;
 
@@ -321,7 +332,7 @@ uses in its UI. The `--cjk-leading` and
   --border-light:     var(--border-subtle);
   --border-medium:    var(--border-soft);
   --border-rail:      var(--border-strong);
-  --accent-border:    oklch(0.68 0.12 250 / 0.25);
+  --accent-border:    oklch(0.82 0 0 / 0.25);
   --accent-orange:    var(--accent-primary);
   --success-green:    var(--state-success);
   --error-red:        var(--state-danger);
@@ -347,12 +358,12 @@ uses in its UI. The `--cjk-leading` and
   --shadow-glow:      none;
   --transition-base:  var(--transition-normal);
   --z-notification:   var(--z-toast);
-  --ai-accent:            #60a5fa;
-  --ai-accent-rgb:        96, 165, 250;
-  --ai-accent-strong:     #93c5fd;
-  --ai-accent-strong-rgb: 147, 197, 253;
-  --ai-accent-deep-rgb:   59, 130, 246;
-  --accent-rgb:           96, 165, 250;
+  --ai-accent:            #c2c2c2;
+  --ai-accent-rgb:        194, 194, 194;
+  --ai-accent-strong:     #e8e8e8;
+  --ai-accent-strong-rgb: 232, 232, 232;
+  --ai-accent-deep-rgb:   158, 158, 158;
+  --accent-rgb:           194, 194, 194;
 }
 
 /* ════════════════════════════════════════════════════════
@@ -362,6 +373,8 @@ uses in its UI. The `--cjk-leading` and
    ════════════════════════════════════════════════════════ */
 [data-theme="light"] {
   color-scheme: light;
+  --desktop-shell-background: #eef3f9;
+  --desktop-frame-border: #e5e9ee;
 
   /* Light mode uses white content planes with neutral, low-contrast interaction
      fills. This keeps hierarchy without turning every page into a grey card. */
@@ -385,30 +398,37 @@ uses in its UI. The `--cjk-leading` and
   --surface-hover:   oklch(0.940 0.004 250);
   --surface-active:  oklch(0.915 0.005 250);
 
-  --workbench-sidebar: oklch(0.973 0.003 245);
+  --workbench-sidebar: #f9fbfd;
   --workbench-tool: oklch(0.978 0.001 250);
-  --workbench-hover: oklch(0.958 0.004 245);
-  --workbench-active: oklch(0.937 0.009 245);
+  --workbench-hover: oklch(0.958 0 0);
+  --workbench-active: oklch(0.937 0 0);
 
   --editor-background: #fafafa;
   --editor-foreground: #30343b;
   --editor-line-number: #92969e;
   --editor-line-number-active: #4d5663;
   --editor-line-highlight: #f0f1f3;
-  --editor-selection: #dce6f0;
-  --editor-selection-inactive: #e8ebef;
+  --editor-selection: #dddddf;
+  --editor-selection-inactive: #e8e8ea;
   --editor-indent-guide: #e3e4e7;
   --editor-indent-guide-active: #b6bac2;
   --editor-widget: #ffffff;
+  --editor-ghost-foreground: #787e88;
+  --diff-added-foreground: #00a240;
+  --diff-added-background: #e7f4e7;
+  --diff-added-word-background: #c5e8cf;
+  --diff-removed-foreground: #e5383b;
+  --diff-removed-background: #fbe7e3;
+  --diff-removed-word-background: #f3c6c1;
   --editor-border: #dcdde1;
-  --editor-widget-selection: #e9edf2;
+  --editor-widget-selection: #e9e9eb;
   --editor-find-match: #d7bd7a66;
   --editor-find-range: #d7bd7a33;
-  --editor-syntax-comment: #6c7480;
-  --editor-syntax-keyword: #3e6b57;
-  --editor-syntax-string: #8f557b;
+  --editor-syntax-comment: #008000;
+  --editor-syntax-keyword: #af264f;
+  --editor-syntax-string: #776899;
   --editor-syntax-number: #927043;
-  --editor-syntax-type: #3c6477;
+  --editor-syntax-type: #2d6471;
   --editor-syntax-function: #83692f;
   --editor-syntax-property: #635d82;
   --editor-syntax-tag: #466a58;
@@ -419,7 +439,7 @@ uses in its UI. The `--cjk-leading` and
   --editor-bracket-3: #43767c;
 
   /* Separate reading text, secondary controls, and quiet process evidence. */
-  --text-primary:   oklch(0.235 0.007 258);
+  --text-primary:   #1a1c1f;
   --text-secondary: oklch(0.470 0.005 250);
   --text-muted:     oklch(0.560 0.005 250);
   --text-disabled:  oklch(0.300 0.004 250 / 0.48);
@@ -433,12 +453,12 @@ uses in its UI. The `--cjk-leading` and
 
   /* Accent (7) — light mode pushes L lower so primary stays
      ≥ 4.5:1 vs surface-page (P1.4 invariant under light theme). */
-  --accent-primary:   oklch(0.52 0.16 255);
-  --accent-secondary: oklch(0.59 0.14 252);
-  --accent-strong:    oklch(0.47 0.20 260);
-  --accent-hover:     oklch(0.46 0.17 255);
-  --accent-active:    oklch(0.40 0.16 258);
-  --accent-soft:      oklch(0.52 0.16 255 / 0.12);
+  --accent-primary:   oklch(0.38 0 0);
+  --accent-secondary: oklch(0.48 0 0);
+  --accent-strong:    oklch(0.30 0 0);
+  --accent-hover:     oklch(0.30 0 0);
+  --accent-active:    oklch(0.24 0 0);
+  --accent-soft:      oklch(0.38 0 0 / 0.10);
   --accent-glow:      none;
   --accent-gradient: var(--accent-primary);
   --accent-gradient-active: var(--accent-active);
@@ -450,17 +470,17 @@ uses in its UI. The `--cjk-leading` and
   --state-warning-soft: oklch(0.55 0.15 68 / 0.12);
   --state-danger:       oklch(0.55 0.18 28);
   --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
-  --state-info:         oklch(0.52 0.13 240);
-  --state-info-soft:    oklch(0.52 0.13 240 / 0.12);
+  --state-info:         oklch(0.48 0 0);
+  --state-info-soft:    oklch(0.48 0 0 / 0.12);
   --agent-identity-teal:   oklch(0.55 0.10 183);
   --agent-identity-blue:   oklch(0.55 0.11 242);
   --agent-identity-violet: oklch(0.56 0.12 300);
   --agent-identity-rose:   oklch(0.57 0.12 12);
   --agent-identity-amber:  oklch(0.56 0.12 77);
   --agent-identity-green:  oklch(0.54 0.12 149);
-  --command-accent:        oklch(0.62 0.075 245);
-  --command-accent-strong: oklch(0.47 0.085 245);
-  --command-border:        oklch(0.62 0.075 245 / 0.42);
+  --command-accent:        oklch(0.48 0 0);
+  --command-accent-strong: oklch(0.38 0 0);
+  --command-border:        oklch(0.48 0 0 / 0.42);
 
   /* Shadows — legacy names, aliased to the refined set (single ladder). */
   --shadow-sm:     var(--shadow-refined);
@@ -487,13 +507,13 @@ uses in its UI. The `--cjk-leading` and
   --border-light:         var(--border-subtle);
   --border-medium:        var(--border-soft);
   --border-rail:          var(--border-strong);
-  --accent-border:        oklch(0.52 0.16 255 / 0.30);
+  --accent-border:        oklch(0.38 0 0 / 0.30);
   --accent-orange:        var(--accent-primary);
   --shadow-glow:          none;
-  --ai-accent:            #2563eb;
-  --ai-accent-rgb:        37, 99, 235;
-  --ai-accent-strong:     #3b82f6;
-  --ai-accent-strong-rgb: 59, 130, 246;
-  --ai-accent-deep-rgb:   29, 78, 216;
-  --accent-rgb:           37, 99, 235;
+  --ai-accent:            #525252;
+  --ai-accent-rgb:        82, 82, 82;
+  --ai-accent-strong:     #303030;
+  --ai-accent-strong-rgb: 48, 48, 48;
+  --ai-accent-deep-rgb:   36, 36, 36;
+  --accent-rgb:           82, 82, 82;
 }

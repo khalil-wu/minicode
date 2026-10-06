@@ -220,7 +220,7 @@ def test_astra_reasoning_controls_resolve_without_gateway_capability_metadata(mo
         "model": model, "wire_api": "responses", "model_metadata": {}}, provider="custom", model_override=model)
     capabilities = capabilities_from_openai_settings(settings, provider="custom")
     assert capabilities.reasoning_effort_supported is True
-    assert capabilities.reasoning_effort_levels == ("low", "medium", "high", "xhigh", "max")
+    assert capabilities.reasoning_effort_levels == ("low", "medium", "high", "xhigh", "max", "ultra")
     assert capabilities.effective_reasoning_effort == "low"
     assert capabilities.max_context_window == 1_050_000
 

@@ -45,6 +45,7 @@ export function loadMiniCodeLanguageServices(): Promise<void> {
       import("monaco-editor/editor/standalone/browser/standaloneServices.js"),
       import("monaco-editor/editor/common/languages/language.js"),
       loadMiniCodeEditorFeatures(),
+      import("monaco-editor/languages/definitions/cpp/register.js"),
     ]);
     typescriptServices = typescript;
     const compilerOptions = {

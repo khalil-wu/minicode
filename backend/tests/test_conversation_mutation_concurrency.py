@@ -19,7 +19,7 @@ from backend.ws.handlers import conversation as conversation_handlers
 
 
 def _manager_with(*sessions):
-    return SimpleNamespace(iter_sessions=lambda: list(sessions))
+    return SimpleNamespace(iter_sessions=lambda: list(sessions), conversation_delete_cleanup_owner=lambda _: None)
 
 
 def _command_result_session(*, conversation_id: str, repository) -> SimpleNamespace:
@@ -31,6 +31,7 @@ def _command_result_session(*, conversation_id: str, repository) -> SimpleNamesp
         artifact_store=SimpleNamespace(share_for_conversation=Mock()),
         emit_command_result=AsyncMock(),
         running_agent_task_for=lambda _conversation_id: None,
+        cleanup_tasks=set(),
     )
     session.ws_manager = _manager_with(session)
     return session
@@ -329,46 +330,179 @@ def test_permission_rule_projection_updates_all_active_runtimes_and_all_windows(
         )
 
 
-def test_archive_reports_resource_counts_before_persisting(monkeypatch) -> None:
+def test_archive_coordinates_only_target_resources_before_persisting(monkeypatch) -> None:
+    from backend.tasks import scheduler as scheduler_module
+    from backend.preview import launcher
+
     target = SimpleNamespace(id="conv_archive")
     repository = SimpleNamespace(
         get_conversation=lambda _conversation_id: target,
-        set_archived=Mock(),
+        set_archived=Mock(return_value=SimpleNamespace(id=target.id, title="Archived", revision=8)),
     )
     session = _command_result_session(
         conversation_id=target.id,
         repository=repository,
     )
-    monkeypatch.setattr(
-        conversation_handlers,
-        "_conversation_activity_blockers",
-        lambda _session, _conversation_id: {
-            "background_commands": 1,
-            "terminal_sessions": 2,
-            "preview_processes": 3,
-            "scheduled_tasks": 4,
-        },
-    )
+    other_window = _command_result_session(conversation_id="other", repository=repository)
+    session.ws_manager = _manager_with(session, other_window)
+    for index, owner in enumerate((session, other_window)):
+        owner.background_manager = SimpleNamespace(
+            list_commands=Mock(return_value=[{"command_id": f"command-{index}", "status": "running"}]),
+            cancel=AsyncMock(return_value=True),
+        )
+        owner.terminal_manager = SimpleNamespace(destroy_sessions_for_conversation=AsyncMock(return_value=1))
+    scheduler = SimpleNamespace(pause_for_conversation=AsyncMock(return_value=1))
+    monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: scheduler)
+    stop_runs = AsyncMock(return_value=True)
+    monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", stop_runs)
+    stop_previews = AsyncMock(return_value=[])
+    monkeypatch.setattr(launcher, "stop_preview_launches_for_conversation", stop_previews)
+    monkeypatch.setattr(conversation_handlers, "_conversation_activity_blockers", lambda *_: {})
+    activate = AsyncMock()
+    monkeypatch.setattr(conversation_handlers, "_activate_conversation_or_blank", activate)
+    monkeypatch.setattr(conversation_handlers, "_schedule_long_term_memory_forgetting", Mock())
+    monkeypatch.setattr(conversation_handlers, "_broadcast_conversation_lists", AsyncMock(return_value=[]))
 
     asyncio.run(conversation_handlers.handle_conversation_archive(
         session,
         {"conversation_id": target.id},
     ))
 
-    repository.set_archived.assert_not_called()
+    repository.set_archived.assert_called_once_with(target.id, True)
+    scheduler.pause_for_conversation.assert_awaited_once_with(target.id)
+    stop_previews.assert_awaited_once_with(target.id)
+    for index, owner in enumerate((session, other_window)):
+        owner.background_manager.list_commands.assert_called_once_with(include_completed=True, conversation_id=target.id)
+        owner.background_manager.cancel.assert_awaited_once_with(f"command-{index}", conversation_id=target.id)
+        owner.terminal_manager.destroy_sessions_for_conversation.assert_awaited_once_with(target.id)
+        assert any(call.args == (owner, target.id) and call.kwargs["reason"] == "conversation_archived"
+                   for call in stop_runs.await_args_list)
+    activate.assert_awaited_once_with(session)
     result = session.emit_command_result.await_args
     assert result.args[0] == "conversation.archive"
-    assert result.kwargs["data"] == {
-        "conversation_id": target.id,
-        "reason": "runtime_resource_active",
-        "resources": {
-            "background_commands": 1,
-            "terminal_sessions": 2,
-            "preview_processes": 3,
-            "scheduled_tasks": 4,
-        },
-        "retryable": True,
-    }
+    assert result.args[1] == "会话已归档。"
+    assert result.kwargs["data"]["archived"] is True
+
+
+def test_archive_retains_conversation_when_a_cleanup_handle_remains(monkeypatch) -> None:
+    from backend.tasks import scheduler as scheduler_module
+    from backend.preview import launcher
+
+    target = SimpleNamespace(id="conv_archive_pending")
+    repository = SimpleNamespace(get_conversation=lambda _: target, set_archived=Mock())
+    session = _command_result_session(conversation_id=target.id, repository=repository)
+    session.background_manager = SimpleNamespace(list_commands=lambda **_: [], cancel=AsyncMock())
+    session.terminal_manager = SimpleNamespace(destroy_sessions_for_conversation=AsyncMock(side_effect=RuntimeError("terminal_cleanup_pending")))
+    monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: SimpleNamespace(pause_for_conversation=AsyncMock(return_value=0)))
+    monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, "stop_preview_launches_for_conversation", AsyncMock(return_value=[]))
+    monkeypatch.setattr(conversation_handlers, "_conversation_activity_blockers", lambda *_: {"terminal_sessions": 1})
+
+    asyncio.run(conversation_handlers.handle_conversation_archive(session, {"conversation_id": target.id}))
+
+    repository.set_archived.assert_not_called()
+    result = session.emit_command_result.await_args
+    assert result.kwargs["level"] == "error"
+    assert result.kwargs["data"]["resources"] == {"terminal_sessions": 1}
+    assert "终端" in result.args[1] and "Stop or remove" not in result.args[1]
+    assert conversation_query_guards().active_claim(target.id) is None
+
+def test_archive_waits_for_native_cleanup_ack_from_every_connected_window(monkeypatch) -> None:
+    from backend.tasks import scheduler as scheduler_module
+    from backend.preview import launcher
+
+    target = SimpleNamespace(id="archive-native-ack")
+    repository = SimpleNamespace(get_conversation=lambda _: target,
+        set_archived=Mock(return_value=SimpleNamespace(id=target.id, revision=1)))
+    first = _command_result_session(conversation_id=target.id, repository=repository)
+    second = _command_result_session(conversation_id="other", repository=repository)
+    first.ws_manager = _manager_with(first, second)
+    for owner in (first, second):
+        owner.is_connected = True
+        owner.background_manager = SimpleNamespace(list_commands=lambda **_: [])
+        owner.terminal_manager = SimpleNamespace(destroy_sessions_for_conversation=AsyncMock(return_value=0))
+    monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: SimpleNamespace(pause_for_conversation=AsyncMock(return_value=0)))
+    monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, "stop_preview_launches_for_conversation", AsyncMock(return_value=[]))
+    monkeypatch.setattr(conversation_handlers, "_conversation_activity_blockers", lambda *_: {})
+    acknowledgements = []
+    async def native_cleanup(owner, conversation, *, operation):
+        repository.set_archived.assert_not_called()
+        assert conversation is target and operation == "archive"
+        acknowledgements.append(owner)
+        return {"action": "approve"}
+    monkeypatch.setattr(conversation_handlers, "_request_conversation_resource_cleanup", native_cleanup)
+    monkeypatch.setattr(conversation_handlers, "_activate_conversation_or_blank", AsyncMock())
+    monkeypatch.setattr(conversation_handlers, "_schedule_long_term_memory_forgetting", Mock())
+    monkeypatch.setattr(conversation_handlers, "_broadcast_conversation_lists", AsyncMock(return_value=[]))
+    asyncio.run(conversation_handlers.handle_conversation_archive(first,
+        {"conversation_id": target.id, "client_resource_cleanup": True}))
+    assert acknowledgements == [first, second]
+    repository.set_archived.assert_called_once_with(target.id, True)
+
+
+def test_resource_count_excludes_exited_terminal_history_but_retains_pending_cleanup(monkeypatch) -> None:
+    from backend.ws.conversation_activity import conversation_activity_blockers
+    from backend.api import _state
+    from backend.tasks import scheduler as scheduler_module
+    from backend.preview import launcher
+    from backend.agent import runtime
+    from backend.terminal.session import TerminalSessionInfo
+
+    session = SimpleNamespace(ws_manager=None,
+        background_manager=SimpleNamespace(list_commands=lambda **_: [
+            {"status": "completed", "cleanup_pending": False},
+            {"status": "cancelled", "cleanup_pending": True},
+        ]),
+        terminal_manager=SimpleNamespace(list_sessions_for_conversation=lambda _: [
+            TerminalSessionInfo("exited", is_alive=False),
+            TerminalSessionInfo("alive", is_alive=True),
+        ]))
+    monkeypatch.setattr(_state, "bootstrap", None)
+    monkeypatch.setattr(scheduler_module, "_GLOBAL_SCHEDULER", None)
+    monkeypatch.setattr(launcher, "running_preview_processes", lambda **_: [])
+    monkeypatch.setattr(runtime, "default_runtime_if_initialized", lambda: None)
+    session.session_id = "archive-counter"
+    counts = conversation_activity_blockers(session, "owner")
+    assert counts["background_commands"] == 1
+    assert counts["terminal_sessions"] == 1
+
+
+def test_archive_stops_real_owned_terminal_and_keeps_other_chat_shell(monkeypatch, tmp_path) -> None:
+    from backend.tasks import scheduler as scheduler_module
+    from backend.preview import launcher
+    from backend.terminal.session import TerminalSessionManager
+
+    target = SimpleNamespace(id="archive-real-terminal")
+    repository = SimpleNamespace(get_conversation=lambda _: target,
+        set_archived=Mock(return_value=SimpleNamespace(id=target.id, revision=1)))
+    session = _command_result_session(conversation_id=target.id, repository=repository)
+    session.background_manager = SimpleNamespace(list_commands=lambda **_: [])
+    session.terminal_manager = TerminalSessionManager()
+    monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: SimpleNamespace(pause_for_conversation=AsyncMock(return_value=0)))
+    monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, "stop_preview_launches_for_conversation", AsyncMock(return_value=[]))
+    monkeypatch.setattr(conversation_handlers, "_conversation_activity_blockers", lambda *_: {})
+    monkeypatch.setattr(conversation_handlers, "_activate_conversation_or_blank", AsyncMock())
+    monkeypatch.setattr(conversation_handlers, "_schedule_long_term_memory_forgetting", Mock())
+    monkeypatch.setattr(conversation_handlers, "_broadcast_conversation_lists", AsyncMock(return_value=[]))
+    user_file = tmp_path / "keep.txt"
+    user_file.write_text("Keep the user's file", encoding="utf-8")
+
+    async def scenario() -> None:
+        owned = await session.terminal_manager.create_session(cwd=str(tmp_path), conversation_id=target.id)
+        unrelated = await session.terminal_manager.create_session(cwd=str(tmp_path), conversation_id="other-chat")
+        try:
+            await conversation_handlers.handle_conversation_archive(session, {"conversation_id": target.id})
+            assert owned.is_alive is False
+            assert unrelated.is_alive is True
+            assert session.terminal_manager.get_session(unrelated.session_id) is unrelated
+            repository.set_archived.assert_called_once_with(target.id, True)
+            assert user_file.read_text(encoding="utf-8") == "Keep the user's file"
+        finally:
+            await session.terminal_manager.destroy_all()
+
+    asyncio.run(scenario())
 
 
 def test_memory_mode_race_cannot_mutate_after_run_check(monkeypatch) -> None:

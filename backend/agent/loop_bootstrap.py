@@ -461,6 +461,7 @@ async def bootstrap_agent_loop(
 
     hook_scope_id = conversation_id or str(session_id or "").strip()
     context.bind_background_commands(background_manager)
+    run_context.turn_diff_tracker = TurnDiffTracker()
     tool_context = ToolExecutionContext(
         permission=effective_permission_context,
         session_id=session_id,
@@ -487,7 +488,7 @@ async def bootstrap_agent_loop(
         conversation_id=conversation_id,
         llm=request.llm,
         artifact_store=request.artifact_store,
-        turn_diff_tracker=TurnDiffTracker(),
+        turn_diff_tracker=run_context.turn_diff_tracker,
     )
     context.bind_tool_context(tool_context)
 

@@ -23,6 +23,7 @@ import { openWebInBrowser } from "../openWebInBrowser";
 import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
+import { isUserQuestionRecord, ToolResultText, UserQuestionResult, usesCodeTypography } from "./renderers/ToolTextRenderer";
 import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, webFetchEvidenceLabel } from "../cells/activityCellHelpers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
@@ -201,7 +202,7 @@ export const ToolCallCard = memo(({
           <span className="text-[var(--text-secondary)] font-semibold">
             {toolLabel}
           </span>
-          {displayInput && <span style={summaryValueStyle}>{displayInput}</span>}
+          {displayInput && <span style={{ ...summaryValueStyle, fontFamily: usesCodeTypography(record) ? "var(--font-mono)" : "var(--font-ui)" }}>{displayInput}</span>}
           {showStatus && <span>{phase}</span>}
           {showStatus && duration && <span>{duration}</span>}
           {resultText && <SmallAction label="复制工具结果" onClick={copyResult}><Copy size={14} /></SmallAction>}
@@ -270,7 +271,7 @@ export const ToolCallCard = memo(({
             {toolLabel}
           </span>
           {displayInput && (
-            <span style={toolInputInlineStyle}>
+            <span style={{ ...toolInputInlineStyle, fontFamily: usesCodeTypography(record) ? "var(--font-mono)" : "var(--font-ui)" }}>
               {displayInput}
             </span>
           )}
@@ -339,7 +340,7 @@ export const ToolCallCard = memo(({
               <InlineDiff patch={record.diff.patch} contextLines={1} />
             </>
           )}
-          <div className="grid gap-2 p-2.5 px-3.5 font-mono text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+          <div className="grid gap-2 p-2.5 px-3.5 font-ui text-sm text-[var(--text-secondary)] whitespace-pre-wrap break-words">
             {record.diff && (record.diff.plus > 0 || record.diff.minus > 0) && (
               <div className="flex items-center gap-2">
                 {record.diff.plus > 0 && <span className="text-[var(--state-success)]">+{record.diff.plus}</span>}
@@ -353,7 +354,9 @@ export const ToolCallCard = memo(({
             )}
             {resultText && (
               <div>
-                {record.name !== "monitor" && (record.resultKind === "command" || record.activityKind === "commandExecution" || record.name === "run_command") ? (
+                {isUserQuestionRecord(record) ? (
+                  <UserQuestionResult record={record} text={resultText} />
+                ) : record.name !== "monitor" && (record.resultKind === "command" || record.activityKind === "commandExecution" || record.name === "run_command") ? (
                   <CommandToolRenderer record={record} resultSummary={resultText} />
                 ) : isWebSearchRecord(record) ? (
                   <WebSearchResultsView text={resultText} />
@@ -362,7 +365,7 @@ export const ToolCallCard = memo(({
                     {!record.diff && <div className="text-[var(--text-muted)] mb-1 font-medium">结果</div>}
                     {resultText.length > 500 && !outputExpanded ? (
                       <>
-                        <div>{resultText.slice(0, 500)}...</div>
+                        <ToolResultText record={record} text={`${resultText.slice(0, 500)}...`} error={hasFailure} />
                         <button
                           type="button"
                           onClick={() => setOutputExpanded(true)}
@@ -372,7 +375,7 @@ export const ToolCallCard = memo(({
                         </button>
                       </>
                     ) : (
-                      <div>{resultText}</div>
+                      <ToolResultText record={record} text={resultText} error={hasFailure} />
                     )}
                   </>
                 )}
@@ -495,7 +498,7 @@ const summaryValueStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const toolInputInlineStyle: React.CSSProperties = {
@@ -506,7 +509,7 @@ const toolInputInlineStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const evidenceBadgeStyle: React.CSSProperties = {
@@ -519,7 +522,7 @@ const evidenceBadgeStyle: React.CSSProperties = {
   background: "var(--surface-base)",
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
   flexShrink: 0,
 };
 
@@ -557,12 +560,12 @@ const limitationBadgeStyle: React.CSSProperties = {
   background: "color-mix(in oklch, var(--state-warning) 9%, var(--surface-soft))",
   color: "var(--text-secondary)",
   fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const sourceUrlStyle: React.CSSProperties = {
   color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
   wordBreak: "break-all",
 };
 

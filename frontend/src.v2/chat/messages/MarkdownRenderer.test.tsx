@@ -473,15 +473,16 @@ describe("MarkdownRenderer", () => {
     }
   });
 
-  it("renders editor chips with compact file-type badges", () => {
+  it("preserves inline code appearance while keeping known file targets actionable", () => {
     render(<MarkdownRenderer content={"Open `frontend/src.v2/chat/noticeEvents.ts` and `README.md`."} knownFilePaths={["frontend/src.v2/chat/noticeEvents.ts", "README.md"]} />);
 
     const tsChip = screen.getByRole("button", { name: "frontend/src.v2/chat/noticeEvents.ts" });
     const mdChip = screen.getByRole("button", { name: "README.md" });
     expect(tsChip.getAttribute("data-ext")).toBe("ts");
     expect(mdChip.getAttribute("data-ext")).toBe("md");
-    expect(tsChip.querySelector('.md-official-file-icon[data-document-type="ts"]')).toBeTruthy();
-    expect(mdChip.querySelector('.md-official-file-icon[data-document-type="md"]')).toBeTruthy();
+    expect(tsChip.getAttribute("data-presentation")).toBe("code");
+    expect(tsChip.querySelector("svg")).toBeNull();
+    expect(mdChip.getAttribute("data-presentation")).toBe("code");
     expect(tsChip.querySelector(".md-file-chip-name")?.textContent).toBe("noticeEvents.ts");
   });
 
@@ -660,7 +661,7 @@ describe("MarkdownRenderer", () => {
       const chip = screen.getByRole("button", { name: "report.pdf" });
       expect(chip.getAttribute("data-ext")).toBe("pdf");
       expect(chip.getAttribute("data-kind")).not.toBe("folder");
-      expect(chip.querySelector('.md-official-file-icon[data-document-type="pdf"]')).toBeTruthy();
+      expect(chip.querySelector(".md-file-link-icon")).toBeTruthy();
 
       fireEvent.click(chip);
       expect(openPathMock).not.toHaveBeenCalled();

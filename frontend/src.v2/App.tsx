@@ -17,8 +17,8 @@ const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHel
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
 
-const RouteLoading = () => (
-  <div className="app-route-loading" role="status" aria-label="正在加载页面">
+const RouteLoading = ({ settings = false }: { settings?: boolean }) => (
+  <div className="app-route-loading" data-scope={settings ? "settings" : "overlay"} role="status" aria-label={settings ? "正在加载设置" : "正在加载页面"}>
     <LoaderCircle className="animate-spin" aria-hidden="true" />
   </div>
 );
@@ -49,9 +49,7 @@ export const App = () => {
   return (
     <>
       <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>Something went wrong. <button onClick={() => window.location.reload()}>Reload</button></div>}>
-        <div hidden={settingsOpen} style={{ display: settingsOpen ? "none" : "contents" }}>
-          <WorkbenchShell />
-        </div>
+        <WorkbenchShell />
       </SafeBoundary>
       <ChunkErrorBoundary key={overlayRoute}>
         <Suspense fallback={<RouteLoading />}>
@@ -62,7 +60,7 @@ export const App = () => {
       </ChunkErrorBoundary>
       <div hidden={!settingsOpen} style={{ display: settingsOpen ? "contents" : "none" }}>
         <ChunkErrorBoundary resetKey={settingsOpen}>
-          <Suspense fallback={<RouteLoading />}>
+          <Suspense fallback={<RouteLoading settings />}>
             {(settingsVisited || settingsOpen) && <SettingsCenter />}
           </Suspense>
         </ChunkErrorBoundary>

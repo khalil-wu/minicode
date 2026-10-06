@@ -802,6 +802,54 @@ def _subagent_summary(data: dict[str, Any]) -> str:
     return ""
 
 
+def _subagent_completion_progress(data: dict[str, Any]) -> AgentEvent:
+    """Project a real child terminal event at its place in the parent stream."""
+    record = data.get("record") or data.get("snapshot") or {}
+    result = data.get("result") or {}
+    subagent_id = str(data["subagent_id"])
+    identity = str(record.get("agent_path") or data.get("agent_path") or subagent_id)
+    path_name = identity.rsplit("/", 1)[-1] if "/" in identity else ""
+    path_name = path_name.replace("_", " ")
+    path_name = path_name[:1].upper() + path_name[1:]
+    name = str(
+        record.get("teammate_name") or data.get("teammate_name")
+        or path_name
+        or record.get("agent_type") or data.get("role") or "Agent"
+    )
+    raw_status = str(data.get("status") or result.get("status") or "completed")
+    if raw_status in {"cancelled", "interrupted"}:
+        status, subagent_status, suffix = "partial", "cancelled", "已停止"
+    elif raw_status == "partial" or data.get("timed_out") or result.get("timed_out"):
+        status, subagent_status, suffix = "partial", "partial", "部分完成"
+    elif raw_status in {"error", "failed"} or data.get("error") or result.get("error"):
+        status, subagent_status, suffix = "failed", "error", "失败"
+    else:
+        status, subagent_status, suffix = "completed", "done", "已完成"
+    mailbox_epoch = int(record.get("mailbox_epoch") or data.get("mailbox_epoch") or 0)
+    progress = AgentEvent.progress(
+        f"{name}{suffix}",
+        id=f"subagent-completed:{subagent_id}:{mailbox_epoch}",
+        stage="status",
+        phase="subagent",
+        status=status,
+        label=name,
+        subagent_id=subagent_id,
+        subagent_name=name,
+        subagent_identity=identity,
+        subagent_status=subagent_status,
+    )
+    completed_at = result.get("completed_at") or record.get("completed_at")
+    progress.data["timestamp"] = (
+        datetime.fromtimestamp(completed_at / 1000, UTC).isoformat()
+        if isinstance(completed_at, (int, float))
+        else datetime.now(UTC).isoformat()
+    )
+    for key in ("conversation_id", "message_id", "turn_id", "task_id"):
+        if key in data:
+            progress.data[key] = data[key]
+    return progress
+
+
 _UI_AGENT_STATE_HANDLER = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None]
 
 
@@ -847,6 +895,7 @@ def _subagent_ui_metadata(data: dict[str, Any]) -> dict[str, Any]:
     fields = {
         "agent_path": "agentPath", "mailbox_epoch": "mailboxEpoch",
         "parent_run_id": "parentRunId", "task_id": "taskId", "turn_id": "turnId",
+        "model": "model", "provider": "provider", "reasoning_effort": "reasoningEffort",
         "objective": "objective", "depends_on": "dependsOn", "blocked_by": "blockedBy",
         "background": "background", "read_only": "readOnly", "write_scope": "writeScope",
         "current_activity": "currentActivity", "waiting_on": "waitingOn",
@@ -919,7 +968,7 @@ def _project_subagent_progress(state: dict[str, Any], data: dict[str, Any]) -> d
 
 def _project_subagent_done(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
     subagent_id = str(data.get("subagent_id") or "").strip()
-    if not subagent_id:
+    if not subagent_id or subagent_id == "parallel-batch":
         return None
     raw_status = str(data.get("status") or "completed").strip().lower()
     event_error = data.get("error") if isinstance(data.get("error"), str) else ""
@@ -1068,6 +1117,8 @@ def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict
             and isinstance(existing_progress.get("timestamp"), int)
             and existing_progress.get("timestamp") >= 0
         )
+        else int(datetime.fromisoformat(str(data["timestamp"])).timestamp() * 1000)
+        if data.get("subagent_id") and data.get("timestamp")
         else int(time.time() * 1000)
     )
     incoming_provider_state = data.get("provider_state", data.get("providerState"))
@@ -1094,6 +1145,10 @@ def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict
         **({"operationId": str(data.get("operation_id"))} if data.get("operation_id") is not None else {}),
         **({"providerState": str(incoming_provider_state).strip()} if incoming_provider_state is not None else {}),
         **({"iterationId": str(data.get("iteration_id"))} if data.get("iteration_id") is not None else {}),
+        **({"subagentId": str(data.get("subagent_id"))} if data.get("subagent_id") else {}),
+        **({"subagentName": str(data.get("subagent_name"))} if data.get("subagent_name") else {}),
+        **({"subagentIdentity": str(data.get("subagent_identity"))} if data.get("subagent_identity") else {}),
+        **({"subagentStatus": str(data.get("subagent_status"))} if data.get("subagent_status") else {}),
         "timestamp": progress_timestamp,
     }
     if provider_progress and isinstance(existing_progress, dict):
@@ -4884,6 +4939,9 @@ class SessionAgentRunnerMixin:
                         conversation.id, self.run_manager.active_task_id or ""
                     ),
                 )
+            if event_type == "turn.diff.updated":
+                _remember_turn_diff(payload)
+                await _persist_partial_turn(force=True)
             self._persist_ui_agent_state_event(conversation.id, event_type, payload)
             if event_type == "runtime.span":
                 span_id = str(payload.get("span_id") or "").strip()
@@ -4904,6 +4962,8 @@ class SessionAgentRunnerMixin:
             ):
                 await _persist_partial_turn(force=True)
             await self.send_event(AgentEvent(type=event_type, data=payload))
+            if event_type == "subagent.done":
+                await _publish_subagent_completion(payload)
 
         assistant_artifacts: list[dict[str, Any]] = []
         assistant_image_contexts: list[dict[str, Any]] = []
@@ -4917,12 +4977,14 @@ class SessionAgentRunnerMixin:
         query_run_completed_payload: dict[str, Any] = {}
         provider_terminal_received = False
         active_runtime_spans: dict[str, dict[str, Any]] = {}
+        latest_turn_diff: dict[str, Any] | None = None
         assistant_message_id = str(stream_state.get("message_id") or assistant_message_id)
 
         def _now_ms() -> int:
             return int(time.time() * 1000)
 
         turn_state = AgentTurnState(now_ms=_now_ms)
+        published_subagent_completions: set[str] = set()
         turn_started_at_ms = _now_ms()
         partial_persist_lock = asyncio.Lock()
         last_partial_persisted_at = 0.0
@@ -4930,6 +4992,12 @@ class SessionAgentRunnerMixin:
         partial_persist_pending = False
         partial_persist_forced = False
         partial_history_revision: int | None = None
+
+        def _remember_turn_diff(payload: dict[str, Any]) -> None:
+            nonlocal latest_turn_diff
+            owner = str(payload.get("thread_id") or payload.get("conversation_id") or "")
+            if owner == conversation.id:
+                latest_turn_diff = dict(payload)
 
         async def _persist_partial_turn(*, force: bool = False) -> None:
             """Coalesce the derived conversation view behind the durable journal."""
@@ -4959,7 +5027,7 @@ class SessionAgentRunnerMixin:
                 if not force and now - last_partial_persisted_at < 1.0:
                     return
                 snapshot = turn_state.finalize(terminal_status="partial")
-                if not snapshot.blocks and not assistant_artifacts:
+                if not snapshot.blocks and not assistant_artifacts and latest_turn_diff is None:
                     return
                 partial_message: dict[str, Any] = {
                     "id": assistant_message_id,
@@ -4978,6 +5046,8 @@ class SessionAgentRunnerMixin:
                     partial_message["artifacts"] = list(assistant_artifacts)
                 if snapshot.citations:
                     partial_message["citations"] = snapshot.citations
+                if latest_turn_diff is not None:
+                    partial_message["metadata"] = {"turn_diff": dict(latest_turn_diff)}
                 try:
                     if not _accepts_projection_events():
                         return
@@ -5059,6 +5129,21 @@ class SessionAgentRunnerMixin:
                         conversation.id,
                     )
                     return
+
+        async def _publish_subagent_completion(data: dict[str, Any]) -> None:
+            if data["subagent_id"] == "parallel-batch":
+                return
+            progress = _subagent_completion_progress(data)
+            progress_id = progress.data["id"]
+            if progress_id in published_subagent_completions:
+                return
+            published_subagent_completions.add(progress_id)
+            progress.data.setdefault("conversation_id", conversation.id)
+            progress.data.setdefault("message_id", assistant_message_id)
+            turn_state.record_progress(progress.data)
+            self._persist_ui_agent_state_event(conversation.id, "agent.progress", progress.data)
+            await _persist_partial_turn(force=True)
+            await self.send_event(progress)
 
         async def _maybe_emit_source_citation(data: dict[str, Any]) -> None:
             citation = turn_state.record_source_citation(data)
@@ -5266,6 +5351,9 @@ class SessionAgentRunnerMixin:
                     event_turn_id = str(event.data.get("turn_id") or "").strip()
                     if event_turn_id:
                         stream_state["turn_id"] = event_turn_id
+                if event.type == "turn.diff.updated":
+                    _remember_turn_diff(event.data)
+                    await _persist_partial_turn(force=True)
 
                 # Provider-managed progress is yielded by the main query
                 # stream rather than the runtime callback used by local tools.
@@ -5454,6 +5542,8 @@ class SessionAgentRunnerMixin:
                 if event.type in {"agent.run.completed", "done"}:
                     continue
                 await self.send_event(event)
+                if event.type == "subagent.done":
+                    await _publish_subagent_completion(event.data)
             if not provider_terminal_received:
                 query_terminal_status = "failed"
                 query_terminal_reason = "provider_terminal_missing"
@@ -5671,6 +5761,8 @@ class SessionAgentRunnerMixin:
                     assistant_message["artifacts"] = assistant_artifacts
                 if assistant_citations:
                     assistant_message["citations"] = assistant_citations
+                if latest_turn_diff is not None:
+                    assistant_message["metadata"] = {"turn_diff": dict(latest_turn_diff)}
 
                 if assistant_content and not parent_notification_only:
                     new_summary = build_conversation_summary(

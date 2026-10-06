@@ -261,6 +261,7 @@ async function createMainWindow() {
     title: "MiniCode",
     icon: desktopIconPath,
     webPreferences: {
+      zoomFactor: 1,
       preload: preloadFile,
       contextIsolation: true,
       nodeIntegration: false,
@@ -293,26 +294,16 @@ async function createMainWindow() {
       event.preventDefault();
       return;
     }
-    // File search is handled by the renderer using the user's current binding.
-    // Zoom: Ctrl+= / Ctrl+Plus -> zoom in, Ctrl+- -> zoom out, Ctrl+0 -> reset
-    if (input.control && !input.alt) {
-      const wc = mainWindow.webContents;
-      if (input.key === "=" || input.key === "+") {
-        wc.setZoomLevel(wc.getZoomLevel() + 0.5);
-        event.preventDefault();
-        return;
-      }
-      if (input.key === "-") {
-        wc.setZoomLevel(wc.getZoomLevel() - 0.5);
-        event.preventDefault();
-        return;
-      }
-      if (input.key === "0") {
-        wc.setZoomLevel(0);
-        event.preventDefault();
-        return;
-      }
+    // Support both the unshifted = key and +, including numpad keys.
+    // Consume the event after zooming so the menu cannot zoom a second time.
+    if ((input.control || input.meta) && !input.alt && ["=", "+", "-", "0"].includes(input.key)) {
+      const zoomLevel = input.key === "0"
+        ? 0
+        : mainWindow.webContents.getZoomLevel() + (input.key === "-" ? -0.5 : 0.5);
+      mainWindow.webContents.setZoomLevel(zoomLevel);
+      event.preventDefault();
     }
+    // File search uses the renderer binding.
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

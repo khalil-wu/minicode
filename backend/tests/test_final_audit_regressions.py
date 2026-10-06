@@ -215,7 +215,6 @@ def test_small_window_externalizes_fresh_tool_output_and_preserves_full_source(t
     from backend.tools.base import ToolResult
     storage = tmp_path / "results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", storage)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     builder = ContextBuilder(TokenBudget(total=24000), workspace_root=tmp_path, conversation_id="small-window")
     builder.append_user("Inspect source")
     builder.append_assistant_tool_calls([ToolCallEvent(id="small", name="read_file", arguments={"file_path": "small.py"})])

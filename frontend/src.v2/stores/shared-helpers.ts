@@ -40,6 +40,7 @@ export const LS = {
   shortcutBindings: "minicode.keyboard.bindings",
   layout: {
     leftWidth: "minicode.layout.left-width",
+    leftExpandedWidth: "minicode.layout.left-expanded-width",
     rightWidth: "minicode.layout.right-width",
     rightOpen: "minicode.layout.right-open",
     dockHeight: "minicode.layout.dock-height",
@@ -62,9 +63,9 @@ export const LS = {
 };
 
 export const DEFAULT_WORKSPACE_KEY = "__default__";
-export const LEFT_SIDEBAR_DEFAULT_WIDTH = 320;
-export const LEFT_SIDEBAR_MIN_WIDTH = 272;
-export const LEFT_SIDEBAR_MAX_WIDTH = 400;
+export const LEFT_SIDEBAR_DEFAULT_WIDTH = 275;
+export const LEFT_SIDEBAR_MIN_WIDTH = 240;
+export const LEFT_SIDEBAR_MAX_WIDTH = 520;
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
 export const RIGHT_SIDEBAR_MAX = 1040;
 export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
@@ -228,6 +229,8 @@ export const loadInitialLayout = () => {
     : LEFT_SIDEBAR_DEFAULT_WIDTH;
   return {
     leftSidebarWidth,
+    leftSidebarExpandedWidth: leftSidebarWidth || clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH,
+      Number(readLS(LS.layout.leftExpandedWidth)) || LEFT_SIDEBAR_DEFAULT_WIDTH),
     rightSidebarWidth: clamp(320, RIGHT_SIDEBAR_MAX, Number.isFinite(right) ? right : RIGHT_SIDEBAR_DEFAULT_WIDTH),
     rightPanelOpen: rightOpen,
     dockHeight: clamp(180, 520, Number.isFinite(dock) ? dock : 240),
@@ -441,7 +444,7 @@ export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] 
       writeLS(storageKey, normalizedRaw);
     }
     const drafts = safeJsonParse<EditorTab[]>(readLS(editorDraftsStorageKey(workspace)) ?? "[]", []);
-    const tabMeta = safeJsonParse<Record<string, Pick<EditorTab, "pinned" | "preview" | "lastActivated">>>(readLS(storageKey + ":meta") ?? "{}", {});
+    const tabMeta = safeJsonParse<Record<string, Pick<EditorTab, "pinned" | "preview" | "lastActivated" | "language">>>(readLS(storageKey + ":meta") ?? "{}", {});
     return normalizedPaths.map((path) => {
       const draft = drafts.find((entry) => editorPathsEqual(entry.path, path, workspace ?? ""));
       return { ...(draft ? { ...draft, path, loading: true, error: null, draftRestorePending: true, draftRestored: true } : blankEditorTab(path)),
@@ -463,7 +466,7 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) 
   });
   writeLS(editorTabsStorageKey(workspace), JSON.stringify(paths));
   writeLS(editorTabsStorageKey(workspace) + ":meta", JSON.stringify(Object.fromEntries(tabs.map((tab) => [
-    editorPathComparisonKey(tab.path, workspace ?? ""), { pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated },
+    editorPathComparisonKey(tab.path, workspace ?? ""), { pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated, language: tab.language },
   ]))));
   const drafts = tabs.filter((tab) => !tab.readOnly && !tab.largeFile && tab.content !== tab.original);
   writeLS(editorDraftsStorageKey(workspace), JSON.stringify(drafts));

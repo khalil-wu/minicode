@@ -8,6 +8,7 @@ type AgentProcessSummaryProps = {
   durationMs: number | null;
   failureMessage?: string;
   canCollapse?: boolean;
+  canExpand?: boolean;
   position?: "top" | "bottom";
   onToggle: () => void;
 };
@@ -19,22 +20,23 @@ export function AgentProcessSummary({
   durationMs,
   failureMessage,
   canCollapse = status === "completed",
+  canExpand = false,
   position = "top",
   onToggle,
 }: AgentProcessSummaryProps) {
   const running = status === "running";
   const statusLabel = running
-    ? "Working"
+    ? "处理中"
     : status === "failed"
-      ? "Failed"
+      ? "处理失败"
       : status === "partial"
-        ? "Partial"
+        ? "部分完成"
         : status === "stopped"
-          ? "Stopped"
-          : "Worked";
+          ? "已停止"
+          : "已处理";
   const durationLabel = running ? "" : formatElapsedSeconds(durationMs);
   const displayLabel = durationLabel
-    ? `${status === "completed" ? "Worked for" : statusLabel} ${durationLabel}`
+    ? status === "completed" ? `用时 ${durationLabel}` : `${statusLabel} · ${durationLabel}`
     : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
@@ -68,7 +70,7 @@ export function AgentProcessSummary({
     </>
   );
 
-  if (!hasTimelineItems || !canCollapse) {
+  if (!hasTimelineItems || (!canCollapse && !canExpand)) {
     return (
       <div
         className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap"
@@ -106,16 +108,16 @@ export function AgentProcessSummary({
 
 function formatElapsedSeconds(durationMs: number | null): string {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "";
-  if (durationMs < 1_000) return "<1s";
+  if (durationMs < 1_000) return "不到1秒";
   const seconds = durationMs / 1_000;
   if (seconds >= 60) {
     const roundedSeconds = Math.round(seconds);
     const minutes = Math.floor(roundedSeconds / 60);
     const remainder = roundedSeconds % 60;
-    return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
+    return remainder > 0 ? `${minutes}分钟${remainder}秒` : `${minutes}分钟`;
   }
   const value = seconds < 10
     ? seconds.toFixed(1).replace(/\.0$/, "")
     : String(Math.round(seconds));
-  return `${value}s`;
+  return `${value}秒`;
 }

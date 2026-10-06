@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "./index";
 import { clearEditorWorkspaceBufferCacheForTests, loadPersistedEditorTabs, persistEditorTabs } from "./shared-helpers";
-import { defaultWorkbenchPreferences } from "../lib/workbench-preferences";
+import { applyWorkbenchPreferences, defaultWorkbenchPreferences } from "../lib/workbench-preferences";
 import { EditorNavigation } from "../panels/editorNavigation";
 
 beforeEach(() => {
@@ -23,11 +23,41 @@ describe("editor workspace efficiency", () => {
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "c.py")).toMatchObject({ pinned: true, preview: false });
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "b.py")).toMatchObject({ content: "b = 2", original: "b = 1" });
   });
-  it("stores the same typography and editor preferences that the DOM consumes", () => {
-    useAppStore.getState().setWorkbenchPreferences({ codeFont: "Consolas", proseFont: "Georgia", proseSize: 18, tabSize: 2, formatOnSave: true });
-    expect(document.documentElement.style.getPropertyValue("--editor-font-family")).toBe("Consolas");
-    expect(document.documentElement.style.getPropertyValue("--font-prose")).toBe("Georgia");
-    expect(JSON.parse(localStorage.getItem("minicode.workbench.preferences")!)).toMatchObject({ proseSize: 18, tabSize: 2, formatOnSave: true });
+  it("ignores legacy font choices while preserving sizes and unrelated editor preferences", () => {
+    const legacy = { ...defaultWorkbenchPreferences, uiFont: "Georgia", proseFont: "Georgia", codeFont: "Fira Code", ligatures: true,
+      proseSize: 17, tabSize: 2, formatOnSave: true, speechModel: "saved-speech-model", snippets: [{ id: "saved", language: "typescript", prefix: "log", body: "console.log($1)", description: "log" }] };
+    const style = document.documentElement.style;
+    const fontProperties = ["--font-ui", "--font-prose", "--font-mono", "--editor-font-family"];
+    for (const property of fontProperties) style.setProperty(property, "LegacyFont");
+    useAppStore.setState({ workbenchPreferences: legacy });
+
+    applyWorkbenchPreferences(useAppStore.getState().workbenchPreferences);
+
+    for (const property of fontProperties) expect(style.getPropertyValue(property)).toBe("");
+    expect(style.getPropertyValue("--mc-font-reading")).toBe("17px");
+    expect(style.getPropertyValue("--prose-font-size")).toBe("17px");
+    style.setProperty("--font-ui", "OldInlineOverride");
+    useAppStore.getState().setWorkbenchPreferences({ proseSize: 18 });
+    expect(style.getPropertyValue("--font-ui")).toBe("");
+    expect(style.getPropertyValue("--mc-font-reading")).toBe("18px");
+    expect(JSON.parse(localStorage.getItem("minicode.workbench.preferences")!)).toMatchObject({ proseSize: 18, tabSize: 2, formatOnSave: true,
+      speechModel: "saved-speech-model", snippets: legacy.snippets });
+  });
+  it("persists a file's chosen language with its unchanged draft and restores automatic mode", () => {
+    const store = useAppStore.getState();
+    store.openEditorTab("example.txt");
+    store.markTabLoaded("example.txt", "// saved comment\nint answer = 42;");
+    store.updateTabContent("example.txt", "// unsaved comment\nint answer = 43;");
+    store.setEditorTabLanguage("example.txt", "cpp");
+    const before = useAppStore.getState().editorTabs[0];
+    clearEditorWorkspaceBufferCacheForTests();
+    const restored = loadPersistedEditorTabs("/editor-test");
+    expect(restored[0]).toMatchObject({ language: "cpp", content: before.content, original: before.original });
+    useAppStore.setState({ editorTabs: restored });
+    store.setEditorTabLanguage("example.txt", undefined);
+    clearEditorWorkspaceBufferCacheForTests();
+    expect(loadPersistedEditorTabs("/editor-test")[0]).toMatchObject({ content: before.content, original: before.original });
+    expect(loadPersistedEditorTabs("/editor-test")[0].language).toBeUndefined();
   });
   it("returns to the previous location, supports forward, and drops the old forward branch after a new jump", () => {
     const history = new EditorNavigation();

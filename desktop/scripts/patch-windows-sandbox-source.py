@@ -64,6 +64,74 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
         path = source_dir / file
         texts[path] = texts[path].replace('OsStr::new(READ_ACL_MUTEX_NAME)', 'OsStr::new(read_acl_mutex_name())')
 
+    # A READ carveout leaves a DENY ACE attached to its capability SID. Reusing
+    # that SID after an explicit WRITE authorization would still deny the write.
+    # Preserve old SIDs for running commands and select a cache per effective
+    # policy; actual filesystem paths remain the innermost cache keys.
+    replace("cap.rs", '    pub writable_root_by_path: HashMap<String, String>,', '''    pub writable_root_by_path: HashMap<String, String>,
+    #[serde(default)]
+    pub workspace_by_policy: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub writable_root_by_policy: HashMap<String, HashMap<String, String>>,''')
+    replace("cap.rs", 'writable_root_by_path: HashMap::new(),', '''writable_root_by_path: HashMap::new(),
+        workspace_by_policy: HashMap::new(),
+        writable_root_by_policy: HashMap::new(),''', 2)
+    for legacy_map, policy_map, argument in [
+        ("workspace_by_cwd", "workspace_by_policy", "cwd"),
+        ("writable_root_by_path", "writable_root_by_policy", "root"),
+    ]:
+        selected_map = policy_map + "_paths"
+        replace("cap.rs", f'''    let key = canonical_path_key({argument});
+    if let Some(sid) = caps.{legacy_map}.get(&key) {{''', f'''    let key = canonical_path_key({argument});
+    let {selected_map} = match std::env::var_os("MINICODE_WINDOWS_SANDBOX_POLICY_SCOPE") {{
+        Some(scope) => caps.{policy_map}.entry(scope.to_string_lossy().into_owned()).or_default(),
+        None => &mut caps.{legacy_map},
+    }};
+    if let Some(sid) = {selected_map}.get(&key) {{''')
+        replace("cap.rs", f'    caps.{legacy_map}.insert(key, sid.clone());', f'    {selected_map}.insert(key, sid.clone());')
+
+    # The upstream full-disk READ shortcut returns no explicit roots, losing
+    # declared metadata such as a linked worktree's common .git directory.
+    # Resolve those entries separately while retaining the original policy's
+    # effective deny decisions.
+    replace("resolved_permissions.rs", '''        self.file_system
+            .get_readable_roots_with_cwd(cwd)
+            .into_iter()
+            .map(AbsolutePathBuf::into_path_buf)
+            .collect()''', '''        let mut explicit = self.file_system.clone();
+        explicit.entries.retain(|entry| {
+            !matches!(&entry.path, FileSystemPath::Special { value: Root })
+                || !entry.access.can_read()
+        });
+        explicit.get_readable_roots_with_cwd(cwd)
+            .into_iter()
+            .filter(|path| self.file_system.can_read_local_path_with_cwd(path.as_path(), cwd))
+            .map(AbsolutePathBuf::into_path_buf)
+            .collect()''')
+    replace("resolved_permissions.rs", '    pub(crate) fn uses_write_capabilities_for_cwd(', '''    pub(crate) fn readable_launch_ancestors_for_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
+        self.readable_roots_for_cwd(cwd).into_iter().chain(std::iter::once(cwd.to_path_buf()))
+            .flat_map(|root| root.ancestors().skip(1).map(Path::to_path_buf).collect::<Vec<_>>())
+            .filter(|path| path.parent().is_some() && self.file_system.can_read_local_path_with_cwd(path, cwd))
+            .collect()
+    }
+
+    pub(crate) fn uses_write_capabilities_for_cwd(''')
+    for file in ["setup.rs", "setup_provisioning.rs"]:
+        replace(file, '    read_roots: Vec<PathBuf>,', '    read_roots: Vec<PathBuf>,\n    #[serde(default)]\n    launch_read_roots: Vec<PathBuf>,')
+        replace(file, '    launch_read_roots: Vec<PathBuf>,', '    launch_read_roots: Vec<PathBuf>,\n    #[serde(default)]\n    launch_read_ancestors: Vec<PathBuf>,')
+    replace("setup.rs", '    let (read_roots, write_roots) = build_payload_roots(&request, &overrides, runtime);', '''    let (read_roots, write_roots) = build_payload_roots(&request, &overrides, runtime);
+    let launch_read_roots = request.permissions.readable_roots_for_cwd(request.command_cwd)
+        .into_iter().filter(|root| root.parent().is_some()).collect();''')
+    replace("setup.rs", '    let deny_read_paths = build_payload_deny_read_paths(overrides.deny_read_paths);', '    let launch_read_ancestors = request.permissions.readable_launch_ancestors_for_cwd(request.command_cwd);\n    let deny_read_paths = build_payload_deny_read_paths(overrides.deny_read_paths);')
+    if '        launch_read_ancestors,\n        write_roots,' not in texts[source_dir / "setup.rs"]:
+        replace("setup.rs", '        read_roots,\n        write_roots,', '        read_roots,\n        launch_read_roots,\n        write_roots,')
+    replace("setup.rs", '        launch_read_roots,', '        launch_read_roots,\n        launch_read_ancestors,')
+    replace("setup.rs", '        read_roots: Vec::new(),', '        read_roots: Vec::new(),\n        launch_read_roots: Vec::new(),', 2)
+    replace("setup_provisioning/service.rs", '        read_roots: Vec::new(),', '        read_roots: Vec::new(),\n        launch_read_roots: Vec::new(),')
+    for file, count in [("setup.rs", 2), ("setup_provisioning/service.rs", 1)]:
+        replace(file, '        launch_read_roots: Vec::new(),', '        launch_read_roots: Vec::new(),\n        launch_read_ancestors: Vec::new(),', count)
+    replace("setup_provisioning/acl_tests.rs", '            read_roots: Vec::new(),', '            read_roots: Vec::new(),\n            launch_read_roots: Vec::new(),\n            launch_read_ancestors: Vec::new(),')
+
     # Runner logon uses command_cwd before the background read helper can run.
     # Finish only its already-authorized RX root here; other read roots retain
     # their existing background path. Both paths share the same ACL operation.
@@ -101,12 +169,15 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
         }
     }
 '''
-    replace("setup_provisioning.rs", read_acl_body, '''    apply_read_acls_for_sandbox_group(
+    has_read_acl_helper = 'fn apply_read_acls_for_sandbox_group(' in texts[source_dir / "setup_provisioning.rs"]
+    if not has_read_acl_helper:
+        replace("setup_provisioning.rs", read_acl_body, '''    apply_read_acls_for_sandbox_group(
         &payload.read_roots, sandbox_group_psid, log, &mut refresh_errors,
     )?;
 ''')
     shared_read_acl_body = read_acl_body.replace('&payload.read_roots', 'read_roots').replace('payload.read_roots', 'read_roots').replace('&mut refresh_errors,', 'refresh_errors,')
-    replace("setup_provisioning.rs", 'fn run_read_acl_only(', '''fn apply_read_acls_for_sandbox_group(
+    if not has_read_acl_helper:
+        replace("setup_provisioning.rs", 'fn run_read_acl_only(', '''fn apply_read_acls_for_sandbox_group(
     read_roots: &[PathBuf],
     sandbox_group_psid: *mut c_void,
     log: &mut dyn Write,
@@ -116,7 +187,7 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
 }
 
 fn run_read_acl_only(''')
-    replace("setup_provisioning.rs", '    if payload.read_roots.is_empty() {', '''    // This root has already passed the read-policy and deny-path filters.
+    old_launch_read_acl = '''    // This root has already passed the read-policy and deny-path filters.
     // Keep RX inheritance identical to the background grant so a root-only ACE
     // cannot make its existing children look prepared when they are not.
     let cwd_key = crate::path_normalization::canonical_path_key(&payload.command_cwd);
@@ -128,7 +199,173 @@ fn run_read_acl_only(''')
         &launch_read_roots, sandbox_group_psid, log, &mut refresh_errors,
     )?;
 
-    if payload.read_roots.is_empty() {''')
+    if payload.read_roots.is_empty() {'''
+    launch_read_acl = '''    // Synchronize only cwd and explicitly declared concrete roots which survived
+    // the existing read/deny filters. Platform and profile-wide preparation keeps
+    // its background path, so this does not scan the drive before each command.
+    let cwd_key = crate::path_normalization::canonical_path_key(&payload.command_cwd);
+    let launch_keys: HashSet<String> = payload.launch_read_roots.iter()
+        .map(|root| crate::path_normalization::canonical_path_key(root)).collect();
+    let launch_read_roots: Vec<PathBuf> = payload.read_roots.iter()
+        .filter(|root| {
+            let key = crate::path_normalization::canonical_path_key(root);
+            key == cwd_key || launch_keys.contains(&key)
+        })
+        .cloned()
+        .collect();
+    apply_read_acls_for_sandbox_group(
+        &launch_read_roots, sandbox_group_psid, log, &mut refresh_errors,
+    )?;
+
+    if payload.read_roots.is_empty() {'''
+    if '&payload.launch_read_ancestors, sandbox_group_psid' not in texts[source_dir / "setup_provisioning.rs"]:
+        read_acl_anchor = old_launch_read_acl if old_launch_read_acl in texts[source_dir / "setup_provisioning.rs"] else '    if payload.read_roots.is_empty() {'
+        replace("setup_provisioning.rs", read_acl_anchor, launch_read_acl)
+    if '    inheritance: u32,\n    access_mask: u32,\n) -> Result<()> {' not in texts[source_dir / "setup_provisioning.rs"]:
+        replace("setup_provisioning.rs", '''fn apply_read_acls_for_sandbox_group(
+    read_roots: &[PathBuf],
+    sandbox_group_psid: *mut c_void,
+    log: &mut dyn Write,
+    refresh_errors: &mut Vec<String>,
+)''', '''fn apply_read_acls_for_sandbox_group(
+    read_roots: &[PathBuf],
+    sandbox_group_psid: *mut c_void,
+    log: &mut dyn Write,
+    refresh_errors: &mut Vec<String>,
+    inheritance: u32,
+)''')
+    replace("setup_provisioning.rs", '    inheritance: u32,\n) -> Result<()> {\n    if !read_roots.is_empty() {', '    inheritance: u32,\n    access_mask: u32,\n) -> Result<()> {\n    if !read_roots.is_empty() {')
+    replace("setup_provisioning.rs", '            "read",\n            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,', '            "read",\n            inheritance,')
+    replace("setup_provisioning.rs", '            refresh_errors,\n            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,\n            "read",\n            inheritance,', '            refresh_errors,\n            access_mask,\n            "read",\n            inheritance,')
+    replace("setup_provisioning.rs", '        &payload.read_roots, sandbox_group_psid, log, &mut refresh_errors,', '        &payload.read_roots, sandbox_group_psid, log, &mut refresh_errors,\n        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,')
+    replace("setup_provisioning.rs", '        &launch_read_roots, sandbox_group_psid, log, &mut refresh_errors,', '        &launch_read_roots, sandbox_group_psid, log, &mut refresh_errors,\n        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,')
+    for roots in ["payload.read_roots", "launch_read_roots"]:
+        replace("setup_provisioning.rs", f'        &{roots}, sandbox_group_psid, log, &mut refresh_errors,\n        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,', f'        &{roots}, sandbox_group_psid, log, &mut refresh_errors,\n        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,')
+    if '&payload.launch_read_ancestors, sandbox_group_psid' not in texts[source_dir / "setup_provisioning.rs"]:
+        replace("setup_provisioning.rs", '    let cwd_key = crate::path_normalization::canonical_path_key(&payload.command_cwd);', '''    apply_read_acls_for_sandbox_group(
+        &payload.launch_read_ancestors, sandbox_group_psid, log, &mut refresh_errors,
+        0,
+    )?;
+    let cwd_key = crate::path_normalization::canonical_path_key(&payload.command_cwd);''')
+    replace("setup_provisioning.rs", '        &payload.launch_read_ancestors, sandbox_group_psid, log, &mut refresh_errors,\n        0,', '        &payload.launch_read_ancestors, sandbox_group_psid, log, &mut refresh_errors,\n        0, windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES | windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE,')
+
+    # A directory-only grant must not cause SetNamedSecurityInfo to propagate
+    # unrelated existing inheritable ACEs through the host's profile tree.
+    # SetFileSecurity writes this object's DACL only, preserving the ACL entries,
+    # owner, and inheritance-protection state already present on that object.
+    if 'GetSecurityDescriptorControl(p_sd, &mut old_control' not in texts[source_dir / "acl.rs"]:
+        replace("acl.rs", '''            let code3 = SetNamedSecurityInfoW(
+                to_wide(path).as_ptr() as *mut u16,
+                1,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p_new_dacl,
+                std::ptr::null_mut(),
+            );''', '''            let code3 = if inheritance == 0 {
+                use windows_sys::Win32::Foundation::GetLastError;
+                use windows_sys::Win32::Security::{InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorDacl};
+                let mut descriptor: SECURITY_DESCRIPTOR = std::mem::zeroed();
+                let descriptor_ptr = std::ptr::addr_of_mut!(descriptor).cast();
+                if InitializeSecurityDescriptor(descriptor_ptr, 1) == 0
+                    || SetSecurityDescriptorDacl(descriptor_ptr, 1, p_new_dacl, 0) == 0
+                    || SetFileSecurityW(to_wide(path).as_ptr(), DACL_SECURITY_INFORMATION, descriptor_ptr) == 0 {
+                    GetLastError()
+                } else { ERROR_SUCCESS }
+            } else {
+                SetNamedSecurityInfoW(
+                    to_wide(path).as_ptr() as *mut u16,
+                    1,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    p_new_dacl,
+                    std::ptr::null_mut(),
+                )
+            };''')
+    replace("acl.rs", '                use windows_sys::Win32::Security::{InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorDacl};', '                use windows_sys::Win32::Security::{GetSecurityDescriptorControl, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SE_DACL_AUTO_INHERITED, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_PROTECTED, SetFileSecurityW, SetSecurityDescriptorControl, SetSecurityDescriptorDacl};')
+    replace("acl.rs", '''                if InitializeSecurityDescriptor(descriptor_ptr, 1) == 0
+                    || SetSecurityDescriptorDacl''', '''                let mut old_control = 0;
+                let mut revision = 0;
+                let mode = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | SE_DACL_AUTO_INHERIT_REQ;
+                if GetSecurityDescriptorControl(p_sd, &mut old_control, &mut revision) == 0
+                    || InitializeSecurityDescriptor(descriptor_ptr, 1) == 0
+                    || SetSecurityDescriptorControl(descriptor_ptr, mode, old_control & mode) == 0
+                    || SetSecurityDescriptorDacl''')
+    replace("acl_tests.rs", '#[test]\nfn revoking_absent_sid_preserves_child_null_dacl()', '''#[test]
+fn noninheriting_grant_preserves_existing_child_security() {
+    let parent = tempfile::tempdir().expect("parent directory");
+    unsafe {
+        let (_, descriptor) = super::fetch_dacl_handle(parent.path()).expect("parent descriptor");
+        let protected = windows_sys::Win32::Security::SE_DACL_PROTECTED;
+        let control = windows_sys::Win32::Security::SetSecurityDescriptorControl(descriptor, protected, protected);
+        assert_ne!(control, 0, "protect fixture descriptor");
+        let set = windows_sys::Win32::Security::SetFileSecurityW(
+            crate::winutil::to_wide(parent.path()).as_ptr(),
+            windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+            descriptor,
+        );
+        LocalFree(descriptor as HLOCAL);
+        assert_ne!(set, 0, "protect fixture parent");
+    }
+    let child = parent.path().join("child.txt");
+    std::fs::write(&child, "host content").expect("create child");
+    let sid = LocalSid::from_string("S-1-5-21-10-20-30-42").expect("test SID");
+    let snapshot = || unsafe {
+        let (_, descriptor) = super::fetch_dacl_handle(&child).expect("child descriptor");
+        let length = windows_sys::Win32::Security::GetSecurityDescriptorLength(descriptor);
+        let bytes = std::slice::from_raw_parts(descriptor.cast::<u8>(), length as usize).to_vec();
+        LocalFree(descriptor as HLOCAL);
+        bytes
+    };
+    let before = snapshot();
+    let mask = windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES
+        | windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
+    assert!(unsafe {
+        super::ensure_allow_mask_aces_with_inheritance(parent.path(), &[sid.as_ptr()], mask, 0)
+    }.expect("grant directory attributes"));
+    assert!(super::path_mask_allows(parent.path(), &[sid.as_ptr()], mask, true).expect("parent access"));
+    assert_eq!(snapshot(), before, "directory-only grant must leave child security unchanged");
+    unsafe {
+        let (_, descriptor) = super::fetch_dacl_handle(parent.path()).expect("updated parent descriptor");
+        let mut control = 0;
+        let mut revision = 0;
+        let valid = windows_sys::Win32::Security::GetSecurityDescriptorControl(descriptor, &mut control, &mut revision);
+        LocalFree(descriptor as HLOCAL);
+        assert_ne!(valid, 0);
+        assert_ne!(control & windows_sys::Win32::Security::SE_DACL_PROTECTED, 0, "preserve parent inheritance mode");
+    }
+}
+
+#[test]
+fn revoking_absent_sid_preserves_child_null_dacl()''')
+    unit_path = source_dir / "acl_tests.rs"
+    unit_marker = '#[test]\nfn noninheriting_grant_preserves_existing_child_security()'
+    if texts[unit_path].count(unit_marker) == 2:
+        first = texts[unit_path].index(unit_marker)
+        second = texts[unit_path].index(unit_marker, first + len(unit_marker))
+        texts[unit_path] = texts[unit_path][:first] + texts[unit_path][second:]
+
+    # Guest-created files belong to the guest account. OWNER RIGHTS alone would
+    # then leave the host unable to read its own workspace (including Git refs).
+    # Give only the bound host SID inherited access on existing WRITE roots;
+    # this SID is absent from guest tokens and uses no sandbox deny replacement.
+    replace("setup_provisioning.rs", '    let mut seen_write_roots: HashSet<PathBuf> = HashSet::new();', '''    let mut seen_write_roots: HashSet<PathBuf> = HashSet::new();
+    let host_user_psid = unsafe {
+        convert_string_sid_to_sid(&crate::owner_identity::owner().user_sid)
+            .ok_or_else(|| anyhow::anyhow!("convert host owner SID failed"))?
+    };''')
+    replace("setup_provisioning.rs", '        let root_cap_sid_str =\n            workspace_write_cap_sid_for_root(', '''        unsafe {
+            ensure_allow_mask_aces_with_inheritance(
+                root, &[host_user_psid],
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+                CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+            ).context("preserve host access to sandbox-written files")?;
+        }
+        let root_cap_sid_str =
+            workspace_write_cap_sid_for_root(''')
+    replace("setup_provisioning.rs", '    if refresh_only && !refresh_errors.is_empty() {', '''    unsafe { LocalFree(host_user_psid as HLOCAL); }
+    if refresh_only && !refresh_errors.is_empty() {''')
 
     # No new owner may reach a pre-v3 global service, including a package-family hint.
     replace("service_identity.rs", 'Ok("MiniCodeSandboxService".into())', 'Ok(crate::owner_identity::owner().service.clone())')

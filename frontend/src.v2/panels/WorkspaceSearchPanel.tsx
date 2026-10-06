@@ -32,12 +32,11 @@ const initialSession = (): SearchSession => ({ options: { query: "", regex: fals
 
 function ReplacementDiff({ file, theme, scale }: { file: { path: string; before: string; after: string }; theme: "light" | "dark"; scale: number }) {
   const onMount = useOwnedDiffModelCleanup();
-  const preferences = useAppStore((state) => state.workbenchPreferences);
   return <NativeDiff height="100%" original={file.before} modified={file.after} language={guessLanguageFromPath(file.path)} theme={miniCodeMonacoThemeName(theme)}
     beforeMount={(monaco) => defineMiniCodeMonacoTheme(monaco, theme)} onMount={onMount}
     options={{ readOnly: true, renderSideBySide: true, automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false,
-      fontFamily: preferences.codeFont || getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(), fontSize: Math.round(14 * scale), lineHeight: Math.round(22 * scale),
-      fontLigatures: preferences.ligatures, roundedSelection: false, renderLineHighlight: "all", renderValidationDecorations: "off", originalEditable: false, lineNumbers: "on", wordWrap: "on", padding: { top: 8 } }} />;
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(), fontSize: Math.round(14 * scale), lineHeight: Math.round(22 * scale),
+      fontLigatures: false, roundedSelection: false, renderLineHighlight: "all", renderValidationDecorations: "off", originalEditable: false, lineNumbers: "on", wordWrap: "on", padding: { top: 8 } }} />;
 }
 
 export function WorkspaceSearchPanel({ onNavigate }: { onNavigate?: () => void }) {

@@ -60,7 +60,7 @@
   line-height: var(--leading-tight);
   text-align: left;
   text-overflow: ellipsis;
-  text-decoration: underline;
+  text-decoration: none;
   text-underline-offset: 2px;
   white-space: nowrap;
   cursor: pointer;
@@ -80,7 +80,7 @@
 .web-search-result-url {
   overflow: hidden;
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -274,6 +274,33 @@ test("killConversation terminates only sessions owned by that conversation", asy
   assert.deepEqual(killed, [0, 1, 2]);
 });
 
+test("archive termination retains exited PTY output and the other conversation's live shell", async () => {
+  const callbacks = [];
+  manager.init({
+    pty: { spawn: () => {
+      const listeners = {};
+      callbacks.push(listeners);
+      return { pid: 0, process: "pwsh", write() {}, resize() {},
+        kill() { listeners.exit({ exitCode: 0 }); },
+        onData(callback) { listeners.data = callback; },
+        onExit(callback) { listeners.exit = callback; },
+      };
+    } },
+    sanitizedPtyEnv: () => ({}), assertTrustedPath: (cwd) => cwd, getMainWindow: () => null,
+  });
+  const archived = manager.spawnSession("C:\\workspace", "archive-native-owner");
+  const other = manager.spawnSession("C:\\workspace", "other-native-owner");
+  callbacks[0].data("Previous command output\r\n");
+  assert.equal(await manager.killConversation("archive-native-owner", true), 1);
+  const snapshot = manager.snapshotSession(archived.session_id, 8000, "archive-native-owner");
+  assert.equal(snapshot.is_alive, false);
+  assert.match(snapshot.output, /Previous command output/);
+  assert.equal(manager.listSessions("other-native-owner")[0].is_alive, true);
+  manager.acknowledgeExitedSession(archived.session_id, "archive-native-owner");
+  await manager.killConversation("other-native-owner");
+  assert.equal(manager.snapshotSession(other.session_id, 100, "other-native-owner"), null);
+});
+
 test("restartSession atomically replaces an exited owned session", async () => {
   const exits = [];
   let pid = 40;

@@ -49,6 +49,22 @@ describe("handleDiffEvent", () => {
       toolCallId: "write-1",
       revision: 2,
     });
+    expect(useAppStore.getState().messages[0].turnDiff).toBe(useAppStore.getState().turnDiffs["conv-current"]);
+  });
+
+  it("retains each parent turn's patch on its own message after a later turn becomes current", () => {
+    useAppStore.setState({ messages: [
+      { id: "answer-first", role: "assistant", turnId: "first", content: "done", blocks: [], artifacts: [], timestamp: 1 },
+      { id: "answer-second", role: "assistant", turnId: "second", content: "done", blocks: [], artifacts: [], timestamp: 2 },
+    ] });
+    for (const [turnId, messageId, path] of [["first", "answer-first", "parser.py"], ["second", "answer-second", "cli.py"]]) {
+      handleDiffEvent({ type: "turn.diff.updated", conversation_id: "conv-current", thread_id: "conv-current",
+        turn_id: turnId, message_id: messageId, revision: 1,
+        diff: `diff --git a/${path} b/${path}\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+ready\n`,
+      } as ServerEvent);
+    }
+    expect(useAppStore.getState().turnDiffs["conv-current"].turnId).toBe("second");
+    expect(useAppStore.getState().messages.map((message) => message.turnDiff?.turnId)).toEqual(["first", "second"]);
   });
 
   it("keeps a turn diff that arrives after the final answer has settled", () => {

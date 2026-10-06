@@ -12,8 +12,8 @@ import {
 import { ChatTurn } from "./components/ChatTurn";
 import { loadEarlierConversationMessages } from "./historyPagination";
 import { hasVisibleActiveConversation } from "./activeConversation";
-import { summarizeTurnDiff } from "../lib/turn-diff";
-import type { ChatTurnState, DiffCellState } from "./cells/cellTypes";
+import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
+import type { ChatTurnState } from "./cells/cellTypes";
 import { loadRevealMessage } from "./revealConversationMessage";
 
 const RECENT_TURN_WINDOW = 40;
@@ -592,62 +592,3 @@ const EmptyState = () => (
     </section>
   </div>
 );
-
-export const applyAuthoritativeTurnDiff = (
-  turns: ChatTurnState[],
-  turnDiff: ReturnType<typeof useAppStore.getState>["turnDiffs"][string] | undefined,
-): ChatTurnState[] => {
-  // An exact empty diff retracts the preview. An unavailable aggregate retains
-  // the tool receipts as history, without claiming they match current files.
-  if (!turnDiff?.turnId) return turns;
-  const index = turns.findIndex((turn) => turn.turnId === turnDiff.turnId);
-  if (index < 0) return turns;
-  const turn = turns[index];
-  if (turnDiff.diff === null) {
-    const next = turns.slice();
-    next[index] = { ...turn, committedCells: turn.committedCells.map((cell) =>
-      cell.kind === "diff" ? { ...cell, historical: true } : cell,
-    ) };
-    return next;
-  }
-  const summary = summarizeTurnDiff(turnDiff);
-  if (!summary) {
-    const withoutFallback = turn.committedCells.filter((cell) => cell.kind !== "diff");
-    if (withoutFallback.length === turn.committedCells.length) return turns;
-    const next = turns.slice();
-    next[index] = { ...turn, committedCells: withoutFallback };
-    return next;
-  }
-  const fallback = turn.committedCells.find((cell): cell is DiffCellState => cell.kind === "diff");
-  const authoritative: DiffCellState = {
-    kind: "diff",
-    id: `turn-diff-${turnDiff.turnId}`,
-    status: "updated",
-    files: summary.files.map((file) => ({
-      path: file.path,
-      oldPath: file.oldPath,
-      patch: file.patch,
-      additions: file.additions,
-      deletions: file.deletions,
-      changeType: file.oldPath && file.oldPath !== file.path ? "renamed" : "updated",
-      isLarge: file.additions + file.deletions > 200,
-    })),
-    summary: {
-      added: summary.additions,
-      deleted: summary.deletions,
-      modifiedFiles: summary.files.length,
-    },
-    toolCallCount: fallback?.toolCallCount,
-    collapsed: false,
-    createdAt: fallback?.createdAt ?? turn.startedAt,
-  };
-  const next = turns.slice();
-  next[index] = {
-    ...turn,
-    committedCells: [
-      ...turn.committedCells.filter((cell) => cell.kind !== "diff"),
-      authoritative,
-    ],
-  };
-  return next;
-};

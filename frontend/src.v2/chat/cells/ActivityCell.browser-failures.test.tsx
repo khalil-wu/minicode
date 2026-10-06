@@ -20,7 +20,7 @@ beforeEach(() => useAppStore.setState({ conversationId:"owner-A", workingDirecto
 afterEach(cleanup);
 
 describe("browser failure projection", () => {
-  it("shows the exact action and URL and retains lineage only in details", () => {
+  it("shows the exact action and URL as ordinary UI text while retaining diagnostic lineage in the record", () => {
     const view=render(<ActivityCell cell={cell} conversationId="owner-A" workspaceRoot="C:/projects/demo" />);
     const row=view.container.querySelector(".activity-cell-main-button")!;
     expect(row.textContent).toContain("Navigate");
@@ -33,7 +33,13 @@ describe("browser failure projection", () => {
     expect(technical.hasAttribute("open")).toBe(false);
     expect(technical.textContent).not.toContain("cell_fixture");
     expect(technical.textContent).not.toContain("call_parent_fixture");
-    expect(view.container.querySelectorAll("pre[aria-label=\"操作结果\"]")).toHaveLength(1);
+    const output = view.container.querySelector('[aria-label="操作结果"]')!;
+    expect(output.textContent).toContain(raw);
+    expect(output.classList.contains("tool-result-text")).toBe(true);
+    expect(output.tagName).toBe("DIV");
+    expect(output.textContent).not.toContain("cell_fixture");
+    expect(output.textContent).not.toContain("call_parent_fixture");
+    expect(record.callSource).toEqual({ kind: "code_mode", cell_id: "cell_fixture", parent_call_id: "call_parent_fixture", runtime_call_id: "2" });
   });
   it("does not borrow a different conversation's running preview", () => {
     useAppStore.setState({previewLaunchProcesses:[{id:"p-A",name:"dev",command:"node",cwd:"C:/projects/demo",port:55494,url:target,pid:123,status:"ready"}]});

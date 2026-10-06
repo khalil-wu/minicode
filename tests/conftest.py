@@ -4,6 +4,18 @@ import os
 from pathlib import Path
 
 import pytest
+from backend.llm.base import LLMAdapter
+
+
+class _NoProviderAdapter(LLMAdapter):
+    """A complete session adapter; stream tests must install their own runner."""
+
+    async def stream_chat(self, messages, tools=None, metadata=None):
+        raise AssertionError("API/WebSocket tests must explicitly provide their model stream")
+        yield
+
+    async def simple_chat(self, messages):
+        raise AssertionError("API/WebSocket tests must explicitly provide their model reply")
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +89,7 @@ def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, isolate
     # configured provider. Tests covering model construction replace this.
     monkeypatch.setattr(
         "backend.main._create_session_llm",
-        lambda config, model_override=None, **_kwargs: object(),
+        lambda config, model_override=None, **_kwargs: _NoProviderAdapter(),
     )
     # Agent runs resolve an adapter again from the run-scoped provider/model
     # snapshot.  Keep the test composition root aligned with that production
@@ -85,7 +97,7 @@ def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, isolate
     # the first user turn trying to construct a real provider without keys.
     monkeypatch.setattr(
         "backend.llm.model_registry.create_session_llm",
-        lambda config, model_override=None, **_kwargs: object(),
+        lambda config, model_override=None, **_kwargs: _NoProviderAdapter(),
     )
 
     from backend.workspace.state import clear_active_workspace_root

@@ -42,7 +42,8 @@ def _make_manager(tmp_path: Path) -> tuple[WorktreeManager, Path]:
     repo = tmp_path / "repo"
     _init_repo(repo)
     store = WorktreeSnapshotStore(tmp_path / "snaps")
-    return WorktreeManager(repo, snapshot_store=store), repo
+    return WorktreeManager(repo, snapshot_store=store,
+        git_runner=lambda *args, index_file=None, **kwargs: subprocess.run(*args, **kwargs)), repo
 
 
 def test_safe_remove_snapshots_dirty_worktree_then_restores(tmp_path: Path) -> None:

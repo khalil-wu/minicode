@@ -7,6 +7,9 @@ import { handlePeripheralEvent } from "./peripheralEvents";
 import { handleSessionEvent } from "./sessionEvents";
 import { focusInspectorEntry } from "./inspectorEntries";
 import { projectAgentViews } from "../lib/agent-view-model";
+import { projectMessagesToTurns } from "./chatSurfaceState";
+import { normalizeContentBlocks } from "./transcriptHydration";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import { buildActivitySidebarState } from "../shell/activitySidebarState";
 import type { ActivitySidebarStateInput } from "../shell/activitySidebarState";
 
@@ -25,6 +28,46 @@ describe("runtime metadata reaches owner-scoped UI", () => {
     inspectorEntries: [], inspectorFocus: null, terminalSessions: [], terminalSnapshots: {}, backgroundTasks: [],
     pendingConversationSwitchId: null });
     registerWebSocketSender(null);
+  });
+
+  it("keeps a completion in its real message position through replay and transcript hydration", () => {
+    useAppStore.setState({ messages: [{ id: "assistant-a", role: "assistant", content: "", artifacts: [], timestamp: 1, isStreaming: true,
+      blocks: [{ type: "tool_call", record: { id: "before", name: "run_command", args: { command: "git status" }, status: "success" } }],
+    }] });
+    const completion = normalizeInboundServerEvent({
+      type: "agent.progress", conversation_id: "owner-a", message_id: "assistant-a",
+      id: "subagent-completed:worker-a:1", stage: "status", phase: "subagent", status: "completed",
+      visibility: "timeline", message: "Verify prediction 已完成", label: "Verify prediction",
+      subagent_id: "worker-a", subagent_name: "Verify prediction", subagent_identity: "/root/verify_prediction",
+      subagent_status: "done", timestamp: "2026-10-06T06:00:00Z",
+    })!;
+    expect(completion).not.toBeNull();
+    handleRuntimeEvent(completion);
+    handleRuntimeEvent({ ...completion, replayed: true });
+    useAppStore.getState().appendToolCallBlock({ id: "after", name: "run_command", args: { command: "git diff" }, status: "success" }, "owner-a", "assistant-a");
+    const live = useAppStore.getState().messages[0];
+    expect(live.blocks?.filter((block) => block.type === "progress")).toHaveLength(1);
+    const restored = { ...live, blocks: normalizeContentBlocks(live.blocks) };
+    const cells = projectMessagesToTurns([restored], false)[0].committedCells;
+    expect(cells.map((cell) => cell.kind)).toEqual(["exec", "collaboration", "exec"]);
+    expect(cells[1]).toMatchObject({ action: "completed", status: "success",
+      createdAt: Date.parse("2026-10-06T06:00:00Z"),
+      entries: [{ agentId: "worker-a", agentLabel: "Verify prediction", agentIdentity: "/root/verify_prediction" }],
+    });
+  });
+
+  it("routes a background completion to its owner without altering the active transcript", () => {
+    useAppStore.setState({ messages: [{ id: "assistant-a", role: "assistant", content: "A", artifacts: [], timestamp: 1 }],
+      conversationMessages: { "owner-b": [{ id: "assistant-b", role: "assistant", content: "", artifacts: [], timestamp: 1, blocks: [], isStreaming: true }] },
+    });
+    handleRuntimeEvent(event({ type: "agent.progress", conversation_id: "owner-b", message_id: "assistant-b",
+      id: "subagent-completed:worker-b:2", stage: "status", phase: "subagent", status: "partial", message: "Worker B 已停止",
+      subagent_id: "worker-b", subagent_name: "Worker B", subagent_status: "cancelled",
+    }));
+    expect(useAppStore.getState().messages[0].content).toBe("A");
+    expect(useAppStore.getState().messages[0].blocks).toBeUndefined();
+    const cells = projectMessagesToTurns(useAppStore.getState().conversationMessages["owner-b"], false)[0].committedCells;
+    expect(cells[0]).toMatchObject({ kind: "collaboration", action: "completed", status: "cancelled" });
   });
 
   it("keeps a terminal subagent's pending cleanup actionable after live done", () => {

@@ -338,7 +338,7 @@ async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_c
             yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
 
     startup_case.tool._llm_provider = BurstModel()
-    _, result = await _launch(startup_case, "foreground")
+    child_id, result = await _launch(startup_case, "foreground")
     assert not result.is_error, result.content
     progress = [data for kind, data in startup_case.events if kind == "subagent.progress"]
     deltas = [data["transcript_delta"] for data in progress if "transcript_delta" in data]
@@ -348,8 +348,60 @@ async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_c
     assert deltas[0]["offset"] == len("观察😀并验证。")
     assert deltas[-1]["offset"] == 79 * len("观察😀并验证。")
     terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
+    parent_id = startup_case.runtime.get_subagent(child_id).parent_run_id
+    assert parent_id == "parent"
+    assert all(data["parent_run_id"] == parent_id for data in progress)
+    assert terminal["parent_run_id"] == parent_id
+    record = startup_case.runtime.get_subagent(child_id)
+    execution = {"model": record.model, "provider": record.provider, "reasoning_effort": record.reasoning_effort}
+    assert all({key: data[key] for key in execution} == execution for data in progress)
+    assert {key: terminal[key] for key in execution} == execution
     assert terminal["transcript_snapshot"]["messages"][-1]["content"] == "观察😀并验证。" * 80
     assert len(json.dumps(startup_case.events, ensure_ascii=False)) < 200_000
+
+
+@pytest.mark.asyncio
+async def test_child_headers_follow_resolved_and_captured_step_model_instead_of_parent_selection(startup_case, monkeypatch):
+    from dataclasses import replace
+    from backend.agent.message import AgentEvent
+    from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.agent.query_engine import QueryEngine
+    from backend.config import AppConfig, LLMSettings
+    from backend.tools.subagent_support import _SubagentLLMResolution
+
+    config = AppConfig(llm=LLMSettings(api_key="", provider="openai", model="resolved-child", reasoning_effort="medium"))
+    resolution = _SubagentLLMResolution(
+        llm=startup_case.model, config=config, provider="openai", model="resolved-child", effort="medium",
+    )
+    startup_case.context.model_execution = ModelExecutionSnapshot(
+        config=config, llm=startup_case.model, provider="parent-provider", model="new-parent-selection", thinking_level="low",
+    )
+
+    async def submit(self, submission):
+        context = submission.runtime.run_context
+        assert context.model_execution.model == "resolved-child"
+        captured = replace(context.model_execution, model="actual-child-step", thinking_level="high")
+        context.model_execution = context.active_model_execution = captured
+        yield AgentEvent(type="tool_call", data={"id": "fixture-call", "tool_name": "read_file", "arguments": {}})
+        submission.state.reply = "Finished"
+        yield AgentEvent.done(status="completed", reason="success")
+
+    monkeypatch.setattr(QueryEngine, "submit", submit)
+    result = await startup_case.tool._run_single_subtask_impl(
+        description="Metadata fixture", prompt="Inspect metadata", agent_type="general-purpose",
+        context=startup_case.context, subagent_id="metadata-child", llm_resolution=resolution,
+    )
+    assert not result.is_error
+    start = next(data for kind, data in startup_case.events if kind == "subagent.start")
+    progress = next(data for kind, data in startup_case.events if kind == "subagent.progress")
+    terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
+    assert (start["model"], start["provider"], start["reasoning_effort"]) == ("resolved-child", "openai", "medium")
+    assert (progress["model"], progress["provider"], progress["reasoning_effort"]) == ("actual-child-step", "openai", "high")
+    assert (terminal["model"], terminal["provider"], terminal["reasoning_effort"]) == ("actual-child-step", "openai", "high")
+    record = startup_case.runtime.get_subagent("metadata-child")
+    assert record.model == record.resume_config["model"] == "actual-child-step"
+    assert record.reasoning_effort == record.resume_config["reasoning_effort"] == "high"
+    assert startup_case.context.model_execution.model == "new-parent-selection"
 
 
 def _assert_terminal(case, subagent_id: str, status: str, epoch: int = 1):

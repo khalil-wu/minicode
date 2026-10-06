@@ -5,7 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ArtifactPreview, ChatMessageSource, Citation, ComposerQuote, MessageContextRef, MessageUsage, ProgressContentBlock, ToolHistoryPage } from "../../stores/types";
+import type { ArtifactPreview, ChatMessageSource, Citation, ComposerQuote, MessageContextRef, MessageUsage, ProgressContentBlock, SubagentState, ToolHistoryPage } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -71,6 +71,7 @@ export interface ActivityCellState {
     maxRetries?: number;
     retryAfterMs?: number;
     providerState?: ProgressContentBlock["providerState"];
+    errorMessage?: string;
   };
   skill?: SkillProcessMetadata;
   startedAt: number;
@@ -203,6 +204,8 @@ export interface ThinkingCellState {
 export interface CollaborationCellEntry {
   agentId: string;
   agentLabel: string;
+  agentIdentity?: string;
+  agentStatus?: SubagentState["status"];
   content?: string;
 }
 
@@ -212,7 +215,7 @@ export interface CollaborationCellEntry {
 export interface CollaborationCellState {
   kind: "collaboration";
   id: string;
-  action: "sent_message" | "closed" | "delegated";
+  action: "sent_message" | "closed" | "delegated" | "completed";
   status: "running" | "success" | "failed" | "partial" | "cancelled";
   background?: boolean;
   entries: CollaborationCellEntry[];

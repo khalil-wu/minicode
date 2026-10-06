@@ -8,10 +8,43 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import httpx
 
 from backend.tools.base import ToolResult
 from backend.tools.html_sanitizer import assess_extraction, sanitize_html
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+
+
+@pytest.mark.parametrize("failure, kind, summary", [
+    (httpx.ReadTimeout(""), "web_fetch_timeout", "网页读取超时"),
+    (httpx.ConnectError("connection interrupted"), "web_fetch_network", "网络连接"),
+    (httpx.HTTPStatusError("404 Not Found", request=httpx.Request("GET", "https://example.com/missing"),
+        response=httpx.Response(404, request=httpx.Request("GET", "https://example.com/missing"))),
+        "web_fetch_http_status", "HTTP 404"),
+])
+def test_failed_fetch_reports_an_accurate_nonempty_issue_without_running_extraction(tmp_path: Path, failure, kind, summary):
+    from backend.artifact.store import ArtifactStore
+    from backend.agent.tool_issues import classify_tool_issue
+    from backend.llm.base import ToolCallEvent
+    from backend.tools.web_tools import WebFetchTool
+
+    tool = WebFetchTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    tool._unrestricted_client = _FakeStreamClient(error=failure)
+    tool._extract_with_prompt = AsyncMock(side_effect=AssertionError("failed HTTP fetch must not run extraction"))
+    result = asyncio.run(tool.execute({"url": "https://example.com/missing", "prompt": "Verify this source"},
+        ToolExecutionContext(permission=PermissionContext(mode="bypass"))))
+
+    assert result.is_error and result.extraction_status == "failed"
+    assert result.error_kind == kind and summary in result.user_summary
+    assert type(failure).__name__ in result.developer_detail
+    assert result.developer_detail in result.content
+    assert result.artifact_id is None and result.content_preview is None
+    assert "No page content" in result.model_observation
+    issue = classify_tool_issue(ToolCallEvent(id="fetch-failure", name="web_fetch", arguments={}), result, "error")
+    assert issue.error_kind == kind and issue.user_summary == result.user_summary
+    assert issue.developer_detail == result.developer_detail
+    assert issue.projection == "error"
+    tool._extract_with_prompt.assert_not_called()
 
 
 class _FakeStreamResponse:

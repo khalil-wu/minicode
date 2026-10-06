@@ -568,9 +568,13 @@ class WebSocketSession(
             "session_id": self.session_id,
             "parent_session_id": None,
             "active_conversation_id": self.active_conversation_id,
-            # A missing project mount is pending; None explicitly means projectless.
+            # Retain a pending project mount only while the lifecycle still
+            # owns its root. A cleared/unavailable mount must publish null so
+            # the renderer drops the preceding workspace without losing the
+            # conversation's durable project binding.
             **({"workspace_root": str(workspace_root) if workspace_root is not None else None}
-               if workspace_root is not None or workspace_scope == "computer" else {}),
+               if workspace_root is not None or workspace_scope == "computer"
+               or self.session_lifecycle.workspace_root is None else {}),
             "active_conversation": project_public_conversation_summary(active)
             if active is not None
             else None,
@@ -776,7 +780,7 @@ class WebSocketSession(
             scope_id=self.active_conversation_id
         )
         active_conversation = (
-            self.conversation_repo.get_conversation(self.active_conversation_id)
+            self.conversation_repo.get_conversation_summary(self.active_conversation_id)
             if self.active_conversation_id
             else None
         )

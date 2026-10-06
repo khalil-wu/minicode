@@ -101,7 +101,9 @@ def test_native_patch_executes_once_through_query_engine_and_replays_after_check
             first, second = endpoint.requests
             assert first["tools"][0]["type"] == "custom"
             assert "Do not wrap it in JSON" in first["tools"][0]["description"]
-            assert "Fixture model guidance." in first["instructions"]
+            from backend.agent.codex_prompts import codex_model_instructions
+            assert first["instructions"].startswith(codex_model_instructions(adapter.model_id()))
+            assert "Fixture model guidance." not in first["instructions"]
             native = [item for item in second["input"] if item.get("type") == "custom_tool_call"]
             outputs = [item for item in second["input"] if item.get("type") == "custom_tool_call_output"]
             assert len(native) == len(outputs) == 1
@@ -211,7 +213,7 @@ def test_truncated_native_patch_recovers_without_orphan_calls_or_partial_writes(
     asyncio.run(scenario())
 
 
-def test_selected_model_metadata_drives_adapter_prompt_and_refresh_without_crosstalk(tmp_path, monkeypatch):
+def test_selected_model_metadata_drives_capabilities_without_injecting_custom_prompts(tmp_path, monkeypatch):
     monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
     snapshot = {"llm": {"provider": "openai", "openai": {
         "api_key": "fixture", "base_url": "https://fixture.invalid/v1", "model": "alpha", "wire_api": "responses",
@@ -229,15 +231,18 @@ def test_selected_model_metadata_drives_adapter_prompt_and_refresh_without_cross
     builder = ContextBuilder(llm=alpha, workspace_root=tmp_path)
     state = AgentState(user_message="work", workspace_root=tmp_path)
     first = builder.base_system_prompt(state)
-    assert "Alpha model guidance." in first
+    from backend.agent.codex_prompts import codex_model_instructions
+    assert first.startswith(codex_model_instructions("alpha"))
+    assert "Alpha model guidance." not in first
     assert "Beta model guidance." not in first
     assert alpha._settings.supports_custom_tools
     builder.bind_llm(beta)
     second = builder.base_system_prompt(state)
-    assert "Beta model guidance." in second and "Alpha model guidance." not in second
+    assert second.startswith(codex_model_instructions("beta"))
+    assert "Beta model guidance." not in second and "Alpha model guidance." not in second
     assert not beta._settings.supports_custom_tools
     assert not beta._settings.responses_websocket
-    assert first != second
+    assert first == second
     assert first == ContextBuilder(llm=alpha, workspace_root=tmp_path).base_system_prompt(state)
     changed = create_session_llm(AppConfig(llm=loaded), model_override="unknown")
     assert not changed._settings.supports_custom_tools and not changed.model_instructions()

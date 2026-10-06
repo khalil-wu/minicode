@@ -378,6 +378,35 @@ describe("BrowserPanel", () => {
     expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
   });
 
+  it("reserves the floating composer strip and updates it as the draft grows without navigating again", async () => {
+    let composerTop = 630;
+    let resize!: ResizeObserverCallback;
+    vi.stubGlobal("ResizeObserver", class extends ResizeObserverMock {
+      constructor(callback: ResizeObserverCallback) { super(); resize = callback; }
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("chat-pane-composer-region")
+        ? new DOMRect(900, composerTop, 90, 100)
+        : new DOMRect(700, 150, 300, 600);
+    });
+    useAppStore.setState({ rightPanelOpen: true, rightPanelExpanded: true });
+    const { container } = render(<>
+      <div className="workbench-primary" data-floating="true"><div className="chat-pane-composer-region" /></div>
+      <BrowserPanel />
+    </>);
+    const address = await screen.findByRole("textbox", { name: "地址栏" });
+    fireEvent.change(address, { target: { value: "example.com" } });
+    fireEvent.submit(address.closest("form")!);
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 472 })));
+    composerTop = 400;
+    act(() => resize([], {} as ResizeObserver));
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 242 })));
+    container.querySelector(".workbench-primary")!.setAttribute("data-floating", "false");
+    act(() => useAppStore.getState().setRightPanelExpanded(false));
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 600 })));
+    expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the native page inside its own modal drawer visible while yielding to a separate dialog", async () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(700, 150, 300, 600));
     runtimeMocks.list.mockResolvedValueOnce([page("drawer-page", "Drawer preview", "http://localhost:4173/", true)]);
@@ -410,6 +439,18 @@ describe("BrowserPanel", () => {
     await act(async () => {});
     expect(runtimeMocks.setBounds).not.toHaveBeenCalled();
     menu.unmount();
+  });
+
+  it("removes externally closed native tabs without reintroducing them as page updates", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("closed-page", "Closing page", "https://one.example/", true), page("kept-page", "Kept page", "https://two.example/")]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Closing page" });
+    const dispatch = runtimeMocks.onEvent.mock.calls.at(-1)![0];
+    act(() => dispatch({ ...page("closed-page", "Closing page", "https://one.example/"), type: "closed" }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Closing page" })).toBeNull());
+    expect(screen.getByRole("tab", { name: "Kept page" })).toBeTruthy();
+    act(() => dispatch({ ...page("kept-page", "Kept page", "https://two.example/"), conversationId: "other-owner", type: "closed" }));
+    expect(screen.getByRole("tab", { name: "Kept page" })).toBeTruthy();
   });
 
   it("renders a native-browser shell and opens typed addresses in the embedded view", async () => {

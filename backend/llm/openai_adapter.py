@@ -125,7 +125,7 @@ from backend.llm.openai_usage import (
 )
 from backend.tools.catalog import canonicalize_tool_schemas
 from backend.secret_redaction import redact_secrets
-from backend.llm.reasoning_effort import normalize_reasoning_effort
+from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_wire_value
 from backend.llm.provider_contracts import ReasoningPolicy
 from backend.permissions.network import (
     actual_peer_network_error,
@@ -374,13 +374,14 @@ def _responses_reasoning_effort(
 ) -> str:
     del has_tools
     wire_model = str(model or settings.model or "").strip()
-    return normalize_reasoning_effort(
+    selected = normalize_reasoning_effort(
         wire_model,
         settings.wire_api,
         settings.reasoning_effort if effort is None else effort,
         _declared_reasoning_effort_levels_for_model(settings, wire_model),
         getattr(settings, "default_reasoning_effort", ""),
     )
+    return reasoning_effort_wire_value(wire_model, selected)
 
 
 def _chat_reasoning_effort(
@@ -406,7 +407,7 @@ def _chat_reasoning_effort(
         requested = (
             str(getattr(settings, "default_reasoning_effort", "") or "").strip().lower()
         )
-    return requested if requested in levels else ""
+    return reasoning_effort_wire_value(wire_model, requested) if requested in levels else ""
 
 
 def _chat_thinking_control(
@@ -2396,10 +2397,16 @@ class OpenAIAdapter(LLMAdapter):
 
     @property
     def capabilities(self) -> ProviderCapabilities:
-        return capabilities_from_openai_settings(
+        capabilities = capabilities_from_openai_settings(
             self._settings,
             provider=self._settings.provider,
         )
+        policy = getattr(self, "_reasoning_policy", None)
+        if isinstance(policy, ReasoningPolicy):
+            return replace(capabilities, reasoning_effort_levels=policy.levels or capabilities.reasoning_effort_levels,
+                configured_reasoning_effort=policy.level, effective_reasoning_effort=policy.level,
+                wire_reasoning_effort=policy.wire_level, wire_reasoning_effort_levels=policy.wire_levels)
+        return capabilities
 
     def apply_reasoning_policy(self, policy: ReasoningPolicy) -> None:
         super().apply_reasoning_policy(policy)

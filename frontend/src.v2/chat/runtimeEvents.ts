@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { subagentModelPatch } from "../lib/subagent-model";
 import { mcpProjectionMatches } from "./mcpProjectionScope";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import type {
@@ -761,6 +762,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           operationId: ev.operation_id,
           providerState: ev.provider_state,
           ephemeral: ev.ephemeral,
+          subagentId: ev.subagent_id,
+          subagentName: ev.subagent_name,
+          subagentIdentity: ev.subagent_identity,
+          subagentStatus: ev.subagent_status,
+          timestamp: ev.timestamp ? eventTimestampMs(e) : undefined,
         };
         if (ev.stage === "image_generation") {
           s.upsertMessageProgress(progress, conversationId, messageId);
@@ -776,7 +782,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           // assistant turn as well as the conversation activity store so the
           // user sees the live ``正在重新连接 1/N`` state in the main transcript;
           // both stores upsert by the same stable operation id.
-          if (String(ev.id || "").startsWith("provider:")) {
+          if (String(ev.id || "").startsWith("provider:") || ev.subagent_id) {
             s.upsertMessageProgress(progress, conversationId, messageId);
           }
           s.appendAgentProgress(progress, conversationId);
@@ -1072,6 +1078,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const metadata = subagentMetadataPatch(ev as unknown as Record<string, unknown>, record);
       const stableMetadata = {
         ...metadata,
+        ...subagentModelPatch(ev as unknown as Record<string, unknown>, existingById, record),
         objective: metadata.objective ?? ev.prompt,
       };
       s.addSubagent({
@@ -1223,6 +1230,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
         ...subagentMetadataPatch(ev as unknown as Record<string, unknown>),
+        ...subagentModelPatch(ev as unknown as Record<string, unknown>, existing, maybeObject((ev as unknown as Record<string, unknown>).snapshot)),
         ...transcriptSnapshotPatch(ev, existing),
         ...transcriptDeltaPatch(ev, existing),
       };
@@ -1298,7 +1306,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         || (Boolean(resultContent) && resultContent === existing?.resultContent
           && resultError === (existing?.resultError || ""))
       );
-      if (duplicateTerminal && !hasTranscriptUpdate) return true;
+      const modelMetadata = subagentModelPatch(e as unknown as Record<string, unknown>, existing, record ?? maybeObject((e as unknown as Record<string, unknown>).snapshot));
+      const newIncarnation = typeof metadata.mailboxEpoch === "number" && typeof existing?.mailboxEpoch === "number"
+        && metadata.mailboxEpoch > existing.mailboxEpoch;
+      if (duplicateTerminal && !hasTranscriptUpdate && !newIncarnation) {
+        if (Object.keys(modelMetadata).length > 0) s.updateSubagent(targetSubagentId, modelMetadata, conversationId);
+        return true;
+      }
       const activityLog = existing?.activityLog ?? [];
       const messages = mergeSubagentMessages(existing?.messages, snapshotMessages(e));
       if (existing) {
@@ -1317,6 +1331,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           messages,
           ...transcriptPatch,
           ...metadata,
+          ...modelMetadata,
         }, conversationId);
       } else if (e.subagent_id !== "parallel-batch") {
         s.addSubagent({
@@ -1336,6 +1351,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           messages,
           ...transcriptPatch,
           ...metadata,
+          ...modelMetadata,
         }, conversationId);
       }
       addInspectorPayload("subagent", e.subagent_id, {

@@ -9,6 +9,7 @@ import pytest
 from backend.agent import prompting
 from backend.agent.query_engine import QueryEngine, QuerySubmission
 from backend.agent.context import ContextBuilder
+from backend.agent.codex_prompts import codex_model_instructions
 from backend.agent.loop import run_agent_loop
 from backend.agent.message import AgentEvent
 from backend.agent.prompting import (
@@ -34,8 +35,7 @@ def test_context_builder_uses_layered_prompt_contract() -> None:
     developer = messages[1]
     user = messages[-1].content
 
-    assert "You are an agent for MiniCode" in system
-    assert "Complete requested tasks fully" in system
+    assert system.startswith(codex_model_instructions())
     assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY in system
     assert "Runtime contract" not in system
     assert developer.role == "developer"
@@ -44,10 +44,6 @@ def test_context_builder_uses_layered_prompt_contract() -> None:
     assert "Runtime contract" not in user
     assert user.endswith("write README")
     assert "<routing>" not in system
-    assert "start with the most specific checks" in system
-    assert "Do not attempt to fix" in system
-    assert "unrelated bugs or broken tests" in system
-    assert "Do not re-run a check that already passed" in system
 
 
 def test_prompt_dynamic_boundary_keeps_system_prefix_stable() -> None:
@@ -90,10 +86,9 @@ def test_prompt_section_cache_rebuilds_after_clear(monkeypatch: pytest.MonkeyPat
     clear_system_prompt_sections()
     rebuilt = PromptBuilderV2().build(state=state, workspace_root=tmp_path)
 
-    assert "ENV A" in first.stable
-    assert "ENV A" in cached.stable
-    assert "ENV B" not in cached.stable
-    assert "ENV B" in rebuilt.stable
+    assert first.stable == cached.stable == rebuilt.stable == codex_model_instructions()
+    assert first.context == "ENV A"
+    assert cached.context == rebuilt.context == "ENV B"
 
 
 async def _collect_events(stream: AsyncIterator[AgentEvent]) -> list[AgentEvent]:

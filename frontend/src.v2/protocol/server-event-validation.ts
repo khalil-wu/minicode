@@ -833,7 +833,8 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
   ) return false;
 
   if (request.subtype === "conversation_resources_cleanup") {
-    return isBoundedString(request.workspace_root, 32_768, { allowEmpty: true });
+    return isBoundedString(request.workspace_root, 32_768, { allowEmpty: true })
+      && (!("operation" in request) || request.operation === "archive" || request.operation === "delete");
   }
   if (request.subtype === "can_use_tool") {
     return isNonEmptyString(request.tool_name)
@@ -1347,7 +1348,10 @@ const hasValidSemanticPayload = (
       && (!("error_message" in value) || isBoundedString(value.error_message, MAX_EVENT_SUMMARY_CHARS))
       && (!("operation_id" in value) || isBoundedString(value.operation_id, 1_024))
       && (!("provider_state" in value) || AGENT_PROGRESS_PROVIDER_STATE_SET.has(String(value.provider_state)))
-      && (!("ephemeral" in value) || typeof value.ephemeral === "boolean");
+      && (!("ephemeral" in value) || typeof value.ephemeral === "boolean")
+      && ["subagent_id", "subagent_identity"].every((field) => !(field in value) || isBoundedString(value[field], 1_024))
+      && (!("subagent_name" in value) || isBoundedString(value.subagent_name, 4_096))
+      && (!("subagent_status" in value) || ["done", "partial", "cancelled", "error"].includes(String(value.subagent_status)));
   }
   if (type === "runtime.span") {
     const startedAt = value.started_at;

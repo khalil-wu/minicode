@@ -115,6 +115,9 @@ class QueryJournalRecorder:
         if event.type == "agent.lifecycle.cleanup":
             self.lifecycle("lifecycle_cleanup", data)
             return
+        if event.type == "turn.diff.updated":
+            self.lifecycle("turn_diff_updated", data)
+            return
         if event.type == "artifact.preview":
             self.lifecycle("artifact_preview", data)
             return

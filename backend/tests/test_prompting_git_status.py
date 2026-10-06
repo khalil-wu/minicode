@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from backend.agent.prompting import build_git_status_context
+from backend.tests.git_sandbox_policy import readable_host_git_policy
 
 
 def test_git_status_context_tolerates_successful_command_without_stdout(monkeypatch, tmp_path):
@@ -37,11 +38,11 @@ def _prompt_git_launch_review_result(argv):
 
 
 def _prompt_git_launch_review_context(root, snapshot):
-    from types import SimpleNamespace
+    from backend.agent.run_context import RunContext
     from backend.permissions.context import PermissionContext, ToolExecutionContext
     loans = []
     owner = set()
-    run = SimpleNamespace(model_execution=None, lifecycle_cleanup_tasks=owner,
+    run = RunContext(lifecycle_cleanup_tasks=owner,
                           retain_model=lambda adapter, task: loans.append((adapter, task)))
     context = ToolExecutionContext(PermissionContext(mode="plan", allow_unsandboxed_commands=False),
                                    workspace_root=root, sandbox_policy=snapshot, run_context=run,
@@ -238,7 +239,7 @@ def test_prompt_git_launch_review_real_fsmonitor_and_cancel(tmp_path, monkeypatc
     host("config", "user.email", "prompt-git@example.invalid")
     host("add", "-A")
     host("commit", "-m", "fixture")
-    snapshot = SandboxPolicy(workspace_root=root, readable_roots=(outside,))
+    snapshot = readable_host_git_policy(SandboxPolicy(workspace_root=root, readable_roots=(outside,)))
     capability = SandboxRunner(snapshot).capability(cwd=root)
     assert capability.available and capability.filesystem_isolated, capability.reason
     resolved = snapshot.resolve(cwd=root)
@@ -277,7 +278,7 @@ def test_prompt_git_launch_review_real_fsmonitor_and_cancel(tmp_path, monkeypatc
 
     monitor.write_text("#!/bin/sh\nprintf started > prompt-hook-started\nsleep 60\nprintf late > prompt-hook-late\nprintf 'token\\0'\n",
                        encoding="utf-8", newline="\n")
-    writable = SandboxPolicy.workspace_default(root)
+    writable = readable_host_git_policy(SandboxPolicy.workspace_default(root))
     async def cancel_actual():
         context, _loans = _prompt_git_launch_review_context(root, writable)
         context.cancel_event = asyncio.Event()

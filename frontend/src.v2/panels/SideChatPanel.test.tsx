@@ -312,7 +312,7 @@ describe("SideChatPanel server lifecycle", () => {
     expect(screen.queryByRole("button", { name: "引用回复" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新生成" })).toBeNull();
     expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "审核" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看变更" }));
     expect(useAppStore.getState().diffReview).toMatchObject({ conversationId: sideId, selectedPath: "src/app.ts" });
     view.rerender(<SideChatPanel active={false} />);
     view.rerender(<SideChatPanel active />);

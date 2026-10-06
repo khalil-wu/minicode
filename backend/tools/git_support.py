@@ -98,9 +98,11 @@ async def _run_git(
             operation_policy = replace(policy, env_overrides={"GIT_INDEX_FILE": mapped_index})
         launch_argv, common_dir = _portable_git_dispatch(operation_policy, root, cwd, argv)
         def filter_environment(environment: dict[str, str]) -> dict[str, str]:
-            return {key: value for key, value in environment.items()
-                    if not _is_git_repository_env(key)
-                    or (index_file is not None and (key.upper() if os.name == "nt" else key) == "GIT_INDEX_FILE")}
+            selected = {key: value for key, value in environment.items()
+                        if not _is_git_repository_env(key)
+                        or (index_file is not None and (key.upper() if os.name == "nt" else key) == "GIT_INDEX_FILE")}
+            selected["GIT_CEILING_DIRECTORIES"] = str(Path.home())
+            return selected
         runner = SandboxRunner(operation_policy, env_filter=filter_environment)
         try:
             if common_dir is None:

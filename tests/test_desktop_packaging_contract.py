@@ -1,5 +1,10 @@
 import json
 from pathlib import Path
+import tomllib
+
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 def test_desktop_package_has_windows_builder_scripts() -> None:
@@ -37,6 +42,41 @@ def test_desktop_package_includes_required_shell_modules_and_sidecar() -> None:
         assert required in build_files
 
     assert "crash-reporter.test.js" in package_json.get("scripts", {}).get("test:unit", "")
+
+
+def test_embedded_python_lock_covers_declared_windows_runtime_dependencies() -> None:
+    environment = default_environment() | {
+        "sys_platform": "win32",
+        "platform_system": "Windows",
+        "os_name": "nt",
+        "python_version": "3.11",
+        "python_full_version": "3.11.9",
+        "implementation_name": "cpython",
+        "platform_python_implementation": "CPython",
+    }
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    locked = [
+        Requirement(line)
+        for line in Path("desktop/requirements-sidecar.lock").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    locked_by_name = {
+        canonicalize_name(requirement.name): requirement
+        for requirement in locked
+        if requirement.marker is None or requirement.marker.evaluate(environment)
+    }
+
+    for declaration in project["project"]["dependencies"]:
+        required = Requirement(declaration)
+        if required.marker is not None and not required.marker.evaluate(environment):
+            continue
+        name = canonicalize_name(required.name)
+        assert name in locked_by_name, f"Desktop runtime is missing {required}"
+        pinned = locked_by_name[name]
+        specifiers = list(pinned.specifier)
+        assert len(specifiers) == 1 and specifiers[0].operator == "==", f"Desktop runtime must pin {pinned}"
+        assert specifiers[0].version in required.specifier, f"Desktop runtime {pinned} violates {required}"
+        assert required.extras <= pinned.extras, f"Desktop runtime {pinned} omits extras from {required}"
 
 
 def test_pdf_frame_csp_allows_only_local_backend_frames() -> None:

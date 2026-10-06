@@ -27,7 +27,7 @@ describe("ExecCell", () => {
       />,
     );
 
-    expect(screen.getByText("Run")).toBeTruthy();
+    expect(screen.getByText("已运行")).toBeTruthy();
     expect(screen.getByText(command)).toBeTruthy();
     expect(screen.queryByText("exit 0 · 1.3s")).toBeNull();
     expect(container.querySelector(".exec-cell-header-button")).toBeTruthy();
@@ -47,7 +47,8 @@ describe("ExecCell", () => {
     expect(container.querySelector(".exec-cell-expanded-heading")).toBeNull();
     expect(screen.getByText("Shell")).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制命令输出" })).toBeTruthy();
-    expect(screen.queryByText("命令已在 1.3s 内运行完成")).toBeNull();
+    expect(screen.getByText("命令已在 1.3s 内运行完成")).toBeTruthy();
+    expect(screen.getByText("成功")).toBeTruthy();
     expect(screen.getByText("$ " + command)).toBeTruthy();
     expect(screen.getByText("7 passed")).toBeTruthy();
     expect(screen.getByText(/exit 0 · 1.3s/)).toBeTruthy();
@@ -72,7 +73,7 @@ describe("ExecCell", () => {
       />,
     );
 
-    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByText("正在运行")).toBeTruthy();
     expect(screen.getByText("npm test -- --runInBand")).toBeTruthy();
     expect(screen.getByRole("button", { name: "停止命令" })).toBeTruthy();
     expect(container.querySelector(".exec-cell-expanded")).toBeNull();
@@ -139,8 +140,8 @@ describe("ExecCell", () => {
       />,
     );
 
-    expect(screen.getByText("Run · Started in background")).toBeTruthy();
-    expect(screen.getAllByText("Run · Started in background").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已在后台启动")).toHaveLength(2);
+    expect(screen.getAllByText("已在后台启动").length).toBeGreaterThan(0);
     expect(screen.queryByText("后台命令已启动；状态和输出会保留在活动任务中。")).toBeNull();
 
     rerender(
@@ -157,8 +158,8 @@ describe("ExecCell", () => {
         }}
       />,
     );
-    expect(screen.getByText("Run · Partial")).toBeTruthy();
-    expect(screen.getAllByText("Run · Partial").length).toBeGreaterThan(0);
+    expect(screen.getByText("命令未完整结束")).toBeTruthy();
+    expect(screen.getAllByText("命令未完整结束").length).toBeGreaterThan(0);
   });
 
   it("copies the actual command, stdout and stderr", async () => {
@@ -173,12 +174,12 @@ describe("ExecCell", () => {
 
 
 it.each([
-  ["pending_approval", "Run · Awaiting approval"],
-  ["failed", "Run · Failed"],
+  ["pending_approval", "等待批准运行命令"],
+  ["failed", "命令运行失败"],
 ] as const)("does not claim a %s command already executed", (status, title) => {
   render(<ExecCell cell={{ kind: "exec", id: "exec-not-performed", command: "python -m pytest", status,
     stdoutPreview: [], stderrPreview: [], collapsed: true, createdAt: 1 }} />);
   expect(screen.getByText(title)).toBeTruthy();
-  expect(screen.queryByText("Run")).toBeNull();
-  expect(screen.queryByText("Running")).toBeNull();
+  expect(screen.queryByText("已在 1.3s 内运行")).toBeNull();
+  expect(screen.queryByText("正在运行")).toBeNull();
 });

@@ -9,7 +9,7 @@
   --mc-font-caption: var(--text-2xs);
   --mc-font-secondary: var(--text-chrome);
   --mc-font-body: var(--text-sm);
-  --mc-font-reading: var(--text-base);
+  --mc-font-reading: calc(14px * var(--app-text-scale));
   --mc-font-heading: var(--text-lg);
   --mc-control-radius: var(--radius-md);
   --mc-card-radius: var(--radius-lg);
@@ -130,9 +130,9 @@
 .header-bar {
   min-height: var(--header-height) !important;
   height: var(--header-height) !important;
-  padding-inline: 14px !important;
-  background: var(--workbench-sidebar) !important;
-  border-bottom: 1px solid var(--border-subtle) !important;
+  padding-inline: 8px !important;
+  background: var(--desktop-shell-background) !important;
+  border-bottom: 0 !important;
 }
 
 .header-bar button {
@@ -147,54 +147,10 @@
 
 .mc-sidebar-project-label {
   font-family: var(--font-ui);
-  font-size: var(--mc-font-caption) !important;
+  font-size: var(--text-sm) !important;
   line-height: 1.35;
   color: var(--text-muted);
-  font-weight: var(--fw-semibold);
-}
-
-.mc-sidebar-left [role="tablist"] {
-  height: 36px !important;
-  min-height: 36px !important;
-  padding: 2px !important;
-  box-sizing: border-box !important;
-  gap: 2px !important;
-  border: 0 !important;
-  border-radius: calc(var(--mc-control-radius) + 2px) !important;
-  background: var(--workbench-tool) !important;
-}
-
-.mc-sidebar-mode-tab {
-  height: 32px !important;
-  min-height: 32px !important;
-  box-sizing: border-box !important;
-  padding: 0 8px !important;
-  line-height: 1 !important;
-  border-radius: var(--mc-control-radius) !important;
-  color: var(--text-secondary) !important;
-  font-size: var(--mc-font-secondary) !important;
-  font-weight: var(--fw-medium) !important;
-  transition:
-    background-color var(--transition-fast),
-    border-color var(--transition-fast),
-    color var(--transition-fast) !important;
-}
-
-/* Selected mode tab: accent-tinted so it separates clearly from hover. */
-.mc-sidebar-mode-tab[aria-selected="true"] {
-  border-color: transparent !important;
-  background: var(--surface-base) !important;
-  color: var(--text-primary) !important;
-  box-shadow: none !important;
-}
-
-/* Mode switching is navigation. It has a stable plane, with no press/settle
-   transform that can make the selected segment look sunken. */
-#root .mc-sidebar-mode-tab,
-#root .mc-sidebar-mode-tab:active,
-#root .mc-sidebar-mode-tab[aria-selected="true"] {
-  transform: none !important;
-  animation: none !important;
+  font-weight: var(--fw-medium);
 }
 
 .mc-sidebar-mode-content {
@@ -231,9 +187,9 @@
   border: 0 !important;
   border-radius: var(--radius-sm) !important;
   background: transparent !important;
-  color: var(--text-secondary) !important;
-  font-size: var(--mc-font-secondary) !important;
-  font-weight: var(--fw-medium) !important;
+  color: var(--text-primary) !important;
+  font-size: var(--text-sm) !important;
+  font-weight: var(--fw-regular) !important;
   box-shadow: none !important;
 }
 
@@ -287,7 +243,7 @@
   min-height: 32px !important;
   border-radius: var(--mc-control-radius) !important;
   color: var(--text-secondary) !important;
-  font-weight: var(--fw-medium) !important;
+  font-weight: var(--fw-regular) !important;
 }
 
 .mc-sidebar-left :where(.mc-workspace-group-toggle, section[aria-label] > button):hover {
@@ -297,11 +253,10 @@
 
 .mc-workspace-label {
   font-family: var(--font-ui) !important;
-  font-size: var(--mc-font-secondary) !important;
-  font-weight: var(--fw-medium) !important;
+  font-size: var(--text-sm) !important;
+  font-weight: var(--fw-regular) !important;
 }
 
-.mc-workspace-session-count,
 .mc-sidebar-left :where(.session-meta-line, time, small) {
   font-size: var(--mc-font-caption) !important;
 }
@@ -386,8 +341,8 @@
 }
 
 .mc-sidebar-right-header {
-  min-height: 40px !important;
-  padding: 4px 8px !important;
+  min-height: 52px !important;
+  padding: 8px 10px !important;
   border-bottom: 1px solid var(--border-subtle) !important;
   background: var(--surface-base) !important;
 }
@@ -531,7 +486,7 @@
   border-radius: 0 !important;
   background: transparent !important;
   color: var(--text-muted) !important;
-  font-size: var(--mc-font-secondary) !important;
+  font-size: var(--mc-font-body) !important;
   font-weight: var(--fw-regular) !important;
   line-height: 1.35;
   box-shadow: none !important;
@@ -564,10 +519,10 @@
   max-width: min(var(--mc-chat-width), calc(100% - 48px)) !important;
   margin-inline: auto !important;
   margin-top: 0 !important;
-  margin-bottom: 20px !important;
-  padding: 12px 12px 8px !important;
+  margin-bottom: 16px !important;
+  padding: 14px 16px 10px !important;
   border: 1px solid var(--mc-composer-border, var(--border-subtle)) !important;
-  border-radius: 20px !important;
+  border-radius: 24px !important;
   background: var(--surface-base) !important;
   box-shadow: var(--shadow-sm) !important;
 }
@@ -623,7 +578,7 @@
   color: var(--text-primary) !important;
   caret-color: var(--accent-primary);
   font-family: var(--font-prose) !important;
-  font-size: var(--text-md) !important;
+  font-size: var(--mc-font-reading) !important;
   font-weight: var(--fw-regular) !important;
   line-height: 1.55 !important;
   outline: none !important;
@@ -755,7 +710,7 @@
   border-radius: var(--radius-md) !important;
   background: var(--surface-raised) !important;
   box-shadow: var(--shadow-medium) !important;
-  animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter) both;
+  animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter-snappy) both;
   transform-origin: var(--mc-menu-origin, top center);
 }
 
@@ -773,9 +728,43 @@
   border-radius: var(--radius-lg) !important;
 }
 
+.mc-process-disclosure { transition: transform var(--transition-fast); }
+.mc-process-disclosure[data-expanded="true"] { transform: rotate(90deg); }
+@keyframes mc-process-details-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.composer-floating-model-icon { display: none; }
+#root .workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) {
+  min-height: 54px;
+  padding: 8px 12px !important;
+  border-radius: var(--radius-full) !important;
+}
+.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-textarea-frame {
+  position: absolute;
+  top: 16px;
+  left: 44px;
+  right: 122px;
+  padding: 0;
+  min-height: 22px;
+}
+#root .workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-textarea {
+  min-height: 22px !important;
+  height: 22px;
+  max-height: 22px;
+}
+.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) :is(.composer-context-usage, .composer-permission-btn > .composer-control-label, .composer-permission-btn > svg:last-child, .composer-model-select:not([data-reasoning-supported="true"]) > span:not(.composer-floating-model-icon), .composer-model-select:not([data-reasoning-supported="true"]) > svg) { display: none; }
+.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-permission-picker {
+  position: absolute;
+  right: 78px;
+}
+.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-floating-model-icon { display: inline-flex; }
+.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-footer { padding-top: 0 !important; }
+
 @keyframes mc-dropdown-enter {
   from { opacity: 0; transform: translateY(4px) scale(0.99); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 1; transform: none; }
 }
 
 /* Settings and secondary pages */
@@ -786,9 +775,21 @@
   background: var(--surface-base) !important;
 }
 
+.settings-workspace.settings-center {
+  position: fixed;
+  z-index: var(--z-modal);
+  inset: calc(var(--header-height) + 8px) 8px 8px var(--desktop-rail-width);
+  border: 1px solid var(--desktop-frame-border);
+  border-radius: 16px;
+}
+
 .settings-workspace-sidebar {
-  background: var(--surface-sidebar) !important;
+  background: var(--workbench-sidebar) !important;
   border-right-color: var(--border-subtle) !important;
+}
+
+@media (max-width: 1199px) {
+  .settings-workspace.settings-center { inset: var(--header-height) 0 0 var(--desktop-rail-width); border: 0; border-radius: 0; }
 }
 
 .settings-center-main {
@@ -798,7 +799,7 @@
 .settings-center-tab {
   min-height: 34px !important;
   border-radius: var(--mc-control-radius) !important;
-  font-size: var(--mc-font-secondary) !important;
+  font-size: var(--mc-font-body) !important;
   transition:
     background-color var(--transition-fast),
     border-color var(--transition-fast),
@@ -808,9 +809,9 @@
 
 .settings-center-tab[aria-current="page"] {
   border-color: transparent !important;
-  background: var(--surface-soft) !important;
+  background: var(--workbench-active) !important;
   box-shadow: none !important;
-  animation: mc-control-settle var(--duration-base) var(--easing-enter) both;
+  animation: none;
 }
 
 .settings-page-heading h2 {

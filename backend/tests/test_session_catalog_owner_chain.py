@@ -18,7 +18,6 @@ def test_agent_model_catalog_matches_workspace_including_projectless(tmp_path, m
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: project if session_scope else None),
         _model_runtime_for_conversation=lambda conversation_id: runtime)
     monkeypatch.setattr(routes_agents._state, "ws_manager", SimpleNamespace(iter_sessions=lambda: [session]))
-    monkeypatch.setattr(routes_agents, "get_explicit_active_workspace_root", lambda: None)
     catalog = routes_agents._live_agent_model_catalog(str(project) if target else "")
     assert [item["model"] for item in catalog] == (["owned-model"] if expected else [])
 

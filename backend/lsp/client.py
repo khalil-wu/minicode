@@ -114,11 +114,13 @@ class LSPClient:
         *,
         server_name: str | None = None,
         sandbox_runner: SandboxRunner | None = None,
+        initialization_options: dict[str, Any] | None = None,
     ) -> None:
         self._command = command
         self._args = args
         self._workspace_root = workspace_root
         self._server_name = server_name or Path(command).name
+        self._initialization_options = initialization_options
         self._sandbox_runner = sandbox_runner or _lsp_sandbox_runner(workspace_root)
         self._process: asyncio.subprocess.Process | None = None
         self._stdin: asyncio.StreamWriter | None = None
@@ -245,6 +247,7 @@ class LSPClient:
         result = await self._send_request("initialize", {
             "processId": os.getpid(),
             "rootUri": self._path_to_uri(self._workspace_root),
+            **({"initializationOptions": self._initialization_options} if self._initialization_options is not None else {}),
             "capabilities": {
                 "textDocument": {
                     "definition": {"dynamicRegistration": False},
@@ -276,7 +279,7 @@ class LSPClient:
         async with self._lock:
             await self._sync_file(file_path)
 
-    async def _sync_file(self, file_path: str, content: str | None = None) -> None:
+    async def _sync_file(self, file_path: str, content: str | None = None, language_id: str | None = None) -> None:
         abs_path = str(Path(file_path).resolve())
         if content is None:
             try:
@@ -298,7 +301,7 @@ class LSPClient:
             self._opened_files[abs_path] = (version, content_hash)
             return
         ext = Path(abs_path).suffix.lstrip(".")
-        lang_id = _language_id_for_extension(ext)
+        lang_id = language_id or _language_id_for_extension(ext)
         await self._send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": self._path_to_uri(abs_path),

@@ -16,7 +16,7 @@ from backend.config import (
 )
 from backend.hooks.runtime import run_config_change_hook
 from backend.hooks.runtime import raise_if_config_change_blocked
-from backend.llm.reasoning_effort import normalize_reasoning_effort
+from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_wire_value, reasoning_effort_wire_map
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
 ProviderResolver = Callable[[], str]
@@ -218,6 +218,8 @@ def llm_model_updated_payload(
         "reasoning_effort": effective_reasoning_effort,
         "configured_reasoning_effort": configured_reasoning_effort,
         "effective_reasoning_effort": effective_reasoning_effort,
+        "wire_reasoning_effort": reasoning_effort_wire_value(selected_model, effective_reasoning_effort),
+        "reasoning_effort_wire_map": reasoning_effort_wire_map(selected_model),
         "reasoning_effort_supported": reasoning_effort_supported,
         "reasoning_effort_levels": reasoning_levels if wire_api != "anthropic" else [],
         "context_window": context_window,

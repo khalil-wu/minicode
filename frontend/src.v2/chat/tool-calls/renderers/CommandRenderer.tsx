@@ -61,7 +61,7 @@ const CommandResultView = ({
   return (
     <div className="grid gap-1.5">
       {command && (
-        <div className="grid grid-cols-[12px_minmax(0,1fr)] gap-1.5 px-2 py-1.5 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)] overflow-hidden">
+        <div className="grid grid-cols-[12px_minmax(0,1fr)] gap-1.5 px-2 py-1.5 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)] font-mono overflow-hidden">
           <span className="text-[var(--accent-primary)] font-bold">$</span>
           <span>{command}</span>
         </div>

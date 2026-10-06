@@ -247,7 +247,7 @@
 }
 
 .user-cell-expand-button:hover {
-  text-decoration: underline;
+  text-decoration: none;
   text-underline-offset: 2px;
 }
 
@@ -978,7 +978,7 @@
 .activity-cell-name {
   flex-shrink: 0;
   color: var(--text-secondary);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-regular);
 }
 
 .activity-cell-name[data-failed="true"] {
@@ -1001,7 +1001,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1012,7 +1012,7 @@
   flex: 0 0 auto;
   gap: 7px;
   margin-left: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
 }
 
@@ -1038,7 +1038,7 @@
   max-width: none;
   overflow: visible;
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1136,7 +1136,7 @@
   min-width: 0;
   flex: 0 1 auto;
   overflow: hidden;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1195,7 +1195,7 @@
   min-width: 0;
   margin-left: auto;
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   opacity: 0.6;
 }
@@ -1384,7 +1384,7 @@
   min-width: 0;
   max-width: 400px;
   overflow: hidden;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1397,7 +1397,7 @@
   background: transparent;
   color: var(--accent-primary);
   font: inherit;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   line-height: inherit;
   text-align: left;
   text-decoration: none;
@@ -1410,20 +1410,20 @@
 
 .activity-cell-detail-link:hover {
   color: var(--accent-secondary);
-  text-decoration: underline;
+  text-decoration: none;
   text-underline-offset: 2px;
 }
 
 .activity-cell-detail-count {
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
 }
 
 .activity-cell-detail-duration {
   margin-left: auto;
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
 }
 
@@ -1515,7 +1515,7 @@
 .activity-cell-error-label {
   margin-bottom: 4px;
   color: var(--state-danger);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   font-weight: var(--fw-semibold);
 }
@@ -1566,14 +1566,14 @@
 .exec-cell-header-button {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   min-width: 0;
   min-height: 24px;
   padding: 0;
   border: 0;
   background: transparent;
-  color: inherit;
+  color: var(--text-muted);
   font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
@@ -1595,11 +1595,11 @@
 }
 
 .exec-cell-status-running {
-  color: var(--accent-primary);
+  color: var(--text-muted);
 }
 
 .exec-cell-status-success {
-  color: var(--state-success);
+  color: var(--text-muted);
 }
 
 .exec-cell-status-failed {
@@ -1628,17 +1628,17 @@
   flex-shrink: 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
 }
 
 .exec-cell-command-preview {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
   font-size: var(--text-sm);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1719,7 +1719,7 @@
 
 .exec-cell-expanded {
   margin: 4px 0 6px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--workbench-tool);
@@ -1780,7 +1780,7 @@
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--surface-base);
   box-shadow: none;
 }
@@ -1815,15 +1815,15 @@
 }
 
 .agent-loop-diff-area .diff-cell-header-row {
-  min-height: 56px;
-  padding: 10px 12px;
+  min-height: 64px;
+  padding: 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .agent-loop-diff-area .diff-cell-icon-tile {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
   background: var(--surface-soft);
 }
 
@@ -1840,7 +1840,7 @@
 
 .diff-cell-header-static .diff-cell-title {
   color: var(--text-primary);
-  font-size: var(--text-base);
+  font-size: var(--mc-font-reading);
 }
 
 .diff-cell-header-static .diff-cell-header-stats {
@@ -1938,7 +1938,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1952,16 +1952,17 @@
 
 .diff-cell-stats {
   flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .diff-cell-added {
-  color: var(--state-success);
+  color: var(--diff-added-foreground);
 }
 
 .diff-cell-removed {
-  color: var(--state-danger);
+  color: var(--diff-removed-foreground);
 }
 
 .diff-cell-files {
@@ -2006,8 +2007,8 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 34px;
-  padding: 6px 12px;
+  min-height: 36px;
+  padding: 7px 12px;
   border-bottom: 0;
   background: transparent;
 }
@@ -2030,7 +2031,7 @@
   overflow: hidden;
   color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2046,7 +2047,7 @@ button.diff-cell-file-path {
 
 button.diff-cell-file-path:hover {
   color: var(--text-primary);
-  text-decoration: underline;
+  text-decoration: none;
   text-underline-offset: 3px;
 }
 
@@ -2404,7 +2405,7 @@ button.diff-cell-file-path:hover {
 
 .md-prose a:hover {
   color: var(--text-primary);
-  text-decoration: underline;
+  text-decoration: none;
   text-decoration-color: var(--border-strong);
 }
 

@@ -2335,6 +2335,7 @@ describe("handleSessionEvent", () => {
             ],
             subagents: [
               { id: "sa-1", role: "reviewer", status: "running", summary: "Reviewing diff",
+                model: "child-model", provider: "child-provider", reasoning_effort: "high",
                 teammate_name: "Ada", team_name: "review", awaiting_plan_approval: true,
                 active_plan_request_id: "plan-sa-1", is_idle: false, needs_input: true,
                 read_only: true, write_scope: ["frontend"], parent_run_id: "parent-agent", agent_path: "/root/review" },
@@ -2395,6 +2396,7 @@ describe("handleSessionEvent", () => {
     ]);
     expect(state.subagents).toEqual([
       expect.objectContaining({ id: "sa-1", status: "running", teammateName: "Ada", teamName: "review",
+        model: "child-model", provider: "child-provider", reasoningEffort: "high",
         awaitingPlanApproval: true, activePlanRequestId: "plan-sa-1", isIdle: false, needsInput: true,
         readOnly: true, writeScope: ["frontend"], parentRunId: "parent-agent", agentPath: "/root/review" }),
       expect.objectContaining({ id: "wf-pending", status: "pending" }),

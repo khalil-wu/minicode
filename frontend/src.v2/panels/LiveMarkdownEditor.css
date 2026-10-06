@@ -48,7 +48,7 @@
   font-size: 0.91em;
 }
 .live-markdown-editor .live-md-source-block { font-family: var(--font-mono); font-size: 0.91em; background: var(--surface-soft); }
-.live-markdown-editor .live-md-link { color: var(--accent-primary); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.live-markdown-editor .live-md-link { color: var(--accent-primary); text-decoration: none; text-underline-offset: 3px; cursor: pointer; }
 .live-markdown-editor .live-md-quote { border-left: 3px solid var(--border-soft); padding-left: 16px; color: var(--text-secondary); }
 .live-markdown-editor .live-md-bullet { display: inline-block; min-width: 10px; color: var(--text-secondary); text-align: center; }
 .live-markdown-editor .live-md-checkbox { accent-color: var(--accent-primary); vertical-align: middle; margin: 0 5px 0 0; cursor: pointer; }

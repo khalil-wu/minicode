@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronDown,
-  ChevronRight,
   Folder,
   FolderOpen,
+  Plus,
   SquarePen,
 } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -17,17 +16,28 @@ import { SessionRow } from "./SessionRow";
 import {
   sectionHeaderRowStyle,
   sessionListWrapStyle,
-  projectCountStyle,
-  projectItemsStyle,
 } from "./sidebarStyles";
 import { isConversationRunning } from "./sessionStatus";
 import { readableToolLabel } from "../chat/toolDisplayName";
 import { pushToast } from "../overlays/ToastContainer";
 import { safeJsonParse } from "../lib/safe-parse";
 import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
+import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { fromMarkdown, markdownNodeText } from "../lib/markdown";
+import { setConversationArchived } from "../chat/archiveConversation";
 
 const CONVERSATION_UI_STATE_KEY = "minicode.sidebar.conversations.state";
 const CONVERSATION_UI_PERSIST_DELAY_MS = 140;
+
+const activitySummaryText = (summary?: string): string => {
+  if (!summary) return "";
+  // build_conversation_summary publishes role-delimited segments. Prefer the
+  // latest real assistant segment; other summaries retain their own content.
+  const segments = summary.split(/(?:^|\s+\|\s+)(?=(?:User|Assistant):\s)/);
+  const assistant = [...segments].reverse().find((segment) => segment.startsWith("Assistant:"));
+  const content = assistant ? assistant.slice("Assistant:".length) : summary.replace(/^User:\s*/, "");
+  return markdownNodeText(fromMarkdown(content)).replace(/\s+/g, " ").trim();
+};
 
 type ConversationUiState = {
   collapsedGroups: Set<string>;
@@ -119,7 +129,7 @@ export function groupByWorkspace(conversations: (ConversationMeta & { sessionSta
   const addWorkspace = (basePath: string) => {
     const key = workspaceGroupIdentity(basePath);
     if (!groups.has(key)) {
-      const label = workspaceDisplayName(basePath, "Computer");
+      const label = workspaceDisplayName(canonicalWorkspacePath(basePath), "Computer");
       groups.set(key, { path: basePath, baseLabel: label, label, items: [] });
     }
     return groups.get(key)!;
@@ -160,10 +170,14 @@ export const ConversationsTab = ({
   conversationId,
   onNavigate,
   onSetConfirmDialog,
+  showRecent = true,
+  activityView = false,
 }: {
   conversationId: string;
   onNavigate?: () => void;
   onSetConfirmDialog: (dialog: { title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }) => void;
+  showRecent?: boolean;
+  activityView?: boolean;
 }) => {
   const conversations = useAppStore((s) => s.conversations);
   const recentWorkspaces = useAppStore((s) => s.recentWorkspaces);
@@ -180,9 +194,11 @@ export const ConversationsTab = ({
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
   const askUserQueue = useAppStore((s) => s.askUserQueue);
   const runtimeSession = useAppStore((s) => s.runtimeSession);
-  const appMode = useAppStore((s) => s.appMode);
   const createConversation = useAppStore((s) => s.createConversation);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [renamingRow, setRenamingRow] = useState<string | null>(null);
+  const [recentLimit, setRecentLimit] = useState(20);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [renameValue, setRenameValue] = useState("");
   const initialUiState = useMemo(readConversationUiState, []);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(initialUiState.collapsedGroups);
@@ -288,7 +304,6 @@ export const ConversationsTab = ({
     return filtered.filter((conversation) => isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
   }, [filtered, recentWorkspaces]);
-  const ordinaryConversations = useMemo(() => filtered.filter((conversation) => !isWorkspaceConversation(conversation)), [filtered]);
   const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.map((workspace) => workspace.path)), [workspaceConversations, recentWorkspaces]);
   const orderedProjectGroups = useMemo(() => (
     Array.from(projectGroups.entries(), ([projectKey, group]) => ({
@@ -297,10 +312,31 @@ export const ConversationsTab = ({
       conversations: orderConversationTree(group.items),
     }))
   ), [projectGroups]);
-  const orderedOrdinaryConversations = useMemo(
-    () => orderConversationTree(ordinaryConversations),
-    [ordinaryConversations],
-  );
+  const recentConversations = useMemo(() => [...filtered]
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+    .slice(0, recentLimit).map((conversation) => ({ ...conversation, treeDepth: 0 })), [filtered, recentLimit]);
+  const activityGroups = useMemo(() => {
+    if (!activityView) return [];
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const groups: { key: string; label: string; items: TreeConversation[] }[] = [
+      { key: "priority", label: "优先级", items: [] },
+      { key: "today", label: "今天", items: [] },
+      { key: "yesterday", label: "昨天", items: [] },
+      { key: "earlier", label: "更早", items: [] },
+    ];
+    const ordered = [...filtered].sort((a, b) =>
+      Number(b.sessionStatus !== "idle") - Number(a.sessionStatus !== "idle")
+      || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    for (const conversation of ordered.slice(0, recentLimit)) {
+      const date = new Date(conversation.updatedAt).toDateString();
+      const group = conversation.sessionStatus !== "idle" ? 0
+        : date === today.toDateString() ? 1 : date === yesterday.toDateString() ? 2 : 3;
+      groups[group].items.push({ ...conversation, treeDepth: 0 });
+    }
+    return groups.filter((group) => group.items.length > 0);
+  }, [activityView, filtered, recentLimit]);
   const conversationsById = useMemo(
     () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
     [conversations],
@@ -355,12 +391,7 @@ export const ConversationsTab = ({
 
   const archiveConversation = useCallback(async (id: string, archived: boolean) => {
     try {
-      const command = archived ? "conversation.archive" : "conversation.unarchive";
-      const result = await wsOutbox.sendClientCommandAwaitResult({
-        type: command,
-        conversation_id: id,
-        archived,
-      }, command);
+      const result = await setConversationArchived(id, archived);
       if (!wsOutbox.commandResultSucceeded(result)) {
         pushToast(result.message || "Unable to update the conversation archive state.", "error", 6000);
       }
@@ -396,9 +427,10 @@ export const ConversationsTab = ({
     setMenuFor(null);
     void navigator.clipboard?.writeText(path);
   }, []);
-  const startRename = useCallback((id: string, currentTitle: string) => {
+  const startRename = useCallback((id: string, currentTitle: string, rowId = id) => {
     renameStateRef.current = { renaming: id, renameValue: currentTitle };
     setRenaming(id);
+    setRenamingRow(rowId);
     setRenameValue(currentTitle);
   }, []);
   const handleRenameValueChange = useCallback((value: string) => {
@@ -443,6 +475,17 @@ export const ConversationsTab = ({
     setCollapsedGroups(next);
     scheduleConversationUiStatePersist(next, listRef.current?.scrollTop ?? 0);
   }, [scheduleConversationUiStatePersist]);
+  const toggleProjectExpansion = useCallback((key: string) => {
+    setExpandedProjects((current) => {
+      const next = new Set(current);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+  const addProject = async () => {
+    const path = await openWorkspaceFolder();
+    if (path) onNavigateRef.current?.();
+  };
   const cloneConversation = useCallback((id: string) => {
     wsOutbox.sendClientCommand({ type: "conversation.clone", conversation_id: id, activate: false });
   }, []);
@@ -478,19 +521,20 @@ export const ConversationsTab = ({
       setCollapsedGroups(next);
       scheduleConversationUiStatePersist(next, listRef.current?.scrollTop ?? 0);
     }
-    createConversation({ bindWorkspace: true, workspaceRoot, appMode });
+    createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" });
     onNavigate?.();
   };
 
-  const renderSessionRow = useCallback((conversation: TreeConversation) => (
+  const renderSessionRow = useCallback((conversation: TreeConversation, scene = "project") => (
     <SessionRow
-      key={conversation.id}
+      key={`${scene}:${conversation.id}`}
+      rowId={`${scene}:${conversation.id}`}
       conversation={conversationsById.get(conversation.id) ?? conversation}
       sessionStatus={conversation.sessionStatus}
       isHydrating={conversation.isHydrating}
       active={conversation.id === conversationIdRef.current}
-      menuOpen={menuFor === conversation.id}
-      renaming={renaming === conversation.id}
+      menuOpen={menuFor === `${scene}:${conversation.id}`}
+      renaming={renaming === conversation.id && renamingRow === `${scene}:${conversation.id}`}
       renameValue={renaming === conversation.id ? renameValue : ""}
       waitingLabel={conversation.waitingLabel}
       onSwitch={handleSwitch}
@@ -525,34 +569,25 @@ export const ConversationsTab = ({
     mergeConversation,
     renameValue,
     renaming,
+    renamingRow,
     revealConversationPath,
     startRename,
   ]);
 
-  if (ordinaryConversations.length === 0 && projectGroups.size === 0) {
-    return (
-      <EmptyState
-        icon={<SquarePen size={22} />}
-        title="开始你的第一个任务"
-        action={
-          <button
-            type="button"
-            onClick={() => {
-              createConversation({ appMode });
-              onNavigate?.();
-            }}
-          >
-            新建任务
-          </button>
-        }
-      />
-    );
-  }
+  const isEmpty = activityView ? filtered.length === 0
+    : projectGroups.size === 0 && (!showRecent || recentConversations.length === 0);
 
   return (
     <>
       <div className="mc-sidebar-project-heading" style={{ ...sectionHeaderRowStyle, padding: "9px 10px 5px" }}>
-        <span className="mc-sidebar-project-label">项目</span>
+        <span className="mc-sidebar-project-label">{activityView ? "活动" : "项目"}</span>
+        {!activityView && <button
+          type="button"
+          className="btn-ghost mc-icon-button mc-sidebar-project-add"
+          aria-label="添加项目"
+          title="添加项目"
+          onClick={() => void addProject()}
+        ><Plus size={15} aria-hidden="true" /></button>}
       </div>
       <div
         ref={listRef}
@@ -560,7 +595,15 @@ export const ConversationsTab = ({
         style={sessionListWrapStyle}
         onScroll={handleConversationListScroll}
       >
-        {orderedProjectGroups.map(({ projectKey, group, conversations: orderedConversations }) => (
+        {isEmpty && <EmptyState
+          icon={<SquarePen size={22} />}
+          title={activityView ? "暂无任务活动" : "开始你的第一个任务"}
+          action={<button type="button" onClick={() => {
+            createConversation({ appMode: "cowork" });
+            onNavigate?.();
+          }}>新建任务</button>}
+        />}
+        {!activityView && orderedProjectGroups.map(({ projectKey, group, conversations: orderedConversations }) => (
           <section key={projectKey} aria-label={`工作区 ${group.label}`} style={taskSectionStyle}>
             <div className="mc-workspace-group-header" onContextMenu={(event) => {
               event.preventDefault();
@@ -580,7 +623,6 @@ export const ConversationsTab = ({
                     : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}
                 </span>
                 <span className="mc-workspace-label">{group.label}</span>
-                <span className="mc-workspace-session-count" aria-hidden="true">{group.items.length}</span>
               </button>
               <button
                   type="button"
@@ -596,34 +638,36 @@ export const ConversationsTab = ({
             {!collapsedGroups.has(projectKey) && (
               <div className="mc-workspace-group-body">
                 <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
-                  {orderedConversations.map(renderSessionRow)}
+                  {(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5))
+                    .map((conversation) => renderSessionRow(conversation))}
+                  {orderedConversations.length > 5 && <button
+                    type="button"
+                    className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
+                    aria-expanded={expandedProjects.has(projectKey)}
+                    onClick={() => toggleProjectExpansion(projectKey)}
+                  >{expandedProjects.has(projectKey) ? "收起" : "展开显示"}</button>}
                 </div>
               </div>
             )}
           </section>
         ))}
 
-        {ordinaryConversations.length > 0 && (
-          <section aria-label="普通任务" style={taskSectionStyle}>
-            <button
-              type="button"
-              aria-expanded={!collapsedGroups.has("__ordinary_tasks__")}
-              onClick={() => toggleGroup("__ordinary_tasks__")}
-              style={taskSectionHeaderStyle}
-            >
-              <span aria-hidden="true">{collapsedGroups.has("__ordinary_tasks__") ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span>
-              <span>普通任务</span>
-              <span style={projectCountStyle}>{ordinaryConversations.length}</span>
-            </button>
-            {!collapsedGroups.has("__ordinary_tasks__") && (
-              <div className="mc-workspace-group-body">
-                <div className="mc-workspace-group-body-inner" style={projectItemsStyle}>
-                  {orderedOrdinaryConversations.map(renderSessionRow)}
-                </div>
-              </div>
-            )}
-          </section>
-        )}
+        {activityView && activityGroups.map((group) => <section key={group.key} aria-label={group.label} className="mc-sidebar-activity-group">
+          <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{group.label}</span></div>
+          {group.items.map((conversation) => {
+            const summary = activitySummaryText(conversation.summary);
+            return <div key={conversation.id} className="mc-sidebar-activity-task">
+              {renderSessionRow(conversation, `activity-${group.key}`)}
+              {summary && <p className="mc-sidebar-activity-summary">{summary}</p>}
+            </div>;
+          })}
+        </section>)}
+        {activityView && filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>显示更多</button>}
+        {!activityView && showRecent && recentConversations.length > 0 && <section aria-label="最近" className="mc-sidebar-recents">
+          <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">最近</span></div>
+          <div className="mc-sidebar-recent-list">{recentConversations.map((conversation) => renderSessionRow(conversation, "recent"))}</div>
+          {filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>显示更多</button>}
+        </section>}
       </div>
       {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
     </>

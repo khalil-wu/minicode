@@ -53,7 +53,7 @@ export function projectChatTurnToAgentLoop(
   const projectedProcessCells = processCells;
   const durationMs = turnDurationMs(turn);
   const hasCompleteFinalAnswer = Boolean(
-    turn.status === "completed"
+    (turn.status === "completed" || turn.status === "streaming")
     && finalAnswerHasContent
     && turn.finalAnswerCell
     && !turn.finalAnswerCell.isStreaming

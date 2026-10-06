@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 from typing import Any
 
+import httpx
+
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.permissions.network import (
@@ -130,13 +132,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             f"{text[:WEB_FETCH_MAX_CHARS]}\n"
             "---\n\n"
             f"{prompt}\n\n"
-            "Provide a concise response based only on the content above. In your response:\n"
-            " - Enforce a strict 125-character maximum for quotes from any source document. "
-            "Open Source Software is ok as long as we respect the license.\n"
-            " - Use quotation marks for exact language from articles; any language outside of the quotation "
-            "should never be word-for-word the same.\n"
-            " - You are not a lawyer and never comment on the legality of your own prompts and responses.\n"
-            " - Never produce or reproduce exact song lyrics."
+            "Provide a concise response based only on the content above."
         )
         messages = [LLMMessage(role="user", content=content)]
         side_query = getattr(llm, "side_query", None)
@@ -406,7 +402,8 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 raw_text = resp.content.decode(charset, errors="replace")
 
             except Exception as exc:
-                logger.warning("web_fetch 失败 %s: %s", url, exc)
+                detail = f"{type(exc).__name__}: {str(exc).strip()}".rstrip(": ")
+                logger.warning("web_fetch 失败 %s: %s", url, detail)
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 if status_code in {401, 403} or _is_hostile_fetch_url(url):
                     return ToolResult(
@@ -420,12 +417,30 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                         display_summary=f"Fetch limited: {urlparse(url).netloc or url}",
                         result_kind="web",
                     )
+                if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                    error_kind = "web_fetch_timeout"
+                    user_summary = "网页读取超时，未获取页面正文。"
+                elif isinstance(exc, httpx.HTTPStatusError):
+                    error_kind = "web_fetch_http_status"
+                    user_summary = f"网页来源返回 HTTP {status_code}，未能读取页面内容。"
+                elif isinstance(exc, httpx.RequestError):
+                    error_kind = "web_fetch_network"
+                    user_summary = "网页读取失败，网络连接未完成或已中断。"
+                else:
+                    error_kind = "web_fetch_error"
+                    user_summary = "网页读取失败，未获取页面正文。"
                 return ToolResult(
-                    content=f"Fetch failed for {url}: {exc}",
+                    content=f"Fetch failed for {url}: {detail}",
                     is_error=True,
                     source_url=url,
                     extraction_status="failed",
                     evidence_type="fetched",
+                    result_kind="web",
+                    error_kind=error_kind,
+                    user_summary=user_summary,
+                    developer_detail=detail,
+                    display_summary=f"读取失败：{urlparse(url).netloc}",
+                    model_observation="The fetch failed. No page content was returned.",
                 )
 
             raw_length = len(raw_text)
@@ -528,10 +543,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             if provider_message:
                 detail = f"{detail} provider_message={provider_message}"
             return ToolResult(
-                content=(
-                    "网页已抓取，但模型二次提取失败。"
-                    "不要把提取失败当成网页内容成功；如需继续，请读取已保存的 artifact。"
-                ),
+                content=f"网页已抓取；模型二次提取失败。原始清洗内容保存在 artifact {artifact_id}。",
                 is_error=True,
                 source_url=url,
                 extraction_status="failed",
@@ -550,13 +562,12 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 recoverable=classification.retryable,
                 projection="error",
                 model_observation=(
-                    "The web page was fetched successfully, but the requested model extraction failed. "
-                    "Do not claim the extraction succeeded; the cleaned page is available through the artifact."
+                    "The page was fetched; model extraction failed. The cleaned page is saved as an artifact."
                 ),
             )
 
         return ToolResult(
-            content="网页已抓取，但当前会话没有可用模型执行所需提取；原始清洗内容已保存为 artifact。",
+            content=f"网页已抓取；当前会话没有可用模型执行提取。原始清洗内容保存在 artifact {artifact_id}。",
             is_error=True,
             source_url=url,
             extraction_status=status,
@@ -572,8 +583,8 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             recoverable=False,
             projection="error",
             model_observation=(
-                "The web page was fetched successfully, but no session model was available for extraction. "
-                "Do not claim the requested extraction succeeded; use the artifact if needed."
+                "The page was fetched; extraction was not run because no session model was available. "
+                "The cleaned page is saved as an artifact."
             ),
         )
 

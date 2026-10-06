@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import pytest_asyncio
 
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.agent.message import UserCommand
@@ -30,8 +31,8 @@ class _Provider(LLMAdapter):
         return ""
 
 
-@pytest.fixture
-def session(tmp_path, monkeypatch):
+@pytest_asyncio.fixture
+async def session(tmp_path, monkeypatch):
     owner = WebSocketSession(
         session_id="regen-session", websocket=SimpleNamespace(), llm=_Provider(),
         artifact_store=ArtifactStore(storage_dir=str(tmp_path / "artifacts")), tool_registry=ToolRegistry(),
@@ -67,7 +68,8 @@ def _regenerate(owner, conversation_id):
     ))
 
 
-def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypatch):
+@pytest.mark.asyncio
+async def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypatch):
     owner, conversation_id = session
     prepare = Mock(return_value={"user_message": {"id": "u1"}})
     monkeypatch.setattr(owner, "_prepare_retry_from_message", prepare)
@@ -75,7 +77,7 @@ def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypatch):
     claim = conversation_query_guards().try_start(conversation_id, owner_id="scheduler:test")
     assert claim is not None
     try:
-        asyncio.run(_regenerate(owner, conversation_id))
+        await _regenerate(owner, conversation_id)
     finally:
         assert conversation_query_guards().end(claim) is True
 
@@ -91,11 +93,12 @@ def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypatch):
     assert any(event.data.get("error_type") == "conversation_busy" for event in errors)
 
 
-def test_regenerate_rewinds_when_no_other_owner_holds_the_conversation(session, monkeypatch):
+@pytest.mark.asyncio
+async def test_regenerate_rewinds_when_no_other_owner_holds_the_conversation(session, monkeypatch):
     owner, conversation_id = session
     prepare = Mock(return_value={"user_message": {"id": "u1"}})
     monkeypatch.setattr(owner, "_prepare_retry_from_message", prepare)
 
-    asyncio.run(_regenerate(owner, conversation_id))
+    await _regenerate(owner, conversation_id)
 
     prepare.assert_called_once()

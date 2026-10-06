@@ -241,6 +241,16 @@ function scrubRuntimeToken(output, runtimeToken) {
 test("packaged Windows app boots renderer, preload, IPC, and managed Python sidecar", { timeout: 90000 }, async () => {
   assert.equal(process.platform, "win32", "The packaged smoke currently targets the Windows release artifact.");
   assert.equal(fs.existsSync(APP_PATH), true, `Packaged executable is missing: ${APP_PATH}`);
+  const resourcesRoot = path.join(path.dirname(APP_PATH), "resources");
+  for (const entry of [
+    "language-services/node_modules/pyright/langserver.index.js",
+    "language-services/node_modules/yaml-language-server/bin/yaml-language-server",
+    "language-services/clangd/clangd_23.1.0/bin/clangd.exe",
+    "backend/agent/codex_prompt_resources/prompt.md",
+    "backend/agent/codex_prompt_resources/model-instructions.json",
+  ]) {
+    assert.equal(fs.existsSync(path.join(resourcesRoot, entry)), true, `Packaged editor/prompt resource is missing: ${entry}`);
+  }
 
   const backendPort = await allocateLoopbackPort();
   let cdpPort = await allocateLoopbackPort();
@@ -328,6 +338,7 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     assert.equal(health.ready, true);
 
     for (const name of ["browser", "code-review", "verify", "skill-creator", "plugin-creator"]) {
+      process.stdout.write(`Checking packaged Skill asset: ${name}\n`);
       const skillPath = path.join(path.dirname(APP_PATH), "resources", "skills", name, "SKILL.md");
       assert.equal(fs.existsSync(skillPath), true, `Bundled skill is missing: ${name}`);
       const assetUrl = new URL(`http://127.0.0.1:${backendPort}/api/skills/asset`);

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 
 import pytest
 
@@ -396,6 +398,10 @@ def test_reused_subagent_identity_clears_previous_result_and_wait_event(tmp_path
 def test_incarnation_fence_survives_1000_reproducible_callback_interleavings(tmp_path) -> None:
     """Late callbacks from every previous incarnation must be harmless."""
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    # Keep the real FULL/WAL database open during this scheduling oracle. Every
+    # operation still commits durably; closing the last connection thousands
+    # of times would benchmark WAL teardown/checkpointing instead of fences.
+    keeper = runtime._swarm_store._connect()
     try:
         with runtime.batched_metrics():
             for seed in range(1000):
@@ -467,6 +473,17 @@ def test_incarnation_fence_survives_1000_reproducible_callback_interleavings(tmp
                 assert snapshot["result"]["content"] == "fresh result"
     finally:
         runtime.close(release_lease=True)
+        keeper.close()
+
+    # Read all results through a fresh file connection after the final keeper
+    # is closed, so the accelerated oracle still verifies durable storage.
+    with closing(sqlite3.connect(runtime.swarm_store_path)) as persisted:
+        children = persisted.execute("SELECT status, mailbox_epoch FROM subagent_runs").fetchall()
+        results = persisted.execute("SELECT status, mailbox_epoch, payload_json FROM subagent_results").fetchall()
+    assert len(children) == len(results) == 1000
+    assert all(status == "completed" and epoch == 2 for status, epoch in children)
+    assert all(status == "completed" and epoch == 2 and json.loads(payload)["content"] == "fresh result"
+        for status, epoch, payload in results)
 
 
 def test_terminal_child_notification_can_transfer_to_later_parent_turn(tmp_path) -> None:

@@ -8,7 +8,7 @@ from backend.agent.public_projection import (
     project_public_subagent_run,
     public_text,
 )
-from backend.conversations.public_projection import project_public_tool_call
+from backend.conversations.public_projection import project_public_tool_call, project_public_transcript_message
 
 
 def _attach_conversation(event: AgentEvent, conversation_id: str) -> AgentEvent:
@@ -89,6 +89,7 @@ def build_subagent_status_event(
         )
         event.data["snapshot"] = public_snapshot
         event.data["result"] = result if isinstance(result, dict) else None
+    event.data.update({key: public_snapshot[key] for key in ("model", "provider", "reasoning_effort") if key in public_snapshot})
     return _attach_conversation(event, conversation_id)
 
 
@@ -296,6 +297,15 @@ def build_subagent_transcript_messages(
             current_turn_id = str(payload.get("turn_id") or payload.get("run_id") or "")
             continue
 
+        if event_type == "system" and payload.get("lifecycle") == "turn_diff_updated":
+            assistant = _ensure_assistant(timestamp, event_id)
+            turn_diff = {**payload, "conversation_id": payload["thread_id"], "message_id": assistant["id"],
+                "turn_id": current_turn_id or payload["turn_id"]}
+            projected = project_public_transcript_message({"id": assistant["id"], "role": "assistant", "content": "",
+                "metadata": {"turn_diff": turn_diff}})
+            assistant["metadata"] = projected["metadata"]
+            continue
+
         if event_type == "user_prompt":
             if current_user is not None or terminal_event is not None:
                 _flush_run()
@@ -490,20 +500,37 @@ def build_subagent_transcript_messages(
             continue
 
         if event_type == "system" and bool(payload.get("transcript_only")):
-            assistant = _ensure_assistant(timestamp, event_id)
-            blocks = assistant["blocks"]
+            item_id = str(payload.get("item_id") or event_id)
+            status = str(payload.get("status") or "completed").strip().lower()
+            visibility = str(payload.get("visibility") or "timeline").strip().lower()
+            if status == "retracted" or visibility in {"hidden", "internal", "debug", "redacted"}:
+                if current_assistant is not None:
+                    current_assistant["blocks"][:] = [
+                        block for block in current_assistant["blocks"]
+                        if block.get("type") != "process" or block.get("id") != item_id
+                    ]
+                continue
             content = public_text(payload.get("content"), max_chars=262_144).strip()
             if content:
-                blocks.append({
+                assistant = _ensure_assistant(timestamp, event_id)
+                blocks = assistant["blocks"]
+                process_block = {
                     "type": "process",
-                    "id": event_id,
+                    "id": item_id,
                     "item_kind": str(payload.get("kind") or "process_text"),
                     "content": content,
                     "source": str(payload.get("source") or "model_preamble"),
-                    "status": "completed",
-                    "visibility": "timeline",
+                    "status": status,
+                    "visibility": visibility,
                     "timestamp": timestamp,
-                })
+                }
+                for block_index, block in enumerate(blocks):
+                    if block.get("type") == "process" and block.get("id") == item_id:
+                        process_block["timestamp"] = block["timestamp"]
+                        blocks[block_index] = process_block
+                        break
+                else:
+                    blocks.append(process_block)
             continue
 
         if event_type == "system" and str(payload.get("lifecycle") or "") == "error":

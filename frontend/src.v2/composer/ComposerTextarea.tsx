@@ -197,9 +197,7 @@ export const ComposerTextarea = ({
         minWidth: 0,
         flex: "1 1 140px",
         color: "var(--text-primary)",
-        // Use one CJK-capable face for both Latin and Chinese glyphs. Switching
-        // from Manrope to a fallback font only after the first Chinese
-        // character made the input look as if it zoomed while typing.
+        // Share the interface and transcript's mixed-language font stack.
         fontFamily: "var(--font-prose)",
         fontSize: "var(--text-md)",
         lineHeight: "var(--leading-relaxed)",

@@ -1,0 +1,14 @@
+{
+  "source_commit": "822e58cc",
+  "source_file": "codex-rs/prompts/src/model_messages/multi_agent.rs",
+  "bundled": {
+    "explicit": "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.",
+    "proactive": "Proactive multi-agent delegation is active. Any earlier developer instruction requiring an explicit user request before spawning sub-agents no longer applies. This mode remains active until a later multi-agent mode developer message changes it. User requests override this hint.\n\nIf at any point you can parallelize work by delegating tasks to another agent (no matter if you are root or subagent), you should do so using collaboration tools if it could save time or improve quality."
+  },
+  "models": {
+    "gpt-6-astra": null,
+    "gpt-6.1-sol": null,
+    "gpt-6-sol": null,
+    "gpt-6-luna": null
+  }
+}

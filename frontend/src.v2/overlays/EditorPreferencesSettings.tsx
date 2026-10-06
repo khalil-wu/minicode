@@ -15,6 +15,24 @@ export function EditorPreferencesSettings() {
   const [snippet, setSnippet] = useState<CodeSnippet>({ id: "", language: "typescript", prefix: "", body: "", description: "" });
   return <>
     <section className="settings-group">
+      <h3 className="settings-group-title">字号</h3>
+      <p className="settings-section-description">Ctrl + ＋ / － 缩放界面，Ctrl + 0 恢复实际大小。</p>
+      <div className="settings-card">
+        {[
+          { label: "界面字号", value: Math.round(textScale * 14), min: 11, max: 21, set: (value: number) => useAppStore.getState().setTextScale(value / 14) },
+          { label: "正文字号", value: preferences.proseSize, min: 12, max: 24, set: (value: number) => update({ proseSize: value }) },
+          { label: "编辑器字号", value: Math.round(codeTextScale * 14), min: 11, max: 24, set: (value: number) => useAppStore.getState().setCodeTextScale(value / 14) },
+        ].map((item) => <label className="settings-row" key={item.label}><span className="settings-row-title">{item.label}</span><span className="settings-row-control">
+          <NumberInput aria-label={item.label} min={item.min} max={item.max} value={item.value} onCommit={item.set} /> px</span></label>)}
+        <div className="settings-font-preview"><p>从一个想法开始，把细节做好。 Make something thoughtful.</p><code>const greeting = "Hello, MiniCode";</code></div>
+      </div>
+      <button type="button" className="settings-action-button" onClick={() => {
+        update({ proseSize: defaultWorkbenchPreferences.proseSize });
+        useAppStore.getState().setTextScale(1);
+        useAppStore.getState().setCodeTextScale(1);
+      }}><RotateCcw size={14} />恢复默认字号</button>
+    </section>
+    <section className="settings-group">
       <h3 className="settings-group-title">AI 代码预测</h3>
       <div className="settings-card">
         <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">行内预测</div><p className="settings-row-description">暂停输入后，使用所选模型补全光标附近代码。Tab 接受，Esc 取消。</p></div>
@@ -27,29 +45,11 @@ export function EditorPreferencesSettings() {
       </div>
     </section>
     <section className="settings-group">
-      <h3 className="settings-group-title">字体与精确字号</h3>
-      <div className="settings-card">
-        {([["uiFont", "界面字体"], ["proseFont", "正文与 Markdown 字体"], ["codeFont", "代码字体"]] as const).map(([key, label]) =>
-          <label className="settings-row" key={key}><span className="settings-row-title">{label}</span>
-            <input className="settings-input" aria-label={label} list={key === "codeFont" ? "code-fonts" : "reading-fonts"} placeholder="使用默认字体"
-              value={preferences[key]} onChange={(event) => update({ [key]: event.target.value })} /></label>)}
-        <datalist id="reading-fonts"><option value="Inter, sans-serif" /><option value="Microsoft YaHei, sans-serif" /><option value="Segoe UI, sans-serif" /><option value="Georgia, serif" /></datalist>
-        <datalist id="code-fonts"><option value="Cascadia Code, Consolas, monospace" /><option value="JetBrains Mono, Consolas, monospace" /><option value="Consolas, monospace" /><option value="Fira Code, monospace" /></datalist>
-        {[
-          { label: "界面基础字号", value: Math.round(textScale * 14), min: 11, max: 21, set: (value: number) => useAppStore.getState().setTextScale(value / 14) },
-          { label: "正文字号", value: preferences.proseSize, min: 12, max: 24, set: (value: number) => update({ proseSize: value }) },
-          { label: "编辑器字号", value: Math.round(codeTextScale * 14), min: 11, max: 24, set: (value: number) => useAppStore.getState().setCodeTextScale(value / 14) },
-        ].map((item) => <label className="settings-row" key={item.label}><span className="settings-row-title">{item.label}</span><span className="settings-row-control">
-          <NumberInput aria-label={item.label} min={item.min} max={item.max} value={item.value} onCommit={item.set} /> px</span></label>)}
-        <div className="settings-font-preview"><p>从一个想法开始，把细节做好。</p><code>const greeting = "Hello, MiniCode";</code></div>
-      </div>
-    </section>
-    <section className="settings-group">
       <h3 className="settings-group-title">编辑器</h3>
       <div className="settings-card">
         <label className="settings-row"><span className="settings-row-title">缩进宽度</span><SelectMenu ariaLabel="缩进宽度" className="settings-select" align="end" value={String(preferences.tabSize)} onValueChange={(value) => update({ tabSize: Number(value) })}>{[2, 4, 8].map((size) => <option key={size} value={size}>{size} 个字符</option>)}</SelectMenu></label>
         {([["insertSpaces", "使用空格缩进"], ["formatOnSave", "保存时格式化"], ["wordWrap", "自动换行"], ["minimap", "代码缩略图"],
-          ["lineNumbers", "显示行号"], ["stickyScroll", "固定作用域标题"], ["ligatures", "字体连字"], ["previewTabs", "单击文件时使用预览标签"]] as const).map(([key, label]) =>
+          ["lineNumbers", "显示行号"], ["stickyScroll", "固定作用域标题"], ["previewTabs", "单击文件时使用预览标签"]] as const).map(([key, label]) =>
           <div className="settings-row" key={key}><span className="settings-row-title">{label}</span><button type="button" className="settings-toggle" role="switch" aria-label={label}
             aria-checked={preferences[key]} data-active={preferences[key]} onClick={() => update({ [key]: !preferences[key] })}><span /></button></div>)}
       </div>
@@ -57,7 +57,7 @@ export function EditorPreferencesSettings() {
         <p className="settings-section-description">输入前缀后选择模板，Tab 跳到下一处占位。支持 $1、$2 和 $0。</p>
         {preferences.snippets.map((item) => <div className="settings-row" key={item.id}><span>{item.prefix}<small> · {item.language} · {item.description}</small></span><button type="button" className="settings-icon-button" aria-label={"删除模板 " + item.prefix} onClick={() => update({ snippets: preferences.snippets.filter((entry) => entry.id !== item.id) })}><Trash2 size={14} /></button></div>)}
         <form className="settings-snippet-form" onSubmit={(event) => { event.preventDefault(); update({ snippets: [...preferences.snippets, { ...snippet, id: crypto.randomUUID() }] }); setSnippet({ ...snippet, prefix: "", body: "", description: "" }); }}>
-          <SelectMenu ariaLabel="模板语言" value={snippet.language} onValueChange={(value) => setSnippet({ ...snippet, language: value })}>{["typescript", "javascript", "python", "yaml", "html", "css", "json"].map((language) => <option key={language} value={language}>{language}</option>)}</SelectMenu>
+          <SelectMenu ariaLabel="模板语言" value={snippet.language} onValueChange={(value) => setSnippet({ ...snippet, language: value })}>{["typescript", "javascript", "python", "yaml", "html", "css", "json", "cpp", "c"].map((language) => <option key={language} value={language}>{language}</option>)}</SelectMenu>
           <input aria-label="模板前缀" required placeholder="触发前缀" value={snippet.prefix} onChange={(event) => setSnippet({ ...snippet, prefix: event.target.value })} />
           <input aria-label="模板说明" placeholder="说明" value={snippet.description} onChange={(event) => setSnippet({ ...snippet, description: event.target.value })} />
           <textarea aria-label="模板正文" required rows={4} placeholder="输入代码和 $1 占位" value={snippet.body} onChange={(event) => setSnippet({ ...snippet, body: event.target.value })} />
@@ -65,11 +65,9 @@ export function EditorPreferencesSettings() {
         </form>
       </details>
       <button type="button" className="settings-action-button" onClick={() => {
-        const keys = ["uiFont", "proseFont", "codeFont", "proseSize", "wordWrap", "minimap", "tabSize", "insertSpaces", "formatOnSave", "ligatures", "lineNumbers", "stickyScroll", "previewTabs"] as const;
+        const keys = ["wordWrap", "minimap", "tabSize", "insertSpaces", "formatOnSave", "lineNumbers", "stickyScroll", "previewTabs"] as const;
         update(Object.fromEntries(keys.map((key) => [key, defaultWorkbenchPreferences[key]])));
-        useAppStore.getState().setTextScale(1);
-        useAppStore.getState().setCodeTextScale(1);
-      }}><RotateCcw size={14} />恢复字体和编辑器默认设置</button>
+      }}><RotateCcw size={14} />恢复编辑器默认设置</button>
     </section>
   </>;
 }

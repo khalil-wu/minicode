@@ -20,6 +20,7 @@ import type {
   MessageAttachmentRef,
   MessageContextRef,
   MessageUsage,
+  TurnDiffState,
 } from "../stores/types";
 
 export type BackendTranscriptMessage = {
@@ -213,6 +214,22 @@ const isProgressVisibility = (value: unknown): value is "timeline" | "compact" |
 
 const stringValue = (value: unknown): string | undefined =>
   typeof value === "string" && value ? value : undefined;
+
+const messageTurnDiff = (metadata: unknown, messageId: string, turnId?: string): TurnDiffState | undefined => {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const payload = (metadata as Record<string, unknown>).turn_diff;
+  if (!payload || typeof payload !== "object") return undefined;
+  const raw = payload as Record<string, unknown>;
+  const threadId = stringValue(raw.thread_id);
+  const ownerTurnId = stringValue(raw.turn_id);
+  if (!threadId || raw.conversation_id !== threadId || !ownerTurnId || raw.message_id !== messageId
+    || (turnId && ownerTurnId !== turnId) || (typeof raw.diff !== "string" && raw.diff !== null)) return undefined;
+  return {
+    threadId, turnId: ownerTurnId, messageId, diff: raw.diff as string | null,
+    taskId: stringValue(raw.task_id), toolCallId: stringValue(raw.tool_call_id),
+    revision: nonNegativeNumberValue(raw.revision), updatedAt: toTimestamp(raw.timestamp),
+  };
+};
 
 const toMessageSource = (value: unknown): ChatMessage["messageSource"] => {
   if (!value || typeof value !== "object") return undefined;
@@ -654,6 +671,10 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         retryAfterMs: nonNegativeNumberValue(item.retryAfterMs ?? item.retry_after_ms),
         errorMessage: stringValue(item.errorMessage ?? item.error_message),
         operationId: stringValue(item.operationId ?? item.operation_id),
+        subagentId: stringValue(item.subagentId ?? item.subagent_id),
+        subagentName: stringValue(item.subagentName ?? item.subagent_name),
+        subagentIdentity: stringValue(item.subagentIdentity ?? item.subagent_identity),
+        subagentStatus: stringValue(item.subagentStatus ?? item.subagent_status) as Extract<ContentBlock, { type: "progress" }>["subagentStatus"],
         providerState,
         timestamp: toTimestamp(item.timestamp),
       });
@@ -849,10 +870,14 @@ export const hydrateMessages = (
       ? parsedBlocks ?? []
       : legacyBlocksFor({ ...message, content }, role, fallbackToolCalls);
     const timestamp = toTimestamp(message.timestamp, index);
+    const id = typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`;
+    const messageTurnId = stringValue(message.turnId ?? message.turn_id);
+    const turnDiff = role === "assistant" ? messageTurnDiff(message.metadata, id, messageTurnId) : undefined;
     return {
       toolPage,
-      id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`,
-      turnId: stringValue(message.turnId ?? message.turn_id),
+      id,
+      turnId: messageTurnId ?? turnDiff?.turnId,
+      turnDiff,
       role,
       content,
       ...(hasDisplayContent ? { backendContent } : {}),
@@ -973,6 +998,7 @@ export const hydrateMessages = (
       && !message.attachmentRefs?.length
       && !message.replyAttachments?.length
       && !message.contextRefs?.length
+      && !message.turnDiff?.diff
       && !message.quotedMessage
       && !(message.role === "assistant" && message.terminalStatus)
     ) continue;

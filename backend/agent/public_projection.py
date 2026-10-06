@@ -182,6 +182,9 @@ _SUBAGENT_RUN_PUBLIC_FIELDS = (
     "result_available",
     "cancel_requested",
     "session_id",
+    "model",
+    "provider",
+    "reasoning_effort",
 )
 
 _PUBLIC_LONG_TEXT_FIELDS = frozenset(
@@ -265,7 +268,16 @@ def project_public_agent_run(value: Any) -> dict[str, Any]:
 
 
 def project_public_subagent_run(value: Any) -> dict[str, Any]:
-    return _allowlisted_mapping(value, _SUBAGENT_RUN_PUBLIC_FIELDS)
+    source = dict(value) if isinstance(value, Mapping) else {}
+    resume = source.get("resume_config")
+    if isinstance(resume, Mapping):
+        # TaskTool has persisted resolved child settings in resume_config.
+        # Older records predate the public header fields; use those actual
+        # settings, never the parent's current selection.
+        for key in ("model", "provider", "reasoning_effort"):
+            if key not in source and key in resume:
+                source[key] = resume[key]
+    return _allowlisted_mapping(source, _SUBAGENT_RUN_PUBLIC_FIELDS)
 
 
 def project_public_subagent_result(

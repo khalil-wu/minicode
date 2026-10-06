@@ -12,6 +12,16 @@ const assistant = (id: string, turnId: string | undefined, edits: { path: string
 });
 
 describe("review history turn ownership", () => {
+  it("restores shell and child changes for every persisted parent turn without tool receipts", () => {
+    const first = assistant("a1", "t1", []);
+    first.turnDiff = { threadId: "conv", turnId: "t1", messageId: "a1", updatedAt: 1,
+      diff: patch("parser.py", "parser") + "\n" + patch("tests.py", "tests") + "\n" + patch("cli.py", "cli") };
+    const second = assistant("a2", "t2", []);
+    second.turnDiff = { threadId: "conv", turnId: "t2", messageId: "a2", updatedAt: 2, diff: patch("cli.py", "updated") };
+    const history = buildReviewHistory([user("1"), first, user("2"), second], undefined, "conv");
+    expect(history.map((turn) => turn.files.map((file) => file.path))).toEqual([["cli.py"], ["parser.py", "tests.py", "cli.py"]]);
+    expect(history[1].files.every((file) => file.revisions.length === 1 && file.revisions[0].name === "本轮修改")).toBe(true);
+  });
   it("shows only the third turn's A edits as the last turn and counts the file once", () => {
     const history = buildReviewHistory([
       user("1"), assistant("a1", "t1", [{ path: "A.ts", value: "first" }]),

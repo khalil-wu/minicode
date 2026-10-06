@@ -4,6 +4,41 @@
   background: var(--editor-background);
 }
 
+.mc-diff-total-counts { display: inline-flex; gap: 6px; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.mc-diff-total-counts > span:first-child, .mc-diff-added { color: var(--diff-added-foreground); }
+.mc-diff-total-counts > span:last-child, .mc-diff-removed { color: var(--diff-removed-foreground); }
+.mc-diff-file-sections { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: 12px; background: var(--surface-base); }
+.mc-diff-file-section { min-width: 0; border-bottom: 1px solid var(--border-subtle); }
+.mc-diff-file-section-heading { display: flex; align-items: center; min-height: 42px; gap: 3px; padding: 0 8px; }
+.mc-diff-file-section-trigger { display: flex; align-items: center; flex: 1; min-width: 0; gap: 8px; padding: 9px 4px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-family: var(--font-ui); font-size: var(--text-sm); text-align: left; cursor: pointer; }
+.mc-diff-file-section-trigger:focus-visible, .mc-diff-file-section-actions button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-radius: 4px; }
+.mc-diff-file-section-trigger > svg { flex-shrink: 0; }
+.mc-diff-file-section-trigger .mc-diff-file-counts { font-size: var(--text-sm); }
+.mc-diff-section-path { display: flex; align-items: baseline; flex: 1; min-width: 0; white-space: nowrap; }
+.mc-diff-section-directory { min-width: 0; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; direction: rtl; text-align: left; }
+.mc-diff-section-filename { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.mc-diff-file-section-actions { display: flex; align-items: center; flex-shrink: 0; gap: 2px; }
+.mc-diff-file-section-actions button { display: grid; place-items: center; width: 24px; height: 26px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.mc-diff-file-section-actions button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-diff-file-section-actions button:disabled { opacity: .4; cursor: default; }
+.mc-diff-file-disclosure { color: var(--text-muted); transition: transform var(--transition-fast); }
+.mc-diff-file-section[data-open="false"] .mc-diff-file-disclosure { transform: rotate(-90deg); }
+.mc-diff-file-section-body { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--transition-normal), opacity var(--transition-fast); }
+.mc-diff-file-section[data-open="true"] > .mc-diff-file-section-body { grid-template-rows: 1fr; opacity: 1; }
+.mc-diff-file-section-content { min-height: 0; overflow: hidden; }
+.mc-diff-reading-inline { flex: initial; overflow-x: auto; overflow-y: hidden; padding-block: 4px 10px; }
+.mc-diff-reading-inline .mc-diff-code-body { width: max-content; min-width: 100%; }
+.mc-diff-reading-inline .mc-diff-code-content { white-space: pre; overflow-wrap: normal; }
+.mc-diff-reading-inline .mc-diff-line-gutter { padding-left: 4px; }
+.mc-diff-reading-inline .mc-diff-hunk-divider { margin: 0 8px 4px; padding-block: 7px; border: 0; border-radius: 9px; font-size: var(--text-sm); }
+.mc-diff-revision-label { padding: 7px 12px; color: var(--text-muted); font-size: var(--text-xs); }
+.mc-diff-file-loading { padding: 16px 12px; color: var(--text-muted); font-size: var(--text-sm); }
+.mc-diff-git-actions { display: flex; gap: 6px; align-items: center; padding: 5px 8px; }
+.mc-diff-show-more { margin: 8px; padding: 5px 8px; border: 0; border-radius: 5px; background: var(--surface-soft); color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .mc-diff-file-section-body, .mc-diff-file-disclosure { transition: none; }
+}
+
 .mc-diff-toolbar { padding-block: 2px; }
 .mc-diff-scope-trigger,
 .mc-diff-icon-action { background: transparent; }
@@ -29,8 +64,9 @@
 
 .mc-diff-return-preview:hover { background: var(--surface-hover); }
 
-.mc-diff-code-row { display: flex; min-width: 0; }
-.mc-diff-code-content { flex: 1; min-width: 0; }
+.mc-diff-code-row { display: flex; align-items: stretch; min-width: 0; min-height: var(--editor-line-height); }
+.mc-diff-code-body .mc-diff-code-content { flex: 1; min-width: 0; padding-inline: 8px; padding-block: 0; }
+.mc-diff-code-sign { display: inline-block; width: 1.5ch; font: inherit; }
 
 .mc-diff-reading-surface {
   background: var(--editor-background);
@@ -39,9 +75,24 @@
 
 .mc-diff-code-body {
   font-family: var(--editor-font-family);
-  font-size: var(--editor-font-size);
+  font-size: var(--code-font-size);
   line-height: var(--editor-line-height);
   font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* Line navigation stays on the code typography axis, including buttons. */
+.mc-diff-code-body .mc-diff-line-gutter > span,
+.mc-diff-code-body .mc-diff-line-gutter > button,
+.mc-diff-code-body .mc-diff-code-sign,
+.mc-diff-code-body .mc-diff-code-content {
+  font-family: var(--editor-font-family) !important;
+  font-size: var(--code-font-size) !important;
+  line-height: var(--editor-line-height) !important;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
 .mc-diff-empty-code-cell { min-height: var(--editor-line-height); }
@@ -59,39 +110,6 @@
   user-select: none;
 }
 
-.mc-diff-history-navigation,
-.mc-diff-git-selection {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  min-height: 34px;
-  padding: 5px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  background: var(--editor-background);
-}
-
-.mc-diff-history-navigation label { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 200px; }
-.mc-diff-history-navigation select {
-  min-width: 0;
-  width: 100%;
-  height: 28px;
-  padding: 0 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: var(--surface-base);
-  color: var(--text-primary);
-}
-
-.mc-diff-git-layout { grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); }
-.mc-diff-git-files {
-  padding: 0 6px 8px;
-  border-right: 1px solid var(--border-subtle);
-  background: var(--surface-sidebar);
-}
-
 .mc-diff-files-heading {
   display: flex;
   align-items: center;
@@ -102,7 +120,6 @@
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.mc-diff-git-batch-actions { padding-inline: 6px; }
 .mc-diff-file-group-title {
   padding: 8px 6px 4px;
   color: var(--text-muted);
@@ -145,32 +162,6 @@
 .mc-diff-file-row:hover > button,
 .mc-diff-file-row:focus-within > button { opacity: 1; }
 
-.mc-diff-history-list { gap: 12px; padding: 12px; }
-.mc-diff-history-card {
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: var(--editor-background);
-}
-.mc-diff-history-file-header {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-height: 32px;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-sidebar);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-.mc-diff-history-file-path {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-secondary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .mc-diff-line-gutter {
   display: inline-flex;
   flex: 0 0 auto;
@@ -194,23 +185,6 @@
 
 .mc-diff-line-gutter > button { cursor: pointer; }
 .mc-diff-line-gutter > button:hover { color: var(--accent-primary); background: var(--surface-hover); }
-
-.mc-diff-line-gutter > .mc-diff-line-quote {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  padding: 0;
-  opacity: 0;
-  color: var(--text-secondary);
-}
-
-.mc-diff-code-row:hover .mc-diff-line-quote,
-.mc-diff-code-row:focus-within .mc-diff-line-quote { opacity: 1; }
-
-@media (hover: none) {
-  .mc-diff-line-gutter > .mc-diff-line-quote { opacity: 1; }
-}
 
 .mc-diff-review-layout {
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
@@ -272,13 +246,4 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .mc-diff-git-layout {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(100px, 28%) minmax(0, 1fr);
-  }
-
-  .mc-diff-git-files {
-    border-right: 0;
-    border-bottom: 1px solid var(--border-subtle);
-  }
 }

@@ -57,6 +57,7 @@ function createSmokePage(port) {
           wsBaseUrl: runtime?.wsBaseUrl || "",
           hasRuntimeToken: typeof runtime?.runtimeToken === "string" && runtime.runtimeToken.length >= 16,
           hasSandboxSetup: typeof runtime?.desktop?.sandbox?.setup === "function",
+          hasMenuPopup: typeof runtime?.desktop?.menu?.popup === "function",
           nodeIntegrationBlocked: typeof window.require === "undefined",
           diagnosticsOk: false,
           diagnosticsHasElectron: false,
@@ -94,10 +95,17 @@ function createSmokePage(port) {
           console.log("[minicode-smoke] embeddedBrowser.reload");
           const reloadOk = await runtime.desktop.embeddedBrowser.runAction({ id: "e2e-browser-tab", conversationId: browserConversationId, action: "reload" });
           console.log("[minicode-smoke] embeddedBrowser.close");
+          let closedEvent;
+          const removeBrowserListener = runtime.desktop.embeddedBrowser.onEvent((event) => {
+            if (event.type === "closed" && event.id === "e2e-browser-tab") closedEvent = event;
+          });
           const closeOk = await runtime.desktop.embeddedBrowser.close({ id: "e2e-browser-tab", conversationId: browserConversationId });
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          removeBrowserListener();
           payload.embeddedBrowserOk = browserState?.id === "e2e-browser-tab"
             && browserTabs.some((tab) => tab.id === "e2e-browser-tab")
-            && boundsOk && reloadOk && closeOk;
+            && boundsOk && reloadOk && closeOk
+            && closedEvent?.conversationId === browserConversationId;
           console.log("[minicode-smoke] workspace.trust");
           const trustResult = await runtime.desktop.trustWorkspace("${os.homedir().replace(/\\/g, "\\\\")}");
           payload.workspaceTrustResult = trustResult;
@@ -223,6 +231,7 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     assert.equal(payload.wsBaseUrl, `ws://127.0.0.1:${port}`);
     assert.equal(payload.hasRuntimeToken, true);
     assert.equal(payload.hasSandboxSetup, true);
+    assert.equal(payload.hasMenuPopup, true);
     assert.equal(payload.nodeIntegrationBlocked, true);
     assert.equal(payload.diagnosticsOk, true);
     assert.equal(payload.diagnosticsHasElectron, true);

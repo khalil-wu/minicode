@@ -3,8 +3,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
-import { compareWriteWorkspaceFile, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
+import { fsListTree, fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
+import { compareWriteWorkspaceFile, listWorkspaceTree, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
 import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, loadPersistedEditorTabs, persistEditorTabs } from "../stores/shared-helpers";
@@ -12,7 +12,7 @@ import { EditorPanel } from "./EditorPanel";
 import type { CodeSelectionRange } from "../stores/types";
 
 const editorMocks = vi.hoisted(() => ({
-  actions: [] as Array<{ run: (editor: unknown) => void }>,
+  actions: [] as Array<{ id: string; run: (editor: unknown) => void }>,
   showConfirm: vi.fn(),
   editOperations: [] as string[],
   trigger: vi.fn(),
@@ -44,13 +44,16 @@ vi.hoisted(() => {
 
 vi.mock("@monaco-editor/react", async () => {
   const ReactModule = await import("react");
+  const monacoApi = await import("monaco-editor/editor/editor.api.js");
   return {
     loader: { config: vi.fn() },
-    default: function MockMonacoEditor({ value, path, onChange, onMount, options }: {
+    default: function MockMonacoEditor({ value, path, language, onChange, onMount, beforeMount, options }: {
       value: string;
       path: string;
+      language?: string;
       onChange?: (value: string) => void;
       onMount: (editor: unknown) => void;
+      beforeMount?: (monaco: unknown) => void;
       options?: { readOnly?: boolean };
     }) {
       const inputRef = ReactModule.useRef<HTMLTextAreaElement>(null);
@@ -65,9 +68,11 @@ vi.mock("@monaco-editor/react", async () => {
       const offsetAt = (lineNumber: number, column: number) => propsRef.current.value.split("\n")
         .slice(0, lineNumber - 1).reduce((offset, line) => offset + line.length + 1, 0) + column - 1;
       ReactModule.useEffect(() => {
-        let dispose: () => void;
+        const disposals: Array<() => void> = [];
         const mountedInput = inputRef.current!;
-        onMount({
+        beforeMount?.(monacoApi);
+        const testEditor = {
+          getContribution: vi.fn(),
           trigger: editorMocks.trigger,
           addContentWidget: vi.fn(),
           layoutContentWidget: vi.fn(),
@@ -85,7 +90,8 @@ vi.mock("@monaco-editor/react", async () => {
             inputRef.current!.scrollTop = saved.scrollTop;
             listeners.current.selection();
           },
-          addAction: (action: { run: (editor: unknown) => void }) => editorMocks.actions.push(action),
+          addAction: (action: { id: string; run: (editor: unknown) => void }) => editorMocks.actions.push(action),
+          getAction: (id: string) => ({ run: () => editorMocks.actions.find((action) => action.id === id)!.run(testEditor) }),
           focus: vi.fn(),
           pushUndoStop: () => editorMocks.editOperations.push("stop"),
           executeEdits: (source: string, edits: Array<{ range: CodeSelectionRange; text: string }>) => {
@@ -116,9 +122,10 @@ vi.mock("@monaco-editor/react", async () => {
           onDidChangeModel: (listener: () => void) => { listeners.current.model = listener; },
           onDidChangeModelContent: (listener: () => void) => { listeners.current.content = listener; },
           onDidScrollChange: (listener: () => void) => { listeners.current.scroll = listener; },
-          onDidDispose: (listener: () => void) => { dispose = listener; },
-        });
-        return () => dispose?.();
+          onDidDispose: (listener: () => void) => { disposals.push(listener); },
+        };
+        onMount(testEditor);
+        return () => disposals.forEach((dispose) => dispose());
       }, []);
       ReactModule.useEffect(() => {
         const selection = selections.current.get(path) ?? { start: 0, end: 0 };
@@ -130,6 +137,7 @@ vi.mock("@monaco-editor/react", async () => {
         ref: inputRef,
         "data-testid": "monaco-editor",
         "data-model-path": path,
+        "data-language": language,
         value,
         readOnly: options?.readOnly,
         onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onChange?.(event.currentTarget.value),
@@ -164,7 +172,15 @@ vi.mock("monaco-editor", () => ({
   languages: {},
 }));
 
-vi.mock("monaco-editor/editor/editor.api.js", () => ({ editor: {}, languages: {} }));
+vi.mock("monaco-editor/editor/editor.api.js", async () => {
+  const { URI } = await import("monaco-editor/base/common/uri.js");
+  return { editor: { getModel: () => null }, languages: {}, Uri: URI, KeyMod: { Alt: 512 }, KeyCode: { Backslash: 88 } };
+});
+vi.mock("./monacoTheme", () => ({ defineMiniCodeMonacoTheme: vi.fn(), miniCodeMonacoThemeName: (theme: string) => `minicode-${theme}` }));
+vi.mock("./useWorkspaceModelIndex", () => ({ useWorkspaceModelIndex: () => ({
+  initialize: vi.fn(), retainsModel: () => false, ownsModel: () => false, refresh: vi.fn(),
+  status: { phase: "idle", sourceCount: 0, issues: [] },
+}) }));
 vi.mock("monaco-editor/languages/definitions/typescript/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/javascript/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/css/register.js", () => ({}));
@@ -186,6 +202,8 @@ vi.mock("../desktop/runtime", () => ({
   fsCompareWriteFile: vi.fn(),
   fsReadFileInfo: vi.fn(),
   fsSearchFiles: vi.fn(),
+  fsListTree: vi.fn(),
+  trustWorkspace: vi.fn(),
   isDesktop: vi.fn(() => false),
   revealPath: vi.fn(),
 }));
@@ -194,8 +212,11 @@ vi.mock("../protocol/workspace", () => ({
   compareWriteWorkspaceFile: vi.fn(),
   readWorkspaceFile: vi.fn(),
   searchWorkspaceFiles: vi.fn(),
+  listWorkspaceTree: vi.fn(),
 }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+
+const originalRequestGitChanges = useAppStore.getState().requestGitChanges;
 
 describe("EditorPanel", () => {
   beforeEach(() => {
@@ -206,7 +227,10 @@ describe("EditorPanel", () => {
     localStorage.clear();
     vi.mocked(isDesktop).mockReturnValue(false);
     vi.mocked(fsSearchFiles).mockResolvedValue([]);
+    vi.mocked(fsListTree).mockResolvedValue([]);
     vi.mocked(searchWorkspaceFiles).mockResolvedValue([]);
+    vi.mocked(listWorkspaceTree).mockResolvedValue({ name: "demo", path: ".", is_dir: true, children: [] });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     useAppStore.setState({
       themeMode: "dark",
       workingDirectory: "C:\\projects\\demo",
@@ -214,6 +238,11 @@ describe("EditorPanel", () => {
       activeEditorOpenRequestId: null,
       activeEditorPath: null,
       fileChanges: [],
+      fileTreeRevealRequests: [],
+      fileTreeVersion: 0,
+      editorExplorerOpen: true,
+      workspaceSearchOpen: false,
+      requestGitChanges: vi.fn(),
       gitChanges: { workingTree: [], staged: [], untracked: [], loading: false, live: null },
       diffReview: null,
       rightStackTab: "preview",
@@ -228,6 +257,7 @@ describe("EditorPanel", () => {
 
   afterEach(() => {
     cleanup();
+    useAppStore.setState({ requestGitChanges: originalRequestGitChanges });
     vi.clearAllMocks();
   });
 
@@ -236,6 +266,13 @@ describe("EditorPanel", () => {
     useAppStore.getState().openEditorFile("main.ts", "main.ts", { exact: true });
     render(<EditorPanel />);
     const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(editor.value).toBe("before after");
+      expect(editorMocks.actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "minicode.ask-about-selection" }),
+        expect.objectContaining({ id: "minicode.predict" }),
+      ]));
+    });
     editor.setSelectionRange(7, 7);
     const event = new CustomEvent("editor:insert-text", { detail: { text: "INSERT " } });
     act(() => window.dispatchEvent(event));
@@ -330,7 +367,53 @@ describe("EditorPanel", () => {
 
     expect(container.querySelector(".editor-empty-file-icon svg")).toBeTruthy();
     expect(screen.getAllByText("未打开文件").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("从左侧项目文件或搜索中打开工作区文件。")).toBeTruthy();
+    expect(screen.getByText("从项目文件中选择文件，或按 Ctrl+P 快速打开。")).toBeTruthy();
+  });
+
+  it("keeps the explorer query and scroll position when collapsed with no open file", async () => {
+    render(<EditorPanel />);
+    const query = await screen.findByRole("textbox", { name: "搜索工作区文件" }) as HTMLInputElement;
+    const tree = screen.getByRole("tree", { name: "文件资源管理器" });
+    fireEvent.change(query, { target: { value: "readme" } });
+    tree.scrollTop = 96;
+    fireEvent.scroll(tree);
+
+    const collapse = screen.getByRole("button", { name: "收起项目文件" });
+    const explorer = document.getElementById(collapse.getAttribute("aria-controls")!)!;
+    fireEvent.click(collapse);
+    expect(explorer.style.display).toBe("none");
+    expect(screen.queryByRole("textbox", { name: "搜索工作区文件" })).toBeNull();
+    expect(explorer.contains(query)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开项目文件" }));
+    expect(explorer.style.display).toBe("flex");
+    expect(screen.getByRole("textbox", { name: "搜索工作区文件" })).toBe(query);
+    expect(query.value).toBe("readme");
+    expect(screen.getByRole("tree", { name: "文件资源管理器" })).toBe(tree);
+    expect(tree.scrollTop).toBe(96);
+    expect(useAppStore.getState().editorTabs).toHaveLength(0);
+  });
+
+  it("reveals a folder from collapsed content search and opens its file in the editor", async () => {
+    vi.mocked(listWorkspaceTree).mockImplementation(async (_workspace, path) => path === "src"
+      ? { name: "src", path: "src", is_dir: true, children: [{ name: "main.ts", path: "src/main.ts", is_dir: false }] }
+      : { name: "demo", path: ".", is_dir: true, children: [{ name: "src", path: "src", is_dir: true, children: [] }] });
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "src/main.ts", content: "export const ready = true;", content_hash: "source" });
+    const view = render(<EditorPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "搜索项目内容" }));
+    expect(screen.getByRole("region", { name: "项目内容搜索" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起项目文件" }));
+
+    act(() => useAppStore.getState().requestFileTreeReveal("src", "folder"));
+
+    expect(screen.queryByRole("region", { name: "项目内容搜索" })).toBeNull();
+    expect(screen.getByRole("button", { name: "收起项目文件" }).getAttribute("aria-expanded")).toBe("true");
+    await waitFor(() => expect(view.container.querySelector('[data-tree-path="src"]')?.getAttribute("aria-expanded")).toBe("true"));
+    await waitFor(() => expect(useAppStore.getState().fileTreeRevealRequests).toHaveLength(0));
+    fireEvent.click(screen.getByText("main.ts", { selector: "span" }));
+    expect((await screen.findByTestId("monaco-editor") as HTMLTextAreaElement).value).toBe("export const ready = true;");
+    expect(useAppStore.getState().activeTabPath).toBe("src/main.ts");
+    expect(listWorkspaceTree).toHaveBeenCalledWith("C:\\projects\\demo", "src");
   });
 
   it("opens Markdown as a single live editing surface without an edit/preview mode switch", async () => {
@@ -1091,6 +1174,29 @@ describe("EditorPanel", () => {
     expect(breadcrumb.textContent).not.toContain("projects");
   });
 
+  it("lets a text file use C++ syntax without changing its content or another file's language", async () => {
+    const content = "// 中文注释\nint answer = 42;";
+    useAppStore.setState({
+      editorTabs: ["example.txt", "other.js"].map((path) => ({ id: path, path, content, original: content, loading: false })),
+      activeTabPath: "example.txt",
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor");
+    expect(editor.getAttribute("data-language")).toBe("plaintext");
+    fireEvent.click(screen.getByRole("button", { name: "文件语言，当前：自动 · 纯文本" }));
+    fireEvent.click(screen.getByRole("option", { name: "C++", exact: true }));
+    expect(editor.getAttribute("data-language")).toBe("cpp");
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ language: "cpp", content, original: content });
+    fireEvent.click(screen.getByRole("tab", { name: "other.js", exact: true }));
+    expect(editor.getAttribute("data-language")).toBe("javascript");
+    fireEvent.click(screen.getByRole("tab", { name: "example.txt", exact: true }));
+    expect(editor.getAttribute("data-language")).toBe("cpp");
+    fireEvent.click(screen.getByRole("button", { name: "文件语言，当前：C++" }));
+    fireEvent.click(screen.getByRole("option", { name: "自动 · 纯文本" }));
+    expect(editor.getAttribute("data-language")).toBe("plaintext");
+    expect(editorMocks.editOperations).toEqual([]);
+  });
+
   it("offers selection chat only for nonempty code and reads the current selection when clicked", async () => {
     const code = "  const answer = 42;  ";
     useAppStore.setState({
@@ -1099,13 +1205,13 @@ describe("EditorPanel", () => {
     });
     render(<EditorPanel />);
     const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
-    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "提问 · Ctrl+K" })).toBeNull();
 
     act(() => editor.focus());
     fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: 2 } });
-    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "提问 · Ctrl+K" })).toBeNull();
     fireEvent.select(editor, { target: { selectionStart: 2, selectionEnd: 7 } });
-    const ask = screen.getByRole("button", { name: "询问选区" });
+    const ask = screen.getByRole("button", { name: "提问 · Ctrl+K" });
     editor.setSelectionRange(0, code.length);
     fireEvent.click(ask);
 
@@ -1126,6 +1232,29 @@ describe("EditorPanel", () => {
     expect(code.slice(editor.selectionStart, editor.selectionEnd)).toBe("second\nthird\nfourth");
   });
 
+  it.each(["src/answer.ts", "docs/readme.md"])("routes Ctrl+K to a draft question without editing or sending: %s", async (path) => {
+    const source = "first\nselected content\nlast";
+    useAppStore.setState({
+      editorTabs: [{ id: "question-shortcut", path, content: source, original: source, loading: false }],
+      activeTabPath: path,
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 6, selectionEnd: 22 } });
+    fireEvent.keyDown(editor, { key: "k", ctrlKey: true });
+
+    expect(useAppStore.getState().sideChatPendingContext).toEqual({
+      text: "selected content", source: path, workspaceRoot: "C:\\projects\\demo",
+      range: { startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 17 },
+    });
+    expect(useAppStore.getState().rightStackTab).toBe("sidechat");
+    expect(useAppStore.getState().sideChats).toEqual({});
+    expect(useAppStore.getState().editorTabs[0].content).toBe(source);
+    expect(editorMocks.editOperations).toEqual([]);
+    expect(screen.queryByRole("dialog", { name: "修改选中代码" })).toBeNull();
+  });
+
   it("follows selection changes across models without reusing the previous file's selection", async () => {
     useAppStore.setState({
       editorTabs: ["first.ts", "second.ts"].map((path) => ({ id: path, path, content: `const ${path.split(".")[0]} = 1;`, original: `const ${path.split(".")[0]} = 1;`, loading: false })),
@@ -1135,21 +1264,21 @@ describe("EditorPanel", () => {
     const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
     act(() => editor.focus());
     fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
-    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "提问 · Ctrl+K" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "second.ts", exact: true }));
-    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "提问 · Ctrl+K" })).toBeNull();
     act(() => editor.focus());
     fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
-    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    fireEvent.click(screen.getByRole("button", { name: "提问 · Ctrl+K" }));
     expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "const second = 1;", source: "second.ts", workspaceRoot: "C:\\projects\\demo",
       range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 18 } });
 
     fireEvent.click(screen.getByRole("tab", { name: "first.ts", exact: true }));
-    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "提问 · Ctrl+K" })).toBeTruthy();
     act(() => editor.focus());
     fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: 0 } });
-    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "提问 · Ctrl+K" })).toBeNull();
   });
 
   it("keeps generated tool results read-only while allowing search and selection questions", async () => {
@@ -1161,10 +1290,10 @@ describe("EditorPanel", () => {
     act(() => editor.focus());
     fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
     expect(editor.readOnly).toBe(true);
-    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "提问 · Ctrl+K" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "文件路径" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查找" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    fireEvent.click(screen.getByRole("button", { name: "提问 · Ctrl+K" }));
     expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "generated output", source: tab.path, workspaceRoot: "C:\\projects\\demo",
       range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 17 } });
     expect(useAppStore.getState().editorTabs[0].readOnly).toBe(true);
@@ -1184,7 +1313,7 @@ describe("EditorPanel", () => {
     await waitFor(() => expect(useAppStore.getState().editorTabs[0].original).toBe(updated));
     act(() => input.focus());
     fireEvent.select(input, { target: { selectionStart: updated.indexOf("Changed"), selectionEnd: updated.length } });
-    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    fireEvent.click(screen.getByRole("button", { name: "提问 · Ctrl+K" }));
     expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "Changed **paragraph**", source: tab.path, workspaceRoot: "C:\\projects\\demo",
       range: { startLineNumber: 3, startColumn: 1, endLineNumber: 3, endColumn: 22 } });
     expect(screen.queryByRole("tablist", { name: "Markdown 视图模式" })).toBeNull();

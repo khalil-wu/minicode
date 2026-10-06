@@ -132,3 +132,30 @@ def test_fetch_keeps_extracted_result_and_full_cleaned_source_separate(tmp_path)
     assert result.status == "success" and "The role requires" in result.content
     assert store.get(result.artifact_id) == "Python, LangGraph and PostgreSQL requirements."
     assert "NOISE" not in result.content_preview
+
+
+def test_fetch_extraction_uses_page_and_requested_task_without_extra_policy(tmp_path):
+    llm = SimpleNamespace(side_query=AsyncMock(return_value="Extracted result"), configured_small_fast_model_id=lambda: "")
+    tool = WebFetchTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    result = asyncio.run(tool._extract_with_prompt("Page body from 2025-10-06", "Extract the stated date.",
+        SimpleNamespace(llm=llm, run_context=None)))
+    assert result == "Extracted result"
+    messages = llm.side_query.call_args.args[0]
+    assert messages[0].content == (
+        "Web page content:\n---\nPage body from 2025-10-06\n---\n\n"
+        "Extract the stated date.\n\nProvide a concise response based only on the content above."
+    )
+
+
+def test_fetch_without_extraction_model_reports_facts_and_preserves_source(tmp_path):
+    store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    tool = WebFetchTool(store)
+    source = "Dated source: 2025-10-06."
+    tool._unrestricted_client = _FakeStreamClient(_FakeStreamResponse(source.encode(), headers={"content-type": "text/plain"}))
+    result = asyncio.run(tool.execute({"url": "https://example.com/date", "prompt": "Extract the date"},
+        ToolExecutionContext(permission=PermissionContext(mode="bypass"))))
+    assert result.is_error and result.error_kind == "provider_unavailable"
+    assert result.source_url == "https://example.com/date" and result.evidence_type == "fetched"
+    assert result.artifact_id and store.get(result.artifact_id) == source
+    assert result.content == f"网页已抓取；当前会话没有可用模型执行提取。原始清洗内容保存在 artifact {result.artifact_id}。"
+    assert result.limitation == "网页抓取成功；当前会话没有可用模型，原始清洗内容已保存为 artifact"

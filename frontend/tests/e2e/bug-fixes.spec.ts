@@ -115,6 +115,8 @@ async function mockWebSocket(page: Page) {
           setTimeout(() => {
             this._receive({
               type: "skills.list",
+              conversation_id: "conv-e2e",
+              workspace_root: "/tmp/test",
               skills: [
                 {
                   name: "react-ui-reviewer",
@@ -433,7 +435,7 @@ test.describe("Bug Fix: authoritative live projection", () => {
     });
 
     const runningCell = page.locator('.collaboration-cell[data-status="running"]');
-    await expect(runningCell).toContainText("正在发送 2 个智能体");
+    await expect(runningCell).toContainText("正在委派 · 2 个子任务");
     await expect(runningCell).toContainText("读取 fact-1.txt");
     await expect(runningCell).toContainText("读取 fact-2.txt");
 
@@ -455,18 +457,18 @@ test.describe("Bug Fix: authoritative live projection", () => {
     await expect(page.getByText("读取 fact-1.txt", { exact: true })).toHaveCount(1);
   });
 
-  test("keeps both sidebar mode tabs fully visible and directly clickable", async ({ page }) => {
+  test("keeps chat and Code navigation fully visible and directly clickable", async ({ page }) => {
     await page.setViewportSize({ width: 1600, height: 1000 });
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       store.setState({ leftSidebarWidth: 272, appMode: "code" });
     });
 
-    const switcher = page.getByTestId("sidebar-mode-switch");
+    const switcher = page.getByRole("navigation", { name: "应用导航" });
     await expect(switcher).toBeVisible();
     const result = await switcher.evaluate((element) => {
       const listRect = element.getBoundingClientRect();
-      const tabs = Array.from(element.querySelectorAll<HTMLElement>('[role="tab"]'));
+      const tabs = Array.from(element.querySelectorAll<HTMLElement>('button[aria-label="聊天首页"], button[aria-label="Code"]'));
       return tabs.map((tab) => {
         const rect = tab.getBoundingClientRect();
         const points = [
@@ -475,17 +477,17 @@ test.describe("Bug Fix: authoritative live projection", () => {
         ];
         return {
           inside: rect.left >= listRect.left && rect.right <= listRect.right,
-          hits: points.map(([x, y]) => document.elementFromPoint(x, y)?.closest('[role="tab"]') === tab),
+          hits: points.map(([x, y]) => document.elementFromPoint(x, y)?.closest('button') === tab),
         };
       });
     });
 
     expect(result).toHaveLength(2);
     expect(result.every((tab) => tab.inside && tab.hits.every(Boolean))).toBe(true);
-    await page.getByRole("tab", { name: "协作" }).click();
-    await expect(page.getByRole("tab", { name: "协作" })).toHaveAttribute("aria-selected", "true");
-    await page.getByRole("tab", { name: "代码" }).click();
-    await expect(page.getByRole("tab", { name: "代码" })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
+    await expect(page.getByRole("button", { name: "聊天首页", exact: true })).toHaveAttribute("aria-current", "page");
+    await page.getByRole("button", { name: "Code", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Code", exact: true })).toHaveAttribute("aria-current", "page");
   });
 });
 
@@ -912,7 +914,7 @@ test.describe("Message context and compact assistant process UI", () => {
     await processSummary.click();
     await expect(page.getByRole("button", { name: "收起处理步骤" }).first()).toBeVisible();
     await expect(page.getByText("frontend/src.v2/App.tsx").first()).toBeVisible();
-    await page.getByRole("button", { name: "思考" }).click();
+    await page.getByRole("button", { name: "Thinking", exact: true }).click();
     await expect(page.getByText("thinking line 20")).toBeVisible();
   });
 
@@ -967,7 +969,7 @@ test.describe("Message context and compact assistant process UI", () => {
     });
 
     await expect(page.getByLabel("Agent is waiting for input")).toBeVisible();
-    await expect(page.getByText("允许使用 运行命令？")).toBeVisible();
+    await expect(page.getByText("允许使用 运行？", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "允许使用工具" })).toBeVisible();
     await expect(page.locator(".overlay-backdrop")).toHaveCount(0);
 
@@ -1075,7 +1077,7 @@ test.describe("Message context and compact assistant process UI", () => {
     await expect(page.getByText("frontend/src.v2/panels/BrowserPanel.tsx").first()).toBeVisible();
     await page.getByRole("button", { name: "关闭右侧栏", exact: true }).first().click();
     await expect(page.getByRole("tablist", { name: "右侧栏面板" })).toBeHidden();
-    await page.getByRole("button", { name: "思考" }).click();
+    await page.getByRole("button", { name: "Thinking", exact: true }).click();
     await expect(page.getByText(/I will inspect the selected panel/).first()).toBeVisible();
     await page.getByRole("button", { name: "打开右侧栏" }).click();
 

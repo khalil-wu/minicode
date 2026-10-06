@@ -117,6 +117,17 @@ describe("file mode projection chain", () => {
     act(() => runtime.receive?.(terminalChunk("tick\r\n", 6, 12)));
     act(() => handlePeripheralEvent(terminalSnapshot("tick\r\n", 0, 6)));
     await waitFor(() => expect(runtime.terminal?.text).toBe("tick\r\ntick\r\n"));
+    act(() => handlePeripheralEvent(terminalSnapshot("tick\r\n", 0, 6)));
+    expect(runtime.terminal?.text).toBe("tick\r\ntick\r\n");
+  });
+
+  it("replaces a disconnected suffix and its notice when a full snapshot fills the gap", async () => {
+    handlePeripheralEvent(terminalSnapshot("tick\r\n", 0, 6));
+    render(<TerminalPanel />);
+    await waitFor(() => expect(runtime.terminal?.text).toBe("tick\r\n"));
+    act(() => runtime.receive?.(terminalChunk("tick\r\n", 12, 18)));
+    act(() => handlePeripheralEvent(terminalSnapshot("tick\r\ntock\r\ntick\r\n", 0, 18)));
+    await waitFor(() => expect(runtime.terminal?.text).toBe("tick\r\ntock\r\ntick\r\n"));
   });
 
   it("keeps post-clear output that arrived before the clear result", async () => {

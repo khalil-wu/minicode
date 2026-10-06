@@ -108,7 +108,7 @@ export const sessionRowStyle: React.CSSProperties = {
 export const sessionTitleStyle: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
-  fontSize: "var(--text-chrome)",
+  fontSize: "var(--text-sm)",
   fontFamily: "var(--font-ui)",
   fontWeight: "var(--fw-medium)",
   lineHeight: 1.35,

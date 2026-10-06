@@ -115,7 +115,7 @@ def test_runtime_review_native_preparation_transfers_or_releases_real_desktop(tm
         tmp_path / "not-invoked.exe", tmp_path / "not-provisioned-home", account, account,
         "fixture-owner", "fixture-sid", "fixture-group",
     )
-    monkeypatch.setattr(native, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(native, "STATE_ROOT", tmp_path)
     monkeypatch.setattr(native, "discover_runtime", lambda: (runtime, ""))
     resolved = SandboxPolicy(workspace_root=tmp_path, writable_roots=()).resolve(cwd=tmp_path)
     created = []

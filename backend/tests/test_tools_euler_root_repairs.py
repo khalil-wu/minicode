@@ -47,7 +47,7 @@ def test_registry_start_uses_the_exact_turn_workspace(monkeypatch):
 
     async def launch(root, **kwargs):
         calls.append((root, kwargs))
-        return SimpleNamespace(effective_url="", effective_port=None, status="starting", stderr_tail=[],
+        return SimpleNamespace(effective_url="", effective_port=None, status="starting", stderr_tail=[], is_active=True,
                                process=SimpleNamespace(returncode=None, pid=101))
 
     monkeypatch.setattr("backend.preview.launcher.start_preview_launch", launch)

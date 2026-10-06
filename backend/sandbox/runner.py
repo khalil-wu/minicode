@@ -453,6 +453,7 @@ class SandboxRunner:
         self._windows_private_desktop: Any | None = None
         self._windows_native_temp_dir: Path | None = None
         self._windows_native_cwd: Path | None = None
+        self._windows_launcher_env: dict[str, str] = {}
         self._windows_cleanup_pending = False
 
     def capability(self, *, cwd: str | Path | None = None) -> SandboxCapability:
@@ -810,7 +811,6 @@ class SandboxRunner:
         | None = None,
         preserve_full_output: bool = False,
     ) -> SandboxResult:
-        env = self._build_env()
         try:
             wrapped_command, capability = self.prepare_command(
                 command,
@@ -824,6 +824,7 @@ class SandboxRunner:
                 exit_code=126,
                 sandbox_unavailable=True,
             )
+        env = self._build_env()
         proc: asyncio.subprocess.Process | None = None
         stdout_task: asyncio.Task[int] | None = None
         stderr_task: asyncio.Task[int] | None = None
@@ -1182,7 +1183,11 @@ class SandboxRunner:
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUNBUFFERED", "1")
-        return self._env_filter(env) if self._env_filter is not None else env
+        env = {key: value for key, value in env.items() if key.upper() != "MINICODE_WINDOWS_SANDBOX_POLICY_SCOPE"}
+        if self._env_filter is not None:
+            env = self._env_filter(env)
+        env.update(self._windows_launcher_env)
+        return env
 
     def _wrap_command(
         self,
@@ -1223,7 +1228,7 @@ class SandboxRunner:
             )
 
         if capability.backend == "windows-elevated-wfp":
-            from backend.sandbox.windows_native import prepare_command
+            from backend.sandbox.windows_native import command_launcher_env, prepare_command
 
             effective_cwd = (
                 Path(cwd).expanduser().resolve()
@@ -1239,7 +1244,11 @@ class SandboxRunner:
                 for path, access in events
                 if access is not FileSystemAccessMode.WRITE
                 and any(
-                    _policy_path_is_writable(resolved, candidate)
+                    writable.is_path_writable(candidate)
+                    for writable in resolved.writable_roots
+                    # Native TEMP is a private directory, not the host TEMP
+                    # used to resolve the legacy policy's tmpdir entry.
+                    if writable.root != Path(tempfile.gettempdir()).resolve()
                     for candidate in (path, *path.parents)
                 )
             ]
@@ -1256,6 +1265,7 @@ class SandboxRunner:
             self._windows_private_desktop = desktop
             self._windows_native_temp_dir = private_temp
             self._windows_native_cwd = effective_cwd
+            self._windows_launcher_env = command_launcher_env(wrapped, private_temp)
             return wrapped
 
         raise SandboxUnavailableError(
@@ -1420,6 +1430,7 @@ class SandboxRunner:
                     return
         self._windows_native_temp_dir = None
         self._windows_native_cwd = None
+        self._windows_launcher_env = {}
         self._windows_cleanup_pending = False
         self._windows_private_desktop = None
         if private_desktop is not None:

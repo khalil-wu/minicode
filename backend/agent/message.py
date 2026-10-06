@@ -1004,6 +1004,10 @@ class AgentEvent:
         error_message: str = "",
         operation_id: str = "",
         provider_state: str | None = None,
+        subagent_id: str = "",
+        subagent_name: str = "",
+        subagent_identity: str = "",
+        subagent_status: str = "",
     ) -> AgentEvent:
         clean_message = _required_event_text(
             message,
@@ -1087,6 +1091,10 @@ class AgentEvent:
             ("step_id", step_id, _MAX_EVENT_ID_CHARS),
             ("iteration_id", iteration_id, _MAX_EVENT_ID_CHARS),
             ("operation_id", operation_id, _MAX_EVENT_ID_CHARS),
+            ("subagent_id", subagent_id, _MAX_EVENT_ID_CHARS),
+            ("subagent_name", subagent_name, 4_096),
+            ("subagent_identity", subagent_identity, _MAX_EVENT_ID_CHARS),
+            ("subagent_status", subagent_status, 32),
         )
         for field_name, value, maximum in optional_text_fields:
             clean_value = _optional_event_text(

@@ -24,7 +24,7 @@ import { useAppStore } from "../../stores";
 
 afterEach(() => cleanup());
 
-it("keeps progress explanations readable when tool details are collapsed", () => {
+it("keeps progress explanations in completed work until the user expands its disclosure", () => {
   render(<ChatTurn turn={{
     id: "narration-with-tools", userCell: null, activeCell: null, status: "completed", startedAt: 1, completedAt: 3,
     committedCells: [
@@ -33,12 +33,13 @@ it("keeps progress explanations readable when tool details are collapsed", () =>
     ],
     finalAnswerCell: { kind: "assistant_markdown", id: "complete", markdownSource: "修复完成。", phase: "final", copyable: true, createdAt: 3 },
   }} />);
-  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
+  expect(screen.queryByText("已定位到重复发送，正在核对调用方。")).toBeNull();
   expect(screen.queryByText("Verification passed")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
   expect(screen.getByText("Verification passed")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
-  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
+  expect(screen.queryByText("已定位到重复发送，正在核对调用方。")).toBeNull();
   expect(screen.queryByText("Verification passed")).toBeNull();
 });
 
@@ -47,7 +48,7 @@ it("shows the stopped state when a restored interrupted turn has no retained con
     id: "empty-interrupted", userCell: null, committedCells: [], activeCell: null,
     finalAnswerCell: null, status: "interrupted", startedAt: 1, completedAt: 2,
   }} />);
-  expect(screen.getByRole("status").textContent).toContain("Stopped");
+  expect(screen.getByRole("status").textContent).toContain("已停止");
 });
 
 describe("HistoryCellRenderer", () => {
@@ -168,13 +169,13 @@ describe("ChatTurn live answer", () => {
       finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
     };
     render(<ChatTurn turn={turn} />);
-    const group = screen.getByRole("button", { name: "Explored" });
+    const group = screen.getByRole("button", { name: "已查看" });
     expect(group.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(group);
     expect(screen.getByText("first.md")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByRole("button", { name: "Explored" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "已查看" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("first.md")).toBeTruthy();
     useAppStore.setState({ viewMode: previousMode });
   });
@@ -230,8 +231,8 @@ describe("ChatTurn live answer", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText("这是正在流式输出的答案。")).toBeTruthy();
-    expect(screen.getByText("Search", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
+    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
   });
 
   it("shows provisional narration in the work zone while the turn is still running", () => {
@@ -261,7 +262,7 @@ describe("ChatTurn live answer", () => {
     expect(screen.getByText("我先检查相关文件。")).toBeTruthy();
     expect(container.querySelector('[data-zone="work"]')).toBeTruthy();
     expect(container.querySelector('[data-zone="reply"]')).toBeNull();
-    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
   });
 });
 
@@ -342,10 +343,10 @@ describe("ChatTurn", () => {
     };
     const { container, rerender } = render(<ChatTurn turn={turn} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
-    expect(screen.getAllByRole("status", { name: "Working" })).toHaveLength(1);
+    expect(screen.getAllByRole("status", { name: "处理中" })).toHaveLength(1);
     rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
-    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
   });
 
   it("opens a shortened file reference using the successful read in the owning turn", () => {
@@ -417,7 +418,7 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} defaultProcessExpanded />);
 
     expect(screen.getAllByText("已编辑 2 个文件")).toHaveLength(1);
-    expect(screen.getByTitle("npm test")).toBeTruthy();
+    expect(screen.getByText("$ npm test", { selector: ".exec-cell-output-command" })).toBeTruthy();
     expect(screen.getByText("修改完成。")).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
     const replyArea = screen.getByLabelText("Agent 回复");
@@ -459,7 +460,11 @@ describe("ChatTurn", () => {
     expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
   });
 
-  it("projects parent messages and closed agents as MiniCode-style collapsible transcript rows", () => {
+  it("projects parent messages and closed agents as actual glyph and name rows without worker instructions", () => {
+    useAppStore.setState({ conversationId: "collaboration-owner", subagents: [
+      { id: "kepler-id", teammateName: "Kepler", agentPath: "/root/kepler", role: "subagent", status: "running" },
+      { id: "kant-id", teammateName: "Kant", agentPath: "/root/kant", role: "subagent", status: "done" },
+    ] });
     const turn: ChatTurnState = {
       id: "assistant-collaboration",
       userCell: null,
@@ -507,13 +512,13 @@ describe("ChatTurn", () => {
       startedAt: 1,
     };
 
-    render(<ChatTurn turn={turn} />);
+    render(<ChatTurn turn={turn} conversationId="collaboration-owner" />);
 
-    expect(screen.getAllByText("已发送消息 · 1 个子任务")).toHaveLength(3);
-    expect(screen.getByText("请完整审计渲染链路并返回证据。")).toBeTruthy();
-    expect(screen.getByText("优先核对真实生产问题。")).toBeTruthy();
-    expect(screen.getByText("已停止 · 1 个子任务")).toBeTruthy();
-    expect(screen.getAllByText("Kant", { selector: "strong" })).toHaveLength(2);
+    expect(screen.queryByText("已发送消息 · 1 个子任务")).toBeNull();
+    expect(screen.queryByText("请完整审计渲染链路并返回证据。")).toBeNull();
+    expect(screen.queryByText("优先核对真实生产问题。")).toBeNull();
+    expect(screen.queryByText("已停止 · 1 个子任务")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "打开子智能体：Kant" })).toHaveLength(2);
   });
 
   it("keeps the completed tool transcript visible and renders the final answer separately", () => {
@@ -547,13 +552,13 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText("Implementation complete.")).toBeTruthy();
-    expect(screen.queryByText("Run explicit tool")).toBeNull();
-    expect(screen.getByText("Worked for 2s")).toBeTruthy();
+    expect(screen.queryByText("运行 explicit tool")).toBeNull();
+    expect(screen.getByText("用时 2秒")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByText("Run explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByText("运行 explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
-    expect(screen.queryByText("Run explicit tool", { selector: ".activity-cell-name" })).toBeNull();
-    expect(screen.queryByText("Run explicit tool")).toBeNull();
+    expect(screen.queryByText("运行 explicit tool", { selector: ".activity-cell-name" })).toBeNull();
+    expect(screen.queryByText("运行 explicit tool")).toBeNull();
   });
 
   it("keeps raw URLs visible when a settled turn has no complete final answer", () => {
@@ -581,8 +586,8 @@ describe("ChatTurn", () => {
 
     render(<ChatTurn turn={turn} />);
 
-    expect(screen.getByTitle(command)).toBeTruthy();
-    expect(screen.getByText("Worked for 26s")).toBeTruthy();
+    expect(screen.getByText(`$ ${command}`, { selector: ".exec-cell-output-command" })).toBeTruthy();
+    expect(screen.getByText("用时 26秒")).toBeTruthy();
     expect(screen.queryByText("1 个工具")).toBeNull();
     expect(screen.queryByText("1 条命令")).toBeNull();
     expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
@@ -673,7 +678,7 @@ describe("ChatTurn", () => {
     const { rerender } = render(<ChatTurn turn={runningTurn} />);
 
     expect(screen.queryByRole("button", { name: "收起处理步骤" })).toBeNull();
-    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
     expect(screen.getByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
     const summary = workArea.querySelector('[data-position="bottom"]');
@@ -704,7 +709,7 @@ describe("ChatTurn", () => {
     }} />);
 
     expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("Worked for 2s")).toBeTruthy();
+    expect(screen.getByText("用时 2秒")).toBeTruthy();
     expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
   });
 
@@ -733,8 +738,8 @@ describe("ChatTurn", () => {
     const workArea = screen.getByLabelText("Agent 处理进度");
     const timeline = workArea.querySelector(".agent-loop-timeline");
     const summary = workArea.querySelector('[data-position="bottom"]');
-    expect(screen.getByText("Search", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: "Working" })).toBeTruthy();
+    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "处理中" })).toBeTruthy();
     expect(timeline).toBeTruthy();
     expect(summary).toBeTruthy();
     expect(Array.from(workArea.children).indexOf(timeline as Element))

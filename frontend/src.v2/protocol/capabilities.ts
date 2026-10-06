@@ -42,6 +42,9 @@ export interface AgentProviderCapabilities {
   reasoning_effort_levels?: unknown;
   configured_reasoning_effort?: unknown;
   effective_reasoning_effort?: unknown;
+  wire_reasoning_effort?: unknown;
+  wire_reasoning_effort_levels?: unknown;
+  reasoning_effort_wire_map?: unknown;
   reasoning_effort_supported?: unknown;
   context_window?: unknown;
   context_window_source?: unknown;

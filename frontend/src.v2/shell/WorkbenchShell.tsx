@@ -10,7 +10,8 @@ import { MainSlots } from "./MainSlots";
 import { ChatPane } from "../chat/ChatPane";
 import { useAppStore } from "../stores";
 import { selectPreviewSurface } from "../lib/preview-projection";
-import { isCompactWorkbenchViewport, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { isCompactWorkbenchViewport } from "../stores/shared-helpers";
+import { NavigationRail } from "./NavigationRail";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
@@ -214,6 +215,7 @@ export const WorkbenchShell = () => {
   const appMode = useAppStore((s) => s.appMode);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
+  const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
@@ -235,7 +237,7 @@ export const WorkbenchShell = () => {
     appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
   );
   const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable = !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized));
+  const rightPanelAvailable = !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
   const expandedRight = rightPanelExpanded && rightPanelOpen && rightPanelAvailable;
   const bottomVisible = appMode !== "chat" && !codePanelMaximized && !settingsOpen && !skillsMarketplaceOpen && !expandedRight;
 
@@ -280,7 +282,7 @@ export const WorkbenchShell = () => {
       setCompactPanel((current) => current === "left" ? null : "left");
       return;
     }
-    setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : LEFT_SIDEBAR_DEFAULT_WIDTH);
+    setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : leftSidebarExpandedWidth);
   };
 
   const toggleWorkbenchRightPanel = () => {
@@ -295,12 +297,13 @@ export const WorkbenchShell = () => {
 
   return (
     <div
+      className="mc-desktop-shell"
       style={{
         position: "fixed",
         inset: 0,
         display: "flex",
         flexDirection: "column",
-        background: "var(--surface-base)",
+        background: "var(--desktop-shell-background)",
         color: "var(--text-primary)",
         fontFamily: "var(--font-ui)",
         fontSize: "var(--text-md)",
@@ -318,10 +321,12 @@ export const WorkbenchShell = () => {
       />
       <ConnectionBanner />
 
-        <div className="workbench-mode-body" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-          {!compact && leftPanelAvailable && leftSidebarWidth > 0 && <SidebarLeft />}
+      <div className="mc-desktop-body">
+        <NavigationRail />
+        <div className="workbench-mode-body mc-desktop-workspace" hidden={settingsOpen} style={{ flex: 1, minHeight: 0, display: settingsOpen ? "none" : "flex", overflow: "hidden" }}>
+          {!compact && leftPanelAvailable && <SidebarLeft withGlobalRail />}
           <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
-            <div className="workbench-primary" hidden={skillsMarketplaceOpen || expandedRight} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen || expandedRight ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
+            <div className="workbench-primary" data-floating={expandedRight ? "true" : "false"} hidden={skillsMarketplaceOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
               <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
                 {appMode === "chat" ? <ChatModeShell /> : <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />}
               </div>
@@ -343,9 +348,10 @@ export const WorkbenchShell = () => {
             </NarrowSidebarDrawer>
           </div>
         </div>
+      </div>
 
-      {compact && !settingsOpen && leftPanelAvailable && compactPanel === "left" && (
-        <NarrowSidebarDrawer id="left-sidebar-drawer" label="左侧栏" side="left" onClose={() => setCompactPanel(null)}>
+      {compact && leftPanelAvailable && compactPanel === "left" && (
+        <NarrowSidebarDrawer id="left-sidebar-drawer" label="左侧栏" side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
           <SidebarLeft embedded onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
       )}

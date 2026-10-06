@@ -157,7 +157,8 @@ class SessionCommandHandlersMixin:
         self._provider_override_active = False
 
     def _bind_selected_llm(self, model_runtime: Any | None) -> None:
-        from backend.ws.agent_runner import _config_with_runtime_model_budget, _get_or_create_session_llm
+        from backend.llm.model_selection import default_model_thinking_level, model_thinking_levels
+        from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm
 
         self.config = _config_with_runtime_model_budget(
             self.config, model_runtime=model_runtime,
@@ -167,6 +168,9 @@ class SessionCommandHandlersMixin:
             self, config=self.config, provider=self.provider,
             model=self.selected_model, model_runtime=model_runtime,
         )
+        selected = model_runtime.get_model(self.provider, self.selected_model) if model_runtime is not None else None
+        requested = self.config.llm.reasoning_effort or default_model_thinking_level(selected, model_thinking_levels(selected, self.llm)) or "off"
+        _apply_thinking_level(self.llm, selected, requested)
         self.context_builder.bind_llm(self.llm)
         self.context_builder.bind_budget(self.config.token_budget)
 

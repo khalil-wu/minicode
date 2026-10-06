@@ -116,7 +116,9 @@ export default defineConfig(async ({ command, mode }) => {
     },
     build: {
       outDir: "dist",
-      emptyOutDir: true,
+      // An open desktop renderer may still import its previous hashed chunks.
+      // Retain them until that window reloads into the newly built index.
+      emptyOutDir: false,
       chunkSizeWarningLimit: 1000,
       modulePreload: {
         resolveDependencies(_filename, dependencies) {
@@ -130,6 +132,12 @@ export default defineConfig(async ({ command, mode }) => {
         output: {
           manualChunks(id) {
             const normalized = id.replace(/\\/g, "/");
+            // Keep transport, event dispatch and the send-message import cycle together.
+            if (
+              normalized.endsWith("/src.v2/hooks/useWebSocket.ts")
+              || normalized.endsWith("/src.v2/chat/sendChatMessage.ts")
+              || /\/src\.v2\/chat\/[^/]+Events\.tsx?$/.test(normalized)
+            ) return "websocket-runtime";
             if (!normalized.includes("/node_modules/")) return undefined;
             if (normalized.includes("/@monaco-editor/react/")) return "monaco-react";
             if (normalized.includes("/monaco-editor/esm/vs/languages/definitions/")) return "monaco-languages";

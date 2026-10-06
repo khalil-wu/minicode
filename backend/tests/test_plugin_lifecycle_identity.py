@@ -13,6 +13,7 @@ import backend.services.plugin_settings_service as service
 from backend.plugins.layout import plugin_install_root
 from backend.plugins.policy import ManagedPluginPolicy
 from backend.plugins.store import PluginStore
+from backend.config_requirements import ConfigRequirements
 
 
 @pytest.fixture
@@ -24,6 +25,7 @@ def plugin_home(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_commands, "STATE_ROOT", state)
     monkeypatch.setattr(service, "SETTINGS_FILE", settings)
     class EmptyStack:
+        requirements = ConfigRequirements()
         def effective_config(self):
             return {}
     monkeypatch.setattr(config, "load_config_layer_stack", lambda: EmptyStack())

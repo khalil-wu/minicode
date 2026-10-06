@@ -255,6 +255,8 @@ function panelSlotsEqual(left: AppStore["panelSlots"], right: AppStore["panelSlo
 }
 
 export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => ({
+  contextCardCollapsed: true,
+  setContextCardCollapsed: (collapsed) => set({ contextCardCollapsed: collapsed }),
   themeMode: initialTheme(),
   resolvedTheme: initialResolvedTheme(),
   textScale: initialTextScale(),
@@ -264,7 +266,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   sendShortcut: initialSendShortcut(),
   followUpBehavior: initialFollowUpBehavior(),
   shortcutBindings: initialShortcutBindings(),
-  appMode: "code" as const,
+  appMode: "cowork" as const,
   workbenchLayout: readLS(LS.layout.workbench) === "split" ? "split" : "tabs",
   rightStackTab: "tasks" as const,
   rightStackTabLocked: false,
@@ -370,13 +372,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setAppMode: (m) =>
     set((s) => {
       if (m !== "code") {
-        if (m === "cowork" && s.editorTabs.length === 0 && s.panelSlots.some((slot) => slot.kind === "editor")) {
-          const panelSlots = normalizePanelSlots(s.panelSlots.filter((slot) => slot.kind !== "editor"));
-          if (!panelSlotsEqual(s.panelSlots, panelSlots)) {
-            persistPanelSlots(panelSlots);
-            return { appMode: m, panelSlots };
-          }
-        }
         if (s.appMode === m) return s;
         return { appMode: m };
       }
@@ -927,11 +922,16 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set((s) => ({ fileTreeVersion: s.fileTreeVersion + 1 })),
   requestFileTreeReveal: (path, kind = "folder") =>
     set((s) => {
-      const panelSlots = ensureCodePanelSlots(s.panelSlots);
+      const panelSlots = ensureCodePanelSlots(s.panelSlots).map((slot) => ({ ...slot, focused: slot.kind === "editor" }));
       persistPanelSlots(panelSlots);
       return {
         appMode: "code",
         panelSlots,
+        editorExplorerOpen: true,
+        workspaceSearchOpen: false,
+        rightPanelExpanded: false,
+        settingsOpen: false,
+        skillsMarketplaceOpen: false,
         fileTreeRevealRequests: [
           ...s.fileTreeRevealRequests,
           {

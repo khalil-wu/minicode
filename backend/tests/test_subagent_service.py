@@ -1,3 +1,7 @@
+import pytest
+
+from backend.agent.execution_journal import ExecutionJournal
+from backend.agent.loop_process_events import model_process_text_event
 from backend.services.subagent_service import (
     build_subagent_status_event,
     build_subagent_transcript_messages,
@@ -121,6 +125,9 @@ def test_subagent_transcript_projects_the_ordinary_chat_schema() -> None:
     assert messages[0]["content"] == "检查真实实现"
     assert "internal delegated system prompt" not in str(messages)
     assert messages[1]["blocks"][0]["type"] == "process"
+    assert messages[1]["blocks"][0]["id"] == "process-1"
+    assert messages[1]["blocks"][0]["status"] == "completed"
+    assert messages[1]["blocks"][0]["visibility"] == "timeline"
     tool_record = next(
         block["record"]
         for block in messages[1]["blocks"]
@@ -131,6 +138,93 @@ def test_subagent_transcript_projects_the_ordinary_chat_schema() -> None:
     assert tool_record["outputPreview"] == "file contents"
     assert messages[1]["content"] == "检查完成"
     assert messages[1]["is_streaming"] is True
+
+
+def test_subagent_process_retry_replays_one_current_item_from_the_full_journal(tmp_path) -> None:
+    journal = ExecutionJournal("child-retry-process", base_dir=tmp_path / "sidechains")
+    journal.append("user_prompt", {"content": "Inspect the implementation"})
+
+    def append_process(content: str, status: str):
+        event = model_process_text_event(
+            content, [], iteration_id="child-iteration", source="model_preamble", status=status,
+        )
+        assert event is not None
+        return journal.append("system", {
+            "kind": event.data["kind"],
+            "item_id": event.data["id"],
+            "content": event.data["content"],
+            "source": event.data["source"],
+            "status": event.data["status"],
+            "visibility": event.data["visibility"],
+            "transcript_only": True,
+        })
+
+    def replay():
+        return build_subagent_transcript_messages({
+            "events": [event.to_dict() for event in journal.read_events()],
+        })[1]
+
+    initial = append_process("Speculative attempt", "running")
+    block = replay()["blocks"][0]
+    assert block["id"] == "child-iteration:model-output:model_preamble"
+    assert (block["status"], block["visibility"]) == ("running", "timeline")
+    append_process("Speculative attempt completed", "completed")
+    blocks = replay()["blocks"]
+    assert len(blocks) == 1
+    assert blocks[0]["content"] == "Speculative attempt completed"
+    assert blocks[0]["timestamp"] == initial.ts_ms
+
+    append_process("Speculative attempt completed", "retracted")
+    assert replay()["blocks"] == []
+    append_process("Actual retry attempt", "running")
+    append_process("Actual retry completed", "completed")
+    journal.append("assistant", {"content": "Checked"})
+    journal.append("terminal", {"status": "completed", "summary": "Checked"})
+
+    restored = replay()
+    process_blocks = [block for block in restored["blocks"] if block["type"] == "process"]
+    assert len(process_blocks) == 1
+    assert process_blocks[0]["content"] == "Actual retry completed"
+    assert process_blocks[0]["status"] == "completed"
+    assert "Speculative attempt" not in str(restored)
+    assert restored["content"] == "Checked"
+    assert restored["terminal_status"] == "completed"
+    assert any(event.payload.get("status") == "retracted" for event in journal.read_events())
+
+
+@pytest.mark.parametrize("status,visibility,content", [
+    ("retracted", "timeline", ""),
+    ("retracted", "timeline", "Discard this text"),
+    ("completed", "debug", "Private debug text"),
+    ("completed", "hidden", "Private hidden text"),
+    ("completed", "internal", "Internal bookkeeping"),
+    ("completed", "redacted", "Redacted text"),
+])
+def test_subagent_process_hidden_updates_remove_the_old_row_without_removing_other_items(
+    tmp_path, status, visibility, content,
+) -> None:
+    journal = ExecutionJournal("child-hidden-process", base_dir=tmp_path / "sidechains")
+    journal.append("user_prompt", {"content": "Inspect"})
+    for item_id, text in (("replaced-item", "Old narration"), ("other-item", "Keep this narration")):
+        journal.append("system", {
+            "kind": "process_text", "item_id": item_id, "content": text,
+            "source": "model_preamble", "status": "completed", "visibility": "timeline",
+            "transcript_only": True,
+        })
+    journal.append("system", {
+        "kind": "process_text", "item_id": "replaced-item", "content": content,
+        "source": "model_preamble", "status": status, "visibility": visibility,
+        "transcript_only": True,
+    })
+    restored = build_subagent_transcript_messages({
+        "events": [event.to_dict() for event in journal.read_events()],
+    })[1]
+
+    assert [(block["id"], block["content"]) for block in restored["blocks"]] == [
+        ("other-item", "Keep this narration"),
+    ]
+    assert "Old narration" not in str(restored)
+    assert restored["is_streaming"] is True
 
 
 def test_subagent_transcript_coalesces_duplicate_tool_lifecycle_observations() -> None:

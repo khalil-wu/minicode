@@ -31,11 +31,12 @@ import type {
 } from "./cells/cellTypes";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import { shallow } from "zustand/shallow";
-import { knownFilePathsForCell, recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
+import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { canonicalArtifactKind, isBrowserScreenshotRecord } from "../lib/artifact-projection";
+import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 
 type CommittedCellState = Exclude<
   HistoryCellState,
@@ -240,6 +241,7 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
         maxRetries: item.progress.at(-1)?.maxRetries,
         retryAfterMs: item.progress.at(-1)?.retryAfterMs,
         providerState: item.progress.at(-1)?.providerState,
+        errorMessage: item.progress.at(-1)?.errorMessage,
       }
     : undefined,
   skill: item.kind === "skill"
@@ -415,6 +417,15 @@ const aggregateDiffCells = (
 
 const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] => {
   const cells: CollaborationCellState[] = [];
+  for (const progress of item.progress ?? []) {
+    if (!progress.subagentId) continue;
+    cells.push({
+      kind: "collaboration", id: progress.id, action: "completed",
+      status: progress.subagentStatus === "cancelled" ? "cancelled" : progress.status === "failed" ? "failed" : progress.status === "partial" ? "partial" : "success",
+      entries: [{ agentId: progress.subagentId, agentLabel: progress.subagentName || progress.label || "子智能体", agentIdentity: progress.subagentIdentity, agentStatus: progress.subagentStatus }],
+      collapsed: true, createdAt: progress.timestamp,
+    });
+  }
   for (const record of item.records ?? []) {
     const name = String(record.name || "").trim();
     if (name === "send_message") {
@@ -477,7 +488,7 @@ const collaborationCell = (
       : "failed",
   entries,
   error: ["failed", "blocked", "timeout"].includes(record.status)
-    ? record.errorInfo?.user_message || record.errorInfo?.user_summary || record.userSummary
+    ? getRecordOutputText(record) || record.errorInfo?.user_message || record.errorInfo?.user_summary || record.userSummary
     : undefined,
   collapsed: false,
   createdAt: record.startedAt ?? record.finishedAt,
@@ -647,7 +658,7 @@ function buildTurn(
     committedCells.push(error);
   }
 
-  return {
+  const turn: ChatTurnState = {
     id: assistantMessage.id,
     resourceKey: {},
     toolPage: assistantMessage.toolPage,
@@ -672,6 +683,7 @@ function buildTurn(
     durationMs: assistantMessage.durationMs,
     usage: assistantMessage.usage,
   };
+  return applyAuthoritativeTurnDiff([turn], assistantMessage.turnDiff)[0];
 }
 
 function splitAnswerAroundImageArtifact(
@@ -779,12 +791,14 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
     } else if (kind === "progress" && block.type === "progress") {
       const index = positions.get(block.id);
       if (index === -1) return null;
+      if (index === undefined && block.status === "failed" && block.errorMessage?.trim()) return null;
       if (index !== undefined) {
         const previous = base.committedCells[index];
         if (previous.kind !== "activity") return null;
         replaceCell(index, { ...activityCell(projectProgressBlock(block), message), segment: previous.segment, segmentClosed: previous.segmentClosed });
       }
     } else if ((kind === "tool_output" || kind === "tool") && block.type === "tool_call") {
+      if (["tool_exec", "tool_wait"].includes(block.record.name)) return null;
       const index = positions.get(block.record.id);
       // Collaboration may project several rows, and file changes own an
       // aggregate diff. Those use the full projection with its grouping rules.

@@ -1,0 +1,56 @@
+.tool-result-text,
+.activity-cell-output-pre.tool-result-text,
+.activity-cell-inline-output.tool-result-text,
+.activity-cell-error-pre.tool-result-text {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.tool-result-code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--code-font-size);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-question-result {
+  display: grid;
+  gap: 12px;
+  padding-block: 4px;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  white-space: normal;
+  color: var(--text-primary);
+}
+
+.tool-question-result-item {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-question-result-question,
+.tool-question-result-answer p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-question-result-answer {
+  display: grid;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-strong);
+}
+
+.tool-question-result-answer > span,
+.tool-question-result-status {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}

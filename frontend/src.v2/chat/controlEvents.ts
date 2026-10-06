@@ -15,19 +15,24 @@ const respondToResourceCleanup = async (event: ControlRequestEvent): Promise<voi
   if (event.request.subtype !== "conversation_resources_cleanup") return;
   let response: Record<string, unknown>;
   try {
-    if (!isDesktop()) throw new Error("桌面资源连接已断开，任务已保留。");
-    const dirty = dirtyEditorFiles(useAppStore.getState(), event.request.workspace_root);
-    if (dirty.length) throw new Error(`请先保存未保存的文件，再删除任务：${dirty.join("、")}`);
-    await Promise.all([
-      ptyKillConversation(event.conversation_id),
-      embeddedBrowserCloseConversation(event.conversation_id),
-    ]);
-    const [terminals, browsers] = await Promise.all([
-      ptyList(event.conversation_id),
-      embeddedBrowserList(event.conversation_id),
-    ]);
-    if (terminals.some((terminal) => terminal.isAlive !== false) || browsers?.length) {
-      throw new Error("本地终端或浏览器尚未关闭，任务已保留。");
+    const archiving = event.request.operation === "archive";
+    if (!isDesktop() && !archiving) throw new Error("桌面资源连接已断开，任务已保留。");
+    if (!archiving) {
+      const dirty = dirtyEditorFiles(useAppStore.getState(), event.request.workspace_root);
+      if (dirty.length) throw new Error(`请先保存未保存的文件，再删除任务：${dirty.join("、")}`);
+    }
+    if (isDesktop()) {
+      await Promise.all([
+        archiving ? ptyKillConversation(event.conversation_id, true) : ptyKillConversation(event.conversation_id),
+        embeddedBrowserCloseConversation(event.conversation_id),
+      ]);
+      const [terminals, browsers] = await Promise.all([
+        ptyList(event.conversation_id),
+        embeddedBrowserList(event.conversation_id),
+      ]);
+      if (terminals.some((terminal) => terminal.isAlive !== false) || browsers?.length) {
+        throw new Error("本地终端或浏览器尚未关闭，任务已保留。");
+      }
     }
     response = { action: "approve" };
   } catch (error) {

@@ -20,11 +20,11 @@ from backend.tools.swarm_tools import MessageListTool, SendMessageTool
 @pytest.fixture
 def pending_plan(tmp_path):
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
-    leader = runtime.start_run(conversation_id="conversation", run_id="leader")
+    leader = runtime.start_run(conversation_id="conversation", run_id="leader", session_id="session")
     child = runtime.start_subagent(
         subagent_id="worker@team", parent_run_id=leader.run_id, agent_type="general-purpose",
         teammate_name="worker", team_name="team", plan_mode_required=True,
-        permission_mode="plan", background=True,
+        permission_mode="plan", background=True, session_id="session",
     )
     runtime.update_subagent_lifecycle(
         child.subagent_id, agent_path=child.agent_path, mailbox_epoch=child.mailbox_epoch,
@@ -168,6 +168,29 @@ async def test_user_plan_review_outlives_the_leader_turn(pending_plan, monkeypat
             sender_id=leader.run_id, recipient_id=child.subagent_id, content="model continuation",
             conversation_id="conversation", recipient_mailbox_epoch=child.mailbox_epoch,
         )
+
+
+@pytest.mark.asyncio
+async def test_host_plan_review_cannot_cross_the_execution_session(pending_plan, monkeypatch):
+    from backend.ws.handlers.misc import handle_subagent_plan_review
+
+    runtime, leader, child = pending_plan
+    runtime.complete_run(leader.run_id)
+    monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
+    error = AsyncMock()
+    monkeypatch.setattr("backend.ws.handlers.misc.emit_command_error", error)
+    session = SimpleNamespace(active_conversation_id="conversation", session_id="different-session",
+        resolve_requested_workspace=lambda value: None,
+        session_lifecycle=SimpleNamespace(current_workspace_root=lambda: None, workspace_root=None),
+        emit_command_result=AsyncMock(), send_event=AsyncMock())
+    await handle_subagent_plan_review(session, {"subagent_id": child.subagent_id,
+        "request_id": "review-1", "approved": True, "conversation_id": "conversation"})
+    error.assert_awaited_once()
+    assert "different session" in str(error.await_args.args)
+    session.emit_command_result.assert_not_awaited()
+    assert runtime.get_subagent(child.subagent_id).awaiting_plan_approval
+    assert runtime.list_swarm_messages(participant_id=child.subagent_id,
+        conversation_id="conversation", message_kind="plan_approval_response") == []
 
 
 @pytest.mark.parametrize("request_id, epoch_delta", [("stale-request", 0), ("review-1", 1)])

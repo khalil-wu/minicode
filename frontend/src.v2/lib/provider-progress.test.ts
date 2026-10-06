@@ -90,5 +90,11 @@ describe("providerProgressLabel", () => {
       status: "completed",
       message: "Provider request completed",
     })).toBe(true);
+    expect(isProviderRequestProgress({
+      id: "child-turn:progress:1", status: "running", message: "Connecting provider", providerState: "connecting",
+    })).toBe(true);
+    expect(isProviderRequestProgress({
+      id: "journal-item-9", status: "running", phase: "model", label: "provider", message: "Preparing request",
+    })).toBe(true);
   });
 });

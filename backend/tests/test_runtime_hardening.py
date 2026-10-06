@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -633,7 +634,8 @@ def test_matching_turn_interrupt_cancels_the_current_run() -> None:
                 }
             }
             self.run_manager = SimpleNamespace(
-                run_task_ids={"conv-cancel": "task-current"}
+                run_task_ids={"conv-cancel": "task-current"}, set_user_queue_paused=Mock(),
+                queued_user_message_snapshot=Mock(return_value=[]),
             )
             self.cancel_calls: list[dict] = []
 
@@ -812,7 +814,8 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
             self.active_conversation_id = "conv-stop"
             self._conversation_streams = {"conv-stop": {}}
             self.run_manager = SimpleNamespace(
-                run_task_ids={"conv-stop": "task-live"}
+                run_task_ids={"conv-stop": "task-live"}, set_user_queue_paused=Mock(),
+                queued_user_message_snapshot=Mock(return_value=[]),
             )
             self.cancel_calls: list[dict] = []
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -326,7 +327,11 @@ class AgentTurnState:
             'stage': str(data.get('stage') or 'status'),
             'status': str(data.get('status') or 'info'),
             'message': message,
-            'timestamp': self._now_ms(),
+            'timestamp': (
+                int(datetime.fromisoformat(str(data['timestamp'])).timestamp() * 1000)
+                if data.get('subagent_id') and data.get('timestamp')
+                else self._now_ms()
+            ),
         }
         for source_key, target_key in (
             ('phase', 'phase'),
@@ -338,6 +343,10 @@ class AgentTurnState:
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
             ('iteration_id', 'iterationId'),
+            ('subagent_id', 'subagentId'),
+            ('subagent_name', 'subagentName'),
+            ('subagent_identity', 'subagentIdentity'),
+            ('subagent_status', 'subagentStatus'),
         ):
             if data.get(source_key):
                 progress[target_key] = str(data.get(source_key) or '')

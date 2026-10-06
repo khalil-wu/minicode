@@ -50,7 +50,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     });
   };
   return {
-    inlineCompletionUsage: { requests: 0, inputTokens: 0, outputTokens: 0, lastError: "" },
+    inlineCompletionUsage: { requests: 0, inputTokens: 0, outputTokens: 0, lastError: "", pending: false },
     workbenchPreferences: { ...defaultWorkbenchPreferences, ...safeJsonParse<Partial<WorkbenchPreferences>>(readLS("minicode.workbench.preferences") ?? "{}", {}) },
     setWorkbenchPreferences: (patch) => set((state) => {
       const workbenchPreferences = { ...state.workbenchPreferences, ...patch };
@@ -65,13 +65,26 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     keepEditorTab: (path) => set((state) => ({
       editorTabs: state.editorTabs.map((tab) => editorPathsEqual(tab.path, path, state.workingDirectory) ? { ...tab, preview: false } : tab),
     })),
+    setEditorTabLanguage: (path, language) => set((state) => ({
+      editorTabs: state.editorTabs.map((tab) => editorPathsEqual(tab.path, path, state.workingDirectory) ? { ...tab, language } : tab),
+    })),
     ...initialEditorState,
+    editorExplorerOpen: true,
+    setEditorExplorerOpen: (open) => set({ editorExplorerOpen: open }),
     workspaceSearchOpen: false,
-    openWorkspaceSearch: () => {
-      get().setAppMode("code");
-      if (get().leftSidebarWidth === 0) get().setLeftSidebarWidth(280);
-      set({ workspaceSearchOpen: true });
-    },
+    openWorkspaceSearch: () => set((state) => {
+      const panelSlots = ensureCodePanelSlots(state.panelSlots).map((slot) => ({ ...slot, focused: slot.kind === "editor" }));
+      persistPanelSlots(panelSlots);
+      return {
+        appMode: "code",
+        panelSlots,
+        editorExplorerOpen: true,
+        workspaceSearchOpen: true,
+        rightPanelExpanded: false,
+        settingsOpen: false,
+        skillsMarketplaceOpen: false,
+      };
+    }),
     closeWorkspaceSearch: () => set({ workspaceSearchOpen: false }),
     queueEditorBufferTransaction: (path, transaction, original, contentHash, workspaceRoot) => updateWorkspace(workspaceRoot, (state) => {
       const existing = state.editorTabs.find((tab) => editorPathsEqual(tab.path, path, workspaceRoot));
@@ -149,6 +162,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         persistPanelSlots(panelSlots);
         return {
           editorTabs: next,
+          appMode: s.appMode === "code" ? "cowork" : s.appMode,
           activeTabPath,
           activeEditorPath,
           editorOpenRequests,
@@ -178,6 +192,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         persistPanelSlots(panelSlots);
         return {
           editorTabs: [],
+          appMode: s.appMode === "code" ? "cowork" : s.appMode,
           activeTabPath: null,
           activeEditorPath: null,
           editorOpenRequests: [],

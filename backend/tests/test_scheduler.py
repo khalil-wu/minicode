@@ -259,6 +259,49 @@ def test_new_scheduled_conversation_binding_is_durable_during_the_run(monkeypatc
     asyncio.run(scenario())
 
 
+def test_archive_pause_retains_history_and_stops_only_the_conversation_runs(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduled_tasks.json")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    async def scenario() -> None:
+        started = set()
+        ready = asyncio.Event()
+        release = asyncio.Event()
+
+        async def on_fire(task, run):
+            if task.name == "Standalone":
+                scheduler.bind_run_conversation(run.id, "archive-owner")
+            started.add(task.id)
+            if len(started) == 3:
+                ready.set()
+            await release.wait()
+            return {"status": "completed"}
+
+        scheduler = TaskScheduler(on_fire=on_fire)
+        bound = scheduler.add_task("Bound", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id="archive-owner")
+        unrelated = scheduler.add_task("Other", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id="other-owner")
+        standalone = scheduler.add_task("Standalone", "Inspect", "0 * * * *", workspace_root=str(project))
+        runs = [scheduler.run_now(task.id) for task in (bound, unrelated, standalone)]
+        await asyncio.wait_for(ready.wait(), timeout=1)
+
+        assert await scheduler.pause_for_conversation("archive-owner") == 1
+        restored = TaskScheduler()
+        assert restored._tasks[bound.id].enabled is False
+        assert restored._tasks[bound.id].next_run_at is None
+        assert restored._tasks[unrelated.id].enabled is True
+        assert restored._tasks[standalone.id].enabled is True
+        assert restored._runs[runs[0].id].status == "cancelled"
+        assert restored._runs[runs[2].id].status == "cancelled"
+        assert runs[1].status == "running"
+        assert not scheduler._run_tasks[runs[1].id].done()
+        release.set()
+        await scheduler._run_tasks[runs[1].id]
+        assert runs[1].status == "completed"
+
+    asyncio.run(scenario())
+
+
 def test_scheduler_persists_each_workspace_in_its_own_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduler" / "legacy.json")
     project_one = tmp_path / "project-one"

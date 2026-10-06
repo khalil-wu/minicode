@@ -148,17 +148,13 @@ describe("Phase A — design token property tests", () => {
     }
   });
 
-  it("P1.5 accent-primary uses a cool blue hue with visible chroma", () => {
+  it("P1.5 interaction accents remain neutral grey in both themes", () => {
     for (const theme of [dark, light] as const) {
-      const c = oklch(parse(theme["--accent-primary"]) as Color);
-      expect(c).toBeDefined();
-      if (!c) continue;
-      const h = c.h ?? 0;
-      const ch = c.c ?? 0;
-      expect(h).toBeGreaterThanOrEqual(230);
-      expect(h).toBeLessThanOrEqual(270);
-      expect(ch).toBeGreaterThanOrEqual(0.03);
-      expect(ch).toBeLessThanOrEqual(0.20);
+      for (const name of ["--accent-primary", "--accent-secondary", "--accent-strong", "--accent-hover", "--accent-active"]) {
+        const c = oklch(parse(resolveValue(theme, theme[name])) as Color);
+        expect(c, name).toBeDefined();
+        expect(c!.c ?? 0, name).toBeLessThanOrEqual(0.005);
+      }
     }
   });
 

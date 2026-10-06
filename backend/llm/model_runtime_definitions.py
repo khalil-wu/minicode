@@ -26,6 +26,7 @@ from backend.config import (
     get_provider_model_metadata,
 )
 from backend.llm.model_selection import REASONING_LEVEL_ORDER
+from backend.llm.reasoning_effort import reasoning_effort_wire_map
 from backend.llm.provider_models import ProviderModelsStorage
 from backend.llm.provider_contracts import (
     ModelDefinition,
@@ -1043,6 +1044,7 @@ def _base_model(
         max_output_tokens_source=str(metadata["max_output_tokens_source"]),
         max_output_tokens_verified=bool(metadata["max_output_tokens_verified"]),
         reasoning_effort_levels=tuple(metadata["reasoning_effort_levels"]),
+        thinking_level_map=(reasoning_effort_wire_map(model_id) or None) if api != "anthropic-messages" else None,
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
         supports_custom_tools=metadata["supports_custom_tools"],

@@ -25,6 +25,80 @@ _SID = "S-1-5-21-1-2-3-1000"
 _INSPECT = windows_native.inspect_runtime_owner
 
 
+def test_native_profile_encodes_the_effective_exact_path_grant(tmp_path):
+    metadata = tmp_path / ".git"
+    entries = [
+        FileSystemSandboxEntry(FileSystemPath.path(metadata), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath.path(metadata), FileSystemAccessMode.WRITE),
+    ]
+    policy = SandboxPolicy(workspace_root=tmp_path, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries)))
+    encoded = windows_native._permission_profile(policy.resolve(cwd=tmp_path), tmp_path)
+    assert encoded["file_system"]["entries"] == [{"path": {"type": "path", "path": str(metadata.resolve())}, "access": "write"}]
+    entries.append(FileSystemSandboxEntry(FileSystemPath.path(metadata), FileSystemAccessMode.DENY))
+    denied = SandboxPolicy(workspace_root=tmp_path, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries)))
+    assert windows_native._permission_profile(denied.resolve(cwd=tmp_path), tmp_path)["file_system"]["entries"][0]["access"] == "deny"
+
+
+def test_native_private_temp_does_not_create_deny_write_for_a_readable_peer(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    peer = tmp_path / "peer"
+    peer.mkdir()
+    policy = SandboxPolicy(workspace_root=workspace, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.TMPDIR), FileSystemAccessMode.WRITE),
+        FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
+        FileSystemSandboxEntry(FileSystemPath.path(peer), FileSystemAccessMode.READ),
+    ])))
+    captured = {}
+    def prepare(command, **kwargs):
+        captured.update(kwargs)
+        args = [
+            "not-launched", "--permission-profile", json.dumps(windows_native._permission_profile(kwargs["resolved"], kwargs["cwd"])),
+            "--write-roots-json", json.dumps([str(workspace)]),
+        ]
+        return args, SimpleNamespace(close=lambda: None), tmp_path / "not-created"
+    monkeypatch.setattr(windows_native, "prepare_command", prepare)
+    runner = SandboxRunner(policy)
+    runner._wrap_command("git status", SimpleNamespace(backend="windows-elevated-wfp"), cwd=workspace)
+    assert peer not in captured["deny_write_paths"]
+    assert workspace / ".git" in captured["deny_write_paths"]
+
+
+def test_native_launcher_scope_follows_permission_changes_and_ignores_temp_nonce(tmp_path):
+    workspace = tmp_path / "workspace"
+    metadata = workspace / ".git"
+    entries = [
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
+    ]
+    read_policy = SandboxPolicy(workspace_root=workspace, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries)))
+    write_policy = SandboxPolicy(workspace_root=workspace, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        *entries, FileSystemSandboxEntry(FileSystemPath.path(metadata), FileSystemAccessMode.WRITE),
+    ])))
+
+    def launch_env(policy, private_temp, writable, deny_write):
+        args = [
+            "native", "--permission-profile", json.dumps(windows_native._permission_profile(policy.resolve(cwd=workspace), workspace)),
+            "--write-roots-json", json.dumps([*writable, str(private_temp.resolve())]),
+            "--deny-write-paths-json", json.dumps(deny_write),
+        ]
+        return windows_native.command_launcher_env(args, private_temp)
+
+    original = launch_env(read_policy, tmp_path / "temp-a", [str(workspace)], [str(metadata)])
+    assert original == launch_env(read_policy, tmp_path / "temp-b", [str(workspace)], [str(metadata)])
+    assert original != launch_env(write_policy, tmp_path / "temp-c", [str(workspace), str(metadata)], [])
+    runner = SandboxRunner(SandboxPolicy(
+        workspace_root=workspace,
+        permission_profile=read_policy.permission_profile,
+        env_overrides={windows_native.POLICY_SCOPE_ENV: "workload-override"},
+    ))
+    assert windows_native.POLICY_SCOPE_ENV not in runner._build_env()
+    runner._windows_launcher_env = original
+    assert runner._build_env()[windows_native.POLICY_SCOPE_ENV] == original[windows_native.POLICY_SCOPE_ENV]
+
+
 def _identity(home: Path) -> dict:
     digest = hashlib.sha256(b"minicode.windows-sandbox.owner.v3\0" + _SID.encode("ascii")
         + b"\0" + str(home.resolve()).replace("\\", "/").encode("utf-8").lower()).digest()
@@ -147,6 +221,7 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch, s
             "OPENAI_API_KEY": "must-not-be-added",
             "HTTP_PROXY": "http://127.0.0.1:7897",
             "CODEX_WINDOWS_SANDBOX_PROXY_PORTS": "7897",
+            windows_native.POLICY_SCOPE_ENV: "workload-override",
         },
         workspace_roots=(workspace,),
         deny_read_paths=(),
@@ -168,6 +243,7 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch, s
     assert child_env["OPENAI_API_KEY"] == "must-not-be-added"
     assert "HTTP_PROXY" not in child_env
     assert "CODEX_WINDOWS_SANDBOX_PROXY_PORTS" not in child_env
+    assert windows_native.POLICY_SCOPE_ENV not in child_env
     assert child_env["TEMP"] == str(private_temp)
     if structured:
         assert args[args.index("--") + 1:] == ["python", "-c", 'print("literal")', "one two", 'a"b']

@@ -5,7 +5,7 @@
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, RefreshCw, Square } from "lucide-react";
+import { ArrowLeft, Bot, ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import { ChatTurn } from "../../chat/components/ChatTurn";
@@ -14,8 +14,11 @@ import {
   type BackendTranscriptMessage,
 } from "../../chat/transcriptHydration";
 import { AgentAvatar } from "../../components/AgentAvatar";
+import { subagentModelPatch } from "../../lib/subagent-model";
+import { formatModelLabel } from "../../lib/model-label";
 import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
 import { SubagentPlanReviewCard } from "../../chat/InlineAgentPrompt";
+import { revealConversationMessage } from "../../chat/revealConversationMessage";
 import {
   projectAgentViews,
   type AgentView,
@@ -26,13 +29,12 @@ import {
   sendClientCommandAwaitResult,
 } from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
-import { promptDraftKey } from "../../stores/prompt-drafts";
 import type { ChatMessage, PendingAskUser, SubagentState } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { EmptyLine, SmallButton } from "../SidebarShared";
 import "./SubagentsTab.css";
 
-const COMPLETED_PREVIEW_LIMIT = 6;
+const COMPLETED_PREVIEW_LIMIT = 10;
 
 type TranscriptPresentationSource = "none" | "durable" | "push";
 
@@ -105,6 +107,7 @@ const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean 
       className="subagents-glyph"
       identityKey={view.identityKey}
       status={view.status}
+      showStatus={false}
       size={large ? "large" : "medium"}
     />
   );
@@ -112,9 +115,11 @@ const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean 
 
 const AgentRow = ({
   view,
+  durationMs,
   onOpen,
 }: {
   view: AgentView;
+  durationMs?: number;
   onOpen: () => void;
 }) => (
   <button
@@ -122,18 +127,24 @@ const AgentRow = ({
     className="subagents-row"
     data-status={view.status}
     aria-label={`打开子智能体任务：${view.title}`}
+    title={view.title}
     onClick={onOpen}
   >
     <AgentGlyph view={view} />
     <span className="subagents-row-copy">
-      <span className="subagents-row-title">{view.title}</span>
-      <span className="subagents-row-meta">
-        <span className="subagents-row-status">{statusText(view)}</span>
-        {view.summary && view.summary !== view.title && (
-          <span className="subagents-row-summary">{summaryText(view)}</span>
+      <span className="subagents-row-heading">
+        <span className="subagents-row-title">{view.teammateName || view.title}</span>
+        {view.status !== "completed" && durationMs != null && (
+          <span className="subagents-row-time">{Math.floor(durationMs / 60000)}分{Math.floor(durationMs / 1000) % 60}秒</span>
         )}
         {view.status === "completed" && view.relativeTimeLabel && (
           <span className="subagents-row-time">{relativeTimeText(view.relativeTimeLabel)}</span>
+        )}
+      </span>
+      <span className={view.status === "completed" ? "sr-only" : "subagents-row-meta"}>
+        <span className={view.status === "running" ? "sr-only" : "subagents-row-status"}>{statusText(view)}</span>
+        {view.status !== "completed" && view.summary && view.summary !== view.title && (
+          <span className="subagents-row-summary">{summaryText(view)}</span>
         )}
       </span>
     </span>
@@ -148,90 +159,10 @@ const AgentRelationLink = ({ agent }: { agent: AgentLink }) => (
   </button>
 );
 
-const AgentFollowup = ({ view, conversationId, workspaceRoot }: {
-  view: AgentView;
-  conversationId: string;
-  workspaceRoot: string;
-}) => {
-  const draftOwner = { conversationId, requestId: `subagent-followup:${JSON.stringify([workspaceRoot, view.id])}` };
-  const draftKey = promptDraftKey(draftOwner);
-  const draft = useAppStore((state) => state.promptDrafts[draftKey]?.answer ?? "");
-  const updatePromptDraft = useAppStore((state) => state.updatePromptDraft);
-  const [expanded, setExpanded] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [receipt, setReceipt] = useState("");
-  const [error, setError] = useState("");
-  const isConnected = useAppStore((state) => state.isConnected);
-  const willResume = ["done", "partial", "cancelled", "error"].includes(view.effectiveStatus);
-  const send = async () => {
-    const message = draft.trim();
-    if (!message || sending || !isConnected) return;
-    setSending(true);
-    setError("");
-    setReceipt("");
-    try {
-      const result = await sendClientCommandAwaitResult({
-        type: "send_message", recipient: view.id, message,
-        conversation_id: conversationId, workspace_root: workspaceRoot,
-      }, "send_message", { silent: true });
-      if (!commandResultSucceeded(result)) throw new Error(result.message || "补充说明未被接收");
-      if (useAppStore.getState().promptDrafts[draftKey]?.answer === draft) {
-        updatePromptDraft(draftOwner, { answer: "" });
-      }
-      setReceipt(result.data?.resumed === true ? "说明已送达，任务已继续。" : "已投递给子智能体，等待它处理。");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "发送失败，请重试。");
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <section className="subagents-followup-region">
-      <button type="button" className="subagents-followup-toggle" aria-expanded={expanded}
-        aria-controls={expanded ? `agent-followup-form-${view.id}` : undefined}
-        onClick={() => setExpanded(!expanded)}>
-        <ChevronRight size={13} aria-hidden="true" />
-        <span>补充指令</span>
-        {draft && <small>草稿</small>}
-      </button>
-      {expanded && <form id={`agent-followup-form-${view.id}`} className="subagents-followup" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-      <div className="subagents-followup-input">
-        <textarea
-          id={`agent-followup-${view.id}`}
-          aria-label={`给${view.title}补充说明`}
-          placeholder={willResume ? "继续这个任务，说明下一步…" : "补充方向、要求或上下文…"}
-          rows={2}
-          autoFocus
-          value={draft}
-          disabled={sending}
-          onChange={(event) => {
-            updatePromptDraft(draftOwner, { answer: event.target.value });
-            setReceipt("");
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-              event.preventDefault(); void send();
-            }
-          }}
-        />
-        <button type="submit" disabled={!isConnected || sending || !draft.trim()} aria-label={willResume ? "发送说明并继续任务" : "发送补充说明"} title="Ctrl+Enter 发送">
-          <ArrowUp size={15} />
-        </button>
-      </div>
-      <span className="subagents-followup-hint">{!isConnected ? "连接恢复后可发送" : sending ? "正在发送…" : willResume ? "发送后将继续这个子任务 · Ctrl+Enter" : "仅发送给当前子任务 · Ctrl+Enter"}</span>
-      </form>}
-      {receipt && <span className="subagents-followup-receipt" role="status">{receipt}</span>}
-      {error && <span className="subagents-followup-error" role="alert">{error}</span>}
-    </section>
-  );
-};
-
 const AgentDetail = ({
   view,
   onBack,
   onFetchResult,
-  onStop,
   transcriptMessages,
   workspaceRoot,
   conversationId,
@@ -241,12 +172,12 @@ const AgentDetail = ({
   pendingAction,
   source,
   agents,
+  sourceMessageId,
   planRequest,
 }: {
   view: AgentView;
   onBack: () => void;
   onFetchResult: () => void;
-  onStop: () => void;
   transcriptMessages: ChatMessage[];
   workspaceRoot: string;
   /** The parent conversation owns the child journal's persisted artifacts. */
@@ -254,9 +185,10 @@ const AgentDetail = ({
   transcriptLoading: boolean;
   transcriptError: string;
   onRefreshTranscript: () => void;
-  pendingAction: "stop" | "result" | null;
+  pendingAction: "result" | null;
   source: SubagentState;
   agents: AgentView[];
+  sourceMessageId?: string;
   planRequest?: PendingAskUser;
 }) => {
   const isLive = view.status === "running" || view.status === "waiting";
@@ -268,6 +200,9 @@ const AgentDetail = ({
     ),
     [isLive, transcriptMessages, workspaceRoot],
   );
+  const finalAnswer = turns.at(-1)?.finalAnswerCell;
+  const hasCanonicalResult = Boolean(finalAnswer && !finalAnswer.isStreaming
+    && (finalAnswer.markdownSource.trim() || finalAnswer.artifacts?.length));
 
   return (
     <section className="subagents-detail" aria-label={`子智能体任务详情：${view.title}`}>
@@ -282,46 +217,30 @@ const AgentDetail = ({
         </button>
         <AgentGlyph view={view} large />
         <span className="subagents-detail-heading">
-          <strong>{view.title}</strong>
-          <span>{[statusText(view), relativeTimeText(view.relativeTimeLabel)].filter(Boolean).join(" · ")}</span>
+          <strong title={view.title}>{view.teammateName || view.title}</strong>
         </span>
-        <span className="subagents-detail-header-actions">
-          <button
-            type="button"
-            className="subagents-detail-icon-action"
-            aria-label="刷新子智能体工作详情"
-            title="刷新工作详情"
-            onClick={onRefreshTranscript}
-            disabled={transcriptLoading}
-          >
-            <RefreshCw size={14} className={transcriptLoading ? "is-spinning" : undefined} />
-          </button>
-          {view.canStop && (
-            <button
-              type="button"
-              className="subagents-detail-icon-action subagents-detail-stop"
-              aria-label={pendingAction === "stop" ? "正在停止子智能体" : "停止子智能体"}
-              title="停止子智能体"
-              onClick={onStop}
-              disabled={pendingAction != null}
-            >
-              <Square size={13} />
-            </button>
-          )}
-        </span>
+        {view.model && <span className="subagents-detail-model" title={[view.provider, view.model, view.reasoningEffort].filter(Boolean).join(" · ")}>
+          {formatModelLabel(view.model)}{view.reasoningEffort ? ` · ${view.reasoningEffort}` : ""}
+        </span>}
       </header>
 
       <div className="subagents-detail-body">
         <div className="subagents-context" aria-label="任务关系">
-          {view.teammateName && <span className="subagents-identity-name">{view.teammateName}{view.teamName ? ` · ${view.teamName}` : ""}</span>}
-          {view.parent && <div className="subagents-relation"><span>由</span><AgentRelationLink agent={view.parent} /><span>委派</span></div>}
+          {sourceMessageId && conversationId && <button type="button" className="subagents-source-link"
+            onClick={() => revealConversationMessage(conversationId, sourceMessageId)}>
+            <ArrowLeft size={12} aria-hidden="true" /><span>查看主任务中的委派</span>
+          </button>}
+          {(view.status !== "completed" || turns.length === 0) && <span role="status">{statusText(view)}</span>}
+          {(view.teamName || view.parent) && <div className="subagents-identity-row">
+            {view.teamName && <span className="subagents-identity-name">{view.teamName}</span>}
+            {view.teamName && view.parent && <span aria-hidden="true">·</span>}
+            {view.parent && <div className="subagents-relation"><span>由</span><AgentRelationLink agent={view.parent} /><span>委派</span></div>}
+          </div>}
           {(view.blockedDependencies.length > 0 || view.dependencies.length > 0) && <div className="subagents-relation">
             <span>{view.blockedDependencies.length > 0 ? "正在等待" : "前置任务"}</span>
             {(view.blockedDependencies.length > 0 ? view.blockedDependencies : view.dependencies).map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}
           </div>}
           {view.children.length > 0 && <div className="subagents-relation"><span>已委派</span>{view.children.map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}</div>}
-          {source.readOnly === true && <span>只读任务</span>}
-          {source.writeScope?.length ? <details className="subagents-scope"><summary>允许修改的范围</summary>{source.writeScope.map((path) => <div key={path}>{path}</div>)}</details> : null}
         </div>
         {planRequest?.planReview && <SubagentPlanReviewCard request={planRequest} review={planRequest.planReview} />}
         {view.status === "attention" && !planRequest && !view.resultError && !source.cleanupPending && (
@@ -349,9 +268,9 @@ const AgentDetail = ({
             {isLive ? "子智能体正在启动，工作记录会实时显示在这里。" : view.resultContent ? "此任务保留了结果，暂无可回放的工作记录。" : "这个子智能体没有可回放的工作记录。"}
           </div>
         )}
-        {view.resultContent && <details className="subagents-retained-result" open={turns.length === 0 || undefined}>
+        {view.resultContent && !hasCanonicalResult && <details className="subagents-retained-result" open={turns.length === 0 || undefined}>
           <summary>保留结果</summary>
-          <div className="subagents-retained-result-content"><MarkdownRenderer content={view.resultContent} conversationId={conversationId} workspaceRoot={workspaceRoot} /></div>
+          <div className="subagents-retained-result-content md-prose"><MarkdownRenderer content={view.resultContent} conversationId={conversationId} workspaceRoot={workspaceRoot} /></div>
         </details>}
         {turns.length > 0 && (
           <div className="subagents-transcript" aria-label="子智能体工作记录">
@@ -387,9 +306,6 @@ const AgentDetail = ({
             </div>;
           })}
         </details> : null}
-        {conversationId && !planRequest && !view.awaitingPlanApproval && !source.cleanupPending && (
-          <AgentFollowup key={JSON.stringify([conversationId, workspaceRoot, view.id])} view={view} conversationId={conversationId} workspaceRoot={workspaceRoot} />
-        )}
       </div>
     </section>
   );
@@ -400,7 +316,7 @@ export const SubagentsTab = () => {
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
   const [showAllCompleted, setShowAllCompleted] = useState(false);
-  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "stop" | "result"; conversationId: string; workspaceRoot: string } | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "result"; conversationId: string; workspaceRoot: string } | null>(null);
   const [transcriptPresentation, setTranscriptPresentation] = useState<TranscriptPresentation>(
     emptyTranscriptPresentation,
   );
@@ -416,6 +332,10 @@ export const SubagentsTab = () => {
   const askUserQueue = useAppStore((state) => state.askUserQueue);
   const conversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const messages = useAppStore((state) => state.messages);
+  const sourceMessageId = selectedAgent?.turnId
+    ? messages.find((message) => message.role === "assistant" && message.turnId === selectedAgent.turnId)?.id
+    : undefined;
   const visibleTranscript = transcriptPresentation.ownerId === selectedAgentId
     && transcriptPresentation.conversationId === conversationId
     && transcriptPresentation.workspaceRoot === workingDirectory
@@ -445,8 +365,14 @@ export const SubagentsTab = () => {
         || useAppStore.getState().workingDirectory !== workingDirectory
         || useAppStore.getState().focusedSubagentId !== id
       ) return;
+      const currentAgent = useAppStore.getState().subagents.find((agent) => agent.id === id);
+      const responseEpoch = result.data?.mailbox_epoch;
+      const responsePath = result.data?.agent_path;
+      if (typeof responseEpoch === "number" && typeof currentAgent?.mailboxEpoch === "number"
+        && (responseEpoch < currentAgent.mailboxEpoch || (responseEpoch === currentAgent.mailboxEpoch
+          && typeof responsePath === "string" && currentAgent.agentPath && responsePath !== currentAgent.agentPath))) return;
       const resultLevel = String(result.level || "").toLowerCase();
-      if (!commandResultSucceeded(result) || resultLevel === "warning") {
+      if (!commandResultSucceeded(result)) {
         setTranscriptError(result.message || "无法读取子智能体工作记录。");
         return;
       }
@@ -465,6 +391,11 @@ export const SubagentsTab = () => {
           || (responseSeq === currentPresentation.seq && currentPresentation.source === "push")
         )
       ) return;
+      useAppStore.getState().updateSubagent(id, subagentModelPatch(result.data ?? {}, currentAgent), ownerConversationId);
+      if (resultLevel === "warning") {
+        setTranscriptError(result.message || "无法读取子智能体工作记录。");
+        return;
+      }
       const nextSeq = Number.isFinite(responseSeq) ? responseSeq : 0;
       const hydrated = hydrateMessages(rawMessages);
       commitTranscriptPresentation({
@@ -545,36 +476,6 @@ export const SubagentsTab = () => {
     commitTranscriptPresentation,
   ]);
 
-  const stop = async (id: string) => {
-    if (!conversationId) return;
-    if (pendingAction?.id === id) return;
-    const ownerConversationId = conversationId;
-    const requestId = ++actionRequestRef.current;
-    const action = { id, kind: "stop" as const, conversationId, workspaceRoot: workingDirectory };
-    setPendingAction(action);
-    try {
-      const result = await sendClientCommandAwaitResult({
-        type: "subagent.cancel",
-        subagent_id: id,
-        conversation_id: conversationId,
-        workspace_root: workingDirectory || undefined,
-      }, "subagent.cancel");
-      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
-        || useAppStore.getState().workingDirectory !== workingDirectory) return;
-      if (!commandResultSucceeded(result)) {
-        pushToast(result.message || "停止子智能体失败。", "error", 4000);
-      } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
-        pushToast(result.message, "warning", 3500);
-      }
-    } catch (error) {
-      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
-        || useAppStore.getState().workingDirectory !== workingDirectory) return;
-      pushToast(error instanceof Error ? error.message : "停止子智能体失败。", "error", 4000);
-    } finally {
-      setPendingAction((current) => current === action ? null : current);
-    }
-  };
-
   const fetchResult = async (id: string) => {
     if (!conversationId) return;
     if (pendingAction?.id === id) return;
@@ -617,11 +518,11 @@ export const SubagentsTab = () => {
         key={`${conversationId}:${selectedView.id}`}
         view={selectedView}
         source={selectedAgent}
+        sourceMessageId={sourceMessageId}
         agents={views}
         planRequest={planRequest}
         onBack={() => setSelectedAgentId(null)}
         onFetchResult={() => void fetchResult(selectedView.id)}
-        onStop={() => void stop(selectedView.id)}
         transcriptMessages={visibleTranscript.messages}
         workspaceRoot={workingDirectory}
         conversationId={conversationId || undefined}
@@ -673,14 +574,14 @@ export const SubagentsTab = () => {
               aria-label={`${group.label}，${items.length} 项`}
             >
               <div className="subagents-group-heading">
-                <span>{group.label}{group.key === "completed" ? ` · ${items.length}` : ""}</span>
-                {group.key !== "completed" && <span>{items.length}</span>}
+                <span>{group.key === "active" ? "已开启" : group.key === "completed" ? "完成" : group.label} · {items.length}</span>
               </div>
               <div className="subagents-list">
                 {visibleItems.map((view) => (
                   <AgentRow
                     key={view.id}
                     view={view}
+                    durationMs={subagents.find((agent) => agent.id === view.id)?.durationMs}
                     onOpen={() => {
                       setSelectedAgentId(view.id);
                       if (view.needsResult) void fetchResult(view.id);

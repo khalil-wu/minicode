@@ -8,14 +8,14 @@ describe("AgentAvatar identity", () => {
   afterEach(cleanup);
 
   it("keeps the same artwork and color through every execution state", () => {
-    const view = render(<AgentAvatar identityKey="agent-review-editor" status="running" />);
+    const view = render(<AgentAvatar identityKey="agent-review-editor" status="running" showStatus />);
     const identity = view.container.querySelector(".mc-agent-avatar")!;
     const artwork = view.container.querySelector(".mc-agent-avatar-art")!.innerHTML;
     const color = identity.getAttribute("data-identity-color");
     const markers = new Set<string>();
 
     for (const status of ["waiting", "running", "attention", "completed"] as const) {
-      view.rerender(<AgentAvatar identityKey="agent-review-editor" status={status} />);
+      view.rerender(<AgentAvatar identityKey="agent-review-editor" status={status} showStatus />);
       expect(view.container.querySelector(".mc-agent-avatar-art")!.innerHTML).toBe(artwork);
       expect(identity.getAttribute("data-identity-color")).toBe(color);
       expect(identity.getAttribute("data-status")).toBe(status);
@@ -34,7 +34,7 @@ describe("AgentAvatar identity", () => {
   });
 
   it("can identify a referenced task without suggesting an unknown execution state", () => {
-    const { container } = render(<AgentAvatar identityKey="referenced-agent" showStatus={false} />);
+    const { container } = render(<AgentAvatar identityKey="referenced-agent" />);
     expect(container.querySelector(".mc-agent-avatar-art")).toBeTruthy();
     expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
   });

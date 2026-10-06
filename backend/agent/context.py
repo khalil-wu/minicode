@@ -69,6 +69,8 @@ from backend.agent.tool_result_persistence import (
 )
 from backend.tools.base import ToolResult
 from backend.tools.untrusted import wrap_untrusted_content
+from backend.agent.codex_prompts import codex_multi_agent_mode
+from backend.llm.reasoning_effort import reasoning_effort_wire_map
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
@@ -1150,6 +1152,10 @@ class ContextBuilder:
         # explicit tool results instead of an implicit per-turn injection.
 
         messages.append(LLMMessage(role="system", content=system_content))
+        if isinstance(self._llm, LLMAdapter) and reasoning_effort_wire_map(self._llm.model_id()):
+            multi_agent_mode = codex_multi_agent_mode(self._llm.model_id(), self._llm.current_reasoning_effort() == "ultra")
+            if multi_agent_mode:
+                messages.append(LLMMessage(role="developer", content=multi_agent_mode))
         if plugin_instructions.strip():
             # Model an explicit plugin selection as a turn-scoped
             # developer fragment, ahead of the user's input and history.
@@ -1550,7 +1556,7 @@ class ContextBuilder:
             memory_context=self._build_memory_context(),
             persistent_context=self._build_persistent_context(),
             git_status_context=self._git_status_context,
-            model_instructions=self._llm.model_instructions() if isinstance(self._llm, LLMAdapter) else "",
+            model_slug=self._llm.model_id() if isinstance(self._llm, LLMAdapter) else "",
         )
         self._last_prompt_section_summary = summarize_prompt_sections(sections)
         state.prompt_context["prompt_section_summary"] = (
@@ -2961,24 +2967,29 @@ class ContextBuilder:
         structured_blocks = self._post_compaction_structured_state_blocks(state, root)
         if structured_blocks:
             structured_content = "\n\n".join(structured_blocks)
-            structured_tokens = _estimate_content_tokens(structured_content)
+            structured_title = "Post-compaction structured task state"
+            note_prefix = "\n\n" if self._persistent_notes else "## Inherited Memory\n"
+            structured_tokens = _estimate_content_tokens(f"{note_prefix}### {structured_title}\n{structured_content}")
             if structured_tokens <= context_available_tokens:
                 self._persistent_notes.append(
                     {
                         "kind": "post_compaction_structured_state",
-                        "title": "Post-compaction structured task state",
+                        "title": structured_title,
                         "content": structured_content,
                     }
                 )
                 context_available_tokens -= structured_tokens
 
         restored_blocks: list[str] = []
+        restored_title = "Post-compaction restored file context"
+        note_prefix = "\n\n" if self._persistent_notes else "## Inherited Memory\n"
+        note_heading_tokens = _estimate_content_tokens(f"{note_prefix}### {restored_title}\n")
         # Recent-file attachments have their own 50K-token quota after
         # structured state, while the turn's remaining context is still the
         # hard outer bound.
         available_tokens = min(
             POST_COMPACT_TOKEN_BUDGET,
-            context_available_tokens,
+            context_available_tokens - note_heading_tokens,
         )
         for path in self._recent_workspace_file_paths(state, root)[
             :POST_COMPACT_MAX_FILES_TO_RESTORE
@@ -3002,7 +3013,7 @@ class ContextBuilder:
             self._persistent_notes.append(
                 {
                     "kind": "post_compaction_restore",
-                    "title": "Post-compaction restored file context",
+                    "title": restored_title,
                     "content": "\n\n".join(restored_blocks),
                 }
             )

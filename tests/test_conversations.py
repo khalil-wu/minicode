@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -36,6 +37,49 @@ def _install_noop_llm(monkeypatch) -> None:
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", factory)
 
 
+def test_parent_workspace_diff_is_durable_on_its_assistant_message_and_survives_refresh(monkeypatch, tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    trust_ledger = tmp_path / "trusted_workspaces.json"
+    trust_ledger.write_text(json.dumps({"roots": [str(workspace)]}), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_ledger)
+    _install_noop_llm(monkeypatch)
+
+    async def changes_runner(**kwargs):
+        root = Path(kwargs["state"].workspace_root)
+        (root / "parser.py").write_text("def parse(row): return row.split(',')\n", encoding="utf-8")
+        (root / "cli.py").write_text("print('ready')\n", encoding="utf-8")
+        kwargs["state"].reply = "Implemented the parser and CLI."
+        yield AgentEvent.reply(kwargs["state"].reply)
+        yield AgentEvent.done(status="completed")
+
+    monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", changes_runner)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?session_id=workspace-diff-refresh") as ws:
+            _receive_until_event(ws, "mcp_status")
+            _receive_until_event(ws, "llm.model.updated")
+            ws.send_json({"type": "conversation.create", "workspace_root": str(workspace), "memory_mode": "none", "permission_mode": "bypass"})
+            listing = _receive_until_event(ws, "conversation.list")
+            owner = listing["active_conversation_id"]
+            ws.send_json({"type": "user_message", "content": "Implement the parser", "conversation_id": owner})
+            change = _receive_until_event(ws, "turn.diff.updated")
+            _receive_until_event(ws, "done")
+            ws.send_json({"type": "conversation.list"})
+            completed = _receive_until_event(ws, "conversation.list")
+            assistant = next(message for message in completed["active_conversation"]["transcript"] if message["role"] == "assistant")
+            saved = assistant["metadata"]["turn_diff"]
+            assert saved["message_id"] == assistant["id"] == change["message_id"]
+            assert saved["turn_id"] == change["turn_id"]
+            assert "+++ b/parser.py" in saved["diff"] and "+++ b/cli.py" in saved["diff"]
+        with client.websocket_connect("/ws?session_id=workspace-diff-refresh") as ws:
+            _receive_until_event(ws, "mcp_status")
+            _receive_until_event(ws, "llm.model.updated")
+            ws.send_json({"type": "session.restore", "last_conversation_id": owner})
+            restored = _receive_until_event(ws, "session.restored")
+            persisted = next(message for message in restored["messages"] if message["id"] == assistant["id"])
+            assert persisted["metadata"]["turn_diff"] == saved
+
+
 def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, object]:
     bookkeeping_events = {
         "task.update",
@@ -46,6 +90,9 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
         # Query admission publishes its captured model owner before transcript
         # events. Model-control tests validate that notification separately.
         "llm.model.updated",
+        # A refreshed model/permission catalog is control-plane state; it is
+        # not the next transcript or rule mutation asserted by these tests.
+        "runtime.capabilities",
         # Lifecycle/control commands now return structured acknowledgements so
         # the frontend can settle pending operations. Data-plane assertions in
         # this helper intentionally continue to the next projected state event.
@@ -53,6 +100,9 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
     }
     for _ in range(max_attempts):
         payload = ws.receive_json()
+        if payload.get("type") == "runtime.capabilities":
+            assert "conversation_id" in payload
+            assert isinstance(payload["capabilities"], dict)
         if payload.get("type") in bookkeeping_events:
             continue
         return payload
@@ -1404,6 +1454,14 @@ def test_websocket_restore_preserves_history_without_an_unavailable_workspace(
             switched = _receive_conversation_switched(ws, target.id)
             ws.send_json({"type": "session.sync"})
             synced = _receive_until_event(ws, "session.synced")
+            from backend.api import _state
+            live_session = _state.ws_manager.get_session("session_test_restore_unavailable")
+            assert live_session is not None
+            assert live_session.session_lifecycle.workspace_context is None
+            assert live_session.session_lifecycle.workspace_root is None
+            assert live_session.session_lifecycle.current_workspace_root() is None
+            assert live_session.session_lifecycle.file_watcher is None
+            assert live_session.mcp_manager is None
             ws.send_json({"type": "terminal.list", "conversation_id": target.id})
             terminal_result = None
             for _attempt in range(60):

@@ -13,6 +13,8 @@ from backend.ws.durable_user_queue import DurableUserMessageQueue
 from backend.ws.event_outbox import EventOutbox
 from backend.ws.handler import WebSocketSession
 from backend.ws.turn_wait_state import TurnWaitState
+from backend.ws.session_lifecycle import SessionLifecycle
+from backend.conversations.repository import ConversationRepository
 
 
 class ReceiptSocket:
@@ -39,7 +41,10 @@ class ReceiptSocket:
 async def session(tmp_path):
     session = WebSocketSession.__new__(WebSocketSession)
     session.session_id = 'control-receipts'
-    session.conversation_runtime = SimpleNamespace(active_conversation_id='conversation-1')
+    session.conversation_runtime = SimpleNamespace(active_conversation_id='conv_receipts')
+    session.conversation_repo = ConversationRepository(tmp_path / 'conversations')
+    session.conversation_repo.create_conversation(conversation_id='conv_receipts', memory_mode='disabled')
+    session.session_lifecycle = SessionLifecycle(session)
     session.config = SimpleNamespace(agent=SimpleNamespace(approval_timeout_seconds=None))
     session._extension_shutdown_requested = False
     session._conversation_streams = {}
@@ -66,7 +71,7 @@ async def session(tmp_path):
 def register(session, *, lane='approval', early=False):
     session.turn_wait_state.pending_approval_payloads['request-1'] = {
         'type': 'control_request', 'request_id': 'request-1',
-        'conversation_id': 'conversation-1', 'turn_id': 'turn-1', 'message_id': 'message-1',
+        'conversation_id': 'conv_receipts', 'turn_id': 'turn-1', 'message_id': 'message-1',
         'request': {'subtype': 'can_use_tool', 'tool_name': 'run_command',
                     'input': {'command': 'echo fixture'}, 'request_digest': 'digest-1'},
     }
@@ -80,7 +85,7 @@ def register(session, *, lane='approval', early=False):
 
 def command(kind='control_response', *, action='approve', command_id='decision-1', **changes):
     data = {
-        'request_id': 'request-1', 'conversation_id': 'conversation-1',
+        'request_id': 'request-1', 'conversation_id': 'conv_receipts',
         'turn_id': 'turn-1', 'message_id': 'message-1',
         'request_digest': 'digest-1', 'client_command_id': command_id,
     }

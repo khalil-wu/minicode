@@ -384,11 +384,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
 
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "代码字号" })).getByRole("radio", { name: "较大" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "编辑器字号" }), { target: { value: "16" } });
     fireEvent.click(screen.getByRole("switch", { name: "减少动态效果" }));
 
-    expect(useAppStore.getState().codeTextScale).toBe(1.15);
-    expect(document.documentElement.style.getPropertyValue("--code-text-scale")).toBe("1.15");
+    expect(useAppStore.getState().codeTextScale).toBe(16 / 14);
+    expect(document.documentElement.style.getPropertyValue("--code-text-scale")).toBe(String(16 / 14));
     expect(useAppStore.getState().reducedMotion).toBe(true);
     expect(document.documentElement.getAttribute("data-reduced-motion")).toBe("true");
   });
@@ -457,6 +457,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     useAppStore.setState({ conversationId: "draft-owner", workingDirectory: "C:/draft-project", isConnected: true });
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "MCP" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByLabelText("服务名称"), { target: { value: "未保存的服务" } });
     fireEvent.change(screen.getByLabelText("启动命令"), { target: { value: "npx" } });
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
