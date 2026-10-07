@@ -14,9 +14,34 @@ from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.llm.base import UsageInfo
 from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.provider_protocol import add_usage
+from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
+from backend.agent.loop_runtime_helpers import is_max_output_finish_reason
 
 
 ProviderStreamAction = Literal["proceed", "retry", "terminate"]
+
+
+async def settle_provider_eof(*, turn_kernel, provider_attempt, stream_state,
+                              finish_reason, tool_tracker, iteration_id) -> AsyncIterator[AgentEvent]:
+    """Close normal acquisition before consumer-close cleanup claims it."""
+    if provider_attempt is None or provider_attempt.closed:
+        return
+    await turn_kernel.close_provider_attempt(
+        provider_attempt,
+        status="completed" if stream_state.provider_done else "failed",
+        summary="Provider stream completed" if stream_state.provider_done else "Provider stream ended without a terminal event",
+        data={
+            "finish_reason": finish_reason or "stream_exhausted",
+            **({} if stream_state.provider_done else {"error_type": "provider_terminal_missing"}),
+        },
+    )
+    if not stream_state.provider_done and not stream_state.committed_tool_ids:
+        for abandoned in abandoned_tool_announcement_events(stream_state, iteration_id=iteration_id):
+            yield abandoned
+        for cancelled in cancelled_pending_tool_events(stream_state, tool_tracker,
+            iteration_id=iteration_id, reason="provider_truncated"):
+            yield cancelled
+        tool_tracker.cancel_remaining()
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,3 +215,38 @@ def record_provider_attempt_usage(*, llm, provider_attempt, stream_state, provid
     add_usage(turn_usage, request_usage)
     budget_runtime.record_provider_usage_total(turn_usage)
     chain.record_usage(input_tokens=request_usage.input_tokens, output_tokens=request_usage.output_tokens)
+
+
+async def complete_provider_response(*, retry_budget_boundary, budget_runtime, turn_kernel,
+    provider_attempt, finish_reason, provider_stream_steered, rebuild_context_and_retry,
+    state, pending_tool_calls, provider_raw_done, visible_text_sanitizer, stream_state,
+    stream_text, context_builder, usage, turn_usage, tool_tracker, response_phase,
+    thinking_chars) -> AsyncIterator[AgentEvent | ProviderStreamResult]:
+    """Own completed acquisition's usage, context and iteration result."""
+    if stream_state.committed_tool_ids and not state.stopped_reason and (
+        not stream_state.provider_done or is_max_output_finish_reason(finish_reason)
+    ):
+        retry_budget_boundary = budget_runtime.consume_retry("provider_stream_after_tools")
+        context_builder.append_user_context(
+            "The provider response stopped after completed tool calls were accepted. Their results are retained. "
+            "Continue from those results; do not repeat successful operations just to replay the interrupted response."
+        )
+    settlement = None
+    async for update in settle_provider_stream(retry_budget_boundary=retry_budget_boundary,
+        budget_runtime=budget_runtime, turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+        finish_reason=finish_reason, provider_stream_steered=provider_stream_steered,
+        rebuild_context_and_retry=rebuild_context_and_retry, state=state,
+        pending_tool_calls=pending_tool_calls, provider_raw_done=provider_raw_done,
+        provider_done=stream_state.provider_done, visible_text_sanitizer=visible_text_sanitizer,
+        stream_state=stream_state, stream_text=stream_text, context_builder=context_builder,
+        usage=usage, turn_usage=turn_usage):
+        if isinstance(update, ProviderStreamSettlement):
+            settlement = update
+        else:
+            yield update
+    if settlement is None:
+        raise RuntimeError("provider stream settlement returned without a result")
+    yield ProviderStreamResult(action=settlement.action, stream_state=stream_state,
+        stream_text=stream_text, tool_tracker=tool_tracker, turn_usage=settlement.turn_usage,
+        usage=usage, finish_reason=settlement.finish_reason, response_phase=response_phase,
+        thinking_chars=thinking_chars)

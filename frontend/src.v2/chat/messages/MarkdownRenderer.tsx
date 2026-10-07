@@ -671,6 +671,7 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
       mermaid.initialize({
         startOnLoad: false,
         securityLevel: "strict",
+        htmlLabels: false,
         theme: resolvedTheme === "light" ? "default" : "dark",
         flowchart: { htmlLabels: false },
         themeVariables: {

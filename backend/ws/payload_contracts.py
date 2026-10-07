@@ -421,6 +421,13 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
             _non_negative_int(payload["revision"], "revision")
         return
     if event_type == "stream_resume":
+        if "snapshot_id" in payload:
+            _text(payload["snapshot_id"], "snapshot_id", MAX_ID_CHARS, required=True)
+            _non_negative_int(payload.get("snapshot_part"), "snapshot_part")
+            if not isinstance(payload.get("snapshot_complete"), bool):
+                raise ValueError("snapshot_complete must be a boolean")
+        elif "snapshot_part" in payload or "snapshot_complete" in payload:
+            raise ValueError("snapshot_id is required for paged stream recovery")
         _text(payload.get("conversation_id"), "conversation_id", MAX_ID_CHARS, required=True)
         if "message_id" not in payload:
             raise ValueError("stream_resume.message_id is required")

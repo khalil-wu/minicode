@@ -3331,6 +3331,11 @@ class ModelRuntime:
             "default_reasoning_effort": str(metadata["default_reasoning_effort"]),
             "default_reasoning_summary": str(metadata["default_reasoning_summary"]),
             "supports_hosted_web_search": model.supports_hosted_web_search if model is not None else None,
+            "input_modalities": list(model.input) if model is not None else [],
+            "declared_reasoning_effort_levels": list(model.reasoning_effort_levels) if model is not None else [],
+            "thinking_budget": int(base.get("thinking_budget") or 0),
+            "parallel_tool_calls": model.parallel_tool_calls if model is not None else None,
+            "native_compaction": model.native_compaction if model is not None else None,
         }
 
 

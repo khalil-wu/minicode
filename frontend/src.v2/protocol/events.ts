@@ -680,6 +680,7 @@ import type {
 } from "./common-types";
 
 export interface ServerEventEnvelope {
+  source_event_seq?: number;
   seq?: number;
   previous_replay_seq?: number;
   event_id?: string;

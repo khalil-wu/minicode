@@ -1753,6 +1753,7 @@ export interface AgentPromptDraft {
   requestId: string;
   conversationId?: string;
   answer?: string;
+  elicitationValues?: Record<string, string | boolean | string[]>;
   selectedOption?: number | null;
   initialPlan?: string;
   plan?: string;

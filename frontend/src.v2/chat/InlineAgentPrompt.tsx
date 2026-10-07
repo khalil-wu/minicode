@@ -10,7 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
-import { buildApprovalResponseCommand, buildAskUserResponseCommand } from "../protocol/prompt-responses";
+import { buildApprovalResponseCommand, buildAskUserResponseCommand, buildElicitationResponseCommand } from "../protocol/prompt-responses";
 import {
   commandResultSucceeded,
   sendClientCommandAwaitResult,
@@ -796,12 +796,34 @@ const useApprovalExpiry = (expiresAt?: number): { label: string; urgent: boolean
   };
 };
 
+type ElicitationField = {
+  type: "string" | "number" | "integer" | "boolean" | "array";
+  title?: string; description?: string; default?: string | number | boolean | string[];
+  enum?: string[]; enumNames?: string[]; items?: { enum?: string[]; enumNames?: string[] };
+  oneOf?: Array<{ const: string; title?: string }>;
+  minimum?: number; maximum?: number; minLength?: number; maxLength?: number; pattern?: string;
+  format?: string;
+};
+
 const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
   const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
   const persistDraft = !request.secret && !request.provider && request.promptType !== "secret" && request.promptType !== "manual_code";
   const [transientAnswer, setTransientAnswer] = useState("");
   const [transientOption, setTransientOption] = useState<number | null>(null);
+  const [transientValues, setTransientValues] = useState<Record<string, string | boolean | string[]>>({});
+  const fields = Object.entries((request.inputSchema?.properties ?? {}) as Record<string, ElicitationField>);
+  const structured = request.inputSchema?.type === "object";
+  const requiredFields = (request.inputSchema?.required ?? []) as string[];
+  const defaultValues = Object.fromEntries(fields.flatMap(([name, field]) => field.default !== undefined
+    ? [[name, typeof field.default === "number" ? String(field.default) : field.default]]
+    : field.type === "boolean" && requiredFields.includes(name) ? [[name, false]] : [])) as Record<string, string | boolean | string[]>;
+  const fieldValues = persistDraft ? draft?.elicitationValues ?? defaultValues : { ...defaultValues, ...transientValues };
+  const updateField = (name: string, value: string | boolean | string[]) => {
+    const elicitationValues = { ...fieldValues, [name]: value };
+    if (persistDraft) updatePromptDraft(request, { elicitationValues });
+    else setTransientValues(elicitationValues);
+  };
   const answer = persistDraft ? draft?.answer ?? "" : transientAnswer;
   const selectedOption = persistDraft ? draft?.selectedOption ?? null : transientOption;
   const updateAnswer = (answer: string, selectedOption: number | null) => {
@@ -813,14 +835,18 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const questionId = useId();
-  const hasOptions = Boolean(request.options && request.options.length > 0);
-  const hasCustomInput = request.allowCustom !== false;
+  const hasOptions = !structured && Boolean(request.options && request.options.length > 0);
+  const hasCustomInput = !structured && request.allowCustom !== false;
   const expiry = useApprovalExpiry(request.expiresAt);
-  const canSubmit = selectedOption !== null || request.allowEmpty === true || answer.length > 0;
+  const canSubmit = structured ? requiredFields.every((name) => {
+    const value = fieldValues[name];
+    return value !== undefined && (typeof value === "string" || Array.isArray(value) ? value.length > 0 : true);
+  }) : selectedOption !== null || request.allowEmpty === true || answer.length > 0;
 
   useEffect(() => {
     setTransientAnswer("");
     setTransientOption(null);
+    setTransientValues({});
     setResponding(false);
     setError("");
     if (hasCustomInput && !hasOptions) window.setTimeout(() => inputRef.current?.focus(), 40);
@@ -831,11 +857,14 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     setResponding(true);
     setError("");
     try {
-      const command = buildAskUserResponseCommand(
-        request.requestId,
-        text,
-        { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId },
-      );
+      const owner = { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId };
+      const content = Object.fromEntries(fields.flatMap(([name, field]) => {
+        const value = fieldValues[name];
+        if (value === undefined || value === "") return [];
+        return [[name, field.type === "number" || field.type === "integer" ? Number(value) : value]];
+      }));
+      const command = structured ? buildElicitationResponseCommand(request.requestId, "accept", content, owner)
+        : buildAskUserResponseCommand(request.requestId, text, owner);
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || "回答未被后端接受");
       useAppStore.getState().clearAskUser(request.requestId);
@@ -852,7 +881,8 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     setResponding(true);
     setError("");
     try {
-      const command = {
+      const command = structured ? buildElicitationResponseCommand(request.requestId, "cancel", undefined,
+        { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId }) : {
         type: "control_cancel_request" as const,
         request_id: request.requestId,
         ...(request.conversationId ? { conversation_id: request.conversationId } : {}),
@@ -936,6 +966,32 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
           ))}
         </div>
       )}
+
+      {structured && fields.map(([name, field]) => {
+        const label = field.title || name;
+        const value = fieldValues[name];
+        const choices = field.enum ?? field.items?.enum ?? field.oneOf?.map((choice) => choice.const);
+        const choiceLabels = field.enumNames ?? field.items?.enumNames ?? field.oneOf?.map((choice) => choice.title || choice.const);
+        return <label className="inline-prompt-input-row" key={name}>
+          <div className="inline-prompt-input-wrap">
+            <div className="inline-prompt-input-label">{label}{requiredFields.includes(name) ? " *" : ""}</div>
+            {field.description && <div className="inline-prompt-subtitle">{field.description}</div>}
+            {field.type === "boolean" ? <input type="checkbox" aria-label={label} checked={value === true} disabled={responding}
+              onChange={(event) => updateField(name, event.target.checked)} />
+              : choices ? <select className="inline-prompt-input" aria-label={label} multiple={field.type === "array"}
+                required={requiredFields.includes(name)} disabled={responding} value={field.type === "array" ? (value as string[] ?? []) : String(value ?? "")}
+                onChange={(event) => updateField(name, field.type === "array" ? Array.from(event.target.selectedOptions).map((option) => option.value) : event.target.value)}>
+                {field.type !== "array" && <option value="">请选择</option>}
+                {choices.map((choice, index) => <option key={choice} value={choice}>{choiceLabels?.[index] || choice}</option>)}
+              </select> : <input className="inline-prompt-input" aria-label={label}
+                type={field.type === "number" || field.type === "integer" ? "number" : field.format === "email" ? "email" : "text"}
+                value={String(value ?? "")} disabled={responding} required={requiredFields.includes(name)}
+                min={field.minimum} max={field.maximum} step={field.type === "integer" ? 1 : "any"}
+                minLength={field.minLength} maxLength={field.maxLength} pattern={field.pattern}
+                onChange={(event) => updateField(name, event.target.value)} />}
+          </div>
+        </label>;
+      })}
 
       {hasCustomInput && (
         <div className="inline-prompt-input-row">

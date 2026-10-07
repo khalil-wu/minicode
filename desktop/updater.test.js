@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   acceptUpdateActivitySnapshot,
@@ -20,6 +21,65 @@ const {
   validatedFeedUrl,
   writeHealthState,
 } = require("./updater");
+
+function updaterConfigurationFixture(t, { packaged = true, bundledFeed = false, runtimeFeed = "" } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-update-configuration-"));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  if (bundledFeed) fs.writeFileSync(path.join(root, "app-update.yml"), "provider: generic\nurl: https://updates.example.com/minicode\n");
+  const calls = { imports: 0, timers: 0, feeds: [], checks: 0 };
+  const fakeUpdater = {
+    setFeedURL: (feed) => calls.feeds.push(feed),
+    on: () => {},
+    checkForUpdates: async () => { calls.checks += 1; },
+  };
+  const module = { exports: {} };
+  const load = (name) => {
+    if (name === "electron-updater") { calls.imports += 1; return { autoUpdater: fakeUpdater }; }
+    return require(name);
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "updater.js"), "utf8"), {
+    module, require: load, URL, process: { env: { MINICODE_UPDATE_FEED_URL: runtimeFeed }, resourcesPath: root },
+    setTimeout: () => { calls.timers += 1; },
+  }, { filename: "updater.js" });
+  const app = { isPackaged: packaged, getVersion: () => "0.2.0", getPath: () => root };
+  return { updater: module.exports, app, calls };
+}
+
+test("a local package without an update feed never schedules a missing-config request", async (t) => {
+  const { updater, app, calls } = updaterConfigurationFixture(t);
+  await updater.init({ app });
+  assert.equal(updater.getStatus().status, "unavailable");
+  assert.equal(await updater.check(), false);
+  assert.equal(calls.imports, 0);
+  assert.equal(calls.timers, 0);
+});
+
+test("development builds report unavailable updates", async (t) => {
+  const { updater, app, calls } = updaterConfigurationFixture(t, { packaged: false });
+  await updater.init({ app });
+  assert.equal(updater.getStatus().status, "unavailable");
+  assert.equal(calls.imports, 0);
+});
+
+test("a declared bundled feed keeps update checks enabled", async (t) => {
+  const { updater, app, calls } = updaterConfigurationFixture(t, { bundledFeed: true });
+  await updater.init({ app });
+  assert.equal(calls.imports, 1);
+  assert.equal(calls.timers, 1);
+  assert.equal(await updater.check(), true);
+  assert.equal(calls.checks, 1);
+});
+
+test("an explicit runtime feed works without bundled update configuration", async (t) => {
+  const { updater, app, calls } = updaterConfigurationFixture(t, { runtimeFeed: "https://updates.example.com/minicode" });
+  await updater.init({ app });
+  assert.deepEqual(calls.feeds.map((feed) => ({ ...feed })), [{ provider: "generic", url: "https://updates.example.com/minicode" }]);
+  assert.equal(calls.timers, 1);
+  assert.equal(await updater.check(), true);
+});
 
 function emptyActivity(revision = 1) {
   return {

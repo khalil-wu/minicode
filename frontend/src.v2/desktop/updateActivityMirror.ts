@@ -39,6 +39,7 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
   }
   const allAttachments = [
     ...state.attachments,
+    ...Object.values(state.sideChats).flatMap((thread) => thread.attachments ?? []),
     ...Object.values(state.conversationWorkbenchStates)
       .flatMap((workbench) => workbench.attachments ?? []),
   ];

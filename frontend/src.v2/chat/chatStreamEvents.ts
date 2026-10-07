@@ -6,6 +6,7 @@ import type {
   ServerEvent,
   ToolOutputDeltaEvent,
   ToolResultEvent,
+  StreamResumeEvent,
 } from "../protocol/events";
 import { isReplayedEvent as isReplayedChatEvent } from "../protocol/events";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -638,7 +639,7 @@ const providerUsageFromDoneUsage = (
     reasoning: usage.reasoning ?? 0,
   } : undefined;
 
-export const handleChatStreamEvent = (
+const applyChatStreamEvent = (
   e: ServerEvent,
   conversationId: string | undefined,
   handlers: ChatStreamHandlers,
@@ -1573,4 +1574,61 @@ export const handleChatStreamEvent = (
     }
     return false;
   }
+};
+
+type ResumePages = {
+  snapshotId: string;
+  nextPart: number;
+  snapshot: StreamResumeEvent;
+  liveEvents: ServerEvent[];
+};
+const pendingResumePages = new Map<string, ResumePages>();
+
+export const resetStreamResumePages = () => pendingResumePages.clear();
+
+export const handleChatStreamEvent = (
+  event: ServerEvent,
+  conversationId: string | undefined,
+  handlers: ChatStreamHandlers,
+): boolean => {
+  const owner = String((event as { conversation_id?: string }).conversation_id || conversationId || "");
+  const key = turnEventKey(owner, eventMessageId(event));
+  if (event.type !== "stream_resume") {
+    const pending = pendingResumePages.get(key);
+    if (pending && (!pending.snapshot.turn_id || !eventTurnId(event) || pending.snapshot.turn_id === eventTurnId(event))
+      && (CHAT_SCOPED_EVENT_TYPES.has(event.type) || event.type === "error")) {
+      pending.liveEvents.push(event);
+      return true;
+    }
+    return applyChatStreamEvent(event, conversationId, handlers);
+  }
+  if (!event.snapshot_id) return applyChatStreamEvent(event, conversationId, handlers);
+  if (event.snapshot_part === 0) {
+    flushLiveBuffers(handlers);
+    pendingResumePages.set(key, {
+      snapshotId: event.snapshot_id,
+      nextPart: 0,
+      snapshot: { ...event, tool_calls_pending: [], tool_states: [],
+        ...(event.content_blocks ? { content_blocks: [] } : {}) },
+      liveEvents: [],
+    });
+  }
+  const pending = pendingResumePages.get(key);
+  if (!pending || pending.snapshotId !== event.snapshot_id || event.snapshot_part !== pending.nextPart) return false;
+  pending.snapshot.tool_calls_pending.push(...event.tool_calls_pending);
+  pending.snapshot.tool_states!.push(...(event.tool_states ?? event.tool_calls_pending));
+  if (event.content_blocks) {
+    pending.snapshot.content_blocks ??= [];
+    pending.snapshot.content_blocks.push(...event.content_blocks);
+  }
+  pending.nextPart += 1;
+  if (!event.snapshot_complete) return true;
+  pendingResumePages.delete(key);
+  if (!applyChatStreamEvent(pending.snapshot as ServerEvent, owner, handlers)) return false;
+  for (const liveEvent of pending.liveEvents) {
+    const sourceSeq = (liveEvent as { source_event_seq?: number }).source_event_seq;
+    if (sourceSeq !== undefined && sourceSeq <= (pending.snapshot.event_seq ?? -1)) continue;
+    if (!applyChatStreamEvent(liveEvent, owner, handlers)) return false;
+  }
+  return true;
 };

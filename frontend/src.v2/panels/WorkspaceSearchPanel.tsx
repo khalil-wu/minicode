@@ -59,7 +59,11 @@ function SearchWorkspace({ workspace, onNavigate }: { workspace: string; onNavig
   const codeTextScale = useAppStore((state) => state.codeTextScale);
   useEffect(() => { queryInput.current?.focus(); return () => request.current?.abort(); }, []);
   const update = (changes: Partial<SearchSession>) => setSession((current) => { const next = { ...current, ...changes }; sessions.set(key, next); return next; });
-  const option = (changes: Partial<WorkspaceSearchOptions>) => { update({ options: { ...session.options, ...changes }, result: null, selected: new Set() }); setApplied(false); setError(""); };
+  const option = (changes: Partial<WorkspaceSearchOptions>) => {
+    request.current?.abort(); request.current = null;
+    update({ options: { ...session.options, ...changes }, result: null, selected: new Set() });
+    setBusy(false); setPreview(false); setApplied(false); setError("");
+  };
   const files = session.result?.files ?? [];
   const replacements = selectedReplacementFiles(files, session.selected, session.replacement, session.options.regex).filter((file) => file.before !== file.after);
   const currentPreview = replacements.find((file) => file.path === previewPath) ?? replacements[0];

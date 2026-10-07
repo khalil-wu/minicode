@@ -12,6 +12,7 @@ from typing import Any
 from backend.agent.message import AgentEvent
 from backend.tools.base import PermissionLevel
 from backend.ws.stream_state import get_stream_content_blocks
+from backend.ws.stream_resume_pages import stream_resume_pages
 from backend.ws.turn_wait_state import TurnWaitState
 
 APPROVAL_INLINE_PATCH_LIMIT_BYTES = 100_000
@@ -645,20 +646,22 @@ class SessionApprovalRuntimeMixin:
                 if str(item.get("status") or "running").lower()
                 not in {"success", "completed", "failed", "error", "blocked", "cancelled", "timeout"}
             ]
-            await self.send_event(
-                AgentEvent.stream_resume(
-                    stream_conversation_id,
-                    stream_state.get("message_id") or None,
-                    pending_tool_calls,
-                    get_stream_content_blocks(stream_state),
-                    turn_id=str(stream_state.get("turn_id") or ""),
-                    phase=str(stream_state.get("phase") or ""),
-                    stream_status=str(stream_state.get("status") or "running"),
-                    event_seq=int(stream_state.get("event_seq") or 0),
-                    last_event_type=str(stream_state.get("last_event_type") or ""),
-                    tool_states=all_tool_states,
-                )
-            )
+            snapshot = self._clone_json_dict({
+                "message_id": stream_state.get("message_id") or None,
+                "tool_calls_pending": pending_tool_calls,
+                "tool_states": all_tool_states,
+                "content_blocks": get_stream_content_blocks(stream_state),
+                "turn_id": str(stream_state.get("turn_id") or ""),
+                "phase": str(stream_state.get("phase") or ""),
+                "stream_status": str(stream_state.get("status") or "running"),
+                "event_seq": int(stream_state.get("event_seq") or 0),
+                "last_event_type": str(stream_state.get("last_event_type") or ""),
+            })
+            # Freeze before yielding; pending delivery of older live events is
+            # identified by source_event_seq, while later events follow page 0
+            # in the existing FIFO outbox and are replayed after reassembly.
+            for page in stream_resume_pages(stream_conversation_id, snapshot):
+                await self.send_event(page)
         # Legacy fallback removed: only per-conversation stream state is authoritative
 
     def _clone_json_dict(self, payload: dict[str, Any]) -> dict[str, Any]:

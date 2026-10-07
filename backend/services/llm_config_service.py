@@ -233,6 +233,12 @@ def llm_model_updated_payload(
         "max_output_tokens_verified": max_output_tokens_verified,
         "default_reasoning_effort": default_reasoning_effort,
         "default_reasoning_summary": default_reasoning_summary,
+        "input_modalities": list(resolved_metadata.get("input_modalities", ())),
+        "declared_reasoning_effort_levels": list(resolved_metadata.get("declared_reasoning_effort_levels", resolved_metadata.get("reasoning_effort_levels", ()))),
+        "thinking_budget": int(payload_section.get("thinking_budget") or 0),
+        "parallel_tool_calls": resolved_metadata.get("parallel_tool_calls"),
+        "native_compaction": resolved_metadata.get("native_compaction"),
+        "supports_hosted_web_search": resolved_metadata.get("supports_hosted_web_search"),
         "working_directory": str(workspace_root) if workspace_root is not None else "",
     }
 

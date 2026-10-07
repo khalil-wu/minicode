@@ -378,6 +378,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     expect(screen.getByText("打开终端")).toBeTruthy();
     expect(screen.queryByText("发送消息")).toBeNull();
+    expect(screen.getByText("打开或收起底部终端面板。")).toBeTruthy();
+    fireEvent.change(search, { target: { value: "工作区" } });
+    expect(screen.getByRole("button", { name: "编辑 全局搜索" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "编辑 搜索项目内容" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "编辑 打开终端" })).toBeNull();
   });
 
   it("persists code sizing and reduced-motion preferences with real consumers", () => {

@@ -18,8 +18,9 @@ import {
 } from "../protocol/ws-outbox";
 export { commandWithClientCommandId } from "../protocol/ws-outbox";
 import { dismissToast, pushToast } from "../overlays/ToastContainer";
-import { handleChatStreamEvent } from "../chat/chatStreamEvents";
+import { handleChatStreamEvent, resetStreamResumePages } from "../chat/chatStreamEvents";
 import { normalizeAgentErrorMessage } from "../chat/errorMessages";
+import { updateMessagesForConversation } from "../stores/shared-helpers";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { handleControlEvent } from "../chat/controlEvents";
 import { handleSessionEvent } from "../chat/sessionEvents";
@@ -603,9 +604,27 @@ export const acknowledgeClientCommand = (event: ServerEvent): boolean => {
   };
   const clientCommandId = ack.client_command_id;
   if (typeof clientCommandId !== "string" || !clientCommandId) return true;
+  const command = pendingClientCommands.get(clientCommandId);
   clearPendingClientCommandAck(clientCommandId);
   if (ack.accepted === false) {
-    rejectClientCommandResult(clientCommandId, String(ack.reason || "Command was rejected by the server"));
+    const reason = String(ack.reason || "Command was rejected by the server");
+    rejectClientCommandResult(clientCommandId, reason);
+    if (command?.type === "user_message" && command.assistant_message_id) {
+      const state = useAppStore.getState();
+      const messageId = command.assistant_message_id;
+      const owner = command.conversation_id
+        || (state.messages.some((message) => message.id === messageId) ? state.conversationId : undefined)
+        || Object.entries({ ...state.conversationMessages, ...Object.fromEntries(Object.entries(state.sideChats).map(([id, thread]) => [id, thread.messages])) })
+          .find(([, messages]) => messages.some((message) => message.id === messageId))?.[0];
+      const activeOwnsMessage = state.messages.some((message) => message.id === messageId);
+      if (owner || activeOwnsMessage) {
+        const failureMessage = normalizeAgentErrorMessage(reason);
+        state.finishStreaming(owner || undefined, undefined, "failed", messageId, failureMessage, true, undefined, "admission_rejected");
+        useAppStore.setState((current) => updateMessagesForConversation(current, owner || undefined, (messages) => messages.map((message) =>
+          message.id === messageId ? { ...message, queueState: undefined, isStreaming: false, terminalStatus: "failed", failureMessage, failureRecoverable: true }
+            : message.id === command.user_message_id && message.queueState === "queued" ? { ...message, queueState: "cancelled" } : message)));
+      }
+    }
   }
   return true;
 };
@@ -806,6 +825,7 @@ export const useWebSocketConnection = () => {
     };
 
     const connect = () => {
+      resetStreamResumePages();
       if (!alive || reconnectExhausted) return;
       timer = null;
       const url = wsUrl("/ws", {
@@ -999,6 +1019,7 @@ export const useWebSocketConnection = () => {
           !handled
           && (
             parsed.type === "session.replay"
+            || parsed.type === "stream_resume"
             || shouldAdvanceReplayCursor(parsed)
             || (
               awaitingSessionRestore

@@ -1401,13 +1401,18 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
     return None
 
 
-def _responses_provider_items_from_response(response: Any) -> list[dict[str, Any]]:
+def _responses_provider_items_from_response(response: Any, *, include_messages: bool = False) -> list[dict[str, Any]]:
     output = _get_attr_or_item(response, "output", []) or []
     if not isinstance(output, list):
         return []
     items: list[dict[str, Any]] = []
     for item in output:
-        provider_item = _responses_provider_item_from_output(item)
+        if include_messages and _get_attr_or_item(item, "type", "") == "message":
+            model_dump = getattr(item, "model_dump", None)
+            message = model_dump(mode="json", exclude_none=True) if callable(model_dump) else item
+            provider_item = _responses_detach_provider_json(message)
+        else:
+            provider_item = _responses_provider_item_from_output(item)
         if provider_item is not None:
             items.append(provider_item)
     return items
@@ -2417,6 +2422,7 @@ class OpenAIAdapter(LLMAdapter):
         )
 
     def validate_context(self, messages: list[LLMMessage]) -> None:
+        self.validate_media_input(messages)
         origin = responses_context_origin(_normalized_openai_base_url(self._settings.base_url)) if self._settings.wire_api == "responses" else ""
         require_native_context_origin(messages, origin)
 
@@ -3315,6 +3321,7 @@ class OpenAIAdapter(LLMAdapter):
         closed_response_items: list[dict[str, Any]] = []
         terminal_tool_calls: list[ToolCallEvent] = []
         completed_response_message_phase = ""
+        completed_response_end_turn: bool | None = None
         saw_terminal_response_event = False
         response_text_by_item: dict[str, str] = {}
         response_reasoning_by_part: dict[str, str] = {}
@@ -4583,6 +4590,7 @@ class OpenAIAdapter(LLMAdapter):
 
                 elif event_type == "response.completed":
                     response_obj = getattr(event, "response", None)
+                    completed_response_end_turn = _get_attr_or_item(response_obj, "end_turn", None)
                     if not response_obj:
                         # A terminal frame with no response object carries no
                         # usage, finish_reason or output. Marking the stream
@@ -4648,7 +4656,7 @@ class OpenAIAdapter(LLMAdapter):
                         _get_attr_or_item(response_obj, "id", "") or ""
                     ).strip()
                     completed_response_provider_items = (
-                        _responses_provider_items_from_response(response_obj)
+                        _responses_provider_items_from_response(response_obj, include_messages=completed_response_end_turn is False)
                     )
                     terminal_tool_calls = _responses_tool_calls_from_provider_items(
                         completed_response_provider_items, custom_fields
@@ -4936,6 +4944,7 @@ class OpenAIAdapter(LLMAdapter):
             raw=raw_done,
             provider_items=completed_response_provider_items,
             phase=completed_response_message_phase,
+            end_turn=completed_response_end_turn,
         )
 
     async def _simple_responses_api(
@@ -5259,7 +5268,7 @@ class OpenAIAdapter(LLMAdapter):
                     dict(item)
                     for item in (msg.provider_items or [])
                     if isinstance(item, dict)
-                    and (str(item.get("type") or "") in {"reasoning", "function_call"}
+                    and (str(item.get("type") or "") in {"reasoning", "function_call", "message"}
                          or (self._settings.supports_custom_tools and item.get("type") == "custom_tool_call"))
                 ]
                 provider_function_call_ids = {
@@ -5271,13 +5280,14 @@ class OpenAIAdapter(LLMAdapter):
                     item["call_id"] for item in provider_items if item.get("type") == "custom_tool_call"
                 )
                 for item in provider_items:
-                    if item.get("type") == "reasoning":
+                    if item.get("type") in {"reasoning", "message"}:
                         # Repair history saved before empty summaries were kept.
                         # These are copied wire items, not mutations of history.
-                        item.setdefault("summary", [])
+                        if item.get("type") == "reasoning":
+                            item.setdefault("summary", [])
                         result.append(item)
                 assistant_text = _message_content_text(msg.content)
-                if assistant_text:
+                if assistant_text and not any(item.get("type") == "message" for item in provider_items):
                     assistant_item: dict[str, Any] = {
                         "role": "assistant",
                         "content": assistant_text,

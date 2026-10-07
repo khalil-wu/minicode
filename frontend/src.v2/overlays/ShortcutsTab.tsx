@@ -1,17 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { AtSign, Command, Keyboard, PanelLeft, Pencil, RotateCcw, Search, Send, Slash, Terminal, Trash2 } from "lucide-react";
+import { Pencil, RotateCcw, Search, Trash2 } from "lucide-react";
 import { findShortcutConflict, formatShortcut, shortcutFromEvent, SHORTCUT_DEFINITIONS, type ShortcutActionId } from "../lib/keyboard-shortcuts";
 import { useAppStore } from "../stores";
-
-const shortcutIcon = (action: string) => {
-  if (action.includes("Command")) return <Command />;
-  if (action.includes("terminal")) return <Terminal />;
-  if (action.includes("sidebar")) return <PanelLeft />;
-  if (action.includes("message") || action.includes("line")) return <Send />;
-  if (action.includes("mentions")) return <AtSign />;
-  if (action.includes("slash")) return <Slash />;
-  return <Keyboard />;
-};
 
 export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: string; active?: boolean }) => {
   const [query, setQuery] = useState("");
@@ -25,7 +15,7 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
   const normalizedQuery = query.trim().toLowerCase();
   const shortcuts = useMemo(() => (
     normalizedQuery
-      ? SHORTCUT_DEFINITIONS.filter((shortcut) => `${shortcut.label} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])}`.toLowerCase().includes(normalizedQuery))
+      ? SHORTCUT_DEFINITIONS.filter((shortcut) => `${shortcut.label} ${shortcut.description} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])}`.toLowerCase().includes(normalizedQuery))
       : SHORTCUT_DEFINITIONS
   ), [bindings, normalizedQuery]);
 
@@ -84,8 +74,7 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
       <div className="settings-card settings-shortcuts-card">
         {shortcuts.map((shortcut) => (
           <div className="settings-shortcut-row" key={shortcut.id}>
-            <span className="settings-shortcut-icon" aria-hidden="true">{shortcutIcon(shortcut.action)}</span>
-            <span className="settings-shortcut-action">{shortcut.label}</span>
+            <span className="settings-shortcut-copy"><span className="settings-shortcut-action">{shortcut.label}</span><span className="settings-shortcut-description">{shortcut.description}</span></span>
             <button
               type="button"
               className="settings-shortcut-binding"

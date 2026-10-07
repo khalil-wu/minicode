@@ -1021,7 +1021,7 @@ def _base_model(
             if api == "anthropic-messages"
             else bool(metadata["reasoning_effort_levels"])
         ),
-        input=("text",),
+        input=tuple(metadata["input_modalities"]) or ("text",),
         cost={},
         context_window=int(metadata["context_window"]),
         context_window_source=str(metadata["context_window_source"]),

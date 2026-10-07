@@ -183,12 +183,25 @@ def derive_turn_tool_schema_state(
             permission_checker=permission_checker,
             permission_context=permission_context,
         )
+    reachable_mcp_tools = set()
+    if tool_registry is not None:
+        reachable_mcp_tools = {
+            view.name for view in tool_registry.build_schema_views(
+                toolset_policy=toolset_policy,
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+                materialize_schema=False,
+            )
+            if view.name.startswith("mcp__") and (view.direct or view.code_mode_available
+                or ("tool_search" in names and view.exposure in {"deferred", "deferred_model_only"}))
+        }
     return TurnToolSchemaDerivation(
         permission_key=permission_key,
         schema_key=schema_key,
         tool_schemas=canonical_base_schemas,
         tool_names=names,
-        runtime_guidance=build_tool_runtime_guidance(canonical_base_schemas, mcp_instructions),
+        runtime_guidance=build_tool_runtime_guidance(canonical_base_schemas, mcp_instructions,
+            reachable_mcp_tools=reachable_mcp_tools),
         deferred_tools_prompt_block=deferred,
         derivation_key=derivation_key,
     )

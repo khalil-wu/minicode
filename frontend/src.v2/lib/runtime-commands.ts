@@ -350,5 +350,5 @@ export const executeRuntimeSlashCommand = async (
     // commands render their own response and keep the historical no-append path.
     skipLocalAppend: !isTemplate,
   });
-  return result(sent, sent ? "input" : "none");
+  return result(sent, sent ? isTemplate ? "composer" : "input" : "none");
 };

@@ -1,4 +1,5 @@
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
+import { CancellationError } from "monaco-editor/base/common/errors.js";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, fetchWithTimeout, errorMessageFromResponseText } from "../protocol/api";
 import { workspacePathWithin } from "../lib/workspace-path";
@@ -8,6 +9,7 @@ type Range = { start: Position; end: Position };
 type TextEdit = { range: Range; newText: string };
 type Location = { uri: string; range: Range } | { targetUri: string; targetSelectionRange: Range };
 type DocumentSymbol = { name: string; detail?: string; kind: number; range: Range; selectionRange: Range; children?: DocumentSymbol[] };
+type SymbolInformation = { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } };
 type CompletionItem = { label: string; kind?: number; detail?: string; documentation?: string | { value: string }; insertText?: string; insertTextFormat?: number; textEdit?: TextEdit; additionalTextEdits?: TextEdit[]; filterText?: string; sortText?: string };
 type Diagnostic = { range: Range; message: string; severity?: number; code?: string | number; source?: string };
 const serverLanguages = ["python", "yaml", "c", "cpp"];
@@ -36,8 +38,9 @@ export async function requestEditorLanguage<T>(monaco: typeof Monaco, model: Mon
 export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.IDisposable {
   const disposables: Monaco.IDisposable[] = [];
   const request = async <T>(model: Monaco.editor.ITextModel, method: string, token: Monaco.CancellationToken, position?: Monaco.IPosition, extra = {}) => {
+    if (token.isCancellationRequested) throw new CancellationError();
     const controller = new AbortController();
-    const subscription = token.onCancellationRequested(() => controller.abort());
+    const subscription = token.onCancellationRequested(() => controller.abort(new CancellationError()));
     try { return await requestEditorLanguage<T>(monaco, model, method, position, extra, controller.signal); }
     finally { subscription.dispose(); }
   };
@@ -47,8 +50,12 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
       : { uri: monaco.Uri.parse(location.uri), range: fromLspRange(location.range) });
   const symbol = (item: DocumentSymbol): Monaco.languages.DocumentSymbol => ({
     name: item.name, detail: item.detail ?? "", kind: item.kind - 1, tags: [],
-    range: fromLspRange(item.range), selectionRange: fromLspRange(item.selectionRange ?? item.range), children: item.children?.map(symbol),
+    range: fromLspRange(item.range), selectionRange: fromLspRange(item.selectionRange), children: item.children?.map(symbol),
   });
+  const documentSymbol = (item: DocumentSymbol | SymbolInformation): Monaco.languages.DocumentSymbol => "location" in item
+    ? { name: item.name, detail: item.containerName ?? "", kind: item.kind - 1, tags: [],
+        range: fromLspRange(item.location.range), selectionRange: fromLspRange(item.location.range) }
+    : symbol(item);
   const markdown = (value: string | { value: string } | undefined): Monaco.IMarkdownString => ({ value: typeof value === "string" ? value : value?.value ?? "", isTrusted: false });
   const kinds = monaco.languages.CompletionItemKind;
   const kindMap = [kinds.Text, kinds.Method, kinds.Function, kinds.Constructor, kinds.Field, kinds.Variable, kinds.Class,
@@ -80,7 +87,7 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
       }),
       monaco.languages.registerDocumentSymbolProvider(language, {
         displayName: language === "python" ? "Pyright" : language === "yaml" ? "YAML" : "clangd",
-        async provideDocumentSymbols(model, token) { return (await request<DocumentSymbol[] | null>(model, "documentSymbol", token) ?? []).map(symbol); },
+        async provideDocumentSymbols(model, token) { return (await request<Array<DocumentSymbol | SymbolInformation> | null>(model, "documentSymbol", token) ?? []).map(documentSymbol); },
       }),
       monaco.languages.registerDocumentFormattingEditProvider(language, {
         async provideDocumentFormattingEdits(model, options, token) {

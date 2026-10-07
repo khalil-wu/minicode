@@ -370,6 +370,10 @@ const hasKind = (value: unknown, kind: FieldKind): boolean => {
 };
 
 const hasValidEnvelope = (value: Record<string, unknown>, type: string): boolean => {
+  if ("source_event_seq" in value && (!Number.isSafeInteger(value.source_event_seq) || Number(value.source_event_seq) < 0)) {
+    console.warn("[ws] Dropping server event with invalid source_event_seq", type, value.source_event_seq);
+    return false;
+  }
   if (
     "seq" in value
     && (!Number.isSafeInteger(value.seq) || (value.seq as number) < 0)
@@ -1495,6 +1499,9 @@ const hasValidSemanticPayload = (
       ? states.map((item) => isRecord(item) ? String(item.id ?? "").trim() : "")
       : [];
     valid = isBoundedString(value.conversation_id, 1_024)
+      && (!('snapshot_id' in value) || (isBoundedString(value.snapshot_id, 1_024)
+        && Number.isSafeInteger(value.snapshot_part) && Number(value.snapshot_part) >= 0
+        && typeof value.snapshot_complete === "boolean"))
       && (value.message_id === null || isBoundedString(value.message_id, 1_024))
       && Array.isArray(pending)
       && pending.length <= MAX_STREAM_RESUME_TOOLS

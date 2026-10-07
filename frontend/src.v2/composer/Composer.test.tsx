@@ -105,6 +105,27 @@ import { Composer } from "./Composer";
 import { appendPromptHistory } from "./prompt-history";
 
 describe("Composer goal bar", () => {
+  it("routes a template through the upload fence and sends attachments and quoted context", async () => {
+    const quote = { id: "template-quote", role: "assistant" as const, content: "Quoted template context" };
+    const uploading = { id: "template-upload", name: "notes.txt", type: "text/plain", size: 12, status: "uploading" as const, conversationId: "template-owner" };
+    useAppStore.setState({ conversationId: "template-owner", workingDirectory: "", appMode: "chat", draft: "/analyze inspect",
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, runtimeSession: null, attachments: [uploading],
+      quotedMessage: quote, selectedMentions: [], selectedSkills: [], slashPanelOpen: false, mentionPanelOpen: false,
+      slashCommands: [{ name: "analyze", command: "analyze", type: "template", label: "/analyze", description: "Analyze" }] });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.pushToast).toHaveBeenCalledWith(expect.stringContaining("仍在上传"), "warning", 3500));
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    act(() => useAppStore.setState({ attachments: [{ ...uploading, status: "ready", attachment: { id: "file-id", artifact_id: "artifact-id", file_name: "notes.txt", kind: "document", media_type: "text/plain" } }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      displayContent: "/analyze inspect", backendContent: expect.stringContaining("Quoted template context"), quotedMessage: quote,
+      attachments: [expect.objectContaining({ artifact_id: "artifact-id" })], attachmentRefs: [expect.objectContaining({ artifactId: "artifact-id" })], skipLocalAppend: false,
+    })));
+    await waitFor(() => expect(useAppStore.getState().attachments).toEqual([]));
+    expect(useAppStore.getState().quotedMessage).toBeNull();
+    expect(useAppStore.getState().draft).toBe("");
+  });
   beforeEach(() => {
     localStorage.clear();
     mocks.sendClientCommand.mockClear();

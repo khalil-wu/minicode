@@ -81,14 +81,14 @@ const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
   return groups;
 };
 
-type WorkLabel = "Edit" | "Run" | "Read" | "List" | "Search" | "Fetch" | "Browse" | "Collaborate" | "Tool calls";
+type WorkLabel = "Edit" | "Run" | "Read" | "List" | "Search" | "Fetch" | "Browse" | "Collaborate";
 const WORK_LABEL_CHROME: Record<WorkLabel, string> = {
   Edit: "编辑", Run: "运行", Read: "读取", List: "查看目录", Search: "搜索", Fetch: "读取网页",
-  Browse: "浏览", Collaborate: "协作", "Tool calls": "工具调用",
+  Browse: "浏览", Collaborate: "协作",
 };
 
-const workLabel = (cell: AgentLoopProcessCell): WorkLabel => {
-  if (cell.kind === "exec") return "Run";
+const workLabel = (cell: AgentLoopProcessCell): WorkLabel | undefined => {
+  if (cell.kind === "exec" || (cell.kind === "activity" && cell.activityKind === "commandExecution")) return "Run";
   if (cell.kind === "diff" || (cell.kind === "activity" && cell.activityKind === "fileChange")) return "Edit";
   if (cell.kind === "activity" && cell.activityKind === "workspaceList") return "List";
   if (cell.kind === "activity" && cell.activityKind === "workspaceSearch") return "Search";
@@ -100,7 +100,7 @@ const workLabel = (cell: AgentLoopProcessCell): WorkLabel => {
   }
   if (cell.kind === "activity" && cell.activityKind === "browser") return "Browse";
   if (cell.kind === "collaboration") return "Collaborate";
-  return "Tool calls";
+  return undefined;
 };
 
 const timelineGroupTitle = (group: TimelineGroup, live = false): string => {
@@ -112,20 +112,24 @@ const timelineGroupTitle = (group: TimelineGroup, live = false): string => {
   const labels: WorkLabel[] = [];
   for (const cell of group.cells) {
     const label = workLabel(cell);
-    if (!labels.includes(label)) labels.push(label);
+    if (label !== undefined && !labels.includes(label)) labels.push(label);
   }
-  const failed = group.cells.some((cell) => cell.kind === "error" || ("status" in cell && cell.status === "failed"));
+  const failedLabels = new Set(group.cells
+    .filter((cell) => cell.kind === "error" || ("status" in cell && cell.status === "failed"))
+    .map(workLabel));
+  const failed = failedLabels.size > 0;
   const interrupted = group.cells.some((cell) => "status" in cell && ["partial", "cancelled", "interrupted"].includes(cell.status));
-  if (labels.every((label) => ["Read", "List", "Search"].includes(label))) {
+  if (labels.every((label) => ["Read", "List", "Search"].includes(label)) && !failedLabels.has(undefined)) {
     return live ? "正在查看" : failed ? "查看失败" : interrupted ? "查看已中断" : "已查看";
   }
-  if (labels.length === 1 && labels[0] === "Run") {
-    return failed ? "运行 · 失败" : interrupted ? "运行 · 已中断" : live ? `正在运行 ${group.cells.length} 条命令` : "运行了命令";
+  if (labels.length === 1 && labels[0] === "Run" && !failedLabels.has(undefined)) {
+    const commandCount = group.cells.filter((cell) => workLabel(cell) === "Run").length;
+    return failed ? "运行失败" : interrupted ? "运行 · 已中断" : live ? `正在运行 ${commandCount} 条命令` : "运行了命令";
   }
-  if (labels.length === 1 && labels[0] === "Edit") {
-    return failed ? "编辑 · 失败" : interrupted ? "编辑 · 已中断" : live ? "正在编辑文件" : "已编辑文件";
+  if (labels.length === 1 && labels[0] === "Edit" && !failedLabels.has(undefined)) {
+    return failed ? "编辑失败" : interrupted ? "编辑 · 已中断" : live ? "正在编辑文件" : "已编辑文件";
   }
-  return `${labels.map((label) => WORK_LABEL_CHROME[label]).join(" · ")}${failed ? " · 失败" : interrupted ? " · 已中断" : ""}`;
+  return `${labels.map((label) => `${WORK_LABEL_CHROME[label]}${failedLabels.has(label) ? "失败" : ""}`).join(" · ")}${failedLabels.has(undefined) && failedLabels.size === 1 ? " · 失败" : interrupted ? " · 已中断" : ""}`;
 };
 
 const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNode => {
@@ -264,7 +268,7 @@ export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, sh
               : renderCell({ key: cell.id, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
         if (group.kind === "work") {
-          if (group.cells.length > 1) {
+          if (group.cells.length > 1 && group.cells.some((cell) => workLabel(cell) !== undefined)) {
             return <WorkGroup key={`timeline-group-work-${group.segment === undefined ? `unscoped-${groupIndex}` : `segment-${group.segment}`}`} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));

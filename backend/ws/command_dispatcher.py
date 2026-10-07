@@ -961,6 +961,15 @@ class SessionCommandDispatcher:
             return
         await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
 
+    def _bind_user_message_owner(self, command: UserCommand, conversation_id: str) -> None:
+        command_id = self._client_command_id(command)
+        if command_id:
+            durable_queue = self._session.run_manager.durable_client_commands
+            if durable_queue is not None and durable_queue.has_client_command(command_id):
+                if not durable_queue.bind_client_command_owner(command_id, conversation_id):
+                    raise RuntimeError("The current dispatcher does not own this durable input")
+        command.data["conversation_id"] = conversation_id
+
     async def _handle_command_inner(self, command: UserCommand) -> None:
         if self._session._extension_shutdown_requested and command.type not in {
             "control_response",
@@ -1241,6 +1250,7 @@ class SessionCommandDispatcher:
                 if not target_conversation_id:
                     self._session._ensure_active_conversation()
                     target_conversation_id = self._session.active_conversation_id or ""
+                self._bind_user_message_owner(command, target_conversation_id)
                 queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
                 message_metadata["_queued_user_message_dispatch"] = queued_dispatch
                 if retry_from_message_id:

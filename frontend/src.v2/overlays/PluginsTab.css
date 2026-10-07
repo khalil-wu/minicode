@@ -325,6 +325,10 @@
   text-align: center;
 }
 
+.plugins-settings .plugin-settings-group { margin-bottom: 28px; }
+.plugins-settings .plugin-source-group-body { padding-block: 16px; }
+.plugins-settings .plugin-settings-toolbar { margin-bottom: 20px; }
+
 .plugin-empty-icon {
   width: 44px;
   height: 44px;

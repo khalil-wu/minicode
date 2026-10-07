@@ -29,7 +29,6 @@ import {
 } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { isDesktop, pickDirectory } from "../desktop/runtime";
-import { Section } from "./settingsShared";
 import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
 import { showConfirm } from "./DialogService";
 import "./PluginsTab.css";
@@ -529,7 +528,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
   };
 
   return (
-    <div className={catalog ? "plugins-catalog" : undefined}>
+    <div className={catalog ? "plugins-catalog" : "plugins-settings"}>
       {catalog && active && toolbarHost && createPortal(<>
         <button type="button" className="skills-icon-button" disabled={busy} onClick={() => { void refresh({ showToast: true }); void loadMarketplaces(); }} aria-label="刷新插件" title="刷新插件"><RefreshCw className={loading ? "settings-spin" : undefined} /></button>
         <button type="button" className="skills-icon-button" onClick={() => setManagementOpen(!managementOpen)} aria-label="管理插件与来源" aria-pressed={managementOpen} title="管理插件与来源"><Settings /></button>
@@ -585,7 +584,8 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
       <div className="plugin-list-page" hidden={Boolean(detail)}>
       {!catalog && <div className="plugin-settings-toolbar"><button type="button" className="settings-action-button" aria-expanded={managementOpen} onClick={() => setManagementOpen(!managementOpen)}>管理来源与本地导入</button></div>}
       {catalog && <label className="skills-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索插件" aria-label="搜索插件" /></label>}
-      <Section title="已安装插件" description="能力包；启用后加载技能、MCP、App 和 Hook。">
+      <section className={catalog ? "settings-section" : "settings-group plugin-settings-group"}>
+        <div className="settings-section-heading"><h3 className="settings-section-title">已安装插件</h3><p className="settings-section-description">能力包；启用后加载技能、MCP、App 和 Hook。</p></div>
         {plugins.length > 0 && <div className="plugin-summary">
           <div className="plugin-summary-item"><strong>{counts.enabled}</strong><span>已启用</span></div>
           <div className="plugin-summary-item"><strong>{plugins.length}</strong><span>已安装</span></div>
@@ -703,7 +703,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
             </div>
           )}
         </div>}
-      </Section>
+      </section>
 
       {(marketplaces.length > 0 || plugins.length > 0 || marketplaceError) && <section className="plugin-marketplace-catalog" aria-label="插件目录">
         <div className="plugin-catalog-heading"><h2>插件目录</h2><SelectMenu ariaLabel="插件来源" className="settings-select" style={{ width: 180 }} value={sourceFilter} onValueChange={setSourceFilter}><option value="">全部来源</option>{marketplaces.map((source) => <option key={source.name} value={source.name}>{source.name}</option>)}</SelectMenu></div>
@@ -728,7 +728,9 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
       </section>}
 
       {managementOpen && <>
-      <Section title="插件来源" description="来源名称需与市场清单中的名称一致。">
+      <section className={catalog ? "settings-section" : "settings-group plugin-settings-group"}>
+        <div className="settings-section-heading"><h3 className="settings-section-title">插件来源</h3><p className="settings-section-description">来源名称需与市场清单中的名称一致。</p></div>
+        <div className={catalog ? "plugin-source-group-body" : "settings-card plugin-source-group-body"}>
         <form className="plugin-source-form" onSubmit={(event) => { event.preventDefault(); void changeMarketplace("add", sourceName); }}>
           <input aria-label="来源名称" placeholder="来源名称" value={sourceName} onChange={(event) => setSourceName(event.target.value)} required disabled={busy} />
           <SelectMenu ariaLabel="来源类型" value={sourceKind} onValueChange={setSourceKind} disabled={busy}><option value="github">GitHub</option><option value="git">Git URL</option><option value="directory">本地文件夹</option></SelectMenu>
@@ -736,8 +738,10 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
           <button type="submit" disabled={busy || !sourceName.trim() || !sourceLocator.trim()}>添加来源</button>
         </form>
         {marketplaces.map((source) => <div className="plugin-source-record" key={source.name}><div><strong>{source.name}</strong><p>{source.source.repo || source.source.url || source.source.path}</p></div><button type="button" className="plugin-icon-button" disabled={busy} aria-label={`移除来源 ${source.name}`} onClick={() => void changeMarketplace("remove", source.name)}><Trash2 /></button></div>)}
-      </Section>
-      <Section title="插件开发" description="验证、导入或打包本地插件。">
+        </div>
+      </section>
+      <section className={catalog ? "settings-section" : "settings-group plugin-settings-group"}>
+        <div className="settings-section-heading"><h3 className="settings-section-title">插件开发</h3><p className="settings-section-description">验证、导入或打包本地插件。</p></div>
         <div className="plugin-dev-card">
           <p className="plugin-section-description">路径只用于本次操作。</p>
           <div className="plugin-import-row">
@@ -769,7 +773,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, search
             </div>
           )}
         </div>
-      </Section>
+      </section>
       </>}
       {active && addMenu && <ContextMenu position={addMenu} onClose={() => setAddMenu(null)} items={[
         { label: "导入本地插件", icon: <FolderOpen />, onClick: () => { setManagementOpen(true); window.requestAnimationFrame(() => importInputRef.current?.focus()); } },

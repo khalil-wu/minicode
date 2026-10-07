@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTurn } from "./ChatTurn";
 import { handleChatStreamEvent } from "../chatStreamEvents";
@@ -32,6 +33,22 @@ beforeEach(() => useAppStore.setState({conversationId:"lifecycle",pendingConvers
 afterEach(cleanup);
 
 describe("real item/terminal disclosure and child roles", () => {
+  it("settles automatic disclosure after the completed answer's first commit", () => {
+    const committedDisclosure: string[] = [];
+    const captureCommit = () => {
+      if (screen.queryByText("完成验证。")) {
+        committedDisclosure.push(screen.getByLabelText("Agent 处理进度").getAttribute("data-collapsed")!);
+      }
+    };
+    const {rerender}=render(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
+    complete();
+    rerender(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
+    expect(committedDisclosure[0]).toBe("false");
+    expect(committedDisclosure.at(-1)).toBe("true");
+    done();
+    rerender(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
+    expect(screen.getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("true");
+  });
   it.each([false,true])("collapses work on committed model_final before done in transcript=%s and stays collapsed after done", (child) => {
     const {container,rerender}=render(<ChatTurn turn={turn()} isTranscriptMode={child} />);
     expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
@@ -49,15 +66,39 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(useAppStore.getState().draft).toBe("保留的草稿");
   });
 
-  it("keeps a reader's explicit scroll and expansion across final and terminal delivery", () => {
+  it("folds after ordinary scrolling and preserves an explicit expansion across terminal delivery", () => {
     const {rerender}=render(<ChatTurn turn={turn()} />);
     fireEvent.wheel(screen.getByLabelText("Agent 处理进度"),{deltaY:-120});
     complete();rerender(<ChatTurn turn={turn()} />);
-    expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"展开处理步骤"}));
     expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
     done();rerender(<ChatTurn turn={turn()} />);
     expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
     expect(useAppStore.getState().draft).toBe("保留的草稿");
+  });
+
+  it("retains the work area when a reader explicitly discloses a tool's details", () => {
+    useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
+      blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, output: "Actual file contents" } } : block) } : message) }));
+    const {rerender}=render(<ChatTurn turn={turn()} />);
+    fireEvent.click(screen.getByRole("button",{name:"展开活动详情"}));
+    complete();rerender(<ChatTurn turn={turn()} />);
+    expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
+    expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+  });
+
+  it("revokes final qualification when the same provider item is reclassified as commentary", () => {
+    const {rerender}=render(<ChatTurn turn={turn()} />);
+    complete();rerender(<ChatTurn turn={turn()} />);
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
+    handle({type:"item.completed",conversation_id:"lifecycle",message_id:"assistant",turn_id:"actual-turn",
+      item:{id:"model-final",type:"agent_message",text:"继续模型采样。",source:"commentary",status:"completed"}});
+    rerender(<ChatTurn turn={turn()} />);
+    expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+    expect(turn().finalAnswerCell).toBeNull();
+    complete();rerender(<ChatTurn turn={turn()} />);
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
   });
 
   it("does not render child dispatch as a human bubble or move assistant commentary into user role", () => {

@@ -222,7 +222,7 @@ def test_mcp_owner_fence_cancels_the_server_callback() -> None:
 def test_bootstrap_mcp_elicitation_uses_registered_owned_protocol_and_cleans_up() -> None:
     async def run() -> None:
         session = _BootstrapElicitationSession(
-            response={"answer": "use-node"},
+            response={"action": "accept", "content": {"runtime": "use-node"}},
         )
         bootstrap = object.__new__(AppBootstrap)
         bootstrap._resolve_mcp_request_session = lambda _params: (
@@ -232,10 +232,10 @@ def test_bootstrap_mcp_elicitation_uses_registered_owned_protocol_and_cleans_up(
 
         result = await bootstrap._handle_mcp_elicitation({
             "prompt": "Which runtime should be used?",
-            "schema": {"type": "string", "enum": ["use-node", "use-bun"]},
+            "schema": {"type": "object", "properties": {"runtime": {"type": "string", "enum": ["use-node", "use-bun"]}}},
         })
 
-        assert result == {"action": "submit", "response": {"answer": "use-node"}}
+        assert result == {"action": "accept", "content": {"runtime": "use-node"}}
         assert len(session.sent) == 1
         payload = session.sent[0]
         assert payload["conversation_id"] == "conversation-a"
@@ -245,7 +245,7 @@ def test_bootstrap_mcp_elicitation_uses_registered_owned_protocol_and_cleans_up(
             "tool_use_id": payload["request_id"],
             "prompt": "Which runtime should be used?",
             "question": "Which runtime should be used?",
-            "schema": {"type": "string", "enum": ["use-node", "use-bun"]},
+            "schema": {"type": "object", "properties": {"runtime": {"type": "string", "enum": ["use-node", "use-bun"]}}},
         }
         assert session.terminal == [{
             "request_ids": [payload["request_id"]],

@@ -168,7 +168,9 @@ export const AgentTurn = memo(function AgentTurn({
           data-active={turn.status === "running" && !turn.hasCompleteFinalAnswer ? "true" : "false"}
           data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent 处理进度"
-          onWheel={() => { if (processExpanded && turn.status === "running") userToggled.current = true; }}
+          onClickCapture={(event) => {
+            if ((event.target as Element).closest("button[aria-expanded], summary")) userToggled.current = true;
+          }}
         >
           {(turn.status !== "running" || turn.hasCompleteFinalAnswer) && processSummary}
           {processExpanded && historyControl}

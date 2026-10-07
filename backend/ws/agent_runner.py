@@ -1851,7 +1851,7 @@ class SessionAgentRunnerMixin:
                 )
             )
         )
-        if selected and runtime.get_model(provider, selected) is not None:
+        if self.llm is not None and selected and runtime.get_model(provider, selected) is not None:
             self.config = _config_with_runtime_model_budget(
                 scoped_config,
                 model_runtime=runtime,

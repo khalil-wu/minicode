@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.answer_acceptance import apply_stop_hook_policy
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.answer_recovery import (
     accept_completed_stream_steer,
     recover_empty_answer,
@@ -48,6 +49,8 @@ async def orchestrate_final_answer(
     provider_raw_done: dict[str, Any],
     degraded_reason: str,
     has_non_text_result: bool = False,
+    budget_runtime: Any,
+    tool_context: Any,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | FinalAnswerOutcome]:
     """Run the no-tools acceptance pipeline and return an explicit loop action."""
 
@@ -101,15 +104,23 @@ async def orchestrate_final_answer(
         yield FinalAnswerOutcome("retry", degraded_reason)
         return
 
-    stop_hook_acceptance = await apply_stop_hook_policy(
-        user_message=user_message,
-        candidate_text=candidate_text,
-        state=state,
-        context_builder=context_builder,
-        stream_text=stream_text,
-        provider_phase=provider_phase,
-        provider_items=provider_items,
-    )
+    try:
+        stop_hook_acceptance = await await_preflight(apply_stop_hook_policy(
+            user_message=user_message,
+            candidate_text=candidate_text,
+            state=state,
+            context_builder=context_builder,
+            stream_text=stream_text,
+            provider_phase=provider_phase,
+            provider_items=provider_items,
+        ), deadline=budget_runtime.active_phase_deadline(), cancel_event=tool_context.cancel_event,
+            run_context=tool_context.run_context, llm=context_builder._llm)
+    except PhaseDeadlineExceeded:
+        _, events = await budget_runtime.apply_boundary(budget_runtime.phase_deadline_boundary())
+        for event in events:
+            yield event
+        yield FinalAnswerOutcome("terminate", degraded_reason)
+        return
     for event in stop_hook_acceptance.events:
         yield event
     if stop_hook_acceptance.action in {"retry", "terminate"}:

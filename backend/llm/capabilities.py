@@ -9,7 +9,7 @@ dedicated image models, not coding models with function-calling tools.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 from urllib.parse import urlparse
 from backend.config import LLMSettings, normalize_custom_wire_api
@@ -208,7 +208,7 @@ def capabilities_from_openai_settings(
         default_reasoning_summary=str(
             getattr(settings, "default_reasoning_summary", "") or ""
         ),
-        vision=False if dedicated_image_model else None,
+        vision=False if dedicated_image_model else "image" in settings.input_modalities if settings.input_modalities else None,
         native_pdf=False if dedicated_image_model else None,
         image_generation=True if dedicated_image_model else None,
         native_compaction=(
@@ -225,6 +225,25 @@ def capabilities_from_openai_settings(
         ),
         limitations=tuple(limitations),
     )
+def capabilities_from_settings(settings: LLMSettings, *, provider: str) -> ProviderCapabilities:
+    """Describe a declared wire/model contract before a client exists."""
+    if settings.wire_api != "anthropic":
+        return capabilities_from_openai_settings(settings, provider=provider)
+    configured = settings.reasoning_effort.strip().lower()
+    effective = "" if configured == "off" else configured
+    supported = bool(configured or settings.reasoning_effort_levels)
+    levels = tuple(dict.fromkeys(("off", *settings.reasoning_effort_levels))) if settings.reasoning_effort_levels else tuple(dict.fromkeys(("off", "high", configured))) if configured else ()
+    base = capabilities_from_openai_settings(replace(settings, wire_api="responses"), provider=provider)
+    return replace(base, wire_api="anthropic", provider_id=provider, streaming=True, tool_calling=True,
+        parallel_tool_calls=True if settings.parallel_tool_calls is None else settings.parallel_tool_calls,
+        json_mode=False, reasoning_effort=bool((settings.thinking_budget if configured != "off" else 0) or effective),
+        reasoning_effort_supported=supported, reasoning_effort_levels=levels,
+        configured_reasoning_effort=configured, effective_reasoning_effort=effective,
+        wire_reasoning_effort="", wire_reasoning_effort_levels=(), reasoning_effort_wire_map={},
+        native_compaction=False, image_generation=False, prompt_caching=True,
+        native_cache_editing=False, cache_deleted_usage=False, confidence="api_contract", limitations=())
+
+
 def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
     spec = getattr(adapter, "provider_adapter_spec", None)
     model = str(getattr(adapter, "_model", "") or "").strip()
@@ -237,6 +256,7 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         getattr(adapter, "_cache_editing_beta_header", "")
         and not getattr(adapter, "_cache_editing_disabled_reason", "")
     )
+    parallel_policy = spec.parallel_tool_calls if spec is not None else adapter._parallel_tool_calls
     return ProviderCapabilities(
         provider=str(getattr(adapter, "_provider_id", "anthropic") or "anthropic"),
         model=model,
@@ -249,7 +269,7 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
             spec.supports_hosted_web_search if spec is not None
             else getattr(adapter, "_declared_hosted_web_search_support", None)
         ),
-        parallel_tool_calls=True,
+        parallel_tool_calls=True if parallel_policy is None else parallel_policy,
         json_mode=False,
         reasoning_effort=bool(getattr(adapter, "_thinking_budget", None) or effective_effort),
         reasoning_effort_levels=adapter.supported_reasoning_efforts() if effort_control else (),
@@ -276,7 +296,7 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         max_output_tokens=spec.max_output_tokens if spec is not None else 0,
         max_output_tokens_source=spec.max_output_tokens_source if spec is not None else "",
         max_output_tokens_verified=spec.max_output_tokens_verified if spec is not None else False,
-        vision=None,
+        vision="image" in adapter._input_modalities if adapter._input_modalities else None,
         native_pdf=None,
         image_generation=False,
         prompt_caching=True,

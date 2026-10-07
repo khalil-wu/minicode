@@ -15,7 +15,7 @@ from backend.agent.loop_runtime_helpers import (
 )
 from backend.agent.policies.stream_retry import plan_connection_retry
 from backend.agent.message import AgentEvent
-from backend.agent.loop_preflight import PhaseDeadlineExceeded
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
@@ -354,13 +354,14 @@ async def handle_provider_error_event(
             return
 
     if not stream_recovery_attempted and not incomplete_tool_stream:
-        recovered = await recover_withheld_error(
+        recovered = await await_preflight(recover_withheld_error(
             error_controller=error_controller,
             classification=classification,
             error_content=event.content,
             state=state,
             ctx=context_builder,
-        )
+        ), deadline=budget_runtime.active_phase_deadline(), cancel_event=cancel_event,
+            run_context=turn_kernel.run_context, llm=context_builder._llm)
         if recovered:
             retry_boundary = budget_runtime.consume_retry(
                 "error_withholding_recovery"

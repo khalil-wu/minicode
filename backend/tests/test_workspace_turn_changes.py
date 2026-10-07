@@ -129,7 +129,7 @@ async def test_parent_terminal_diff_contains_completed_children_and_real_command
         await asyncio.gather(child("parser.py", "def parse(row): return row.split(',')\n"), child("test_parser.py", "def test_parse(): assert True\n"))
         await asyncio.to_thread(subprocess.run, [sys.executable, "-c", "from pathlib import Path; Path('cli.py').write_text('print(42)\\n', encoding='utf-8')"], cwd=workspace, check=True)
         state.reply = "Implemented and verified the CSV parser."
-        yield AgentEvent.reply(state.reply)
+        yield AgentEvent.agent_message_completed(state.reply, item_id="final", source="model_final")
         yield AgentEvent.done(status="completed")
 
     session = AgentSession(llm=adapter, tool_registry=ToolRegistry(), artifact_store=ArtifactStore(storage_dir=str(tmp_path / "artifacts")),
@@ -139,6 +139,7 @@ async def test_parent_terminal_diff_contains_completed_children_and_real_command
         events = [event async for event in QueryEngine(runner=runner).submit(QuerySubmission(session=session, state=state,
             user_message=state.user_message, runtime=AgentLoopSessionContext(workspace_root=workspace, run_context=RunContext(agent_runtime=runtime))))]
         change = next(event for event in events if event.type == "turn.diff.updated")
+        assert [event.data["status"] for event in events if event.type == "done"] == ["completed"]
         assert change.data["source"] == "workspace_snapshot"
         assert change.data["thread_id"] == "parent-conversation"
         assert all(f"+++ b/{name}" in change.data["diff"] for name in ("parser.py", "test_parser.py", "cli.py"))

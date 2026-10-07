@@ -42,17 +42,17 @@ def _invalidate_runtime_status_cache() -> None:
 
 
 async def _dispose_unadopted_connection_resources(
-    llm: LLMAdapter,
+    llm: LLMAdapter | None,
     artifact_store: ArtifactStore | None,
     *,
     adopted_session: WebSocketSession | None = None,
 ) -> None:
     """Release resources created for a connection that was not adopted.
 
-    ``websocket_endpoint`` creates these objects before the manager can decide
-    whether a reconnect will attach to an existing session.  Ownership moves
-    only when a new ``WebSocketSession`` is constructed; a reconnect must close
-    its discarded objects here without touching the live session's objects.
+    Connection-owned resources exist before the manager decides whether a
+    reconnect attaches to an existing session. Adapter ownership is optional:
+    the desktop transport starts unbound, while an embedding caller may supply
+    an actual adapter. A reconnect releases only objects it did not adopt.
     """
 
     try:
@@ -294,7 +294,7 @@ class WebSocketManager:
     async def connect(
         self,
         websocket: WebSocket,
-        llm: LLMAdapter,
+        llm: LLMAdapter | None,
         artifact_store: ArtifactStore,
         tool_registry: ToolRegistry,
         permission_checker: PermissionChecker,

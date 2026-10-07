@@ -15,6 +15,7 @@ export function McpToolsEditor({ server, tools }: { server: McpServerStatus; too
     try {
       const result = await sendClientCommandAwaitResult({ type: "mcp.update", original_name: server.name, tools_only: true, enabled_tools: all ? null : [...selected] }, "mcp.update");
       if (!commandResultSucceeded(result)) throw new Error(result.message || "工具策略保存失败");
+      if (all) setSelected(new Set(tools.map((tool) => tool.name)));
       if (useAppStore.getState().workingDirectory === owner) { setFeedback("已保存，下条消息生效。"); sendClientCommand({ type: "mcp.list" }, { silent: true }); }
     } catch (error) { setFeedback(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }

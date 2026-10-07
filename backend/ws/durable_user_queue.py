@@ -951,6 +951,30 @@ class DurableUserMessageQueue:
         return list(self._client_pending)
 
     @_queue_locked
+    def bind_client_command_owner(self, client_command_id: str, conversation_id: str) -> bool:
+        """Bind the claimed input before its conversation admission begins."""
+        self._refresh_from_disk_unlocked()
+        command_id = _clean_command_id(client_command_id)
+        if self._client_inflight_owners.get(command_id) != self._owner_id:
+            return False
+        command = self._client_inflight[command_id]
+        previous_owner = command.data.get("conversation_id")
+        if previous_owner and previous_owner != conversation_id:
+            raise ValueError("A durable input cannot change conversation owner")
+        if previous_owner == conversation_id:
+            return True
+        command.data["conversation_id"] = conversation_id
+        try:
+            self._write_current_unlocked()
+        except Exception:
+            if previous_owner is None:
+                command.data.pop("conversation_id", None)
+            else:
+                command.data["conversation_id"] = previous_owner
+            raise
+        return True
+
+    @_queue_locked
     def discard_pending_client_command(self, client_command_id: str) -> bool:
         """Atomically settle a pending command already recorded as handled.
 

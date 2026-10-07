@@ -354,7 +354,7 @@ async def test_endpoint_reports_initialization_failure_and_releases_resources(
         return connection["permission_checker"]
 
     bootstrap = SimpleNamespace(
-        create_llm=lambda **kwargs: llm,
+        create_llm=lambda **kwargs: pytest.fail("Protocol initialization must not create a model adapter"),
         create_tool_registry=create_registry,
         create_permission_checker=create_permissions,
         skill_manager=None, skill_executor=None, memory_manager=None, mcp_manager=None,
@@ -378,10 +378,10 @@ async def test_endpoint_reports_initialization_failure_and_releases_resources(
         assert socket.sent[0]["error_code"] == "connection.session_initialization_failed"
         assert socket.sent[0]["recoverable"] is False
         assert socket.sent[0]["message"].startswith("Session initialization failed:")
-    assert llm.close_calls == 1
+    assert llm.close_calls == 0
     assert path.read_bytes() == b"\xff\n"
     if failure != "artifact":
-        _assert_released(connection)
+        assert (artifacts.flush_calls, artifacts.shutdown_calls, artifacts.clear_calls) == (1, 1, 1)
     else:
         assert artifacts.shutdown_calls == 0
         artifacts.shutdown()

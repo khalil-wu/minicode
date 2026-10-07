@@ -62,10 +62,32 @@ it("resets sizes separately from editing behavior and retains custom code snippe
 
   expect(useAppStore.getState()).toMatchObject({ textScale: 1, codeTextScale: 1,
     workbenchPreferences: { proseSize: 14, tabSize: 2, wordWrap: false, formatOnSave: true, aiEnabled: true, aiModel: "saved-model", snippets: [snippet] } });
+  fireEvent.click(screen.getByText("高级"));
   expect(screen.getByRole("switch", { name: "自动换行" }).getAttribute("aria-checked")).toBe("false");
   fireEvent.click(screen.getByRole("button", { name: "恢复编辑器默认设置" }));
   expect(useAppStore.getState().workbenchPreferences).toMatchObject({ proseSize: 14, tabSize: 4, wordWrap: true, formatOnSave: false,
     aiEnabled: true, aiModel: "saved-model", snippets: [snippet] });
+});
+
+it("retains the unfinished code template when advanced settings are collapsed and reopened", () => {
+  render(<AppearanceTab />);
+  expect(screen.getByRole("spinbutton", { name: "编辑器字号" })).toBeTruthy();
+  const advanced = screen.getByText("高级");
+  const disclosure = advanced.closest("details") as HTMLDetailsElement;
+  expect(disclosure.open).toBe(false);
+  fireEvent.click(advanced);
+  expect(disclosure.open).toBe(true);
+  expect(screen.getByRole("switch", { name: "AI 行内预测" })).toBeTruthy();
+  fireEvent.click(screen.getByText("自定义代码模板 · 0"));
+  fireEvent.change(screen.getByRole("textbox", { name: "模板前缀" }), { target: { value: "draft" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "模板正文" }), { target: { value: "console.log($1)" } });
+  fireEvent.click(advanced);
+  expect(disclosure.open).toBe(false);
+  fireEvent.click(advanced);
+  expect(disclosure.open).toBe(true);
+  expect(screen.getByRole("textbox", { name: "模板前缀" })).toHaveProperty("value", "draft");
+  expect(screen.getByRole("textbox", { name: "模板正文" })).toHaveProperty("value", "console.log($1)");
+  expect(useAppStore.getState().workbenchPreferences.snippets).toHaveLength(0);
 });
 
 it("keeps recording through IME events and distinguishes letters, function keys and modified Delete", () => {

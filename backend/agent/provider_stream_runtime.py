@@ -12,7 +12,7 @@ from backend.agent.first_byte_waiter import (
     ProviderStreamFailure,
 )
 from backend.agent.loop_preflight import PhaseDeadlineExceeded
-from backend.agent.model_execution import refresh_request_auth
+from backend.agent.model_execution import refresh_request_auth, provider_auth_refresh_allowed
 from backend.agent.loop_runtime_helpers import (
     epoch_ms,
     is_max_output_finish_reason,
@@ -39,9 +39,9 @@ from backend.agent.provider_stream_wait import (
 )
 from backend.agent.provider_stream_settlement import (
     ProviderStreamResult,
-    ProviderStreamSettlement,
-    settle_provider_stream,
     record_provider_attempt_usage,
+    settle_provider_eof,
+    complete_provider_response,
 )
 from backend.agent.provider_stream_failures import (
     ProviderStreamExceptionResult,
@@ -61,7 +61,6 @@ from backend.agent.provider_text_projection import finish_provider_text_item
 from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.tool_stream_tracker import StreamingToolTracker
-from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
 from backend.llm.errors import classify_llm_error
 from backend.llm.base import (
     StreamEventType,
@@ -71,7 +70,7 @@ from backend.llm.base import (
 
 
 Degrade = Callable[..., AsyncIterator[AgentEvent | TurnTerminalProjection]]
-ErrorRecovery = Callable[..., Awaitable[AgentEvent | None]]
+ErrorRecovery = Callable[..., Awaitable[bool]]
 
 
 async def stream_provider_response(
@@ -272,15 +271,7 @@ async def stream_provider_response(
                     provider_raw_done.update(event.raw)
                 if event.type in {StreamEventType.DONE, StreamEventType.ERROR}:
                     settle_attempt_usage(event.raw)
-                run_context = getattr(tool_context, "run_context", None)
-                auth_retry = (
-                    not stream_state.saw_visible_output
-                    and not stream_state.saw_provider_activity
-                    and not stream_state.committed_tool_ids
-                    and not stream_state.has_non_text_result
-                    and callable(getattr(run_context, "refresh_model_auth", None))
-                    and getattr(tool_context, "model_execution", None) is not None
-                )
+                auth_retry = provider_auth_refresh_allowed(tool_context, stream_state)
                 first_event = False
                 dispatch_result = None
                 async for dispatch_update in dispatch_provider_event(
@@ -451,40 +442,15 @@ async def stream_provider_response(
         # Normal EOF is settled before the consumer-close fallback. Only a
         # consumer that interrupts acquisition owns a cancelled request span.
         settle_attempt_usage()
-        if provider_attempt is not None and not provider_attempt.closed:
-            await turn_kernel.close_provider_attempt(
-                provider_attempt,
-                status="completed" if stream_state.provider_done else "failed",
-                summary="Provider stream completed" if stream_state.provider_done else "Provider stream ended without a terminal event",
-                data={
-                    "finish_reason": finish_reason or "stream_exhausted",
-                    **({} if stream_state.provider_done else {"error_type": "provider_terminal_missing"}),
-                },
-            )
-            if not stream_state.provider_done and not stream_state.committed_tool_ids:
-                for abandoned in abandoned_tool_announcement_events(stream_state, iteration_id=iteration_id_value):
-                    yield abandoned
-                for cancelled in cancelled_pending_tool_events(
-                    stream_state, tool_tracker, iteration_id=iteration_id_value,
-                    reason="provider_truncated",
-                ):
-                    yield cancelled
-                tool_tracker.cancel_remaining()
+        async for event in settle_provider_eof(turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+            stream_state=stream_state, finish_reason=finish_reason, tool_tracker=tool_tracker,
+            iteration_id=iteration_id_value):
+            yield event
     finally:
         settle_attempt_usage()
         await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)
 
-    if stream_state.committed_tool_ids and not state.stopped_reason and (
-        not stream_state.provider_done or is_max_output_finish_reason(finish_reason)
-    ):
-        retry_budget_boundary = budget_runtime.consume_retry("provider_stream_after_tools")
-        context_builder.append_user_context(
-            "The provider response stopped after completed tool calls were accepted. Their results are retained. "
-            "Continue from those results; do not repeat successful operations just to replay the interrupted response."
-        )
-
-    settlement = None
-    async for settlement_update in settle_provider_stream(
+    async for update in complete_provider_response(
         retry_budget_boundary=retry_budget_boundary,
         budget_runtime=budget_runtime,
         turn_kernel=turn_kernel,
@@ -495,32 +461,14 @@ async def stream_provider_response(
         state=state,
         pending_tool_calls=pending_tool_calls,
         provider_raw_done=provider_raw_done,
-        provider_done=stream_state.provider_done,
         visible_text_sanitizer=visible_text_sanitizer,
         stream_state=stream_state,
         stream_text=stream_text,
         context_builder=context_builder,
         usage=usage,
         turn_usage=turn_usage,
-    ):
-        if isinstance(settlement_update, ProviderStreamSettlement):
-            settlement = settlement_update
-        else:
-            yield settlement_update
-    if settlement is None:
-        raise RuntimeError("provider stream settlement returned without a result")
-    action = settlement.action
-    turn_usage = settlement.turn_usage
-    finish_reason = settlement.finish_reason
-
-    yield ProviderStreamResult(
-        action=action,
-        stream_state=stream_state,
-        stream_text=stream_text,
         tool_tracker=tool_tracker,
-        turn_usage=turn_usage,
-        usage=usage,
-        finish_reason=finish_reason,
         response_phase=provider_response_phase,
         thinking_chars=thinking_chars,
-    )
+    ):
+        yield update

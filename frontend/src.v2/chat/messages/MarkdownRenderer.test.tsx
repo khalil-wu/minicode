@@ -291,6 +291,7 @@ describe("MarkdownRenderer", () => {
 
     await waitFor(() => expect(screen.getByTestId("md-mermaid")).toBeTruthy());
     expect(mermaid.initialize).toHaveBeenCalledWith(expect.objectContaining({
+      htmlLabels: false,
       flowchart: { htmlLabels: false },
     }));
     expect(container.querySelector(".md-mermaid style")?.textContent).toContain("fill: #eef2ff");

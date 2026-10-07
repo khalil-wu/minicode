@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { NumberInput } from "../components/NumberInput";
 import { SelectMenu } from "../components/SelectMenu";
@@ -26,12 +26,15 @@ export function EditorPreferencesSettings() {
           <NumberInput aria-label={item.label} min={item.min} max={item.max} value={item.value} onCommit={item.set} /> px</span></label>)}
         <div className="settings-font-preview"><p>从一个想法开始，把细节做好。 Make something thoughtful.</p><code>const greeting = "Hello, MiniCode";</code></div>
       </div>
-      <button type="button" className="settings-action-button" onClick={() => {
+      <div className="settings-preferences-actions"><button type="button" className="settings-action-button" onClick={() => {
         update({ proseSize: defaultWorkbenchPreferences.proseSize });
         useAppStore.getState().setTextScale(1);
         useAppStore.getState().setCodeTextScale(1);
-      }}><RotateCcw size={14} />恢复默认字号</button>
+      }}><RotateCcw size={14} />恢复默认字号</button></div>
     </section>
+    <details className="settings-appearance-advanced">
+      <summary className="settings-appearance-advanced-trigger">高级<ChevronDown size={15} aria-hidden="true" /></summary>
+      <div className="settings-appearance-advanced-body">
     <section className="settings-group">
       <h3 className="settings-group-title">AI 代码预测</h3>
       <div className="settings-card">
@@ -64,10 +67,12 @@ export function EditorPreferencesSettings() {
           <button type="submit" className="settings-action-button"><Plus size={14} />添加模板</button>
         </form>
       </details>
-      <button type="button" className="settings-action-button" onClick={() => {
+      <div className="settings-preferences-actions"><button type="button" className="settings-action-button" onClick={() => {
         const keys = ["wordWrap", "minimap", "tabSize", "insertSpaces", "formatOnSave", "lineNumbers", "stickyScroll", "previewTabs"] as const;
         update(Object.fromEntries(keys.map((key) => [key, defaultWorkbenchPreferences[key]])));
-      }}><RotateCcw size={14} />恢复编辑器默认设置</button>
+      }}><RotateCcw size={14} />恢复编辑器默认设置</button></div>
     </section>
+      </div>
+    </details>
   </>;
 }

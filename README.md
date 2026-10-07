@@ -2,7 +2,11 @@
 
 MiniCode 是一个本地运行的 AI 编程助手，包含 Python 后端、React + Vite 前端和 Electron 桌面端。它提供工作区管理、代码编辑、终端、预览以及多模型对话能力。
 
-![MiniCode 桌面端：带来源面板的联网问答](docs/assets/screenshot-chat.png)
+![MiniCode 桌面端：真实双 agent 编码任务、Mermaid 与逐文件 Diff](docs/assets/screenshot-chat-20261007.png)
+
+完整回复后自动收起工具过程，点击可查看执行记录；子任务的工作记录在侧栏独立呈现，Diff 按文件展开。代码工作区提供 Monaco 编辑器、LSP 补全与导航，默认显示代码缩略图。
+
+截图在 2026-10-07 最新 Windows 桌面包中拍摄，展示真实编码任务的完成记录。修复范围、测试结果及验证边界见[本次验收记录](docs/validation/2026-10-07-release-closure.md)。
 
 ## 环境要求
 

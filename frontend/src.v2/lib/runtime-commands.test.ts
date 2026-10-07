@@ -59,7 +59,7 @@ describe("executeRuntimeSlashCommand", () => {
 
     const handled = await executeRuntimeSlashCommand("/review inspect the diff", deps);
 
-    expect(handled).toEqual({ sent: true, reset: "input" });
+    expect(handled).toEqual({ sent: true, reset: "composer" });
     expect(deps.sendChatMessage).toHaveBeenCalledWith({
       displayContent: "/review inspect the diff",
       backendContent: "/review inspect the diff",

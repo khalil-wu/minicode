@@ -67,3 +67,16 @@ async def refresh_request_auth(tool_context, context_builder, budget_runtime) ->
     tool_context.llm = refreshed.llm
     context_builder.bind_llm(refreshed.llm)
     return True
+
+
+def provider_auth_refresh_allowed(tool_context, stream_state) -> bool:
+    """Auth replay is limited to a selected request with no visible effects."""
+    owner = tool_context.run_context
+    return (
+        not stream_state.saw_visible_output
+        and not stream_state.saw_provider_activity
+        and not stream_state.committed_tool_ids
+        and not stream_state.has_non_text_result
+        and callable(owner.refresh_model_auth)
+        and tool_context.model_execution is not None
+    )

@@ -264,9 +264,10 @@ const DesktopUpdates = () => {
             : status === "rollback_launching" ? `正在恢复至 ${version || previousVersion || "上一版本"}…`
               : status === "rolled_back" ? `已自动恢复至 ${version || "上一版本"}${failedVersion ? `；版本 ${failedVersion} 未通过启动检查。` : "。"}`
                 : status === "recovery_required" ? `当前版本未通过启动检查${previousVersion ? `，且无法自动启动 ${previousVersion}` : ""}。${message ? ` ${message}` : ""}`
-            : status === "error" ? `更新服务失败${message ? `：${message}` : "，请稍后重试。"}`
+            : status === "unavailable" ? "此构建未启用自动更新。"
+              : status === "error" ? `更新服务失败${message ? `：${message}` : "，请稍后重试。"}`
               : "MiniCode 会通过已配置的发布源检查更新。";
-  const updatesUnavailable = status === "recovery_required" || status === "rollback_launching";
+  const updatesUnavailable = status === "unavailable" || status === "recovery_required" || status === "rollback_launching";
   const actionPending = Boolean(pendingAction);
   return (
     <SettingsGroup title="桌面更新">

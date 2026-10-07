@@ -77,6 +77,8 @@ def build_wire_adapter(
             default_headers=dict(settings.default_headers),
             provider_id=resolved_provider_id,
             supports_hosted_web_search=settings.supports_hosted_web_search,
+            input_modalities=settings.input_modalities,
+            parallel_tool_calls=settings.parallel_tool_calls,
             proxy_mode=str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
         )
     raise ValueError(f"Unsupported LLM wire API: {wire_api or '<empty>'}")
@@ -172,6 +174,7 @@ def _openai_compatible_settings(
         native_compaction=metadata["native_compaction"],
         model_instructions=metadata["model_instructions"],
         parallel_tool_calls=metadata["parallel_tool_calls"],
+        input_modalities=metadata["input_modalities"],
         tool_mode=metadata["tool_mode"],
         image_model=image_model,
         image_size=image_size,
@@ -243,6 +246,8 @@ def build_provider_adapter(
                 model=model,
                 model_instructions=get_provider_model_metadata(anthropic_settings, model)["model_instructions"],
                 supports_hosted_web_search=get_provider_model_metadata(anthropic_settings, model)["supports_hosted_web_search"],
+                input_modalities=get_provider_model_metadata(anthropic_settings, model)["input_modalities"],
+                parallel_tool_calls=get_provider_model_metadata(anthropic_settings, model)["parallel_tool_calls"],
                 small_fast_model=str(
                     anthropic_settings["small_fast_model"] or ""
                 ),
@@ -335,6 +340,8 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             default_headers=spec.headers,
             provider_id=spec.provider_id,
             supports_hosted_web_search=spec.supports_hosted_web_search,
+            input_modalities=spec.model.input if spec.model is not None else (),
+            parallel_tool_calls=spec.parallel_tool_calls,
             proxy_mode=spec.proxy_mode,
         )
 
@@ -375,6 +382,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             native_compaction=spec.native_compaction,
             model_instructions=spec.model_instructions,
             parallel_tool_calls=spec.parallel_tool_calls,
+            input_modalities=spec.model.input if spec.model is not None else (),
             tool_mode=spec.tool_mode,
             default_headers=tuple(
                 (str(key), str(value)) for key, value in spec.headers.items()

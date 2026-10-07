@@ -1198,7 +1198,10 @@ async def _run_authorized_tool(
                         tc.name, execution_args, context=tool_ctx
                     ),
                 )
-                result = await tm.wait(managed.id)
+                # This caller owns the execution, unlike independent manager
+                # observers. Propagate cancellation to the actual managed task
+                # and retain this wrapper until its concrete cleanup settles.
+                result = await managed.task
             except Exception as exc:
                 result = _execution_exception_result(
                     exc, label="Managed tool execution"
@@ -1511,7 +1514,13 @@ async def _apply_extension_post_tool_hook(
     patched_error = getattr(patch, "is_error", None)
     if patched_error is not None:
         is_error = bool(patched_error)
-    return replace(result, content=content, is_error=is_error)
+    status = result.status
+    if patched_error is not None and is_error != result.is_error:
+        status = "failed" if is_error else "success"
+        if not is_error:
+            result = replace(result, error_kind=None, user_summary=None, developer_detail=None,
+                projection=None, model_observation=None, provider_error_type=None)
+    return replace(result, content=content, is_error=is_error, status=status)
 
 
 def _display_path_for_tool_arg(
@@ -2203,12 +2212,31 @@ def store_result_events(
     tool_registry: ToolRegistry | None = None,
     append_context_result: Callable[..., None] | None = None,
 ) -> list[AgentEvent]:
+    image_artifact_events: list[AgentEvent] = []
+    # MCP images selected through Code Mode are presented by the cell output.
+    # Direct calls have no cell presenter and publish their raw image blocks here.
+    if (result.images and tc.name.startswith("mcp__") and tool_ctx is not None
+            and tool_ctx.result_sink is None):
+        for image in result.images:
+            media_type = image["media_type"]
+            body = base64.b64decode(image["data"], validate=True)
+            artifact_id = tool_ctx.artifact_store.save(image["data"], source=tc.name, type="image",
+                media_type=media_type, conversation_id=tool_ctx.conversation_id,
+                workspace_root=artifact_owner_workspace_root(tool_ctx))
+            image_artifact_events.append(AgentEvent("artifact.preview", {
+                "artifact_id": artifact_id, "conversation_id": tool_ctx.conversation_id,
+                "message_id": str(tool_ctx.metadata.get("assistant_message_id") or ""),
+                "kind": "image", "media_type": media_type, "summary": "MCP image",
+                "bytes": len(body),
+            }))
+        first = image_artifact_events[0].data
+        result = replace(result, artifact_id=result.artifact_id or first["artifact_id"],
+            artifact_kind=result.artifact_kind or "image", artifact_media_type=result.artifact_media_type or first["media_type"],
+            artifact_bytes=result.artifact_bytes if result.artifact_bytes is not None else first["bytes"])
     audio_events: list[AgentEvent] = []
     # Nested code-mode calls keep their raw audio for selection by audio().
     # Direct calls and selected cell outputs share this persistence boundary.
     if result.audios and tool_ctx is not None and tool_ctx.result_sink is None:
-        from backend.tools.base import artifact_owner_workspace_root
-
         references = []
         for audio in result.audios:
             media_type = audio["media_type"].lower()
@@ -2266,7 +2294,7 @@ def store_result_events(
                 image_events.append(AgentEvent.image_chunk(image_data, media_type))
     # Keep the terminal tool_result last because runtime-span settlement reads
     # the final emitted event as the authoritative tool completion record.
-    return [*audio_events, *resource_events, *image_events, event]
+    return [*image_artifact_events, *audio_events, *resource_events, *image_events, event]
 
 
 def _resolve_workspace_path_for_diff(

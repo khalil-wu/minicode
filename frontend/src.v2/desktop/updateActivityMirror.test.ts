@@ -37,6 +37,7 @@ describe("update activity snapshot", () => {
           messages: [],
           isStreaming: false,
           draft: "",
+          attachments: [{ id: "upload-side", name: "side.txt", type: "text/plain", size: 1, status: "uploading" }],
         },
       },
       pendingApproval: {
@@ -78,7 +79,7 @@ describe("update activity snapshot", () => {
       activeTurns: ["conv-active", "conv-background", "conv-runtime", "side-running"],
       sideChatStreams: ["side-running"],
       pendingPrompts: ["approval-1", "ask-1", "diff-1", "runtime-approval"],
-      uploadingAttachments: ["upload-background", "upload-live"],
+      uploadingAttachments: ["upload-background", "upload-live", "upload-side"],
       dirtyEditors: ["dirty.ts"],
       backgroundTasks: ["runtime-task", "task-running", "task-stalled"],
     });

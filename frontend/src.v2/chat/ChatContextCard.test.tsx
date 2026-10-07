@@ -31,6 +31,22 @@ vi.hoisted(() => {
 });
 
 describe("ChatContextCard", () => {
+  it("rejects browser-list results from the previous context-card owner", async () => {
+    let finishOld!: (targets: EmbeddedBrowserState[]) => void;
+    const old = new Promise<EmbeddedBrowserState[]>((resolve) => { finishOld = resolve; });
+    const target: EmbeddedBrowserState = { id: "native-new", conversationId: "conv-new", type: "updated", url: "https://new.example/", title: "New owner page", loading: false, canGoBack: false, canGoForward: false };
+    vi.spyOn(desktopRuntime, "isDesktop").mockReturnValue(true);
+    vi.spyOn(desktopRuntime, "embeddedBrowserList").mockImplementation((owner) => owner === "conv-active" ? old : Promise.resolve([target]));
+    vi.spyOn(desktopRuntime, "onEmbeddedBrowserEvent").mockReturnValue(vi.fn());
+    const activate = vi.spyOn(desktopRuntime, "embeddedBrowserActivate").mockResolvedValue(null);
+    render(<ChatContextCard />);
+    act(() => useAppStore.setState({ conversationId: "conv-new" }));
+    await screen.findByText("New owner page");
+    await act(async () => finishOld([{ ...target, id: "native-old", conversationId: "conv-active", title: "Old owner page" }]));
+    expect(screen.queryByText("Old owner page")).toBeNull();
+    fireEvent.click(screen.getByText("New owner page"));
+    expect(activate).toHaveBeenCalledWith("conv-new", "native-new");
+  });
   beforeEach(() => {
     useAppStore.setState({
       appMode: "cowork",

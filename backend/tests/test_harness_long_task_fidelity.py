@@ -129,6 +129,7 @@ class _SelectionSession(SessionCommandHandlersMixin):
         self.config = config
         self.provider = "openai"
         self.selected_model = "base"
+        self.llm = None
         self._model_override_active = False
         self._provider_override_active = False
         self._resolve_llm_provider = lambda *_: "openai"
@@ -171,8 +172,11 @@ def test_two_sessions_restore_task_selection_without_changing_captured_adapter(t
     assert config.llm.reasoning_effort == "medium"
     restarted = _SelectionSession(ConversationRepository(tmp_path), a.id, replace(config))
     restarted.refresh_llm_selection()
-    assert restarted.llm.model == "coding"
+    assert restarted.llm is None
+    assert restarted.selected_model == "coding"
     assert restarted.config.llm.reasoning_effort == "high"
+    asyncio.run(restarted.set_selected_model("coding", manual_override=False))
+    assert restarted.llm.model == "coding"
 
 
 def test_task_effort_overrides_global_value_in_ui_payload():

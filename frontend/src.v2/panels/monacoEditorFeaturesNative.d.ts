@@ -1,4 +1,8 @@
 declare module "monaco-editor/editor/browser/coreCommands.js";
+declare module "monaco-editor/base/common/errors.js" {
+  export class CancellationError extends Error {}
+  export function isCancellationError(error: unknown): boolean;
+}
 declare module "monaco-editor/editor/common/services/languageFeatures.js" {
   export const ILanguageFeaturesService: unknown;
 }

@@ -617,6 +617,9 @@ class StreamEvent:
     # Provider-normalized terminal reason on DONE events, e.g. "stop",
     # "tool_calls", "length", "max_tokens", or "max_output_tokens".
     finish_reason: str = ""
+    # Responses can complete one response while explicitly requesting another
+    # sampling step. This is a turn-control signal, not a transport finish reason.
+    end_turn: bool | None = None
     # Provider-native metadata kept off the user-facing UI by default. Adapters
     # attach small raw fragments here so usage deltas, stop reasons, and future
     # provider-specific fields are not discarded by normalization.
@@ -1061,8 +1064,14 @@ class LLMAdapter(ABC):
         raise NotImplementedError("This adapter does not support native compaction")
 
     def validate_context(self, messages: list[LLMMessage]) -> None:
+        self.validate_media_input(messages)
         from backend.llm.native_compaction import require_native_context_origin
         require_native_context_origin(messages)
+
+    def validate_media_input(self, messages: list[LLMMessage]) -> None:
+        from backend.llm.capabilities import capabilities_for_adapter
+        if capabilities_for_adapter(self).vision is False and any(message.images for message in messages):
+            raise ValueError("The selected model declares text-only input and cannot receive image payloads.")
 
     async def _run_auxiliary_call(
         self,

@@ -811,14 +811,21 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
 def test_provider_protocol_conversion_failure_is_fatal_and_never_enters_retry_budget() -> (
     None
 ):
+    from backend.agent.context import ContextBuilder
+    from backend.agent.run_context import RunContext
+
     class TurnKernel:
         def __init__(self) -> None:
             self.closed: list[dict[str, object]] = []
+            self.run_context = RunContext()
 
         async def close_provider_attempt(self, _attempt, **kwargs) -> None:
             self.closed.append(kwargs)
 
     class BudgetRuntime:
+        def active_phase_deadline(self):
+            return None
+
         def consume_retry(self, reason: str):
             raise AssertionError(
                 f"protocol failure must not consume retry budget: {reason}"
@@ -848,7 +855,7 @@ def test_provider_protocol_conversion_failure_is_fatal_and_never_enters_retry_bu
             async for item in handle_provider_error_event(
                 event,
                 state=SimpleNamespace(),
-                context_builder=SimpleNamespace(),
+                context_builder=ContextBuilder(),
                 turn_kernel=kernel,
                 provider_attempt=object(),
                 stream_state=StreamAttemptState(),

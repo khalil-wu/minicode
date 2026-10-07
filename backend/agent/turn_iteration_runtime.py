@@ -21,6 +21,7 @@ from backend.llm.capabilities import (
 )
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 from backend.tools.registry import ToolRegistry
+from backend.services.context_budget import build_context_compacted_event, context_ledger_snapshot
 
 
 @dataclass(slots=True)
@@ -80,11 +81,10 @@ class TurnIterationRuntime:
         self._base_schema_permission: Any = None
         self._base_schemas: list[dict[str, Any]] = []
 
-    def sync_active_session_model(self) -> Any:
+    def sync_active_session_model(self, snapshot: Any) -> Any:
         """Capture the selection before context preparation and provider I/O."""
 
         owner = self.agent_session
-        snapshot = self.tool_context.run_context.model_execution
         self.tool_context.run_context.active_model_execution = snapshot
         self.tool_context.model_execution = snapshot
         active_llm = snapshot.llm if snapshot is not None else getattr(owner, "llm", None)
@@ -120,7 +120,16 @@ class TurnIterationRuntime:
                     break
                 # A host selection published during the await owns the next
                 # step. Refresh that choice under the same admission deadline.
-        self.sync_active_session_model()
+        snapshot = run_context.model_execution
+        model_events: list[AgentEvent] = []
+        if snapshot is not None and self.context._llm is not snapshot.llm:
+            target_budget = snapshot.config.token_budget
+            if (target_budget.total < self.context._budget.total
+                and self.context.token_usage > target_budget.total - target_budget.reserved_response_tokens):
+                before = context_ledger_snapshot(self.context)
+                summary = await self.context.compact(restore_state=self.state, replacement_budget=target_budget)
+                model_events.append(build_context_compacted_event(summary, before, context_ledger_snapshot(self.context)))
+        self.sync_active_session_model(snapshot)
         mcp_version, mcp_instructions = self.mcp_catalog(self.base_tool_registry)
         self.tool_registry = self.base_tool_registry.fork()
         self.tool_context.tool_registry = self.tool_registry
@@ -241,7 +250,7 @@ class TurnIterationRuntime:
         self.state.prompt_context["deferred_tools_prompt_block"] = (
             schema_state.deferred_tools_prompt_block
         )
-        events: list[AgentEvent] = []
+        events: list[AgentEvent] = model_events
         boundary_input = await self.turn_kernel.take_boundary_input(
             initial_turn_pending=initial_turn_pending,
         )

@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from backend.agent.provider_attempt import ProviderAttempt
+from backend.agent.run_context import RunContext
 from backend.agent.provider_completion import ProviderCompletionResult
 from backend.agent.provider_event_projection import project_non_text_provider_event
 from backend.agent.provider_protocol import add_usage
@@ -25,6 +26,7 @@ from backend.llm.cost_tracker import CostTracker, estimate_usage_cost_usd
 from backend.llm.model_runtime import ModelRuntime
 from backend.llm.openai_adapter import OpenAIAdapter, _json_to_namespace, _responses_tool_calls_from_provider_items
 from backend.llm.openai_usage import _get_usage_cost_usd
+from backend.permissions.context import PermissionContext, ToolExecutionContext
 
 
 @pytest.fixture
@@ -303,7 +305,8 @@ def provider_run(monkeypatch, batches):
         turn_kernel=Kernel(), budget_runtime=SimpleNamespace(ensure_started=lambda: None, cost_session_id="probe",
             record_provider_usage_total=lambda value: committed.append(value.total_tokens)), turn_usage=turn.usage,
         settings=SimpleNamespace(stream_max_attempts=1, live_text_streaming=True), tool_registry=None, permission_checker=None,
-        effective_permission_context=None, tool_context=SimpleNamespace(cancel_event=asyncio.Event()), turn_start_tool_call_count=0,
+        effective_permission_context=None, tool_context=ToolExecutionContext(permission=PermissionContext(),
+            cancel_event=asyncio.Event(), run_context=RunContext()), turn_start_tool_call_count=0,
         turn_started_at=0, iteration_limit=10, tool_batch_count=0, iteration_id_value="i1", stream_retry_policy=None, error_controller=None,
         chain=SimpleNamespace(record_usage=lambda **kwargs: None), stream_text=StreamTextState(), degrade_and_finish=unused, recover_withheld_error=None)
     return generator, turn, committed

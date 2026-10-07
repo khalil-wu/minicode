@@ -10,6 +10,8 @@ import httpx
 import pytest
 
 from backend.agent.error_withholding import is_context_overflow_error
+from backend.agent.context import ContextBuilder
+from backend.agent.run_context import RunContext
 from backend.agent.policies.stream_retry import DefaultStreamRetryPolicy, StreamRetryState
 from backend.agent.provider_stream_error_event import (
     handle_provider_error_event,
@@ -58,8 +60,8 @@ async def _drive(event, *, retry_state: StreamRetryState, attempt: int, waits: l
     async for item in handle_provider_error_event(
         event,
         state=SimpleNamespace(),
-        context_builder=None,
-        turn_kernel=SimpleNamespace(close_provider_attempt=noop, emit_runtime_span=None),
+        context_builder=ContextBuilder(),
+        turn_kernel=SimpleNamespace(close_provider_attempt=noop, emit_runtime_span=None, run_context=RunContext()),
         provider_attempt=SimpleNamespace(span_id="s"),
         stream_state=StreamAttemptState(),
         stream_text=StreamTextState(),
@@ -70,6 +72,7 @@ async def _drive(event, *, retry_state: StreamRetryState, attempt: int, waits: l
         stream_attempt=attempt,
         stream_recovery_attempted=False,
         budget_runtime=SimpleNamespace(
+            active_phase_deadline=lambda: None,
             bounded_provider_timeout=lambda delay: (waits.append(delay) or 0.0, False),
             consume_retry=lambda reason: None,
         ),

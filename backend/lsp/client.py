@@ -253,7 +253,7 @@ class LSPClient:
                     "definition": {"dynamicRegistration": False},
                     "references": {"dynamicRegistration": False},
                     "hover": {"dynamicRegistration": False},
-                    "documentSymbol": {"dynamicRegistration": False},
+                    "documentSymbol": {"dynamicRegistration": False, "hierarchicalDocumentSymbolSupport": True},
                     "completion": {"completionItem": {"snippetSupport": True}},
                     "signatureHelp": {},
                     "publishDiagnostics": {"versionSupport": True},

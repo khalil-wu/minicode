@@ -79,8 +79,39 @@ describe("AgentTimeline", () => {
       toolCallRecords: [{ id: "fetch-call", name: "web_fetch", status: "failed", args: { url: "https://example.com/Read/Search" } }],
     };
     render(<AgentTimeline cells={[activity("search", "workspaceSearch"), fetchCell, activity("read", "fileRead")]} renderCell={renderCell} />);
-    expect(screen.getByRole("region", { name: "搜索 · 读取网页 · 读取 · 失败" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "搜索 · 读取网页失败 · 读取" })).toBeTruthy();
     expect(fetchCell.toolCallRecords?.[0]).toMatchObject({ name: "web_fetch", status: "failed", args: { url: "https://example.com/Read/Search" } });
+  });
+
+  it("uses operation captions without a tool-call category and retains failed records", () => {
+    const pendingOutput: AgentLoopProcessCell = { kind: "activity", id: "output", activityKind: "genericTool", title: "读取命令输出",
+      status: "done", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true,
+      toolCallRecords: [{ id: "output-call", name: "get_command_output", status: "success" }],
+    };
+    const failedOutput: AgentLoopProcessCell = { ...pendingOutput, status: "failed",
+      toolCallRecords: [{ id: "output-call", name: "get_command_output", status: "failed" }],
+    };
+    const failedRun = { ...exec("failed-test", "npm test"), status: "failed" } as AgentLoopProcessCell;
+    const { rerender } = render(<AgentTimeline cells={[failedOutput, activity("read", "fileRead"), fileChange("edit"), failedRun]} renderCell={renderCell} />);
+    expect(screen.getByRole("region", { name: "读取 · 编辑 · 运行失败" })).toBeTruthy();
+    expect(screen.queryByText(/工具调用/)).toBeNull();
+    expect(screen.getByText("npm test")).toBeTruthy();
+    expect(failedOutput.toolCallRecords?.[0]).toMatchObject({ id: "output-call", name: "get_command_output", status: "failed" });
+    expect(failedRun).toMatchObject({ status: "failed", command: "npm test" });
+    rerender(<AgentTimeline cells={[pendingOutput, openExec("latest", "npm test")]} renderCell={renderCell} isRunning />);
+    expect(screen.getByRole("region", { name: "正在运行 1 条命令" })).toBeTruthy();
+  });
+
+  it("keeps unclassified failures visible without inventing a read failure or generic group", () => {
+    const failedTool: AgentLoopProcessCell = { kind: "activity", id: "mcp", activityKind: "genericTool", title: "MCP calendar",
+      status: "failed", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true,
+    };
+    const { rerender } = render(<AgentTimeline cells={[activity("read", "fileRead"), failedTool]} renderCell={renderCell} />);
+    expect(screen.getByRole("region", { name: "读取 · 失败" })).toBeTruthy();
+    expect(screen.queryByText("查看失败")).toBeNull();
+    rerender(<AgentTimeline cells={[failedTool, { ...failedTool, id: "mcp-two" }]} renderCell={renderCell} />);
+    expect(screen.queryByRole("region")).toBeNull();
+    expect(screen.getAllByText("activity")).toHaveLength(2);
   });
   it("preserves a user's collapse choice when a live group closes", () => {
     const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);

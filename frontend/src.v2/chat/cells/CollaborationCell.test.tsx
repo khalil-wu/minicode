@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CollaborationCell } from "./CollaborationCell";
 import { useAppStore } from "../../stores";
@@ -21,9 +21,9 @@ describe("CollaborationCell agent navigation", () => {
 
   it("keeps delegation success separate from the child's live status and opens that child", () => {
     render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
-    expect(screen.queryByText("开始工作")).toBeNull();
+    expect(screen.getByText("开始工作")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /子任务详情/ })).toBeNull();
-    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada开始工作");
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Ada" }));
     expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
     expect(useAppStore.getState().rightStackTab).toBe("subagents");
@@ -95,6 +95,7 @@ describe("CollaborationCell agent navigation", () => {
     fireEvent.click(screen.getByText("错误详情"));
     expect(screen.getByRole("alert").textContent).toBe("子任务启动失败");
     expect(screen.queryByText("委派失败")).toBeNull();
+    expect(screen.queryByText("开始工作")).toBeNull();
     expect(container.querySelector("details")?.open).toBe(true);
     expect(container.textContent).not.toContain(instructions);
     expect(screen.queryByText("委派指令")).toBeNull();
@@ -102,8 +103,8 @@ describe("CollaborationCell agent navigation", () => {
     expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
   });
 
-  it("does not turn an unstarted request without an agent id into a named or clickable agent", () => {
-    const { container } = render(<CollaborationCell cell={{ ...cell, status: "running", collapsed: false,
+  it.each(["running", "success"] as const)("does not turn a %s request without an agent id into a named or clickable agent", (status) => {
+    const { container } = render(<CollaborationCell cell={{ ...cell, status, collapsed: false,
       entries: [{ agentId: "", agentLabel: "parser", content: "Implement parser.py and then test it" }],
     }} conversationId="collaboration-owner" />);
     expect(screen.queryByRole("status")).toBeNull();
@@ -114,7 +115,7 @@ describe("CollaborationCell agent navigation", () => {
     expect(useAppStore.getState().focusedSubagentId).toBeNull();
   });
 
-  it("pairs each parallel worker's own glyph and name on one row without prompt or start labels", () => {
+  it("pairs each real parallel start with its own glyph and name without exposing prompts", () => {
     useAppStore.setState((state) => ({ subagents: [...state.subagents,
       { id: "worker-b", agentPath: "/root/b", teammateName: "Lin", role: "subagent", status: "running", objective: "实现解析器" }],
     }));
@@ -124,10 +125,10 @@ describe("CollaborationCell agent navigation", () => {
     ] }} conversationId="collaboration-owner" />);
     const rows = container.querySelectorAll(".collaboration-delegated-row");
     expect(rows).toHaveLength(2);
-    expect(rows[0].textContent).toBe("Ada");
-    expect(rows[1].textContent).toBe("Lin");
+    expect(rows[0].textContent).toBe("Ada开始工作");
+    expect(rows[1].textContent).toBe("Lin开始工作");
     for (const row of rows) expect(row.querySelectorAll(".mc-agent-avatar-art")).toHaveLength(1);
-    expect(screen.queryByText("开始工作")).toBeNull();
+    expect(screen.getAllByText("开始工作")).toHaveLength(2);
     expect(screen.queryByText("Implement all parser details")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Lin" }));
     expect(useAppStore.getState().focusedSubagentId).toBe("worker-b");
@@ -137,8 +138,58 @@ describe("CollaborationCell agent navigation", () => {
     useAppStore.setState({ conversationAgentStates: { archived: { subagents: [{ id: "worker-a", agentPath: "/root/a", teammateName: "Ada", role: "explore", status: "done" }], todos: [], agentProgress: [], plan: null } } });
     render(<CollaborationCell cell={cell} conversationId="archived" />);
     expect(screen.getByText("Ada")).toBeTruthy();
+    expect(screen.getByText("开始工作")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /打开子智能体/ })).toBeNull();
     expect(useAppStore.getState().focusedSubagentId).toBeNull();
+  });
+
+  it("preserves a successful start milestone and the same identity after the child completes", () => {
+    const view = render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
+    const avatar = view.container.querySelector(".mc-agent-avatar")!;
+    const identity = [avatar.getAttribute("data-glyph"), avatar.getAttribute("data-identity-color")];
+    const artwork = view.container.querySelector(".mc-agent-avatar-art")!.innerHTML;
+    act(() => useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "done" as const })) })));
+    view.rerender(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada开始工作");
+    expect(avatar.getAttribute("data-glyph")).toBe(identity[0]);
+    expect(avatar.getAttribute("data-identity-color")).toBe(identity[1]);
+    expect(view.container.querySelector(".mc-agent-avatar-art")!.innerHTML).toBe(artwork);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Ada" }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
+  });
+
+  it("keeps a long real name and the unspaced start suffix in separate text slots", () => {
+    const name = "Editor question defaults ".repeat(20).trim();
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, teammateName: name })) }));
+    const { container } = render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
+    const row = screen.getByRole("button", { name: `打开子智能体：${name}` });
+    expect(row.textContent).toBe(`${name}开始工作`);
+    expect(container.querySelector(".collaboration-delegated-label > .collaboration-delegated-name")?.textContent).toBe(name);
+    expect(container.querySelector(".collaboration-delegated-label > .collaboration-delegated-start")?.textContent).toBe("开始工作");
+    expect(row.getAttribute("data-started")).toBe("true");
+  });
+
+  it("does not call a real queued identity started before the worker begins", () => {
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "pending" as const })) }));
+    render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
+    expect(screen.queryByText("开始工作")).toBeNull();
+  });
+
+  it.each(["running", "failed", "partial", "cancelled"] as const)("never converts a %s delegation into a successful start", (status) => {
+    render(<CollaborationCell cell={{ ...cell, status }} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
+    expect(screen.queryByText("开始工作")).toBeNull();
+  });
+
+  it("opens the actual saved child identity from a successful historical start", () => {
+    useAppStore.setState({ subagents: [] });
+    render(<CollaborationCell cell={{ ...cell, entries: [{ agentId: "worker-a", agentLabel: "Editor question defaults",
+      agentIdentity: "/root/editor_question_defaults", agentStatus: "done" }] }} conversationId="collaboration-owner" />);
+    expect(screen.getByText("开始工作")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Editor question defaults" }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
+    expect(useAppStore.getState().subagents[0]).toMatchObject({ id: "worker-a", agentPath: "/root/editor_question_defaults", status: "done" });
   });
 
   it("renders a real completion as a quiet identity, name and status row", () => {
@@ -147,6 +198,7 @@ describe("CollaborationCell agent navigation", () => {
     }} conversationId="collaboration-owner" />);
     expect(screen.getByText("Ada")).toBeTruthy();
     expect(screen.getByText("已完成")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada已完成");
     expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
     expect(screen.queryByText("查看运行详情")).toBeNull();
     expect(screen.queryByText("委派指令")).toBeNull();
@@ -164,5 +216,20 @@ describe("CollaborationCell agent navigation", () => {
     expect(screen.getByText("已停止")).toBeTruthy();
     expect(screen.queryByText("已完成")).toBeNull();
     expect(screen.queryByRole("button", { name: /打开子智能体/ })).toBeNull();
+  });
+
+  it.each([
+    ["success", "已完成"], ["failed", "失败"], ["partial", "部分完成"], ["cancelled", "已停止"],
+  ] as const)("keeps the real %s completion suffix next to a long name without replacing its identity", (status, suffix) => {
+    const name = "Subagent surface alignment ".repeat(16).trim();
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, teammateName: name })) }));
+    const { container } = render(<CollaborationCell cell={{ ...cell, action: "completed", status }} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: `打开子智能体：${name}` }).textContent).toBe(`${name}${suffix}`);
+    expect(container.querySelector(".collaboration-completion-label > .collaboration-completion-name")?.textContent).toBe(name);
+    expect(container.querySelector(".collaboration-completion-label > .collaboration-completion-status")?.textContent).toBe(suffix);
+    expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
+    expect(screen.queryByText("开始工作")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: `打开子智能体：${name}` }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
   });
 });

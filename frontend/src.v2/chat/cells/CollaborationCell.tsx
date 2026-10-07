@@ -50,15 +50,20 @@ export const CollaborationCell = memo(function CollaborationCell({
         const agent = agentFor(entry.agentId);
         const label = agentNames.get(entry.agentId);
         const canOpen = conversationId === activeConversationId;
-        const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} /><span className="collaboration-delegated-name">{label}</span></>;
+        const hasStarted = cell.action === "delegated" && cell.status === "success"
+          && (agent?.effectiveStatus || entry.agentStatus) !== "pending";
+        const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} />
+          <span className="collaboration-delegated-label"><span className="collaboration-delegated-name">{label}</span>
+            {hasStarted && <span className="collaboration-delegated-start">开始工作</span>}
+          </span></>;
         return canOpen ? <button key={entry.agentId} type="button" className="collaboration-delegated-row"
           aria-label={`打开子智能体：${label}`} title={`查看 ${label} 的工作记录${agent ? ` · ${agent.statusLabel}` : ""}`}
-          data-agent-status={agent?.effectiveStatus || entry.agentStatus} onClick={() => {
+          data-agent-status={agent?.effectiveStatus || entry.agentStatus} data-started={hasStarted} onClick={() => {
             if (!agent) useAppStore.getState().addSubagent({ id: entry.agentId, role: "subagent", status: entry.agentStatus!,
               teammateName: label, agentPath: entry.agentIdentity }, conversationId);
             openAgent(agent?.id ?? entry.agentId);
           }}>{content}</button>
-          : <div key={entry.agentId} className="collaboration-delegated-row" data-agent-status={agent?.effectiveStatus || entry.agentStatus}>{content}</div>;
+          : <div key={entry.agentId} className="collaboration-delegated-row" data-agent-status={agent?.effectiveStatus || entry.agentStatus} data-started={hasStarted}>{content}</div>;
       })}
       {cell.error && <details className="collaboration-delegated-error">
         <summary>错误详情</summary>
@@ -73,7 +78,10 @@ export const CollaborationCell = memo(function CollaborationCell({
       {cell.entries.map((entry) => {
         const agent = agentFor(entry.agentId);
         const label = agentNames.get(entry.agentId);
-        const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} /><span>{label}</span><span className="collaboration-completion-status">{statusLabel}</span></>;
+        const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} />
+          <span className="collaboration-completion-label"><span className="collaboration-completion-name">{label}</span>
+            <span className="collaboration-completion-status">{statusLabel}</span>
+          </span></>;
         const canOpen = entry.agentId.trim() && (agent || entry.agentStatus) && conversationId === activeConversationId;
         return canOpen
           ? <button key={entry.agentId} type="button" className="collaboration-completion-row" aria-label={`打开子智能体：${label}`}

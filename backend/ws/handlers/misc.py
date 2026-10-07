@@ -1283,12 +1283,15 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     )
 
     _clear_session_llm_cache(session)
-    session.llm = _get_or_create_session_llm(
-        session,
-        config=session.config,
-        provider=session.provider,
-        model=session.selected_model,
-        model_runtime=model_runtime,
+    session.llm = (
+        _get_or_create_session_llm(
+            session,
+            config=session.config,
+            provider=session.provider,
+            model=session.selected_model,
+            model_runtime=model_runtime,
+        )
+        if session.selected_model else None
     )
     session.context_builder.bind_llm(session.llm)
     session.context_builder.bind_budget(session.config.token_budget)
@@ -1299,11 +1302,11 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
             model=session.selected_model,
             reasoning_effort=str(session.config.llm.reasoning_effort or ""),
         )
-        if owner is not session:
+        if owner is not session and session.selected_model:
             await owner._set_selected_provider_model(session.provider, session.selected_model,
                 manual_override=True, conversation_id=conversation_id, config_override=session.config,
                 reasoning_effort=reasoning_effort or None)
-        else:
+        elif session.selected_model:
             from backend.agent.model_execution import ModelExecutionSnapshot
 
             snapshot = ModelExecutionSnapshot.capture(session.config, session.llm)

@@ -17,6 +17,22 @@ const content = "😀 foo\r\nfoo\r\n";
 const match = (id: string, offset: number, line: number, column: number) => ({ id, offset, length: 3, line, column, end_line: line, end_column: column + 3, text: "foo", snippet: "foo", groups: [], named_groups: {} });
 
 describe("project search and selected replacement UI", () => {
+  it("invalidates a pending query before a late result can enable replacement", async () => {
+    const workspace = "/search-query-invalidation";
+    useAppStore.setState({ workingDirectory: workspace, editorTabs: [] });
+    let finish!: (value: Awaited<ReturnType<typeof searchWorkspaceText>>) => void;
+    vi.mocked(searchWorkspaceText).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    render(<WorkspaceSearchPanel />);
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索项目内容" }), { target: { value: "foo" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索", exact: true }));
+    const signal = vi.mocked(searchWorkspaceText).mock.calls[0][3]!;
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索项目内容" }), { target: { value: "bar" } });
+    expect(signal.aborted).toBe(true);
+    finish({ workspace_root: workspace, files: [], match_count: 7, truncated: false, issues: [] });
+    await waitFor(() => expect(screen.getByRole("button", { name: "搜索", exact: true }).hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByText(/已显示 7/)).toBeNull();
+    expect(screen.getByRole("button", { name: /预览选中替换/ }).hasAttribute("disabled")).toBe(true);
+  });
   it("searches live buffers, reveals an exact UTF-16 range, previews outside sidebar containment and invalidates applied results", async () => {
     const workspace = "/search-panel-selection";
     useAppStore.setState({ workingDirectory: workspace, appMode: "code", panelSlots: [{ id: "editor", kind: "editor", focused: true }], editorTabs: [

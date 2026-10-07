@@ -1632,6 +1632,9 @@ class AgentEvent:
         event_seq: int | None = None,
         last_event_type: str = "",
         tool_states: list[dict[str, Any]] | None = None,
+        snapshot_id: str = "",
+        snapshot_part: int | None = None,
+        snapshot_complete: bool | None = None,
     ) -> AgentEvent:
         clean_conversation_id = _required_event_text(
             conversation_id,
@@ -1735,6 +1738,16 @@ class AgentEvent:
             data["event_seq"] = _non_negative_event_int(event_seq, field_name="event_seq")
         if states is not None:
             data["tool_states"] = states
+        if snapshot_id:
+            data["snapshot_id"] = _required_event_text(
+                snapshot_id, field_name="snapshot_id", maximum=_MAX_EVENT_ID_CHARS,
+            )
+            data["snapshot_part"] = _non_negative_event_int(snapshot_part, field_name="snapshot_part")
+            if not isinstance(snapshot_complete, bool):
+                raise ValueError("snapshot_complete must be a boolean")
+            data["snapshot_complete"] = snapshot_complete
+        elif snapshot_part is not None or snapshot_complete is not None:
+            raise ValueError("snapshot_id is required for paged stream recovery")
         return cls(
             type="stream_resume",
             data=data,

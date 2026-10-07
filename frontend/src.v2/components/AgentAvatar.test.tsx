@@ -3,6 +3,7 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentAvatar } from "./AgentAvatar";
+import { agentIdentity } from "../lib/agent-identity";
 
 describe("AgentAvatar identity", () => {
   afterEach(cleanup);
@@ -36,6 +37,16 @@ describe("AgentAvatar identity", () => {
   it("can identify a referenced task without suggesting an unknown execution state", () => {
     const { container } = render(<AgentAvatar identityKey="referenced-agent" />);
     expect(container.querySelector(".mc-agent-avatar-art")).toBeTruthy();
+    expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
+  });
+
+  it("uses the reference flower's four petals and four outer dots without a status marker", () => {
+    const key = Array.from({ length: 64 }, (_, index) => `reference-${index}`)
+      .find((candidate) => agentIdentity(candidate).glyph === "petal")!;
+    const { container } = render(<AgentAvatar identityKey={key} size="small" />);
+    const artwork = container.querySelector(".mc-agent-avatar-art")!;
+    expect(artwork.querySelectorAll("path")).toHaveLength(4);
+    expect(artwork.querySelectorAll("circle[transform]")).toHaveLength(4);
     expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
   });
 });

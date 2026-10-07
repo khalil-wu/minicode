@@ -313,20 +313,25 @@ def _compact_mcp_instruction_text(text: Any) -> str:
 def build_tool_runtime_guidance(
     tool_schemas: list[Any],
     mcp_instructions: dict[str, str] | None = None,
+    *,
+    reachable_mcp_tools: set[str] | None = None,
 ) -> str:
     """Build compact per-turn runtime guidance from available tools."""
     # This section is derived from the live tool registry and MCP server
     # instructions. Recompute it instead of maintaining a second process-wide
     # cache whose invalidation would be weaker than the registry lifecycle.
-    return _build_tool_runtime_guidance_uncached(tool_schemas, mcp_instructions)
+    return _build_tool_runtime_guidance_uncached(tool_schemas, mcp_instructions,
+        reachable_mcp_tools=reachable_mcp_tools)
 
 
 def _build_tool_runtime_guidance_uncached(
     tool_schemas: list[Any],
     mcp_instructions: dict[str, str] | None = None,
+    *,
+    reachable_mcp_tools: set[str] | None = None,
 ) -> str:
     names = _tool_names(tool_schemas)
-    mcp_tools = sorted(name for name in names if name.startswith("mcp__"))
+    mcp_tools = sorted(name for name in names | (reachable_mcp_tools or set()) if name.startswith("mcp__"))
     sections: list[str] = []
 
     host_api: list[str] = []

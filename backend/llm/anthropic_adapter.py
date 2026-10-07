@@ -137,6 +137,8 @@ class AnthropicAdapter(LLMAdapter):
         max_context_window_verified: bool = False,
         tool_mode: str = "",
         supports_hosted_web_search: bool | None = None,
+        input_modalities: tuple[str, ...] = (),
+        parallel_tool_calls: bool | None = None,
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
@@ -145,6 +147,8 @@ class AnthropicAdapter(LLMAdapter):
         self._model_instructions = model_instructions
         self._tool_mode = tool_mode
         self._declared_hosted_web_search_support = supports_hosted_web_search
+        self._input_modalities = input_modalities
+        self._parallel_tool_calls = parallel_tool_calls
         self._small_fast_model = str(small_fast_model or "").strip()
         self._base_url = base_url
         self._max_tokens = max(1, max_tokens or 8_000)
@@ -317,6 +321,7 @@ class AnthropicAdapter(LLMAdapter):
         max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """流式调用 Claude Messages API。"""
+        self.validate_media_input(messages)
         # 分离 system prompt + 消息交替保证
         system_text, api_messages = self._convert_messages(messages)
         side_options = context.options if context is not None else None
@@ -473,6 +478,8 @@ class AnthropicAdapter(LLMAdapter):
         if tools and cached_tools:
             kwargs["tools"] = cached_tools
             kwargs["tool_choice"] = {"type": "auto"}
+            if self.capabilities.parallel_tool_calls is False:
+                kwargs["tool_choice"]["disable_parallel_tool_use"] = True
 
         if side_options is not None and side_options.output_schema is not None:
             output_config = dict(kwargs.get("output_config") or {})

@@ -121,6 +121,7 @@ class LLMSettings:
     native_compaction: bool | None = None
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
+    input_modalities: tuple[str, ...] = ()
     seed: int | None = None
     default_headers: tuple[tuple[str, str], ...] = ()
     auth_header: bool = False
@@ -622,6 +623,8 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
             metadata["model_instructions"] = raw_metadata["model_instructions"].strip()
         if isinstance(raw_metadata.get("parallel_tool_calls"), bool):
             metadata["parallel_tool_calls"] = raw_metadata["parallel_tool_calls"]
+        if "input" in raw_metadata:
+            metadata["input"] = _coerce_model_list(raw_metadata["input"])
         if tool_mode := normalize_tool_mode(raw_metadata.get("tool_mode")):
             metadata["tool_mode"] = tool_mode
         if metadata:
@@ -713,6 +716,7 @@ def get_provider_model_metadata(
         "native_compaction": declared.get("native_compaction"),
         "model_instructions": declared.get("model_instructions", ""),
         "parallel_tool_calls": declared.get("parallel_tool_calls"),
+        "input_modalities": tuple(declared.get("input", ())),
         "tool_mode": declared.get("tool_mode", ""),
         "context_window": resolution.tokens,
         "context_window_source": resolution.source,

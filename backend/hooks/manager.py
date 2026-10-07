@@ -1511,6 +1511,10 @@ class HookManager:
             ),
             name=f"hook:{event.value}:{entry.raw_matcher or '*'}",
         )
+        if entry.hook_type == "prompt" and not entry.model:
+            owner = getattr(runtime.tool_context, "run_context", None)
+            if owner is not None:
+                owner.retain_lifecycle_task(task, label="async_prompt_hook", llm=runtime.llm)
         self._track_async_task(task, event)
 
     def _schedule_dynamic_async_command(

@@ -18,6 +18,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
@@ -29,7 +30,7 @@ from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.message import SessionMessage
+from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.shared.exceptions import McpError
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pydantic import AnyUrl
@@ -64,6 +65,9 @@ _MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 # MiniCode's own contract with a user-configured `headers_helper`: the helper is
 # told which server it is being asked to authenticate.
 _HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
+
+_request_owner: ContextVar[dict[str, Any] | None] = ContextVar("mcp_request_owner", default=None)
+_callback_owner: ContextVar[tuple[bool, dict[str, Any] | None] | None] = ContextVar("mcp_callback_owner", default=None)
 
 
 def _sanitize_tool_schema_descriptions(schema: Any) -> None:
@@ -106,6 +110,28 @@ class _LifecycleClientSession(ClientSession):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._transport_closed = transport_closed
+        self._request_owners: dict[Any, dict[str, Any]] = {}
+
+    async def send_request(self, request: Any, result_type: Any, *args: Any, **kwargs: Any) -> Any:
+        request_id = self._request_id
+        owner = _request_owner.get()
+        if owner is not None and isinstance(request.root, types.CallToolRequest):
+            self._request_owners[request_id] = owner
+        try:
+            return await super().send_request(request, result_type, *args, **kwargs)
+        finally:
+            self._request_owners.pop(request_id, None)
+
+    async def _received_request(self, responder: Any) -> None:
+        metadata = responder.message_metadata
+        correlated = (True, self._request_owners.get(metadata.related_request_id)) if (
+            isinstance(metadata, ServerMessageMetadata) and metadata.related_request_id is not None
+        ) else None
+        token = _callback_owner.set(correlated)
+        try:
+            await super()._received_request(responder)
+        finally:
+            _callback_owner.reset(token)
 
     async def _receive_loop(self) -> None:
         try:
@@ -920,10 +946,10 @@ class MCPClient:
         if request_meta:
             params["_meta"] = dict(request_meta)
         owner_key = next(self._tool_owner_seq)
-        if request_owner:
-            self._active_tool_request_owners[owner_key] = dict(request_owner)
+        self._active_tool_request_owners[owner_key] = dict(request_owner or {})
         request_task: asyncio.Task[dict[str, Any]] | None = None
         cancel_task: asyncio.Task[bool] | None = None
+        owner_token = _request_owner.set(dict(request_owner) if request_owner else None)
         try:
             try:
                 cancel_event = (
@@ -934,6 +960,7 @@ class MCPClient:
                 request_task = asyncio.create_task(self._request("tools/call", params))
                 self._active_request_tasks.add(request_task)
                 request_task.add_done_callback(self._active_request_tasks.discard)
+                request_task.add_done_callback(lambda _task: self._active_tool_request_owners.pop(owner_key, None))
                 if isinstance(cancel_event, asyncio.Event):
                     cancel_task = asyncio.create_task(cancel_event.wait())
                     try:
@@ -959,7 +986,9 @@ class MCPClient:
             except Exception as exc:
                 return self._tool_exception(exc)
         finally:
-            self._active_tool_request_owners.pop(owner_key, None)
+            _request_owner.reset(owner_token)
+            if request_task is None or request_task.done():
+                self._active_tool_request_owners.pop(owner_key, None)
             if cancel_task is not None and not cancel_task.done():
                 cancel_task.cancel()
                 await asyncio.gather(cancel_task, return_exceptions=True)
@@ -1159,7 +1188,8 @@ class MCPClient:
     async def _sdk_elicitation_callback(self, context: Any, params: Any) -> Any:
         if not feature_enabled("mcp_elicitation") or self._elicitation_handler is None:
             return types.ErrorData(code=types.INVALID_REQUEST, message="elicitation not supported")
-        owner = self._active_callback_owner()
+        correlated = _callback_owner.get()
+        owner = correlated[1] if correlated is not None else self._active_callback_owner()
         if owner is None:
             return types.ErrorData(code=-32002, message="elicitation request has no unambiguous active turn owner")
         payload = _model_dict(params)
@@ -1219,17 +1249,15 @@ class MCPClient:
             del self._resource_notifications[:-100]
 
     def _active_callback_owner(self) -> dict[str, Any] | None:
-        owners: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        owners: list[dict[str, Any]] = []
         for owner in self._active_tool_request_owners.values():
-            identity = (
-                str(owner.get("session_id") or ""),
-                str(owner.get("conversation_id") or ""),
-                str(owner.get("task_id") or ""),
-                str(owner.get("run_id") or ""),
-            )
-            if identity[0] and identity[1]:
-                owners[identity] = owner
-        return dict(next(iter(owners.values()))) if len(owners) == 1 else None
+            if not owner.get("session_id") or not owner.get("conversation_id"):
+                return None
+            if owner not in owners:
+                owners.append(owner)
+        # Equal run IDs do not identify the request's cancellation scope.
+        # Without a transport correlation, distinct live owners are ambiguous.
+        return dict(owners[0]) if len(owners) == 1 else None
 
     def _client_roots(self) -> list[dict[str, str]]:
         # Roots belong to this client's explicit workspace owner. With no owner,

@@ -724,20 +724,48 @@ class AppBootstrap:
         # cc runs Elicitation hooks and validates the requested schema
         # before prompting (elicitationHandler.ts); a blocked hook cancels.
         hook_mgr = owner.get("hook_manager")
+        server_name = str(params.get("_mcp_server_name") or "")
+        mode = str(params.get("mode") or "")
+
+        async def finish(response: dict[str, Any]) -> dict[str, Any]:
+            if hook_mgr is not None and hook_mgr.has_hooks(HookEvent.ELICITATION_RESULT):
+                hook_result = await hook_mgr.run_elicitation_result(
+                    mcp_server_name=server_name, elicitation_id=request_id,
+                    action=response["action"], content=response.get("content"), mode=mode,
+                )
+                if hook_result.elicitation_action:
+                    response = {"action": hook_result.elicitation_action,
+                        "content": hook_result.elicitation_content}
+                elif hook_result.blocked:
+                    response = {"action": "cancel", "error": hook_result.message}
+            if response["action"] == "accept" and schema:
+                import jsonschema
+
+                try:
+                    jsonschema.validate(response.get("content"), schema)
+                except jsonschema.ValidationError as exc:
+                    return {"action": "cancel", "error": f"MCP elicitation response is invalid: {exc.message}"}
+            if response["action"] != "accept":
+                response.pop("content", None)
+            return response
+
         if hook_mgr is not None and hook_mgr.has_hooks(HookEvent.ELICITATION):
             hook_result = await hook_mgr.run_elicitation(
                 prompt,
                 elicitation_id=request_id,
-                mcp_server_name=str(params.get("_mcp_server_name") or ""),
-                mode=str(params.get("mode") or ""),
+                mcp_server_name=server_name,
+                mode=mode,
                 url=str(params.get("url") or ""),
                 requested_schema=schema or None,
             )
-            if getattr(hook_result, "blocked", False):
-                return {
+            if hook_result.elicitation_action:
+                return await finish({"action": hook_result.elicitation_action,
+                    "content": hook_result.elicitation_content})
+            if hook_result.blocked:
+                return await finish({
                     "action": "cancel",
-                    "error": str(getattr(hook_result, "message", "") or "Elicitation blocked by hook"),
-                }
+                    "error": str(hook_result.message or "Elicitation blocked by hook"),
+                })
 
         # Build the payload
         payload = {
@@ -774,68 +802,50 @@ class AppBootstrap:
                     reason="mcp_elicitation_delivery_failed",
                     conversation_id=conversation_id,
                 )
-                return {"action": "cancel", "error": "MCP elicitation could not be delivered"}
-            # Wait for user input from the desktop app (up to 5 minutes)
-            result = await self._await_mcp_owner_operation(
-                future,
-                owner,
-                label="elicitation",
-                maximum_seconds=300.0,
-            )
-
-            # The client responds via "answer" or "approval" command, which resolves
-            # the future with the payload. Let's inspect result structure:
-            if str(result.get("action") or "").strip().lower() in {
-                "cancel",
-                "deny",
-                "reject",
-            }:
+                response = {"action": "cancel", "error": "MCP elicitation could not be delivered"}
+            else:
+                result = await self._await_mcp_owner_operation(
+                    future, owner, label="elicitation", maximum_seconds=300.0,
+                )
+                action = str(result.get("action") or "").strip().lower()
+                rejected = action in {"cancel", "deny", "reject", "decline"}
                 await session.emit_approval_cancelled_once(
                     [request_id],
-                    reason="mcp_elicitation_rejected",
+                    reason="mcp_elicitation_rejected" if rejected else "mcp_elicitation_resolved",
                     conversation_id=conversation_id,
                 )
-                return {"action": "cancel", "error": "User cancelled the elicitation"}
-            answer = result.get("answer") or result.get("content") or ""
-            await session.emit_approval_cancelled_once(
-                [request_id],
-                reason="mcp_elicitation_resolved",
-                conversation_id=conversation_id,
-            )
-            return {
-                "action": "submit",
-                "response": {
-                    "answer": answer
-                }
-            }
+                response = ({"action": "decline" if action == "decline" else "cancel",
+                    "error": "User cancelled the elicitation"} if rejected
+                    else {"action": "accept", "content": result.get("content")})
         except TimeoutError:
             await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_timeout",
                 conversation_id=conversation_id,
             )
-            return {"action": "cancel", "error": "User response timed out"}
+            response = {"action": "cancel", "error": "User response timed out"}
         except PermissionError as exc:
             await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_owner_cancelled",
                 conversation_id=conversation_id,
             )
-            return {"action": "cancel", "error": str(exc)}
+            response = {"action": "cancel", "error": str(exc)}
         except asyncio.CancelledError:
             await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_cancelled",
                 conversation_id=conversation_id,
             )
-            return {"action": "cancel", "error": "Interaction cancelled"}
+            response = {"action": "cancel", "error": "Interaction cancelled"}
         except Exception as exc:
             await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_failed",
                 conversation_id=conversation_id,
             )
-            return {"action": "cancel", "error": str(exc) or "MCP elicitation failed"}
+            response = {"action": "cancel", "error": str(exc) or "MCP elicitation failed"}
         finally:
             wait_state.remove_waiter(request_id)
             wait_state.pending_approval_payloads.pop(request_id, None)
+        return await finish(response)

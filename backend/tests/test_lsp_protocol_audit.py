@@ -39,6 +39,23 @@ def _client(tmp_path: Path) -> tuple[lsp.LSPClient, _Writer]:
     return client, writer
 
 
+def test_editor_symbol_initialization_declares_hierarchical_document_symbols(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        client, writer = _client(tmp_path)
+        captured = []
+        async def initialize(method, params):
+            captured.append((method, params))
+            return {"capabilities": {"documentSymbolProvider": True}}
+        monkeypatch.setattr(client, "_send_request", initialize)
+        await client._initialize()
+        assert captured[0][0] == "initialize"
+        assert captured[0][1]["capabilities"]["textDocument"]["documentSymbol"] == {
+            "dynamicRegistration": False, "hierarchicalDocumentSymbolSupport": True,
+        }
+        assert writer.messages[0]["method"] == "initialized"
+    asyncio.run(scenario())
+
+
 def test_parallel_navigation_opens_once_and_updates_once(tmp_path: Path) -> None:
     async def scenario() -> None:
         client, writer = _client(tmp_path)

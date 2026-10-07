@@ -90,9 +90,9 @@ class SessionCommandHandlersMixin:
                 model=self.selected_model,
                 reasoning_effort=task_selection.get("reasoning_effort", scoped_config.llm.reasoning_effort),
             ))
-            if provider in {"openai", "anthropic", "custom"} or (
+            if self.llm is not None and self.selected_model and (provider in {"openai", "anthropic", "custom"} or (
                 model_runtime is not None and model_runtime.get_provider(provider) is not None
-            ):
+            )):
                 self._bind_selected_llm(model_runtime)
             return
         if conversation is not None:
@@ -130,7 +130,8 @@ class SessionCommandHandlersMixin:
                     is not None
                     else resolve_models_source(provider)
                 )
-                self._bind_selected_llm(model_runtime)
+                if self.llm is not None and self.selected_model:
+                    self._bind_selected_llm(model_runtime)
                 return
 
         selection = refresh_llm_selection_state(
@@ -149,7 +150,7 @@ class SessionCommandHandlersMixin:
         self._model_override_active = selection.model_override_active
         self._provider_override_active = False
         self.models_source = resolve_models_source(self.provider)
-        if self.selected_model:
+        if self.selected_model and self.llm is not None:
             self._bind_selected_llm(model_runtime)
 
     def reset_model_selection_overrides(self) -> None:
@@ -365,9 +366,28 @@ class SessionCommandHandlersMixin:
         the websocket state stream edge-triggered, while ``force`` preserves
         the mandatory initial snapshot for every newly attached connection.
         """
+        self.refresh_llm_selection()
+        model_runtime = self._model_runtime_for_conversation(self.active_conversation_id)
+        payload = self._llm_selection_payload()
+        previous_payload = self._last_llm_state_payload
+        if not force and previous_payload == payload:
+            return
+
+        # Record before the awaited websocket write. Concurrent runtime
+        # notifications then observe the in-flight projection and cannot append
+        # an identical state event behind a user turn. Roll it back if sending
+        # fails so the next genuine state synchronization can retry.
+        self._last_llm_state_payload = dict(payload)
+        sent = await self.send_payload(payload, log_context="llm.model.updated")
+        if not sent and self._last_llm_state_payload == payload:
+            self._last_llm_state_payload = previous_payload
+        if sent:
+            await self._report_model_catalog_error(model_runtime)
+
+    def _llm_selection_payload(self) -> dict[str, Any]:
+        """Project the selected catalog/config contract without binding a client."""
         from backend.services.llm_config_service import llm_model_updated_payload
 
-        self.refresh_llm_selection()
         workspace_root = self.session_lifecycle.workspace_root_for_conversation()
         model_runtime = self._model_runtime_for_conversation(self.active_conversation_id)
         provider_metadata = (
@@ -391,20 +411,7 @@ class SessionCommandHandlersMixin:
             configured_reasoning_effort=self.config.llm.reasoning_effort,
         )
         payload["conversation_id"] = self.active_conversation_id
-        previous_payload = self._last_llm_state_payload
-        if not force and previous_payload == payload:
-            return
-
-        # Record before the awaited websocket write. Concurrent runtime
-        # notifications then observe the in-flight projection and cannot append
-        # an identical state event behind a user turn. Roll it back if sending
-        # fails so the next genuine state synchronization can retry.
-        self._last_llm_state_payload = dict(payload)
-        sent = await self.send_payload(payload, log_context="llm.model.updated")
-        if not sent and self._last_llm_state_payload == payload:
-            self._last_llm_state_payload = previous_payload
-        if sent:
-            await self._report_model_catalog_error(model_runtime)
+        return payload
 
     async def _report_model_catalog_error(self, model_runtime: Any) -> None:
         """Surface the catalog's own load/parse/refresh failures to the user.

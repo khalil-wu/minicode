@@ -63,3 +63,15 @@ export const buildAskUserResponseCommand = (
     },
   };
 };
+
+export const buildElicitationResponseCommand = (
+  requestId: string,
+  action: "accept" | "cancel",
+  content: Record<string, unknown> | undefined,
+  owner?: PromptOwner,
+): ClientCommand => ({
+  type: "control_response",
+  request_id: requestId,
+  ...ownerFields(owner),
+  response: { subtype: "success", response: { action, ...(content ? { content } : {}) } },
+});

@@ -588,6 +588,9 @@ export interface StreamResumeEvent {
   phase?: string;
   stream_status?: string;
   event_seq?: number;
+  snapshot_id?: string;
+  snapshot_part?: number;
+  snapshot_complete?: boolean;
   last_event_type?: string;
   tool_calls_pending: Array<{
     id: string;

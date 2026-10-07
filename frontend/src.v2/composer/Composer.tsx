@@ -27,6 +27,7 @@ import {
   parseRuntimeSlashInput,
   resolveRuntimeSlashMenuSelection,
   syncRuntimeSlashPanelForDraft,
+  shouldTokenizeRuntimeSlashCommand,
 } from "../lib/runtime-commands";
 import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-command";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
@@ -245,6 +246,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       allowWhileStreaming?: boolean;
       busyBehavior?: "queue" | "steer";
       quotedMessage?: ComposerQuote | null;
+      skipLocalAppend?: boolean;
     },
   ) => {
     const outgoing = await buildOutgoingContext(options?.conversationId || "");
@@ -267,6 +269,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       quotedMessage: options?.quotedMessage ?? null,
       allowWhileStreaming: options?.allowWhileStreaming,
       busyBehavior: options?.busyBehavior,
+      skipLocalAppend: options?.skipLocalAppend,
     });
   };
 
@@ -274,22 +277,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     displayContent: string;
     backendContent: string;
     skipLocalAppend: boolean;
-  }) => {
-    const outgoing = await buildOutgoingContext("");
-    if (!outgoing) return false;
-    return sendChatMessage({
+  }, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null }) => {
+    const state = useAppStore.getState();
+    return sendUserMessage(options.displayContent, prepared?.attachments, {
+      ...prepared,
       ...options,
-      backendContent: [outgoing.prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
-      attachments: outgoing.attachments,
-      attachmentRefs: outgoing.attachmentRefs,
-      conversationId: outgoing.conversationId,
-      agentMode: outgoing.stateAtSend.agentMode,
-      primaryFile: outgoing.stateAtSend.workingDirectory
-        ? outgoing.stateAtSend.activeTabPath ?? undefined
-        : undefined,
-      contextRefs: outgoing.contextRefs,
-      allowWhileStreaming: outgoing.stateAtSend.isStreaming,
-      busyBehavior: outgoing.stateAtSend.followUpBehavior,
+      backendContent: [prepared?.quotedMessage ? formatQuotedMessageForBackend(prepared.quotedMessage) : "", options.backendContent].filter(Boolean).join("\n\n"),
+      allowWhileStreaming: state.isStreaming,
+      busyBehavior: state.followUpBehavior,
     });
   };
 
@@ -363,7 +358,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       : draft.trim();
 
     const slashInput = parseRuntimeSlashInput(content);
-    if (slashInput) {
+    if (slashInput && !shouldTokenizeRuntimeSlashCommand(slashInput.commandLine.split(/\s/, 1)[0], useAppStore.getState().slashCommands)) {
       for (const mention of slashInput.mentions) {
         addSelectedMention(mention);
       }
@@ -446,6 +441,12 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const displayContent = content;
 
+    if (slashInput) {
+      for (const mention of slashInput.mentions) addSelectedMention(mention);
+      await executeSlashCommand(slashInput.commandLine, { attachments: readyAttachments, attachmentRefs, conversationId: sendConversationId || undefined, quotedMessage });
+      return;
+    }
+
     if (!await sendUserMessage(finalContent, readyAttachments, {
       attachmentRefs,
       conversationId: sendConversationId || undefined,
@@ -467,13 +468,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
   };
 
-  const executeSlashCommand = async (commandLine: string) => {
+  const executeSlashCommand = async (commandLine: string, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null }) => {
     const composerStateAtSend = composerFingerprint();
     const result = await executeRuntimeSlashCommand(commandLine, {
       getState: useAppStore.getState,
       setState: useAppStore.setState,
       sendClientCommand,
-      sendChatMessage: sendRuntimeSlashMessage,
+      sendChatMessage: (options) => sendRuntimeSlashMessage(options, prepared),
       sendUserMessage,
       confirmClear: async () => {
         const { showConfirm } = await import("../overlays/DialogService");

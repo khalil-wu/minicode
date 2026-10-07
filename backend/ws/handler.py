@@ -246,7 +246,7 @@ class WebSocketSession(
         self,
         session_id: str,
         websocket: WebSocket,
-        llm: LLMAdapter,
+        llm: LLMAdapter | None,
         artifact_store: ArtifactStore,
         tool_registry: ToolRegistry,
         permission_checker: PermissionChecker,
@@ -340,13 +340,14 @@ class WebSocketSession(
         # Preserve an explicit configured model even when discovery no longer
         # advertises it. The run admission boundary must report that mismatch;
         # selecting the first catalog entry would change user intent silently.
-        self._llm_adapter_cache[
-            _llm_adapter_cache_key(
-                config=config,
-                provider=self.provider,
-                model=self.selected_model,
-            )
-        ] = llm
+        if llm is not None:
+            self._llm_adapter_cache[
+                _llm_adapter_cache_key(
+                    config=config,
+                    provider=self.provider,
+                    model=self.selected_model,
+                )
+            ] = llm
         self._model_override_active = False
         self._provider_override_active = False
 
@@ -715,6 +716,23 @@ class WebSocketSession(
         }
 
     def _provider_capabilities_payload(self) -> dict[str, Any]:
+        if self.llm is None:
+            from dataclasses import replace
+            from backend.llm.capabilities import capabilities_from_settings
+
+            selection = self._llm_selection_payload()
+            fields = {key: selection[key] for key in (
+                "model", "base_url", "wire_api", "context_window", "context_window_source", "context_window_verified",
+                "max_context_window", "max_context_window_source", "max_context_window_verified",
+                "max_output_tokens", "max_output_tokens_source", "max_output_tokens_verified",
+                "default_reasoning_effort", "default_reasoning_summary", "parallel_tool_calls",
+                "native_compaction", "supports_hosted_web_search", "thinking_budget",
+            )}
+            fields["reasoning_effort"] = selection["configured_reasoning_effort"]
+            fields["reasoning_effort_levels"] = tuple(selection["reasoning_effort_levels"] if selection["wire_api"] != "anthropic" else selection["declared_reasoning_effort_levels"])
+            fields["input_modalities"] = tuple(selection["input_modalities"])
+            declared = replace(self.config.llm, provider=self.provider, **fields)
+            return capabilities_from_settings(declared, provider=self.provider).to_dict()
         try:
             from backend.llm.capabilities import capabilities_for_adapter
 
@@ -1632,12 +1650,17 @@ class WebSocketSession(
                     isinstance(current_value, str) and not current_value.strip()
                 ):
                     projection_data[owner_key] = owner_value
-        apply_stream_event(
-            getattr(self, "_conversation_streams", {}),
-            target_conversation_id,
-            event.type,
-            projection_data,
-        )
+        if event.type != "stream_resume":
+            projected_stream = apply_stream_event(
+                getattr(self, "_conversation_streams", {}),
+                target_conversation_id,
+                event.type,
+                projection_data,
+            )
+            if (projected_stream is not None
+                and payload.get("message_id") == projected_stream.get("message_id")
+                and (not payload.get("turn_id") or payload["turn_id"] == projected_stream.get("turn_id"))):
+                payload["source_event_seq"] = projected_stream["event_seq"]
         if event.type in {"approval_request", "ask_user"}:
             request_id = str(
                 payload.get("request_id")

@@ -1975,6 +1975,7 @@ class TaskTool(BaseTool):
             "reasoning_effort": llm_resolution.effort,
         }
         child_run_context: RunContext | None = None
+        child_agent_session: AgentSession | None = None
         journal_events: list[dict[str, Any]] = []
         journal: ExecutionJournal | None = None
         cached_transcript_seq = -1
@@ -2077,6 +2078,25 @@ class TaskTool(BaseTool):
         async def _cleanup_worktree() -> str:
             """Remove the worktree when unchanged; return a keep-note otherwise."""
             nonlocal agent_worktree
+            if child_agent_session is not None:
+                manager = child_agent_session.command_manager(subagent_id)
+                command_owner = str(getattr(context, "conversation_id", "") or subagent_id)
+                commands = [manager.get_status(item["command_id"], conversation_id=command_owner)
+                    for item in manager.list_commands(include_completed=True, conversation_id=command_owner)]
+                await child_agent_session.aclose()
+                pending = {task for task in child_agent_session.lifecycle_cleanup_tasks if not task.done()}
+                if pending:
+                    await asyncio.wait(pending)
+                for command in commands:
+                    if journal is not None:
+                        journal.append_cleanup({
+                            "resource_kind": "background_command", "resource_id": command.command_id,
+                            "reason": "child_session_closed", "status": command.status,
+                            "completed": not command.cleanup_pending, "pending": int(command.cleanup_pending),
+                            "pid": command.pid, "cleanup_reason": command.cleanup_reason,
+                        })
+                if any(command.cleanup_pending for command in commands):
+                    raise RuntimeError("Subagent commands still own resources after session shutdown")
             if agent_worktree is None:
                 return ""
             from backend.agent.worktree import cleanup_agent_worktree, has_worktree_changes

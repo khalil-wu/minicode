@@ -13,6 +13,7 @@ from backend.agent.final_answer_orchestrator import (
     orchestrate_final_answer,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.provider_follow_up import retain_provider_follow_up
 from backend.agent.provider_response_recovery import (
     PostStreamRecoveryResult,
     recover_provider_response,
@@ -285,6 +286,13 @@ class TurnIterationExecutor:
             )
             return
 
+        if stream_state.end_turn is False and not stream_state.tool_calls:
+            for event in retain_provider_follow_up(state=self.agent_state, stream_state=stream_state,
+                stream_text=stream_text, context_builder=self.context_builder):
+                yield event
+            yield IterationExecutionResult(action="retry", state=execution_state, stream_text=stream_text)
+            return
+
         post_stream_result = None
         async with aclosing(recover_provider_response(
             state=self.agent_state,
@@ -341,6 +349,8 @@ class TurnIterationExecutor:
                 provider_raw_done=stream_state.raw_done,
                 degraded_reason=execution_state.degraded_reason,
                 has_non_text_result=stream_state.has_non_text_result,
+                budget_runtime=self.budget_runtime,
+                tool_context=self.tool_context,
             )) as owned_events:
                 async for update in owned_events:
                     if isinstance(update, FinalAnswerOutcome):

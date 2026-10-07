@@ -29,6 +29,7 @@ import {
   closeWebSocketForResync,
 } from "./useWebSocket";
 import { LS } from "../stores/shared-helpers";
+import { useAppStore } from "../stores";
 import {
   createClientCommandId,
   registerWebSocketSender,
@@ -246,6 +247,37 @@ describe("useWebSocket renderer identity", () => {
 });
 
 describe("useWebSocket client command ids", () => {
+  it.each(["active", "background", "side"])("seals only the rejected %s optimistic turn and preserves drafts and other live work", (owner) => {
+    const assistant = (id: string) => ({ id, role: "assistant" as const, content: "", timestamp: 1, isStreaming: true, blocks: [] });
+    useAppStore.setState({ conversationId: "active", draft: "new draft", messages: [assistant("active-reply")], isStreaming: true,
+      conversationMessages: { background: [assistant("background-reply")] }, conversationStreaming: { active: true, background: true, side: true },
+      sideChats: { side: { id: "side", messages: [assistant("side-reply")], isStreaming: true, draft: "side draft" } } });
+    trackPendingClientCommandAck({ type: "user_message", client_command_id: "rejected-send", content: "input", conversation_id: owner,
+      user_message_id: `${owner}-input`, assistant_message_id: `${owner}-reply` });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "rejected-send", accepted: false, reason: "command.persistence" } as ServerEvent);
+    const state = useAppStore.getState();
+    const message = owner === "active" ? state.messages[0] : owner === "side" ? state.sideChats.side.messages[0] : state.conversationMessages.background[0];
+    expect(message).toMatchObject({ isStreaming: false, terminalStatus: "failed", failureRecoverable: true });
+    expect(owner === "active" ? state.isStreaming : owner === "side" ? state.sideChats.side.isStreaming : state.conversationStreaming.background).toBe(false);
+    expect(state.draft).toBe("new draft");
+    expect(state.sideChats.side.draft).toBe("side draft");
+    if (owner !== "active") expect(state.messages[0].isStreaming).toBe(true);
+    if (owner !== "side") expect(state.sideChats.side.messages[0].isStreaming).toBe(true);
+  });
+
+  it("does not stop the running turn when admission rejects a queued follow-up", () => {
+    useAppStore.setState({ conversationId: "active", isStreaming: true, conversationStreaming: { active: true }, sideChats: {}, conversationMessages: {},
+      messages: [{ id: "running", role: "assistant", content: "Working", isStreaming: true, timestamp: 1 },
+        { id: "queued-user", role: "user", content: "next", queueState: "queued", timestamp: 2 },
+        { id: "queued-reply", role: "assistant", content: "", isStreaming: false, queueState: "queued", timestamp: 3 }] });
+    trackPendingClientCommandAck({ type: "user_message", client_command_id: "queued-rejected", content: "next", conversation_id: "active",
+      user_message_id: "queued-user", assistant_message_id: "queued-reply" });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "queued-rejected", accepted: false } as ServerEvent);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
+    expect(useAppStore.getState().messages[1].queueState).toBe("cancelled");
+    expect(useAppStore.getState().messages[2].terminalStatus).toBe("failed");
+  });
   beforeEach(() => {
     resetPendingClientCommandAcksForTests();
     resetPendingCommandResultsForTests();

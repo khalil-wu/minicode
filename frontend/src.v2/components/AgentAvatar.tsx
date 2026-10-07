@@ -12,15 +12,15 @@ export interface AgentAvatarProps {
 const AgentGlyphArt = ({ glyph }: { glyph: AgentIdentityGlyph }) => {
   switch (glyph) {
     case "orbit": return <>
-      <circle cx="12" cy="12" r="9.1" opacity=".7" />
-      <circle cx="12" cy="12" r="7" fill="none" stroke="var(--surface-base)" strokeWidth=".7" />
-      <g fill="none" stroke="var(--surface-base)" strokeWidth=".6">
-        {[0, 60, 120].map((angle) => <ellipse key={angle} cx="12" cy="12" rx="4.2" ry="7" transform={`rotate(${angle} 12 12)`} />)}
-      </g>
+      <circle cx="12" cy="12" r="9.1" opacity=".75" />
+      <ellipse cx="12" cy="12" rx="3.4" ry="9.1" fill="none" stroke="var(--surface-base)" strokeWidth=".95" />
+      <path d="M2.9 12h18.2" fill="none" stroke="var(--surface-base)" strokeWidth="2.5" />
+      <path d="M2.3 12h19.4" fill="none" stroke="currentColor" strokeWidth=".9" opacity=".85" />
     </>;
     case "petal": return <>
-      {[0, 60, 120, 180, 240, 300].map((angle, index) => <path key={angle} d="M12 10.7C9.6 9 8.8 5.7 10.2 3.8c.9-1.4 2.7-1.4 3.6 0 1.4 1.9.6 5.2-1.8 6.9Z" opacity={index % 2 ? ".65" : "1"} transform={`rotate(${angle} 12 12)`} />)}
-      <circle cx="12" cy="12" r="1.6" opacity=".85" />
+      {[0, 90, 180, 270].map((angle, index) => <path key={angle} d="M10.7 11.1C7.5 10.8 3.8 9.8 3.1 6.9 2.4 4.1 3.7 2.7 6.4 3.1c3.2.5 4.3 4.6 4.3 8Z" opacity={index % 2 ? ".6" : "1"} transform={`rotate(${angle} 12 12)`} />)}
+      {[0, 90, 180, 270].map((angle) => <circle key={angle} cx="12" cy="1.5" r=".85" opacity=".8" transform={`rotate(${angle} 12 12)`} />)}
+      <circle cx="12" cy="12" r=".8" opacity=".75" />
     </>;
     case "facets": return <>
       <circle cx="12" cy="1.7" r="1.5" opacity=".8" />

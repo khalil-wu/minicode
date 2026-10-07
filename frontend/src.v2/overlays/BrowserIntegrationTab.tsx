@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Globe2, PanelRightOpen, RefreshCw, ShieldCheck } from "lucide-react";
 import { embeddedBrowserGetSettings, embeddedBrowserList, embeddedBrowserSetSettings, isDesktop, type EmbeddedBrowserSettings, type EmbeddedBrowserState } from "../desktop/runtime";
 import { openRightPanelFromSettings } from "../lib/settings-navigation";
-import { Section } from "./settingsShared";
 import { pushToast } from "./ToastContainer";
 import { useAppStore } from "../stores";
 import { SelectMenu } from "../components/SelectMenu";
@@ -75,7 +74,9 @@ export const BrowserIntegrationTab = ({ active = true }: { active?: boolean }) =
 
   return (
     <>
-      <Section title="内置浏览器" description="页面、控制台、网络和权限共用浏览器面板。">
+      <section className="settings-group settings-browser-group">
+        <h3 className="settings-group-title">内置浏览器</h3>
+        <p className="settings-section-description">页面、控制台、网络和权限共用浏览器面板。</p>
         <div className="settings-browser-summary">
           <span className="settings-browser-summary-icon" aria-hidden="true"><Globe2 /></span>
           <div>
@@ -93,9 +94,11 @@ export const BrowserIntegrationTab = ({ active = true }: { active?: boolean }) =
           </button>
           </div>
         </div>
-      </Section>
+      </section>
 
-      <Section title="浏览器设置" description="下载为全局策略；站点权限按网站保存。">
+      <section className="settings-group settings-browser-group">
+        <h3 className="settings-group-title">浏览器设置</h3>
+        <p className="settings-section-description">下载为全局策略；站点权限按网站保存。</p>
         <div className="settings-card">
           <div className="settings-row settings-browser-permission-row">
             <span className="settings-browser-row-icon" aria-hidden="true"><Download /></span>
@@ -130,7 +133,7 @@ export const BrowserIntegrationTab = ({ active = true }: { active?: boolean }) =
             </div>
           </div>
         </div>
-      </Section>
+      </section>
     </>
   );
 };

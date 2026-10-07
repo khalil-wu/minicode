@@ -362,6 +362,7 @@ export const ChatContextCard = () => {
 
   useEffect(() => {
     if (!isDesktop()) return;
+    setBrowserTargets([]);
     let cancelled = false;
     const refresh = () => {
       if (!conversationId) return;
@@ -394,14 +395,16 @@ export const ChatContextCard = () => {
   }, [conversationId]);
 
   useEffect(() => {
+    let cancelled = false;
     if (!collapsed && isDesktop()) {
       if (!conversationId) return;
       void Promise.resolve(embeddedBrowserList(conversationId)).then((targets) => {
-        if (Array.isArray(targets)) {
+        if (!cancelled && Array.isArray(targets)) {
           setBrowserTargets(targets.filter((target) => target.url && target.url !== "about:blank"));
         }
       });
     }
+    return () => { cancelled = true; };
   }, [conversationId, collapsed]);
 
   const agentSummary = agentStatusSummary(agentViews);

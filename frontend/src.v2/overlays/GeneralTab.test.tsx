@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppStore } from "../stores";
 import { GeneralTab } from "./GeneralTab";
@@ -21,6 +21,7 @@ vi.mock("../desktop/runtime", () => ({
 }));
 
 describe("desktop update install preflight", () => {
+  afterEach(cleanup);
   beforeEach(() => {
     vi.clearAllMocks();
     updateMocks.getStatus.mockResolvedValue({ status: "ready", sequence: 1, version: "2.0.0" });
@@ -63,5 +64,15 @@ describe("desktop update install preflight", () => {
     await waitFor(() => {
       expect(updateMocks.install).toHaveBeenCalledWith({ fingerprint: "reviewed-fingerprint" });
     });
+  });
+
+  it("shows build update availability instead of offering a missing release feed", async () => {
+    updateMocks.getStatus.mockResolvedValue({ status: "unavailable", sequence: 1 });
+    render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={() => {}} />);
+    await screen.findByText("此构建未启用自动更新。");
+    const check = screen.getByRole("button", { name: "检查更新" });
+    expect((check as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(check);
+    expect(updateMocks.check).not.toHaveBeenCalled();
   });
 });

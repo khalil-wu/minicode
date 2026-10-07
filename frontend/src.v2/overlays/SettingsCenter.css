@@ -575,8 +575,7 @@
 .settings-action-button > svg,
 .settings-icon-button > svg,
 .settings-state-pill > svg,
-.settings-runtime-icon > svg,
-.settings-shortcut-icon > svg {
+.settings-runtime-icon > svg {
   stroke-width: var(--mc-icon-stroke);
 }
 
@@ -1031,10 +1030,10 @@
 .settings-shortcut-row {
   min-height: 56px;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) minmax(132px, auto) 28px;
+  grid-template-columns: minmax(0, 1fr) minmax(132px, auto) 28px;
   align-items: center;
   gap: 9px;
-  padding: 0 14px 0 18px;
+  padding: 11px 14px 11px 18px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -1042,24 +1041,12 @@
   border-bottom: 0;
 }
 
-.settings-shortcut-icon {
-  width: 28px;
-  height: 28px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: var(--mc-control-radius);
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.settings-shortcut-icon > svg {
-  width: 15px;
-  height: 15px;
-}
-
 .settings-shortcut-action {
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
+
+.settings-shortcut-copy { display: grid; gap: 4px; min-width: 0; }
+.settings-shortcut-description { color: var(--text-muted); font-size: var(--mc-font-secondary); line-height: 1.4; }
 
 .settings-shortcut-row kbd {
   min-height: 24px;
@@ -1092,7 +1079,7 @@
 .settings-shortcut-binding > svg {
   width: 13px;
   height: 13px;
-  opacity: 0;
+  opacity: .7;
   transition: opacity var(--transition-fast);
 }
 
@@ -1142,6 +1129,14 @@
 .settings-shortcut-reset {
   flex: 0 0 auto;
 }
+
+.settings-preferences-actions { display: flex; justify-content: flex-end; }
+.settings-appearance-advanced { padding: 0; }
+.settings-appearance-advanced-trigger { display: flex; align-items: center; gap: 6px; width: fit-content; list-style: none; padding: 6px 0; color: var(--text-muted); cursor: pointer; }
+.settings-appearance-advanced-trigger::-webkit-details-marker { display: none; }
+.settings-appearance-advanced-trigger > svg { transform: rotate(-90deg); transition: transform var(--transition-fast); }
+.settings-appearance-advanced[open] > .settings-appearance-advanced-trigger > svg { transform: rotate(0); }
+.settings-appearance-advanced-body { display: grid; gap: 28px; padding-top: 16px; }
 
 .settings-shortcut-search {
   width: min(260px, 42vw);

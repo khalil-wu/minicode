@@ -60,6 +60,29 @@ import { useAppStore } from "../stores";
 import { loadPromptDrafts } from "../stores/prompt-drafts";
 
 describe("InlineAgentPrompt control protocol responses", () => {
+  it("renders the upstream structured schema and submits typed content while preserving its draft across remount", async () => {
+    useAppStore.getState().setAskUser({ requestId: "structured", conversationId: "conv-inline", question: "Profile",
+      inputSchema: { type: "object", properties: { name: { type: "string" }, age: { type: "integer", default: 30 }, score: { type: "number", default: 95.5 },
+        verified: { type: "boolean", default: true }, status: { type: "string", enum: ["active", "inactive"], default: "active" },
+        template: { type: "string", oneOf: [{ const: "monthly-review", title: "Monthly review" }] } }, required: ["name", "template"] } });
+    let mounted = render(<InlineAgentPrompt />);
+    fireEvent.change(screen.getByRole("textbox", { name: "name" }), { target: { value: "Shanghai" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "template" }), { target: { value: "monthly-review" } });
+    mounted.unmount(); mounted = render(<InlineAgentPrompt />);
+    expect((screen.getByRole("textbox", { name: "name" }) as HTMLInputElement).value).toBe("Shanghai");
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({
+      response: { subtype: "success", response: { action: "accept", content: { name: "Shanghai", age: 30, score: 95.5, verified: true, status: "active", template: "monthly-review" } } },
+    })));
+  });
+
+  it("cancels a structured MCP request with the same action contract", async () => {
+    useAppStore.getState().setAskUser({ requestId: "structured-cancel", conversationId: "conv-inline", question: "City",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } });
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({ response: { subtype: "success", response: { action: "cancel" } } })));
+  });
   beforeEach(() => {
     localStorage.removeItem("minicode.agentPromptDrafts");
     mocks.sendClientCommand.mockClear();

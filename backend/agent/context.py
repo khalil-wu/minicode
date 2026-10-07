@@ -3286,19 +3286,21 @@ class ContextBuilder:
 
 
     async def compact(
-        self, focus: str = "", restore_state: AgentState | None = None
+        self, focus: str = "", restore_state: AgentState | None = None,
+        *, replacement_budget: TokenBudget | None = None,
     ) -> str:
         """Summarize older entries while preserving a token-bounded recent tail."""
         clear_system_prompt_sections()
         if capabilities_for_adapter(self._llm).native_compaction:
-            return await self._compact_native_context(focus, restore_state)
+            return await self._compact_native_context(focus, restore_state, replacement_budget=replacement_budget)
         # A local summary can compact newer readable history, but may not
         # rewrite or discard an already-installed encrypted provider window.
         pinned_end = next((index + 1 for index in range(len(self._history) - 1, -1, -1)
                            if native_compaction_windows(self._history[index])), 0)
         if pinned_end:
             self._llm.validate_context(self._history)
-        keep_recent = min(self._agent_settings.compaction_keep_recent_tokens, max(0, self._budget.history_budget // 2))
+        budget = replacement_budget if replacement_budget is not None else self._budget
+        keep_recent = min(self._agent_settings.compaction_keep_recent_tokens, max(0, budget.history_budget // 2))
         recent_start = self._compaction_cut(keep_recent)
 
         if recent_start <= pinned_end:
@@ -3310,7 +3312,7 @@ class ContextBuilder:
         wrapper_tokens = estimate_text_tokens(
             COMPACTION_SUMMARY_PREFIX + COMPACTION_SUMMARY_SUFFIX + COMPACTION_RESUME_SUFFIX
         )
-        available = self._budget.history_budget - sum(self._estimate_history_message(message) for message in pinned + recent) - wrapper_tokens
+        available = budget.history_budget - sum(self._estimate_history_message(message) for message in pinned + recent) - wrapper_tokens
         if available <= 0:
             raise CompactionNoopError("The retained context leaves no room for a compaction summary")
         user_messages = retain_user_inputs(
@@ -3349,6 +3351,7 @@ class ContextBuilder:
                     retained_refs[ref["artifact_id"]] = ref
             summary_message.images.extend(message.images)
             summary_message.documents.extend(message.documents)
+        self.bind_budget(budget)
         self._install_compacted_history(
             # Retained requests are historical input. Put the checkpoint after
             # them so the model continues from progress instead of treating an
@@ -3358,7 +3361,7 @@ class ContextBuilder:
         )
         return compressed_summary
 
-    async def _compact_native_context(self, focus: str, restore_state: AgentState | None) -> str:
+    async def _compact_native_context(self, focus: str, restore_state: AgentState | None, *, replacement_budget: TokenBudget | None = None) -> str:
         state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
         messages = self._render_prompt_messages(state, self._workspace_root_for_state(state))
         if focus:
@@ -3368,6 +3371,8 @@ class ContextBuilder:
         # provider's returned media or trying to interpret encrypted content.
         refs = {ref["artifact_id"]: ref for message in self._history for ref in message.attachment_refs}
         replacement.attachment_refs = list(refs.values())
+        if replacement_budget is not None:
+            self.bind_budget(replacement_budget)
         self._install_compacted_history([replacement], removed_prefix=len(self._history), recent_count=0, restore_state=restore_state)
         return "Provider-native context compaction completed."
 

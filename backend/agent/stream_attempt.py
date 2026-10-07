@@ -357,6 +357,7 @@ class StreamAttemptState:
     response_phase: str = ""
     finish_reason: str = ""
     provider_done: bool = False
+    end_turn: bool | None = None
     saw_partial_tool_call: bool = False
     has_non_text_result: bool = False
     # Provider thinking/activity is observable progress, but it is still
@@ -428,6 +429,7 @@ class StreamAttemptState:
             )
         if event.type == StreamEventType.DONE:
             self.provider_done = True
+            self.end_turn = event.end_turn
             raw = dict(getattr(event, "raw", {}) or {})
             self.accept_done_payload(
                 finish_reason=event.finish_reason,
@@ -500,6 +502,7 @@ class StreamAttemptState:
         self.response_phase = ""
         self.finish_reason = ""
         self.provider_done = False
+        self.end_turn = None
         self.has_non_text_result = False
         self.saw_visible_output = False
         self.saw_provider_activity = False

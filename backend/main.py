@@ -490,21 +490,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     workspace_root = get_explicit_active_workspace_root()
     config = load_config(cwd=workspace_root)
 
-    # Create LLM adapter
-    try:
-        llm = _state.bootstrap.create_llm(config=config)
-    except Exception as exc:
-        await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
-        await websocket.send_json(
-            AgentEvent.error(
-                f"LLM initialization failed: {exc}",
-                recoverable=False,
-                error_code="connection.llm_initialization_failed",
-            ).to_ws_message()
-        )
-        await websocket.close(code=1008)
-        return
-
+    # The transport hosts settings, files and catalogs before a model is chosen.
+    # A real query or explicit model change owns adapter creation and binding.
     artifact_store = None
     try:
         try:
@@ -519,12 +506,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 config=config,
             )
         except BaseException:
-            await _dispose_unadopted_connection_resources(llm, artifact_store)
+            await _dispose_unadopted_connection_resources(None, artifact_store)
             raise
 
         session, connection_generation = await _state.ws_manager.connect(
             websocket=websocket,
-            llm=llm,
+            llm=None,
             artifact_store=artifact_store,
             tool_registry=tool_registry,
             permission_checker=permission_checker,

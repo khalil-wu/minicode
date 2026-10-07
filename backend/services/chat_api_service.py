@@ -205,7 +205,6 @@ async def run_owned_rest_chat(
             "tool_calls": [],
         }
 
-    reply_parts: list[str] = []
     error_messages: list[str] = []
     stopped_reason = "completed"
     terminal_status = "completed"
@@ -288,11 +287,7 @@ async def run_owned_rest_chat(
     ))
     async with aclosing(session):
         async for event in _owned_query_events(stream, query_claim):
-            if event.type == "item.completed":
-                item = event.data.get("item") if isinstance(event.data.get("item"), dict) else {}
-                if item.get("type") == "agent_message":
-                    reply_parts[:] = [str(item.get("text") or "")]
-            elif event.type == "error":
+            if event.type == "error":
                 stopped_reason = event.data.get("error_type", "api")
                 message_text = str(event.data.get("message") or "").strip()
                 if message_text:
@@ -321,7 +316,7 @@ async def run_owned_rest_chat(
         }
 
     return {
-        "reply": "".join(reply_parts) or state.reply or "(No reply)",
+        "reply": state.reply,
         "stopped_reason": stopped_reason,
         "status": terminal_status,
         "errors": error_messages,

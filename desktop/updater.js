@@ -423,7 +423,10 @@ async function init({ app, getMainWindow: nextGetMainWindow, logger, getActivePt
   getActivePtySessions = typeof nextGetActivePtySessions === "function"
     ? nextGetActivePtySessions
     : getActivePtySessions;
-  if (!app?.isPackaged) return false;
+  if (!app?.isPackaged) {
+    emit("unavailable");
+    return false;
+  }
 
   const bootHealth = beginBootHealthCheck(app);
   if (bootHealth.status === "recovery_required") {
@@ -443,6 +446,11 @@ async function init({ app, getMainWindow: nextGetMainWindow, logger, getActivePt
   } catch (error) {
     appendDesktopLog(`[updater] ${error.message}`);
     emit("error", { message: error.message });
+    return false;
+  }
+  if (!feedUrl && !fs.existsSync(path.join(process.resourcesPath, "app-update.yml"))) {
+    appendDesktopLog("[updater] automatic updates are not configured for this build");
+    emit("unavailable");
     return false;
   }
   try {

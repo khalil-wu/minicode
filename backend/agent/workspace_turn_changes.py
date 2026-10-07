@@ -26,7 +26,12 @@ def _read_workspace(root: Path, application_roots: tuple[Path, ...], write_scope
             continue
         if write_scope is not None and not any(path == scope or path.is_relative_to(scope) for scope in write_scope):
             continue
-        raw = path.read_bytes()
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            # The workspace can change between enumeration and the read. A
+            # disappeared entry is absent from the current snapshot.
+            continue
         oid = hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest()
         text = None
         if b"\0" not in raw:

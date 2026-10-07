@@ -56,12 +56,14 @@ def _assert_startup_events(ws) -> list[dict[str, object]]:
 
 
 async def _fake_agent_loop(*args, **kwargs):
+    kwargs["state"].reply = "stub reply"
     yield AgentEvent.agent_message_completed("stub reply", source="model_final")
     yield AgentEvent.done(input_tokens=3, output_tokens=2)
 
 
 async def _fake_recovered_agent_loop(*args, **kwargs):
     yield AgentEvent.error("temporary provider failure", recoverable=True, error_type="api")
+    kwargs["state"].reply = "recovered reply"
     yield AgentEvent.agent_message_completed("recovered reply", source="model_final")
     yield AgentEvent.done(status="completed")
 
