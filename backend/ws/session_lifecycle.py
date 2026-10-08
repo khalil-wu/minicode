@@ -568,17 +568,24 @@ class SessionLifecycle:
             workspace_imported_payload,
         )
 
+        owner_conversation_id = str(
+            conversation_id or self._session.active_conversation_id or ""
+        ).strip()
         request = parse_workspace_activation_request(path_str)
         if request.error_event is not None:
-            await self._session.send_event(request.error_event)
+            if error_command:
+                from backend.ws.command_results import emit_command_error
+                await emit_command_error(self._session, error_command, request.error_event,
+                    data={"conversation_id": owner_conversation_id, "workspace_root": str(path_str)})
+            else:
+                request.error_event.data["conversation_id"] = owner_conversation_id
+                request.error_event.data["workspace_root"] = str(path_str)
+                await self._session.send_event(request.error_event)
             return False
         project_path = request.project_path
         if project_path is None:
             return False
 
-        owner_conversation_id = str(
-            conversation_id or self._session.active_conversation_id or ""
-        ).strip()
         # Explicit activation is user-visible conversation state. On a
         # first-run session create the ordinary active conversation only after
         # path validation, so the success event is never unowned.
@@ -843,9 +850,12 @@ class SessionLifecycle:
                     message = f"Failed to switch session workspace: {exc}"
                     if error_command:
                         from backend.ws.command_results import emit_command_error
-                        await emit_command_error(self._session, error_command, message)
+                        await emit_command_error(self._session, error_command, message,
+                            data={"conversation_id": owner_conversation_id, "workspace_root": str(project_path)})
                     else:
-                        await self._session.send_event(AgentEvent.error(message, recoverable=True))
+                        event = AgentEvent.error(message, recoverable=True)
+                        event.data.update(conversation_id=owner_conversation_id, workspace_root=str(project_path))
+                        await self._session.send_event(event)
                     return False
 
             if wait_for_initialize:
@@ -870,9 +880,12 @@ class SessionLifecycle:
             message = f"Failed to switch session workspace: {exc}"
             if error_command:
                 from backend.ws.command_results import emit_command_error
-                await emit_command_error(self._session, error_command, message)
+                await emit_command_error(self._session, error_command, message,
+                    data={"conversation_id": owner_conversation_id, "workspace_root": str(project_path)})
             else:
-                await self._session.send_event(AgentEvent.error(message, recoverable=True))
+                event = AgentEvent.error(message, recoverable=True)
+                event.data.update(conversation_id=owner_conversation_id, workspace_root=str(project_path))
+                await self._session.send_event(event)
             return False
 
     def _current_sandbox_capability_scope(self) -> tuple[Any, ...]:

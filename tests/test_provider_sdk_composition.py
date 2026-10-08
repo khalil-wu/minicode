@@ -272,9 +272,6 @@ def test_ws_model_selection_uses_active_conversation_config(monkeypatch, tmp_pat
         def _model_runtime_for_conversation(self, _conversation_id):
             return None
 
-        def _bind_selected_llm(self, _runtime):
-            self.bound_selection = (self.provider, self.selected_model)
-
         @staticmethod
         def _resolve_llm_provider(settings):
             return settings["provider"]
@@ -300,7 +297,6 @@ def test_ws_model_selection_uses_active_conversation_config(monkeypatch, tmp_pat
     assert session.provider == "custom"
     assert session.available_models == ["workspace-model"]
     assert session.selected_model == "workspace-model"
-    assert session.bound_selection == ("custom", "workspace-model")
     assert session.models_source == "workspace"
 
 

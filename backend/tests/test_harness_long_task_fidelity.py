@@ -163,10 +163,13 @@ def test_two_sessions_restore_task_selection_without_changing_captured_adapter(t
     repo.update_model_selection(a.id, provider="openai", model="coding", reasoning_effort="high")
     first.active_conversation_id = b.id
     first.refresh_llm_selection()
-    assert first.selected_model == first.llm.model == "vision"
+    assert first.selected_model == "vision"
+    assert first.llm is captured_adapter
+    assert first.llm.model == "coding"
     first.active_conversation_id = a.id
     first.refresh_llm_selection()
     assert first.selected_model == "coding"
+    assert first.llm is captured_adapter
     assert first.config.llm.reasoning_effort == "high"
     assert captured_adapter.config.llm.reasoning_effort == "medium"
     assert config.llm.reasoning_effort == "medium"

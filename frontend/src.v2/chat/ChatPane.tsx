@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { LoaderCircle } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
 import { ChatSearch } from "./ChatSearch";
@@ -78,7 +79,10 @@ export const ChatPane = () => {
       }}
     >
       {pendingConversationSwitchId ? (
-        <span role="status" className="sr-only">正在打开会话…</span>
+        <div role="status" aria-live="polite" className="chat-pane-switch-status">
+          <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+          <span>正在打开会话…</span>
+        </div>
       ) : (
         <div className="chat-pane-layout">
         <div className="chat-pane-main">

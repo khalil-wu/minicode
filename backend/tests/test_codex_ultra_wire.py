@@ -16,7 +16,8 @@ from backend.llm.openai_adapter import OpenAIAdapter
 from backend.llm.reasoning_effort import reasoning_effort_wire_value
 from backend.services.llm_adapter_factory import _openai_compatible_settings
 from backend.config import AppConfig, LLMSettings
-from backend.ws.command_handlers import SessionCommandHandlersMixin
+from backend.services.llm_config_service import llm_model_updated_payload
+from backend.ws.handler import WebSocketSession
 
 
 @pytest.mark.parametrize(("model", "wire"), [("gpt-6.1-sol", "xhigh"), ("openai/gpt-6.1-sol", "xhigh"),
@@ -76,27 +77,16 @@ async def test_real_error_contract_is_avoided_on_the_first_request_without_disab
 
 
 @pytest.mark.parametrize(("configured", "canonical", "wire"), [("ultra", "ultra", "xhigh"), ("medium", "medium", "medium"), ("", "low", "low")])
-@pytest.mark.asyncio
-async def test_restored_session_binds_the_saved_policy_before_capability_projection(monkeypatch, configured, canonical, wire):
+def test_restored_session_projects_the_saved_policy_without_rebinding(configured, canonical, wire):
     source = {"model": "gpt-6.1-sol", "api_key": "fixture-key", "base_url": "https://fixture.test/v1", "wire_api": "responses",
         "reasoning_effort": "", "proxy_mode": "direct", "model_metadata": {}}
-    definition = _base_model("custom", source["model"], api="openai-responses", base_url=source["base_url"], max_tokens=0, settings=source)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("Restoring a model must not send a provider request"))) as client:
-        adapter = OpenAIAdapter(_openai_compatible_settings(source, provider="custom", model_override=source["model"]), http_client=client)
-        try:
-            monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda *_, **__: adapter)
-            builder = ContextBuilder(llm=adapter)
-            session = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key="fixture-key", provider="custom", model=source["model"], reasoning_effort=configured)),
-                provider="custom", selected_model=source["model"], context_builder=builder)
-            runtime = SimpleNamespace(get_model=lambda provider, model: definition)
-            SessionCommandHandlersMixin._bind_selected_llm(session, runtime)
-            caps = adapter.capabilities.to_dict()
-            assert caps["effective_reasoning_effort"] == canonical
-            assert caps["wire_reasoning_effort"] == wire
-            assert adapter.current_reasoning_effort() == canonical
-            assert session.config.llm.reasoning_effort == configured
-            assert builder._llm is adapter
-            messages = await builder.build(AgentState(user_message="Only reply OK"))
-            assert any(message.role == "developer" and message.content == codex_multi_agent_mode(source["model"], configured == "ultra") for message in messages)
-        finally:
-            await adapter.aclose()
+    selection = llm_model_updated_payload(provider="custom", selected_model=source["model"],
+        available_models=[source["model"]], workspace_root=None, settings_data={"llm": {"custom": source}},
+        configured_reasoning_effort=configured)
+    session = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key="fixture-key", provider="custom",
+        model=source["model"], reasoning_effort=configured)), provider="custom", llm=object(),
+        _llm_selection_payload=lambda: selection)
+    caps = WebSocketSession._provider_capabilities_payload(session)
+    assert caps["effective_reasoning_effort"] == canonical
+    assert caps["wire_reasoning_effort"] == wire
+    assert caps["configured_reasoning_effort"] == session.config.llm.reasoning_effort == configured

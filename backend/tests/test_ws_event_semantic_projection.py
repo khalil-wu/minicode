@@ -802,7 +802,7 @@ def _minimal_event_session() -> WebSocketSession:
     session._conversation_streams = {}
     session.turn_wait_state = TurnWaitState()
     session.diagnostic_store = DiagnosticPayloadStore()
-    session.event_outbox = SimpleNamespace(client_command_id="")
+    session.event_outbox = SimpleNamespace(client_command_id="", client_command_owner=None)
     session._notification_hook_tasks = set()
     session._run_notification_hook_for_event = AsyncMock()
     session.send_payload = AsyncMock(return_value=True)

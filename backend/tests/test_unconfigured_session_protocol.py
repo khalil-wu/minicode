@@ -182,6 +182,140 @@ async def test_protocol_start_restore_catalogs_and_files_do_not_bind_a_model(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "untrusted", "history_read", "workspace_parse", "owner_metadata"])
+async def test_warm_switch_failures_reply_to_target_and_preserve_source(
+    tmp_path, monkeypatch, protocol_environment, failure,
+):
+    source_root = tmp_path / "source-project"
+    source_root.mkdir()
+    target_root = tmp_path / "target-project"
+    if failure != "missing":
+        target_root.mkdir()
+    trust_file = tmp_path / "trusted-workspaces.json"
+    trust_file.write_text(json.dumps({"version": 1, "roots": [str(source_root)]}), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_file)
+    socket = ProtocolSocket(f"session_failed_switch_{failure}")
+    fault_message = f"Target {failure} failed before switching"
+
+    async with main.lifespan(main.app):
+        task = asyncio.create_task(main.websocket_endpoint(socket))
+        try:
+            await socket.until("llm.model.updated")
+            session = main._state.ws_manager.get_session(socket.query_params["session_id"])
+            source = session.conversation_repo.create_conversation(title="Source task", workspace_root=str(source_root),
+                transcript=[{"role": "user", "content": "Original history"}],
+                context_snapshot={"history": [{"role": "user", "content": "Original history"}]})
+            target = session.conversation_repo.create_conversation(title="Target task", workspace_root=str(target_root),
+                transcript=[{"role": "user", "content": "Target history"}])
+            await socket.command("conversation.switch", conversation_id=source.id)
+            await socket.until("conversation.switched", conversation_id=source.id, is_hydrating=False)
+            source_history = [message.content for message in session.context_builder._history]
+            source_transcript = session.conversation_repo.get_conversation(source.id).transcript
+
+            if failure == "history_read":
+                read_view = session.conversation_repo.get_conversation_view
+
+                def failing_view(identity, **kwargs):
+                    if identity == target.id:
+                        raise RuntimeError(fault_message)
+                    return read_view(identity, **kwargs)
+
+                monkeypatch.setattr(session.conversation_repo, "get_conversation_view", failing_view)
+            elif failure == "workspace_parse":
+                import backend.services.workspace_service as workspace_service
+                parse_workspace = workspace_service.parse_workspace_activation_request
+
+                def failing_parse(path):
+                    if path == str(target_root):
+                        raise RuntimeError(fault_message)
+                    return parse_workspace(path)
+
+                monkeypatch.setattr(workspace_service, "parse_workspace_activation_request", failing_parse)
+            elif failure == "owner_metadata":
+                read_summary = session.conversation_repo.get_conversation_summary
+
+                def failing_summary(identity):
+                    if identity == target.id:
+                        raise RuntimeError(fault_message)
+                    return read_summary(identity)
+
+                monkeypatch.setattr(session.conversation_repo, "get_conversation_summary", failing_summary)
+
+            command_id = f"switch-failure-{failure}"
+            await socket.command("conversation.switch", conversation_id=target.id, client_command_id=command_id)
+            result = await socket.until("command.result", command="conversation.switch", client_command_id=command_id)
+            assert result["level"] == "error"
+            assert result["conversation_id"] == result["data"]["conversation_id"] == target.id
+            assert result["data"]["client_command_id"] == command_id
+            if failure in {"missing", "untrusted"}:
+                assert result["data"]["error_code"] == f"workspace_{failure}"
+                assert str(target_root) in result["message"]
+            else:
+                assert result["message"] == fault_message
+            if failure == "owner_metadata":
+                assert result["workspace_root"] == result["data"]["workspace_root"] == ""
+            else:
+                assert result["workspace_root"] == result["data"]["workspace_root"] == str(target_root.resolve())
+            assert session.active_conversation_id == source.id
+            assert session.session_lifecycle.current_workspace_root() == source_root.resolve()
+            assert session.session_lifecycle.workspace_context.root_path == source_root.resolve()
+            assert [message.content for message in session.context_builder._history] == source_history
+            assert session.conversation_repo.get_conversation(source.id).transcript == source_transcript
+            assert not any(event.get("type") == "conversation.switched" and event.get("conversation_id") == target.id for event in socket.sent)
+            await socket.command("ping")
+            await socket.until("pong")
+            assert session.is_connected and socket.closed == []
+        finally:
+            await socket.finish(task)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_location", ["top", "data"])
+async def test_dispatched_result_preserves_explicit_global_owner_and_empty_workspace(
+    tmp_path, monkeypatch, protocol_environment, owner_location,
+):
+    from backend.agent.message import AgentEvent
+
+    old_root = tmp_path / "previous-workspace"
+    old_root.mkdir()
+    trust_file = tmp_path / "trusted-workspaces.json"
+    trust_file.write_text(json.dumps({"version": 1, "roots": [str(old_root)]}), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_file)
+    socket = ProtocolSocket(f"session_explicit_result_owner_{owner_location}")
+    async with main.lifespan(main.app):
+        task = asyncio.create_task(main.websocket_endpoint(socket))
+        try:
+            await socket.until("llm.model.updated")
+            session = main._state.ws_manager.get_session(socket.query_params["session_id"])
+            previous = session.conversation_repo.create_conversation(title="Project task", workspace_root=str(old_root),
+                transcript=[{"role": "user", "content": "Original history"}])
+            global_task = session.conversation_repo.create_conversation(title="Global task")
+            await socket.command("conversation.switch", conversation_id=previous.id)
+            await socket.until("conversation.switched", conversation_id=previous.id, is_hydrating=False)
+
+            async def producer(_data):
+                owner = {"conversation_id": global_task.id, "workspace_root": ""}
+                event = AgentEvent.command_result("conversation.export", "Explicit owner failure", level="error",
+                    data=owner if owner_location == "data" else None)
+                if owner_location == "top":
+                    event.data.update(owner)
+                await session.send_event(event)
+                return True
+
+            session.command_registry.register("conversation.export", producer)
+            command_id = f"explicit-owner-{owner_location}"
+            await socket.command("conversation.export", conversation_id=previous.id, client_command_id=command_id)
+            result = await socket.until("command.result", command="conversation.export", client_command_id=command_id)
+            assert result["conversation_id"] == result["data"]["conversation_id"] == global_task.id
+            assert result["workspace_root"] == result["data"]["workspace_root"] == ""
+            assert session.active_conversation_id == previous.id
+            assert session.session_lifecycle.current_workspace_root() == old_root.resolve()
+            assert session.conversation_repo.get_conversation(previous.id).transcript[0]["content"] == "Original history"
+        finally:
+            await socket.finish(task)
+
+
+@pytest.mark.asyncio
 async def test_empty_model_settings_sync_and_real_query_rejection_keep_protocol_connected(
     monkeypatch, protocol_environment,
 ):
@@ -222,14 +356,23 @@ async def test_empty_model_settings_sync_and_real_query_rejection_keep_protocol_
 
 
 @pytest.mark.asyncio
-async def test_first_real_query_creates_the_selected_adapter_and_runs_native_response(
+async def test_real_queries_and_warm_history_switches_bind_only_at_execution_boundaries(
     monkeypatch, protocol_environment,
 ):
+    from backend.config_helpers import SETTINGS_FILE
+    from backend.agent.model_execution import ModelExecutionSnapshot
+
     monkeypatch.setenv("OPENAI_MODEL", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_API_KEY", "offline-fixture")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://protocol.invalid/v1")
     monkeypatch.setenv("OPENAI_REASONING_EFFORT", "medium")
+    SETTINGS_FILE.write_text(json.dumps({"llm": {"provider": "openai", "custom": {
+        "api_key": "offline-fixture", "model": "catalog-model", "available_models": ["catalog-model"],
+        "base_url": "https://custom.protocol.invalid/v1", "wire_api": "responses", "tool_mode": "direct",
+        "model_metadata": {"catalog-model": {"source": "provider", "context_window": 32000,
+            "reasoning_effort_levels": ["low", "high"], "input": ["text"], "tool_mode": "direct",
+            "parallel_tool_calls": False, "native_compaction": False, "supports_hosted_web_search": False}}}}}), encoding="utf-8")
     adapters, requests = [], []
 
     async def respond(request):
@@ -281,8 +424,118 @@ async def test_first_real_query_creates_the_selected_adapter_and_runs_native_res
                         "supports_hosted_web_search", "context_window"):
                 assert before[key] == after[key], key
             assert session.conversation_repo.get_conversation(conversation_id).transcript[-1]["content"] == "The requested result is ready."
+            captured = ModelExecutionSnapshot.capture(session.config, adapters[0])
+            history = [{"role": "user" if index % 2 == 0 else "assistant", "content": f"Saved entry {index}"}
+                for index in range(24)]
+            saved = session.conversation_repo.create_conversation(title="Other provider task", transcript=history,
+                context_snapshot={"history": history}, model_selection={"provider": "custom", "model": "catalog-model", "reasoning_effort": "high"})
+            unavailable = session.conversation_repo.create_conversation(title="Retired model task", transcript=history,
+                context_snapshot={"history": history}, model_selection={"provider": "custom", "model": "retired-model", "reasoning_effort": "low"})
+            removed = session.conversation_repo.create_conversation(title="Removed provider task", transcript=history,
+                context_snapshot={"history": history}, model_selection={"provider": "Removed-Provider", "model": "removed-model", "reasoning_effort": "low"})
+
+            summarize_capabilities = session.runtime_capability_summary
+
+            def summary_after_public_history(**kwargs):
+                if session.active_conversation_id == saved.id:
+                    assert any(event["type"] == "conversation.switched" and event.get("conversation_id") == saved.id
+                        and event.get("is_hydrating") is True for event in socket.sent)
+                return summarize_capabilities(**kwargs)
+
+            monkeypatch.setattr(session, "runtime_capability_summary", summary_after_public_history)
+
+            await socket.command("conversation.switch", conversation_id=saved.id)
+            pending = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=True)
+            complete = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=False)
+            assert pending["conversation"]["transcript"][-1]["content"] == complete["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+            current = complete["session"]["capabilities"]["provider_capabilities"]
+            assert current["provider"] == "custom" and current["model"] == "catalog-model"
+            assert current["context_window"] == 32000 and current["vision"] is False
+            assert current["effective_reasoning_effort"] == "high" and current["parallel_tool_calls"] is False
+            assert current["native_compaction"] is False and current["supports_hosted_web_search"] is False
+            assert len(session.context_builder._history) == 24
+            assert len(adapters) == len(requests) == 1
+            assert session.llm is captured.llm and captured.provider == "openai"
+            assert captured.model == captured.llm.model_id() == "gpt-6.1-sol"
+            assert captured.config.llm.reasoning_effort == "medium"
+
+            await socket.command("commands.list")
+            await socket.until("commands.list", conversation_id=saved.id)
+            refresh_task = session._extension_runtime_states[saved.id].get("model_refresh_task")
+            if refresh_task is not None:
+                await asyncio.wait_for(asyncio.shield(refresh_task), 5)
+            assert len(adapters) == 1 and session.llm is captured.llm
+            assert session.runtime_toolset_policy(session.tool_registry).code_mode_enabled is False
+            await socket.command("user_message", content="Use the saved provider", conversation_id=saved.id,
+                client_command_id="saved-provider-query", user_message_id="saved-user", assistant_message_id="saved-assistant")
+            second_done = await socket.until("done", conversation_id=saved.id)
+            assert second_done["status"] == "completed"
+            assert len(adapters) == len(requests) == 2 and session.llm is adapters[1]
+            assert requests[1]["model"] == "catalog-model" and requests[1]["reasoning"]["effort"] == "high"
+            assert "Saved entry 0" in json.dumps(requests[1])
+
+            for old_task in (unavailable, removed):
+                await socket.command("conversation.switch", conversation_id=old_task.id)
+                await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=True)
+                restored = await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=False)
+                assert restored["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+                current = restored["session"]["capabilities"]["provider_capabilities"]
+                assert current["provider"] == old_task.model_selection["provider"]
+                assert current["model"] == old_task.model_selection["model"]
+                if old_task.id == removed.id:
+                    assert session.models_source == "unavailable" and session.available_models == []
+                    assert current["confidence"] == "unavailable" and current["limitations"] == ["provider_catalog_unavailable"]
+                    assert current["wire_api"] == current["base_url"] == ""
+                    assert current["streaming"] is False and current["tool_calling"] is False
+                    assert current["context_window"] == 0 and current["vision"] is None
+                await socket.command("commands.list")
+                await socket.until("commands.list", conversation_id=old_task.id)
+                refresh_task = session._extension_runtime_states[old_task.id].get("model_refresh_task")
+                if refresh_task is not None:
+                    await asyncio.wait_for(asyncio.shield(refresh_task), 5)
+                assert session.provider == old_task.model_selection["provider"]
+                assert session.selected_model == old_task.model_selection["model"]
+                if old_task.id == removed.id:
+                    selection = session._llm_selection_payload()
+                    assert selection["models_source"] == "unavailable" and selection["provider"] == "Removed-Provider"
+                    assert selection["available_models"] == [] and selection["wire_api"] == ""
+                assert len(adapters) == len(requests) == 2
+            await socket.command("user_message", content="Resume the retired provider", conversation_id=removed.id,
+                client_command_id="removed-provider-query", user_message_id="removed-user", assistant_message_id="removed-assistant")
+            unavailable_error = await socket.until("error", conversation_id=removed.id)
+            unavailable_done = await socket.until("done", conversation_id=removed.id)
+            assert unavailable_error["error_type"] == unavailable_error["provider_error_type"] == "model"
+            assert unavailable_error["recoverable"] is False
+            assert unavailable_done["status"] == "failed" and unavailable_done["reason"] == "llm_initialization_failed"
+            assert unavailable_done["failure_recoverable"] is False
+            terminal = default_runtime().latest_main_run(removed.id)
+            assert terminal.status == "failed" and terminal.terminal_reason == "llm_initialization_failed"
+            assert terminal.error == unavailable_error["message"]
+            assert session.conversation_repo.get_conversation(removed.id).transcript[0]["content"] == "Saved entry 0"
+            assert len(adapters) == len(requests) == 2
+            await socket.command("session.restore", last_seq=0, last_conversation_id=conversation_id)
+            restored = await socket.until("session.restored")
+            assert restored["conversation"]["transcript"][-1]["content"] == "The requested result is ready."
+            assert session.provider == "openai" and session.selected_model == "gpt-6.1-sol"
+            assert session._provider_capabilities_payload()["model"] == "gpt-6.1-sol"
+            assert session.runtime_toolset_policy(session.tool_registry).code_mode_enabled is True
+            assert len(adapters) == len(requests) == 2 and session.llm is adapters[1]
+            await socket.command("llm.model.set", model="gpt-6.1-sol", conversation_id=conversation_id, client_command_id="explicit-model-change")
+            model_changed = await socket.until("llm.model.updated", conversation_id=conversation_id, client_command_id="explicit-model-change")
+            assert model_changed["model"] == "gpt-6.1-sol"
+            assert session.llm.model_id() == "gpt-6.1-sol"
+            assert session.context_builder._llm is session.llm
+            assert len(requests) == 2
+            await socket.command("llm.config.set", source="frontend.footer", reasoning_effort="high", conversation_id=conversation_id,
+                client_command_id="explicit-effort-change")
+            effort_changed = await socket.until("llm.model.updated", conversation_id=conversation_id,
+                client_command_id="explicit-effort-change", effective_reasoning_effort="high")
+            assert effort_changed["model"] == "gpt-6.1-sol"
+            assert session.context_builder._llm is session.llm
+            assert session.llm.current_reasoning_effort() == "high" and len(requests) == 2
             await socket.command("ping")
             await socket.until("pong")
-            assert session.is_connected and not any(event["type"] == "error" for event in socket.sent)
+            assert session.is_connected
+            assert [event for event in socket.sent if event["type"] == "error"] == [unavailable_error]
         finally:
             await socket.finish(task)

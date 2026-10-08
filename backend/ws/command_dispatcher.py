@@ -506,16 +506,27 @@ class SessionCommandDispatcher:
             conversation_id = str(command.data.get("owner_conversation_id")
                 or command.data.get("ownerConversationId") or command.data.get("conversation_id")
                 or self._session.active_conversation_id or "")
-            if "workspace_root" in command.data:
-                workspace_root = command.data["workspace_root"]
-            elif conversation_id and conversation_id != self._session.active_conversation_id:
-                conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
-                workspace_root = (
-                    self._session.session_lifecycle.workspace_root_for_conversation(conversation)
-                    if conversation is not None else ""
-                )
-            else:
-                workspace_root = self._session.session_lifecycle.workspace_root_for_conversation()
+            try:
+                if "workspace_root" in command.data:
+                    workspace_root = command.data["workspace_root"]
+                elif conversation_id and conversation_id != self._session.active_conversation_id:
+                    conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+                    workspace_root = (
+                        self._session.session_lifecycle.workspace_root_for_conversation(conversation)
+                        if conversation is not None else ""
+                    )
+                else:
+                    workspace_root = self._session.session_lifecycle.workspace_root_for_conversation()
+            except Exception as exc:
+                if not _is_conversation_lifecycle_command(command.type):
+                    raise
+                logger.error("Command %s owner resolution failed: %s", command.type, exc, exc_info=True)
+                with self._session.event_outbox.bind_client_command(
+                    self._client_command_id(command), command.type,
+                    owner=(conversation_id, ""),
+                ):
+                    await emit_command_error(self._session, command.type, exc)
+                return False
             owner = (conversation_id, str(workspace_root or ""))
             async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
                 with self._session.event_outbox.bind_client_command(

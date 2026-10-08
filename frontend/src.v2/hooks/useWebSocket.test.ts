@@ -247,6 +247,19 @@ describe("useWebSocket renderer identity", () => {
 });
 
 describe("useWebSocket client command ids", () => {
+  it.each(["conv-target", "conv-newer"])("settles only the rejected switch while preserving navigation to %s", (pendingOwner) => {
+    const messages = [{ id: "source-user", role: "user" as const, content: "Keep this history", timestamp: 1 }];
+    useAppStore.setState({ conversationId: "conv-source", pendingConversationSwitchId: pendingOwner,
+      messages, draft: "Unsent prompt" });
+    trackPendingClientCommandAck({ type: "conversation.switch", conversation_id: "conv-target", client_command_id: "rejected-switch" });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "rejected-switch",
+      command_type: "conversation.switch", accepted: false, reason: "command.persistence" } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-source",
+      pendingConversationSwitchId: pendingOwner === "conv-target" ? null : "conv-newer", messages, draft: "Unsent prompt" });
+    if (pendingOwner === "conv-target") expect(pushToast).toHaveBeenCalledWith("打开会话失败：command.persistence", "error", 6000);
+    else expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it.each(["active", "background", "side"])("seals only the rejected %s optimistic turn and preserves drafts and other live work", (owner) => {
     const assistant = (id: string) => ({ id, role: "assistant" as const, content: "", timestamp: 1, isStreaming: true, blocks: [] });
     useAppStore.setState({ conversationId: "active", draft: "new draft", messages: [assistant("active-reply")], isStreaming: true,

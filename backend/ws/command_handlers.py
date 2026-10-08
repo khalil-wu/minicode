@@ -27,6 +27,7 @@ class SessionCommandHandlersMixin:
         register_domain_handlers(self)
 
     def refresh_llm_selection(self, *, prefer_config: bool = False) -> None:
+        """Restore the visible selection without changing a running query's client."""
         from backend.services.llm_config_service import refresh_llm_selection_state
         from backend.config import load_config
         from backend.ws.agent_runner import _resolver_accepts_positional_arguments
@@ -72,28 +73,30 @@ class SessionCommandHandlersMixin:
         task_selection = conversation.model_selection if conversation is not None else {}
         if task_selection and not prefer_config:
             provider = task_selection["provider"]
+            builtin_provider = provider in {"openai", "anthropic", "custom"}
             self.provider = provider
             self.selected_model = task_selection["model"]
             self._model_override_active = True
             self._provider_override_active = provider != resolve_provider()
             self.available_models = (
                 [model.id for model in model_runtime.get_models(provider)]
-                if model_runtime is not None else list(resolve_models(provider))
+                if model_runtime is not None else list(resolve_models(provider)) if builtin_provider else []
             )
-            self.models_source = (
-                "extension"
-                if model_runtime is not None and model_runtime.get_registered_provider_config(provider) is not None
-                else resolve_models_source(provider)
-            )
+            if model_runtime is not None and model_runtime.get_registered_provider_config(provider) is not None:
+                self.models_source = "extension"
+            elif builtin_provider:
+                self.models_source = resolve_models_source(provider)
+            elif model_runtime is not None:
+                declared_provider = model_runtime.get_provider(provider)
+                self.models_source = declared_provider.source if declared_provider is not None else "unavailable"
+            else:
+                self.models_source = "unavailable"
             self.config = replace(scoped_config, llm=replace(
                 scoped_config.llm,
+                provider=provider,
                 model=self.selected_model,
                 reasoning_effort=task_selection.get("reasoning_effort", scoped_config.llm.reasoning_effort),
             ))
-            if self.llm is not None and self.selected_model and (provider in {"openai", "anthropic", "custom"} or (
-                model_runtime is not None and model_runtime.get_provider(provider) is not None
-            )):
-                self._bind_selected_llm(model_runtime)
             return
         if conversation is not None:
             # Older tasks without a saved choice follow project defaults;
@@ -130,8 +133,6 @@ class SessionCommandHandlersMixin:
                     is not None
                     else resolve_models_source(provider)
                 )
-                if self.llm is not None and self.selected_model:
-                    self._bind_selected_llm(model_runtime)
                 return
 
         selection = refresh_llm_selection_state(
@@ -150,30 +151,10 @@ class SessionCommandHandlersMixin:
         self._model_override_active = selection.model_override_active
         self._provider_override_active = False
         self.models_source = resolve_models_source(self.provider)
-        if self.selected_model and self.llm is not None:
-            self._bind_selected_llm(model_runtime)
 
     def reset_model_selection_overrides(self) -> None:
         self._model_override_active = False
         self._provider_override_active = False
-
-    def _bind_selected_llm(self, model_runtime: Any | None) -> None:
-        from backend.llm.model_selection import default_model_thinking_level, model_thinking_levels
-        from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm
-
-        self.config = _config_with_runtime_model_budget(
-            self.config, model_runtime=model_runtime,
-            provider=self.provider, model=self.selected_model,
-        )
-        self.llm = _get_or_create_session_llm(
-            self, config=self.config, provider=self.provider,
-            model=self.selected_model, model_runtime=model_runtime,
-        )
-        selected = model_runtime.get_model(self.provider, self.selected_model) if model_runtime is not None else None
-        requested = self.config.llm.reasoning_effort or default_model_thinking_level(selected, model_thinking_levels(selected, self.llm)) or "off"
-        _apply_thinking_level(self.llm, selected, requested)
-        self.context_builder.bind_llm(self.llm)
-        self.context_builder.bind_budget(self.config.token_budget)
 
     async def _run_cwd_changed_hook(self, *, old_cwd: str, new_cwd: str) -> None:
         from backend.hooks.runtime import run_cwd_changed_hook

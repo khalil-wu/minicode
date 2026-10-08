@@ -909,7 +909,7 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
         )
         return True
     target = ConversationRecord.from_dict(view)
-    if not await session.switch_workspace_for_conversation(target, announce=True):
+    if not await session.switch_workspace_for_conversation(target, announce=True, error_command="conversation.switch"):
         return True
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
@@ -939,7 +939,7 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
     await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
                                 "conversation": view, "is_hydrating": True, "context_pending": True,
-                                "session": session.runtime_snapshot(),
+                                "session": session.runtime_snapshot(include_capabilities=False),
                                 "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
     session.start_active_conversation_hydration(target.id)
     return True

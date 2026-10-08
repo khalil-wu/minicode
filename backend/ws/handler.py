@@ -637,7 +637,8 @@ class WebSocketSession(
 
     def runtime_toolset_policy(self, registry: ToolRegistry):
         """Project the admitted tool surface, or derive the next idle surface."""
-        from backend.agent.tool_schema_derivation import effective_toolset_policy, requested_tool_mode
+        from backend.agent.tool_schema_derivation import effective_toolset_policy
+        from backend.llm.provider_contracts import normalize_tool_mode
         from backend.tools.toolsets import ToolsetPolicy
 
         context = self.run_manager.context_for(self.active_conversation_id or "")
@@ -648,6 +649,11 @@ class WebSocketSession(
         base = ToolsetPolicy.default()
         if selection is not None:
             base = base.with_active_tool_selection(selection)
+        model_runtime = self._model_runtime_for_conversation(self.active_conversation_id)
+        model = model_runtime.get_model(self.provider, self.selected_model) if model_runtime is not None else None
+        tool_mode = normalize_tool_mode(
+            (model.tool_mode if model is not None else "") or self.config.llm.tool_mode
+        ) or ("code_mode_only" if self.config.agent.code_mode_only else "code_mode")
         return effective_toolset_policy(
             base_policy=base,
             tool_registry=registry,
@@ -655,11 +661,7 @@ class WebSocketSession(
             requires_explicit_workspace=True,
             workspace_root=self.session_lifecycle.current_workspace_root(),
             permission_mode=self.permission_context.mode,
-            tool_mode="code_mode" if selection is not None else requested_tool_mode(
-                default_code_mode_only=self.config.agent.code_mode_only,
-                model_execution=None,
-                llm=self.llm,
-            ),
+            tool_mode="code_mode" if selection is not None else tool_mode,
         )
 
     def runtime_capability_summary(
@@ -716,30 +718,32 @@ class WebSocketSession(
         }
 
     def _provider_capabilities_payload(self) -> dict[str, Any]:
-        if self.llm is None:
-            from dataclasses import replace
-            from backend.llm.capabilities import capabilities_from_settings
+        from dataclasses import replace
+        from backend.llm.capabilities import ProviderCapabilities, capabilities_from_settings
 
-            selection = self._llm_selection_payload()
-            fields = {key: selection[key] for key in (
-                "model", "base_url", "wire_api", "context_window", "context_window_source", "context_window_verified",
-                "max_context_window", "max_context_window_source", "max_context_window_verified",
-                "max_output_tokens", "max_output_tokens_source", "max_output_tokens_verified",
-                "default_reasoning_effort", "default_reasoning_summary", "parallel_tool_calls",
-                "native_compaction", "supports_hosted_web_search", "thinking_budget",
-            )}
-            fields["reasoning_effort"] = selection["configured_reasoning_effort"]
-            fields["reasoning_effort_levels"] = tuple(selection["reasoning_effort_levels"] if selection["wire_api"] != "anthropic" else selection["declared_reasoning_effort_levels"])
-            fields["input_modalities"] = tuple(selection["input_modalities"])
-            declared = replace(self.config.llm, provider=self.provider, **fields)
-            return capabilities_from_settings(declared, provider=self.provider).to_dict()
-        try:
-            from backend.llm.capabilities import capabilities_for_adapter
-
-            return capabilities_for_adapter(self.llm).to_dict()
-        except Exception as exc:
-            logger.debug("session %s provider capability snapshot failed: %s", self.session_id, exc)
-            return {}
+        # The visible conversation can change while an earlier query retains its
+        # adapter. Its composer describes the selected catalog/config contract;
+        # execution snapshots keep the capabilities of their own bound clients.
+        selection = self._llm_selection_payload()
+        if selection["models_source"] == "unavailable":
+            return ProviderCapabilities(
+                provider=selection["provider"], provider_id=selection["provider_id"], model=selection["model"],
+                configured_reasoning_effort=selection["configured_reasoning_effort"],
+                streaming=False, tool_calling=False, reasoning_effort_supported=False,
+                confidence="unavailable", limitations=("provider_catalog_unavailable",),
+            ).to_dict()
+        fields = {key: selection[key] for key in (
+            "model", "base_url", "wire_api", "context_window", "context_window_source", "context_window_verified",
+            "max_context_window", "max_context_window_source", "max_context_window_verified",
+            "max_output_tokens", "max_output_tokens_source", "max_output_tokens_verified",
+            "default_reasoning_effort", "default_reasoning_summary", "parallel_tool_calls",
+            "native_compaction", "supports_hosted_web_search", "thinking_budget",
+        )}
+        fields["reasoning_effort"] = selection["configured_reasoning_effort"]
+        fields["reasoning_effort_levels"] = tuple(selection["reasoning_effort_levels"] if selection["wire_api"] != "anthropic" else selection["declared_reasoning_effort_levels"])
+        fields["input_modalities"] = tuple(selection["input_modalities"])
+        declared = replace(self.config.llm, provider=self.provider, **fields)
+        return capabilities_from_settings(declared, provider=self.provider).to_dict()
 
     def runtime_capability_snapshot(self, *, skill_catalog: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
@@ -1523,20 +1527,33 @@ class WebSocketSession(
                 event.data["conversation_id"] = active_conversation_id
         if event.type == "command.result":
             command_id = self.event_outbox.client_command_id
+            command_owner = self.event_outbox.client_command_owner
             details = event.data.get("data")
             result_data = dict(details) if isinstance(details, dict) else {}
             if command_id:
                 result_data.setdefault("client_command_id", command_id)
-            conversation_id = str(
-                event.data.get("conversation_id")
-                or result_data.get("conversation_id")
-                or slash_conversation_id()
-                or self.active_conversation_id
-                or ""
-            ).strip()
-            if conversation_id:
+            if "conversation_id" in event.data:
+                conversation_owner = event.data["conversation_id"]
+            elif "conversation_id" in result_data:
+                conversation_owner = result_data["conversation_id"]
+            elif command_owner is not None:
+                conversation_owner = command_owner[0]
+            else:
+                conversation_owner = slash_conversation_id() or self.active_conversation_id
+            conversation_id = str(conversation_owner or "").strip()
+            if conversation_owner is not None:
                 event.data.setdefault("conversation_id", conversation_id)
                 result_data.setdefault("conversation_id", conversation_id)
+            if "workspace_root" in event.data:
+                workspace_owner = event.data["workspace_root"]
+            elif "workspace_root" in result_data:
+                workspace_owner = result_data["workspace_root"]
+            else:
+                workspace_owner = command_owner[1] if command_owner is not None else None
+            if workspace_owner is not None:
+                workspace_root = str(workspace_owner)
+                event.data.setdefault("workspace_root", workspace_root)
+                result_data.setdefault("workspace_root", workspace_root)
             if result_data:
                 event.data["data"] = result_data
         # Raw provider/tool traces are retained server-side and fetched only

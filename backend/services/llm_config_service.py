@@ -112,9 +112,10 @@ def llm_model_updated_payload(
         str(runtime_metadata.get("models_source") or "").strip().lower()
         == "extension"
     )
+    catalog_unavailable = models_source == "unavailable"
     normalized_provider = (
         requested_provider
-        if extension_defined
+        if extension_defined or catalog_unavailable
         else requested_provider.lower()
     )
     payload_section: dict[str, Any]
@@ -152,7 +153,7 @@ def llm_model_updated_payload(
         ).strip()
     raw_wire_api = str(
         payload_section.get("wire_api")
-        or ("anthropic" if normalized_provider == "anthropic" else "chat")
+        or ("" if catalog_unavailable else "anthropic" if normalized_provider == "anthropic" else "chat")
     ).strip()
     wire_api = {
         "anthropic-messages": "anthropic",

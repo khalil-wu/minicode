@@ -134,6 +134,10 @@ class EventOutbox:
         return self._client_command_id.get()
 
     @property
+    def client_command_owner(self) -> tuple[str, str] | None:
+        return self._client_command_owner.get()
+
+    @property
     def persistence_tail(self) -> asyncio.Task[None] | None:
         return self._persist_tail
 

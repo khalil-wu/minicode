@@ -82,7 +82,8 @@ describe("ChatPane search shortcuts", () => {
     expect(screen.getByPlaceholderText("在对话中搜索…")).toBeTruthy();
   });
 
-  it("immediately blanks the old chat while a switch waits for its public page", () => {
+  it("shows opening progress while a switch waits for its public page and preserves the source draft", () => {
+    useAppStore.setState({ draft: "Unsent prompt" });
     const { container } = render(<ChatPane />);
     expect(screen.getByText("messages")).toBeTruthy();
 
@@ -90,10 +91,16 @@ describe("ChatPane search shortcuts", () => {
     expect(container.querySelector(".chat-pane")?.getAttribute("data-switching")).toBe("true");
     expect(screen.queryByText("messages")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
-    expect(screen.getByRole("status").textContent).toContain("正在打开会话");
+    const opening = screen.getByRole("status");
+    expect(opening.textContent).toContain("正在打开会话");
+    expect(opening.className).toBe("chat-pane-switch-status");
+    expect(opening.querySelector("svg.animate-spin")?.getAttribute("aria-hidden")).toBe("true");
+    expect(useAppStore.getState().draft).toBe("Unsent prompt");
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
     expect(screen.getByText("messages")).toBeTruthy();
+    expect(screen.queryByText("正在打开会话…")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("Unsent prompt");
   });
 
   it("shows an informative hydration status while backend context is being restored", () => {

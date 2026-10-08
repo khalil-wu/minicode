@@ -1793,80 +1793,10 @@ class SessionAgentRunnerMixin:
             return
         if conversation_id != str(getattr(self, "active_conversation_id", "") or ""):
             return
-        conversation = self.conversation_repo.get_conversation(conversation_id)
-        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
-        scoped_config = load_config(cwd=workspace_root)
-        scoped_settings = (
-            scoped_config.config_layer_stack.effective_config()
-            if scoped_config.config_layer_stack is not None
-            else None
-        )
-        provider_resolver = getattr(self, "_resolve_llm_provider", get_llm_provider)
-        configured_provider = str(
-            (
-                provider_resolver(scoped_settings)
-                if _resolver_accepts_positional_arguments(
-                    provider_resolver,
-                    scoped_settings,
-                )
-                else provider_resolver()
-            )
-            or ""
-        ).strip().lower()
-        provider = str(getattr(self, "provider", "") or "").strip()
-        provider_override = bool(getattr(self, "_provider_override_active", False))
-        if not provider_override or runtime.get_provider(provider) is None:
-            provider = configured_provider
-            self._provider_override_active = False
+        self.refresh_llm_selection()
         refresh_provider_auth = getattr(runtime, "refresh_provider_auth", None)
         if callable(refresh_provider_auth):
-            await refresh_provider_auth(provider)
-        models = list(runtime.get_models(provider))
-        available_models = [model.id for model in models]
-        selected = str(getattr(self, "selected_model", "") or "").strip()
-        if not selected:
-            # Preserve an explicit configured model even when the refreshed
-            # catalog no longer advertises it. The run admission boundary
-            # reports that mismatch; selecting the first catalog entry would
-            # change the user's model silently.
-            selected = str(
-                getattr(scoped_config.llm, "model", "") or ""
-            ).strip()
-        self.provider = provider
-        self.available_models = available_models
-        self.selected_model = selected
-        self.models_source = (
-            "extension"
-            if runtime.get_registered_provider_config(provider) is not None
-            else (
-                getattr(self, "_resolve_models_source")(provider, scoped_settings)
-                if callable(getattr(self, "_resolve_models_source", None))
-                and _resolver_accepts_positional_arguments(
-                    getattr(self, "_resolve_models_source"),
-                    provider,
-                    scoped_settings,
-                )
-                else getattr(self, "_resolve_models_source", lambda _provider: "")(
-                    provider
-                )
-            )
-        )
-        if self.llm is not None and selected and runtime.get_model(provider, selected) is not None:
-            self.config = _config_with_runtime_model_budget(
-                scoped_config,
-                model_runtime=runtime,
-                provider=provider,
-                model=selected,
-            )
-            self.llm = _get_or_create_session_llm(
-                self,
-                config=self.config,
-                provider=provider,
-                model=selected,
-                model_runtime=runtime,
-            )
-            self.context_builder.bind_llm(self.llm)
-            self.context_builder.bind_budget(self.config.token_budget)
+            await refresh_provider_auth(self.provider)
         send_state = getattr(self, "send_llm_state", None)
         if callable(send_state):
             await send_state()
@@ -4159,21 +4089,30 @@ class SessionAgentRunnerMixin:
                 run_available_models = [
                     model.id for model in run_model_runtime.get_models(run_provider)
                 ]
-                run_models_source = (
-                    "extension"
-                    if run_model_runtime.get_registered_provider_config(run_provider)
-                    is not None
-                    else (
+                if run_model_runtime.get_registered_provider_config(run_provider) is not None:
+                    run_models_source = "extension"
+                elif run_provider in {"openai", "anthropic", "custom"}:
+                    run_models_source = (
                         models_source_resolver(run_provider, run_settings)
                         if _resolver_accepts_positional_arguments(
                             models_source_resolver, run_provider, run_settings
                         )
                         else models_source_resolver(run_provider)
-                    )
-                    if models_source_resolver
-                    else ""
-                )
+                    ) if models_source_resolver else ""
+                else:
+                    declared_provider = run_model_runtime.get_provider(run_provider)
+                    if declared_provider is None:
+                        raise RuntimeError(
+                            "provider_error_type=model: "
+                            f"Selected provider '{run_provider}' is unavailable in the active provider model catalog"
+                        )
+                    run_models_source = declared_provider.source
             else:
+                if run_provider not in {"openai", "anthropic", "custom"}:
+                    raise RuntimeError(
+                        "provider_error_type=model: "
+                        f"Selected provider '{run_provider}' is unavailable in the active provider model catalog"
+                    )
                 run_available_models = list(
                     models_resolver(run_provider, run_settings)
                     if _resolver_accepts_positional_arguments(

@@ -127,6 +127,7 @@ def test_failed_workspace_admission_preserves_previous_runtime_until_owner_chang
     monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", tmp_path / "absent-ledger.json")
     previous_context = _Context(previous_root)
     session = _Session(previous_context)
+    session.active_conversation_id = "conv-source"
     previous_mcp = object()
     session.mcp_manager = previous_mcp
     stopped = []
@@ -135,8 +136,10 @@ def test_failed_workspace_admission_preserves_previous_runtime_until_owner_chang
     lifecycle.workspace_root = previous_root
     lifecycle.file_watcher = watcher
 
+    requested_command = "workspace.activate" if wait_for_initialize else "conversation.switch"
     result = asyncio.run(lifecycle.activate_workspace_path(
         str(target_root), wait_for_initialize=wait_for_initialize,
+        conversation_id="conv-target", error_command=requested_command,
     ))
 
     assert result is False
@@ -145,7 +148,14 @@ def test_failed_workspace_admission_preserves_previous_runtime_until_owner_chang
     assert session.mcp_manager is previous_mcp
     assert lifecycle.file_watcher is watcher
     assert not stopped
-    assert session.events[-1].data["error_code"] == f"workspace_{workspace_state}"
+    assert session.active_conversation_id == "conv-source"
+    event = session.events[-1]
+    assert event.type == "command.result"
+    assert event.data["command"] == requested_command
+    assert event.data["level"] == "error"
+    assert event.data["data"]["error_code"] == f"workspace_{workspace_state}"
+    assert event.data["data"]["conversation_id"] == "conv-target"
+    assert event.data["data"]["workspace_root"] == str(target_root)
 
 
 def test_background_workspace_index_failure_keeps_the_committed_new_owner(

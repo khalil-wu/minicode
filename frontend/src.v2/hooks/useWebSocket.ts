@@ -609,6 +609,11 @@ export const acknowledgeClientCommand = (event: ServerEvent): boolean => {
   if (ack.accepted === false) {
     const reason = String(ack.reason || "Command was rejected by the server");
     rejectClientCommandResult(clientCommandId, reason);
+    if (command?.type === "conversation.switch"
+      && command.conversation_id === useAppStore.getState().pendingConversationSwitchId) {
+      useAppStore.setState({ pendingConversationSwitchId: null });
+      pushToast(`打开会话失败：${reason}`, "error", 6000);
+    }
     if (command?.type === "user_message" && command.assistant_message_id) {
       const state = useAppStore.getState();
       const messageId = command.assistant_message_id;

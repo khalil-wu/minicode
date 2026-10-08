@@ -252,14 +252,6 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     };
   };
 
-  if (
-    ev.command === "conversation.switch"
-    && ev.level !== "success"
-    && ev.data?.conversation_id === useAppStore.getState().pendingConversationSwitchId
-  ) {
-    useAppStore.setState({ pendingConversationSwitchId: null });
-  }
-
   // Resolve the owning operation before doing any generic presentation. A
   // settings page waiting on this result owns its inline state/toast; surfacing
   // the same MCP/plugin/scheduler result as agent progress mixes control-plane
@@ -268,6 +260,14 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
   const envelope = ev as CommandResultEvent & { conversation_id?: string; workspace_root?: string };
   const owner = typeof ev.data?.conversation_id === "string" ? ev.data.conversation_id : envelope.conversation_id;
   const workspaceRoot = typeof ev.data?.workspace_root === "string" ? ev.data.workspace_root : envelope.workspace_root;
+  if (
+    ev.command === "conversation.switch"
+    && ev.level !== "success"
+    && owner === useAppStore.getState().pendingConversationSwitchId
+  ) {
+    useAppStore.setState({ pendingConversationSwitchId: null });
+    if (!consumedByCaller) pushToast(ev.message, toastType(ev.level), 7000);
+  }
   const targetsActiveScope = () => owner !== undefined && typeof workspaceRoot === "string"
     && owner === (useAppStore.getState().conversationId || "")
     && workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory);

@@ -59,6 +59,32 @@ describe("handleCommandResultEvent", () => {
     expect(useAppStore.getState().conversationId).toBe("conv-command");
   });
 
+  it("settles an exception result owned by the switch target and preserves the source transcript and draft", () => {
+    const messages = [{ id: "source-user", role: "user" as const, content: "Keep this history", timestamp: 1 }];
+    useAppStore.setState({ pendingConversationSwitchId: "conv-target", messages, draft: "Unsent prompt" });
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      conversation_id: "conv-target",
+      workspace_root: "C:/target",
+      command: "conversation.switch",
+      level: "error",
+      message: "Private checkpoint unreadable",
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-command", pendingConversationSwitchId: null,
+      messages, draft: "Unsent prompt", agentProgress: [] });
+    expect(pushToast).toHaveBeenCalledWith("Private checkpoint unreadable", "error", 7000);
+  });
+
+  it("does not settle a newer navigation from an earlier switch failure", () => {
+    useAppStore.setState({ pendingConversationSwitchId: "conv-newer", draft: "Unsent prompt" });
+    handleCommandResultEvent({ type: "command.result", conversation_id: "conv-older", workspace_root: "C:/older",
+      command: "conversation.switch", level: "error", message: "Earlier switch failed" } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-command", pendingConversationSwitchId: "conv-newer",
+      draft: "Unsent prompt" });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it("surfaces inspect-type results as an ephemeral toast, never as a persistent transcript message", () => {
     expect(handleCommandResultEvent({
       type: "command.result",
