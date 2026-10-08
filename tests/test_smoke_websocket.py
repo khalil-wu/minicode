@@ -3,6 +3,7 @@ import json
 from queue import Empty
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from backend.agent.loop import run_agent_loop
@@ -96,11 +97,13 @@ def _assert_startup_events(ws) -> list[dict[str, object]]:
 
 
 def _create_active_conversation(ws, *, title: str = "Smoke test chat") -> dict[str, object]:
-    ws.send_json({"type": "conversation.create", "title": title, "memory_mode": "none"})
-    listing = _receive_next_type(ws, "conversation.list")
+    command_id = f"smoke-create-{uuid4().hex}"
+    ws.send_json({"type": "conversation.create", "title": title, "memory_mode": "none", "client_command_id": command_id})
+    listing = _receive_next_type(ws, "conversation.list", client_command_id=command_id)
     assert listing["active_conversation_id"]
     assert listing["active_conversation"]["id"] == listing["active_conversation_id"]
-    result = _receive_next_type(ws, "command.result")
+    result = _receive_next_type(ws, "command.result", client_command_id=command_id,
+        command="conversation.create", conversation_id=listing["active_conversation_id"])
     assert result["command"] == "conversation.create"
     assert result["data"]["conversation_id"] == listing["active_conversation_id"]
     return listing
@@ -202,7 +205,7 @@ def test_websocket_ping_round_trip() -> None:
             _assert_startup_events(ws)
 
             ws.send_json({"type": "ping"})
-            pong = _receive_next_non_task_update(ws)
+            pong = _receive_next_type(ws, "pong")
             assert pong["type"] == "pong"
             _assert_event_envelope(pong)
 
@@ -240,7 +243,7 @@ def test_websocket_accepts_control_protocol_messages() -> None:
             ws.send_json({"type": "control_cancel_request", "request_id": "req_missing"})
 
             ws.send_json({"type": "ping"})
-            pong = _receive_next_non_task_update(ws)
+            pong = _receive_next_type(ws, "pong")
             assert pong["type"] == "pong"
             _assert_event_envelope(pong)
 
@@ -340,26 +343,26 @@ def test_websocket_runtime_inspect_commandsemit_command_result() -> None:
         with client.websocket_connect("/ws?session_id=session_test_runtime_inspect") as ws:
             _assert_startup_events(ws)
 
-            ws.send_json({"type": "session.tasks.inspect"})
-            tasks_result = _receive_next_non_task_update(ws)
+            ws.send_json({"type": "session.tasks.inspect", "client_command_id": "smoke-inspect-tasks"})
+            tasks_result = _receive_next_type(ws, "command.result", command="tasks", client_command_id="smoke-inspect-tasks")
             assert tasks_result["type"] == "command.result"
             assert tasks_result["command"] == "tasks"
             assert "Current session tasks" in tasks_result["message"]
 
-            ws.send_json({"type": "session.status.inspect"})
-            status_result = _receive_next_non_task_update(ws)
+            ws.send_json({"type": "session.status.inspect", "client_command_id": "smoke-inspect-status"})
+            status_result = _receive_next_type(ws, "command.result", command="status", client_command_id="smoke-inspect-status")
             assert status_result["type"] == "command.result"
             assert status_result["command"] == "status"
             assert "Runtime status" in status_result["message"]
 
-            ws.send_json({"type": "session.permissions.inspect"})
-            permissions_result = _receive_next_non_task_update(ws)
+            ws.send_json({"type": "session.permissions.inspect", "client_command_id": "smoke-inspect-permissions"})
+            permissions_result = _receive_next_type(ws, "command.result", command="permissions", client_command_id="smoke-inspect-permissions")
             assert permissions_result["type"] == "command.result"
             assert permissions_result["command"] == "permissions"
             assert "Permission mode" in permissions_result["message"]
 
-            ws.send_json({"type": "runtime.capabilities.inspect"})
-            capabilities = _receive_next_type(ws, "runtime.capabilities")
+            ws.send_json({"type": "runtime.capabilities.inspect", "client_command_id": "smoke-inspect-capabilities"})
+            capabilities = _receive_next_type(ws, "runtime.capabilities", client_command_id="smoke-inspect-capabilities")
             assert capabilities["session_id"] == "session_test_runtime_inspect"
             assert capabilities["capabilities"]["summary"]["tools_total"] >= 1
             assert isinstance(capabilities["capabilities"]["tool_views"], list)
@@ -738,8 +741,8 @@ def test_new_websocket_session_lists_history_without_auto_restoring_active_conve
         with client.websocket_connect("/ws?session_id=session_test_fresh_conversation") as ws:
             _assert_startup_events(ws)
 
-            ws.send_json({"type": "conversation.list"})
-            listing = _receive_next_non_task_update(ws)
+            ws.send_json({"type": "conversation.list", "client_command_id": "smoke-fresh-list"})
+            listing = _receive_next_type(ws, "conversation.list", client_command_id="smoke-fresh-list")
 
     assert [item["id"] for item in listing["conversations"]] == [existing.id]
     assert listing["active_conversation_id"] is None
@@ -766,7 +769,7 @@ def test_uploaded_attachment_can_be_opened_after_websocket_reconnect(monkeypatch
         with client.websocket_connect("/ws?session_id=session_test_attachment_reopen") as ws:
             _assert_startup_events(ws)
             ws.send_json({"type": "read_artifact", "artifact_id": artifact_id})
-            event = _receive_next_non_task_update(ws)
+            event = _receive_next_type(ws, "artifact_content", artifact_id=artifact_id)
 
     assert event["type"] == "artifact_content"
     assert event["artifact_id"] == artifact_id
@@ -787,7 +790,7 @@ def test_websocket_session_handoff_preserves_active_session(monkeypatch) -> None
                 ws_primary.close()
 
                 ws_reconnect.send_json({"type": "ping"})
-                pong = _receive_next_non_task_update(ws_reconnect)
+                pong = _receive_next_type(ws_reconnect, "pong")
                 assert pong["type"] == "pong"
                 _assert_event_envelope(pong)
 
@@ -943,7 +946,7 @@ def test_websocket_can_update_session_model(monkeypatch) -> None:
             assert initial["model"] == "gpt-5.4"
 
             ws.send_json({"type": "llm.model.set", "model": "gpt-5.4-mini"})
-            updated = _receive_next_non_task_update(ws)
+            updated = _receive_next_type(ws, "llm.model.updated", model="gpt-5.4-mini")
 
     assert updated["type"] == "llm.model.updated"
     assert updated["model"] == "gpt-5.4-mini"
@@ -962,8 +965,8 @@ def test_websocket_rejects_unknown_session_model(monkeypatch) -> None:
             assert initial["model"] == "gpt-5.4"
 
             ws.send_json({"type": "llm.model.set", "model": "deepseek-v4"})
-            error = _receive_next_non_task_update(ws)
-            updated = _receive_next_non_task_update(ws)
+            error = _receive_next_type(ws, "command.result", command="model.set", level="error")
+            updated = _receive_next_type(ws, "llm.model.updated", model="gpt-5.4")
 
     assert error["type"] == "command.result"
     assert error["level"] == "error"
