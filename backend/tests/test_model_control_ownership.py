@@ -30,6 +30,7 @@ class ControlHost(SessionCommandHandlersMixin):
         self.conversation_repo = repo
         self.active_conversation_id = active_id
         self.config = fixture.config
+        self.llm = fixture.model
         self.context_builder = ContextBuilder(llm=fixture.model, token_budget=fixture.config.token_budget)
         self.provider = "custom"
         self.selected_model = "model-a"
@@ -65,6 +66,7 @@ def controls(fixture, tmp_path, monkeypatch):
     catalog.get_registered_provider_config = lambda _: None
     catalog.provider_payload = lambda provider, model: {
         "wire_api": "chat", "provider_id": provider, "reasoning_effort_levels": ["low", "high"],
+        "configured_reasoning_effort": "low",
         "context_window": catalog.get_model(provider, model).context_window,
     }
     monkeypatch.setattr("backend.config.load_config", lambda **_: fixture.config)
@@ -193,6 +195,44 @@ async def test_effort_edit_uses_selected_capabilities_without_refreshing_auth(tm
         await host.set_selected_model("model-b", manual_override=True)
         oauth.assert_awaited_once()
         auth.assert_awaited_once()
+    finally:
+        await host.run_manager.shutdown_notification_wakes()
+        fixture.runtime.close(release_lease=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_id", ["conv_model_control", "conv_other_control"])
+async def test_idle_model_and_effort_changes_persist_without_auth_or_adapter_work(tmp_path, monkeypatch, owner_id):
+    fixture = setup(tmp_path, monkeypatch, AsyncMock(return_value=None))
+    host, repo = controls(fixture, tmp_path, monkeypatch)
+    host.run_manager.cleanup(conversation_id="conv_model_control", task=asyncio.current_task(),
+        task_id="model-run", cancel_event=host.run_manager.cancel_events["conv_model_control"])
+    loads = Mock(return_value=fixture.config)
+    monkeypatch.setattr("backend.config.load_config", loads)
+    oauth = AsyncMock(side_effect=AssertionError("An idle selection must not refresh OAuth"))
+    auth = AsyncMock(side_effect=AssertionError("An idle selection must not execute provider auth"))
+    monkeypatch.setattr(host.catalog, "refresh_oauth_credentials", oauth)
+    monkeypatch.setattr(host.catalog, "refresh_provider_auth", auth)
+    build = Mock(side_effect=AssertionError("An idle selection must not bind an adapter"))
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", build)
+    try:
+        assert await host.set_selected_model("model-b", manual_override=True, conversation_id=owner_id)
+        assert await host.set_selected_model("", manual_override=True, conversation_id=owner_id, reasoning_effort="high")
+        assert repo.get_conversation_summary(owner_id).model_selection == {
+            "provider": "custom", "model": "model-b", "reasoning_effort": "high"}
+        assert repo.get_conversation_summary("conv_other_control" if owner_id == "conv_model_control" else "conv_model_control").model_selection == {
+            "provider": "custom", "model": "model-a", "reasoning_effort": "low"}
+        assert host.selected_model == ("model-b" if owner_id == host.active_conversation_id else "model-a")
+        assert host.llm is host.context_builder._llm is fixture.model
+        assert fixture.model.current_reasoning_effort() == "low"
+        assert all(call.kwargs["resolve_credentials"] is False for call in loads.call_args_list)
+        assert loads.call_count > 0
+        oauth.assert_not_awaited()
+        auth.assert_not_awaited()
+        build.assert_not_called()
+        with pytest.raises(ValueError, match="not supported"):
+            await host.set_selected_model("", manual_override=True, conversation_id=owner_id, reasoning_effort="ultra")
+        assert repo.get_conversation_summary(owner_id).model_selection["reasoning_effort"] == "high"
     finally:
         await host.run_manager.shutdown_notification_wakes()
         fixture.runtime.close(release_lease=True)

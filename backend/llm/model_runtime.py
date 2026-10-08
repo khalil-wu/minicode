@@ -3262,7 +3262,7 @@ class ModelRuntime:
             return {}
         model = self.get_model(clean_id, model_id) if model_id else None
         levels = (
-            model_thinking_levels(model)
+            model_thinking_levels(model, configured_reasoning_effort=_clean_text(base.get("reasoning_effort")))
             if model is not None and model.reasoning else ()
         )
         metadata = {

@@ -323,6 +323,7 @@ describe("MarkdownRenderer", () => {
 
     expect(container.querySelector("code")?.textContent).toBe("const value = 1");
     expect(container.querySelector(".md-inline-option-list")).toBeNull();
+    expect(container.querySelector(".md-file-link-icon")).toBeNull();
   });
 
   it("turns bare file references with line numbers into editor links", () => {
@@ -482,8 +483,9 @@ describe("MarkdownRenderer", () => {
     expect(tsChip.getAttribute("data-ext")).toBe("ts");
     expect(mdChip.getAttribute("data-ext")).toBe("md");
     expect(tsChip.getAttribute("data-presentation")).toBe("code");
-    expect(tsChip.querySelector("svg")).toBeNull();
+    expect(tsChip.querySelector('svg.md-file-link-icon[data-file-kind="code"]')).toBeTruthy();
     expect(mdChip.getAttribute("data-presentation")).toBe("code");
+    expect(mdChip.querySelector('svg.md-file-link-icon[data-file-kind="document"]')).toBeTruthy();
     expect(tsChip.querySelector(".md-file-chip-name")?.textContent).toBe("noticeEvents.ts");
   });
 
@@ -663,6 +665,7 @@ describe("MarkdownRenderer", () => {
       expect(chip.getAttribute("data-ext")).toBe("pdf");
       expect(chip.getAttribute("data-kind")).not.toBe("folder");
       expect(chip.querySelector(".md-file-link-icon")).toBeTruthy();
+      expect(chip.querySelector('.md-file-link-icon[data-file-kind="pdf"]')).toBeTruthy();
 
       fireEvent.click(chip);
       expect(openPathMock).not.toHaveBeenCalled();
@@ -790,6 +793,27 @@ describe("MarkdownRenderer", () => {
     expect(requests).toEqual(["https://docs.example/guide"]);
     expect(sendMock).not.toHaveBeenCalledWith({ type: "preview.navigate", url: "https://docs.example/guide" });
     unsubscribe();
+  });
+
+  it("shows a local website icon before the favicon loads and after an image error", () => {
+    const { container } = render(<MarkdownRenderer content={"[OpenAI article](https://unknown.example/articles/github)"} />);
+    const link = screen.getByRole("link", { name: "OpenAI article" });
+    expect(link.querySelector('.md-web-link-icon[data-brand="generic"] svg')).toBeTruthy();
+    const remote = link.querySelector<HTMLImageElement>('.brand-icon-remote')!;
+    expect(remote.src).toBe("https://unknown.example/favicon.ico");
+    expect(remote.hidden).toBe(true);
+    fireEvent.error(remote);
+    expect(link.querySelector('.md-web-link-icon svg')).toBeTruthy();
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it("keeps mail and heading links as text links without website or file icons", () => {
+    render(<MarkdownRenderer content={"[Email](mailto:team@example.com) · [Jump](#details)\n\n## Details"} />);
+    for (const name of ["Email", "Jump"]) {
+      const link = screen.getByRole("link", { name });
+      expect(link.querySelector('.md-web-link-icon, .md-file-link-icon')).toBeNull();
+    }
+    expect(screen.getByRole("link", { name: "Email" }).getAttribute("href")).toBe("mailto:team@example.com");
   });
 
   it("renders descriptive external links with a website icon and keeps their label", () => {

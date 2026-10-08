@@ -532,7 +532,12 @@ describe("BrowserPanel", () => {
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: /Guide/ })).toBeTruthy();
     });
-    expect(document.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe("https://docs.example/icon.png");
+    const icon = document.querySelector<HTMLImageElement>('.brand-icon-remote[src="https://docs.example/icon.png"]')!;
+    expect(icon.hidden).toBe(true);
+    expect(icon.parentElement?.querySelector("svg")).toBeTruthy();
+    fireEvent.load(icon);
+    expect(icon.hidden).toBe(false);
+    expect(document.querySelector('[data-brand="website"] img')).toBe(icon);
     expect(runtimeMocks.create).not.toHaveBeenCalled();
   });
 

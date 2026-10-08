@@ -27,7 +27,7 @@ import { isReplayedEvent as isReplayedRuntimeEvent } from "../protocol/events";
 import type { McpServerStatus, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { fromBackendPermissionMode } from "../protocol/permissions";
-import { withDerivedCapabilitySummary } from "../protocol/capabilities";
+import { mergeCapabilities, withDerivedCapabilitySummary } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
 import { addInspectorPayload } from "./inspectorEntries";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
@@ -1520,7 +1520,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
         || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;
       const ev = e as unknown as { capabilities?: Parameters<typeof withDerivedCapabilitySummary>[0] };
-      const capabilities = withDerivedCapabilitySummary(ev.capabilities) ?? null;
+      const patch = ev.capabilities;
+      const capabilities = mergeCapabilities(patch && {
+        ...patch,
+        summary: { ...s.runtimeCapabilities?.summary, ...patch.summary },
+      }, s.runtimeCapabilities ?? undefined) ?? null;
       s.setRuntimeCapabilities(capabilities);
       if (Array.isArray(capabilities?.skills)) {
         s.setAvailableSkills(normalizeSkillList(capabilities.skills, e.workspace_root));

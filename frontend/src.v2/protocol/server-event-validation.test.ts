@@ -1676,6 +1676,7 @@ describe("normalizeInboundServerEvent", () => {
       { ...valid, events: [valid.events[1], valid.events[0]] },
       { ...valid, events: [{ type: "session.replay", events: [] }] },
       { ...valid, events: [{ type: "conversation.switched", conversation_id: "conversation-1" }] },
+      { ...valid, events: [{ ...valid.events[0], type: "runtime.capabilities", workspace_root: "", capabilities: { provider_capabilities: { model: "updated-model" } } }] },
       { ...valid, events: [{ ...valid.events[0], seq: 4 }] },
       { ...valid, events: [{ ...valid.events[0], seq: 8 }] },
       { ...valid, events: [{ ...valid.events[0], previous_replay_seq: 3 }, valid.events[1]] },

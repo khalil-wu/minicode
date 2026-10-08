@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-import { folderIcon } from "../../lib/file-icons";
+import { fileIcon, folderIcon } from "../../lib/file-icons";
 import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
@@ -17,7 +17,6 @@ import { openWebTarget } from "../openWebTarget";
 import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
-import { File } from "../../lib/icons";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
@@ -1096,7 +1095,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
         data-presentation={presentation}
         data-ext={extension || "file"}
       >
-        {presentation === "link" && <File size={14} className="md-file-link-icon" aria-hidden="true" />}
+        {fileIcon(target.path, { size: 14, className: "md-file-link-icon" })}
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{fileName}</span>
@@ -1147,7 +1146,7 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
         data-presentation={presentation}
         data-ext={extension || "file"}
       >
-        {presentation === "link" && <File size={14} className="md-file-link-icon" aria-hidden="true" />}
+        {fileIcon(target.path, { size: 14, className: "md-file-link-icon" })}
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{name}</span>

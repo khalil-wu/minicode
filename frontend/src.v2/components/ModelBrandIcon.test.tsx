@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ModelBrandIcon, resolveModelBrand } from "./ModelBrandIcon";
 
@@ -39,7 +39,7 @@ describe("ModelBrandIcon", () => {
 
   it("does not impersonate a model vendor for an unknown provider", () => {
     const { container } = render(<ModelBrandIcon model="gpt-5" provider="Private AI" entity="provider" websiteUrl="https://models.example.com/v1" />);
-    expect(container.querySelector('[data-model-brand="custom"] [data-brand="website"]')).toBeTruthy();
+    expect(container.querySelector('[data-model-brand="custom"] [data-brand="generic"] svg')).toBeTruthy();
     expect(container.querySelector('[data-model-brand="openai"]')).toBeNull();
   });
 
@@ -60,8 +60,12 @@ describe("ModelBrandIcon", () => {
 
   it("uses the provider website icon for unknown custom providers", () => {
     const { container } = render(<ModelBrandIcon model="private-model" provider="Private AI" websiteUrl="https://models.example.com/v1" size={24} />);
-    expect(container.querySelector('[data-model-brand="custom"] [data-brand="website"] img')?.getAttribute("src")).toBe(
-      "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fmodels.example.com&sz=64",
-    );
+    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
+    expect(icon.src).toBe("https://models.example.com/favicon.ico");
+    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('[data-model-brand="custom"] svg')).toBeTruthy();
+    fireEvent.load(icon);
+    expect(container.querySelector('[data-model-brand="custom"] [data-brand="website"] img')).toBe(icon);
+    expect(icon.hidden).toBe(false);
   });
 });

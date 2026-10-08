@@ -675,6 +675,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         conversationMessages: cachedCurrent.conversationMessages,
         conversationStreaming: cachedCurrent.conversationStreaming,
         runtimeSession: null,
+        ...(!sameConversation || workspaceChanged
+          ? { runtimeCapabilities: null, availableSkills: [], slashCommands: [] }
+          : {}),
         draft: "",
         attachments: [],
         quotedMessage: null,

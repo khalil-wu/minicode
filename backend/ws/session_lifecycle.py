@@ -912,8 +912,14 @@ class SessionLifecycle:
         task = loop.create_task(self.send_runtime_capabilities(source=source))
         retain_cleanup_task(task, self._retired_workspace_tasks)
 
-    async def send_runtime_capabilities(self, *, source: str = "session") -> None:
+    async def send_runtime_capabilities(self, *, source: str = "session", include_catalogs: bool = True) -> None:
         if self.is_shutting_down:
+            return
+        if not include_catalogs:
+            await self._session.send_payload(
+                self._session.runtime_capabilities_payload(source=source, include_catalogs=False),
+                log_context="runtime.capabilities",
+            )
             return
         workspace = self.workspace_root_for_conversation()
         permission = self._session.permission_context

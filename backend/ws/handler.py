@@ -745,7 +745,9 @@ class WebSocketSession(
         declared = replace(self.config.llm, provider=self.provider, **fields)
         return capabilities_from_settings(declared, provider=self.provider).to_dict()
 
-    def runtime_capability_snapshot(self, *, skill_catalog: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def runtime_capability_snapshot(
+        self, *, skill_catalog: list[dict[str, Any]] | None = None, include_catalogs: bool = True,
+    ) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
         from backend.commands.catalog import get_enabled_composer_command_catalog
         from backend.feature_flags import feature_flags_payload
@@ -798,6 +800,12 @@ class WebSocketSession(
                     "detail": type(exc).__name__,
                 },
             }
+        if not include_catalogs:
+            del snapshot["skills"]
+            del snapshot["summary"]["skills"]
+            snapshot["summary"].pop("skill_catalog", None)
+            snapshot["provider_capabilities"] = self._provider_capabilities_payload()
+            return snapshot
         extension_commands = self.command_registry.list_extension_slash_commands(
             scope_id=self.active_conversation_id
         )
@@ -835,6 +843,7 @@ class WebSocketSession(
 
     def runtime_capabilities_payload(
         self, *, source: str = "session", skill_catalog: list[dict[str, Any]] | None = None,
+        include_catalogs: bool = True,
     ) -> dict[str, Any]:
         conversation_id = str(self.active_conversation_id or "")
         workspace_root = str(self.session_lifecycle.workspace_root_for_conversation() or "")
@@ -844,7 +853,7 @@ class WebSocketSession(
             "source": source,
             "conversation_id": conversation_id,
             "workspace_root": workspace_root,
-            "capabilities": self.runtime_capability_snapshot(skill_catalog=skill_catalog),
+            "capabilities": self.runtime_capability_snapshot(skill_catalog=skill_catalog, include_catalogs=include_catalogs),
         }
 
     def _mcp_summary(self) -> dict[str, Any]:

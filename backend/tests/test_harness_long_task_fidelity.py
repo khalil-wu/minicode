@@ -138,7 +138,8 @@ class _SelectionSession(SessionCommandHandlersMixin):
         self._model_runtime_for_conversation = lambda *_: None
         self.session_lifecycle = SimpleNamespace(workspace_root_for_conversation=lambda *_: None)
         self.context_builder = SimpleNamespace(bind_llm=lambda _: None, bind_budget=lambda _: None)
-        self.run_manager = SimpleNamespace(publish_model_execution=lambda *_: None)
+        self.run_manager = SimpleNamespace(running_task_for=lambda *_: None, context_for=lambda *_: None,
+            publish_model_execution=lambda *_: None)
 
     @property
     def active_conversation(self):
@@ -146,26 +147,29 @@ class _SelectionSession(SessionCommandHandlersMixin):
 
 
 def test_two_sessions_restore_task_selection_without_changing_captured_adapter(tmp_path, monkeypatch):
-    config = AppConfig(llm=LLMSettings(api_key="test", model="base", reasoning_effort="medium"))
+    config = AppConfig(llm=LLMSettings(api_key="test", model="base", reasoning_effort="medium",
+        reasoning_effort_levels=("low", "medium", "high")))
     monkeypatch.setattr("backend.config.load_config", lambda **_: config)
     monkeypatch.setattr("backend.ws.agent_runner._config_with_runtime_model_budget", lambda value, **_: value)
-    monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm",
-                        lambda _, *, config, provider, model, **kwargs: SimpleNamespace(config=config, provider=provider, model=model,
-                            supported_reasoning_efforts=lambda: ("off", "low", "medium", "high"), apply_reasoning_policy=lambda _: None))
+    def forbidden_adapter(*args, **kwargs):
+        raise AssertionError("Task selection and restore must not construct an adapter")
+
+    monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", forbidden_adapter)
     repo = ConversationRepository(tmp_path)
     a = repo.create_conversation()
     b = repo.create_conversation()
     first = _SelectionSession(repo, a.id, config)
     second = _SelectionSession(repo, b.id, config)
+    captured_adapter = SimpleNamespace(config=config, model="base")
+    first.llm = captured_adapter
     asyncio.run(first.set_selected_model("coding", manual_override=True))
     asyncio.run(second.set_selected_model("vision", manual_override=True))
-    captured_adapter = first.llm
     repo.update_model_selection(a.id, provider="openai", model="coding", reasoning_effort="high")
     first.active_conversation_id = b.id
     first.refresh_llm_selection()
     assert first.selected_model == "vision"
     assert first.llm is captured_adapter
-    assert first.llm.model == "coding"
+    assert first.llm.model == "base"
     first.active_conversation_id = a.id
     first.refresh_llm_selection()
     assert first.selected_model == "coding"
@@ -179,7 +183,7 @@ def test_two_sessions_restore_task_selection_without_changing_captured_adapter(t
     assert restarted.selected_model == "coding"
     assert restarted.config.llm.reasoning_effort == "high"
     asyncio.run(restarted.set_selected_model("coding", manual_override=False))
-    assert restarted.llm.model == "coding"
+    assert restarted.llm is None
 
 
 def test_task_effort_overrides_global_value_in_ui_payload():

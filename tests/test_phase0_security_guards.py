@@ -483,7 +483,7 @@ def test_reasoning_effort_config_is_not_persisted_for_deepseek_chat(monkeypatch,
         async def send_llm_state(self):
             self.events.append("llm_state")
 
-        async def _send_runtime_capabilities(self, *, source: str = "session") -> None:
+        async def _send_runtime_capabilities(self, *, source: str = "session", include_catalogs: bool = True) -> None:
             self.events.append(
                 AgentEvent(type="runtime.capabilities", data={"source": source})
             )

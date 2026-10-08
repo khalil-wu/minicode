@@ -321,7 +321,7 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
     # authoritative model state. This is an explicit command response, not a
     # duplicate background runtime projection.
     await session.send_llm_state(force=True)
-    await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set")
+    await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set", include_catalogs=False)
     return True
 
 
@@ -1176,7 +1176,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
             changed = await owner._set_selected_provider_model(
                 str(data.get("provider") or ""), str(data.get("model") or ""),
                 manual_override=True, conversation_id=conversation_id or None,
-                config_override=load_config(cwd=workspace), emit_unavailable=False,
+                config_override=load_config(cwd=workspace, resolve_credentials=False), emit_unavailable=False,
             )
             if not changed:
                 raise ValueError("The saved provider model is unavailable for this conversation")
@@ -1206,7 +1206,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         await session.emit_command_result("effort", f"Reasoning effort set to '{level}'.",
             data={"reasoning_effort": level, "applied": True, "conversation_id": conversation_id})
         await session.send_llm_state()
-        await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set")
+        await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set", include_catalogs=False)
         return True
     from backend.services.llm_config_service import apply_llm_config_update
 
@@ -1254,12 +1254,6 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
                 else None
             )
         )
-        refresh_oauth = getattr(model_runtime, "refresh_oauth_credentials", None)
-        if callable(refresh_oauth):
-            await refresh_oauth(session.provider)
-        refresh_provider_auth = getattr(model_runtime, "refresh_provider_auth", None)
-        if callable(refresh_provider_auth):
-            await refresh_provider_auth(session.provider)
         composed_models = [
             model.id for model in model_runtime.get_models(session.provider)
         ]
@@ -1269,11 +1263,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     # the persisted configuration has none; run admission owns the explicit
     # capability failure for that state.
 
-    from backend.ws.agent_runner import (
-        _clear_session_llm_cache,
-        _config_with_runtime_model_budget,
-        _get_or_create_session_llm,
-    )
+    from backend.ws.agent_runner import _config_with_runtime_model_budget
 
     session.config = _config_with_runtime_model_budget(
         session.config,
@@ -1282,38 +1272,16 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         model=session.selected_model,
     )
 
-    _clear_session_llm_cache(session)
-    session.llm = (
-        _get_or_create_session_llm(
-            session,
-            config=session.config,
-            provider=session.provider,
-            model=session.selected_model,
-            model_runtime=model_runtime,
-        )
-        if session.selected_model else None
-    )
-    session.context_builder.bind_llm(session.llm)
-    session.context_builder.bind_budget(session.config.token_budget)
-
-    if conversation_id:
+    if conversation_id and session.selected_model:
+        await owner._set_selected_provider_model(session.provider, session.selected_model,
+            manual_override=True, conversation_id=conversation_id, config_override=session.config,
+            reasoning_effort=reasoning_effort or None)
+    elif conversation_id:
         session.conversation_repo.update_model_selection(
             conversation_id, provider=session.provider,
             model=session.selected_model,
             reasoning_effort=str(session.config.llm.reasoning_effort or ""),
         )
-        if owner is not session and session.selected_model:
-            await owner._set_selected_provider_model(session.provider, session.selected_model,
-                manual_override=True, conversation_id=conversation_id, config_override=session.config,
-                reasoning_effort=reasoning_effort or None)
-        elif session.selected_model:
-            from backend.agent.model_execution import ModelExecutionSnapshot
-
-            snapshot = ModelExecutionSnapshot.capture(session.config, session.llm)
-            session.publish_live_model_execution(conversation_id, replace(snapshot,
-                model_runtime=model_runtime, available_models=tuple(session.available_models),
-                models_source=session.models_source,
-                model_info=model_runtime.get_model(session.provider, session.selected_model) if model_runtime is not None else None))
     if reasoning_effort and not from_slash_command:
         await session.emit_command_result(
             "effort",
@@ -1324,7 +1292,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
             },
         )
     await session.send_llm_state()
-    await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set")
+    await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set", include_catalogs=False)
     return True
 
 

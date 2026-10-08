@@ -12,6 +12,10 @@ from backend.services.llm_config_service import (
 from backend.ws.handlers.misc import handle_llm_config_set
 
 
+def unexpected_adapter(*args, **kwargs):
+    raise AssertionError("An idle configuration change must not construct an adapter")
+
+
 class _HookManager:
     def __init__(self, calls: list[dict]) -> None:
         self.calls = calls
@@ -28,6 +32,7 @@ class _Session:
         self.provider = "openai"
         self.available_models = ["gpt-5"]
         self.selected_model = "gpt-5"
+        self.llm = None
         self._model_override_active = False
         self._provider_override_active = False
         self.context_builder = ContextBuilder(
@@ -58,7 +63,7 @@ class _Session:
             }
         )
 
-    async def send_runtime_capabilities(self, *, source: str = "session") -> None:
+    async def send_runtime_capabilities(self, *, source: str = "session", include_catalogs: bool = True) -> None:
         self.events.append(
             {
                 "type": "runtime.capabilities",
@@ -163,7 +168,7 @@ def test_model_updated_event_reports_provider_declared_capabilities(monkeypatch)
 def test_provider_config_update_is_state_event_not_system_notice(monkeypatch):
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda: AppConfig(llm=LLMSettings(api_key="test-key", model="gpt-5.5")),
+        lambda **_: AppConfig(llm=LLMSettings(api_key="test-key", model="gpt-5.5")),
     )
     monkeypatch.setattr(
         "backend.config.get_llm_settings_payload",
@@ -179,7 +184,7 @@ def test_provider_config_update_is_state_event_not_system_notice(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.llm.model_registry.create_session_llm",
-        lambda config, model_override=None, **_kwargs: SimpleNamespace(model=model_override),
+        unexpected_adapter,
     )
 
     session = _Session()
@@ -217,7 +222,7 @@ def test_reasoning_effort_from_footer_uses_command_result_not_system_notice(monk
     monkeypatch.setattr("backend.config.SETTINGS_FILE", settings_file)
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda: AppConfig(llm=LLMSettings(api_key="test-key", model="gpt-5")),
+        lambda **_: AppConfig(llm=LLMSettings(api_key="test-key", model="gpt-5")),
     )
     monkeypatch.setattr(
         "backend.config.get_llm_settings_payload",
@@ -235,7 +240,7 @@ def test_reasoning_effort_from_footer_uses_command_result_not_system_notice(monk
     )
     monkeypatch.setattr(
         "backend.llm.model_registry.create_session_llm",
-        lambda config, model_override=None, **_kwargs: SimpleNamespace(model=model_override),
+        unexpected_adapter,
     )
 
     session = _Session()
@@ -269,6 +274,7 @@ def test_reasoning_effort_from_footer_uses_command_result_not_system_notice(monk
     assert len(saved_payloads) == 1
     assert set(saved_payloads[0]) == {"openai"}
     assert saved_payloads[0]["openai"]["reasoning_effort"] == "focused"
+    assert session.llm is session.context_builder._llm is None
 
 
 def test_reasoning_effort_validation_error_uses_effort_command_correlation(monkeypatch):
@@ -323,7 +329,7 @@ def test_reasoning_effort_is_not_applied_without_exact_model_declaration(monkeyp
     }
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda: AppConfig(llm=LLMSettings(api_key="test-key", model="provider-model")),
+        lambda **_: AppConfig(llm=LLMSettings(api_key="test-key", model="provider-model")),
     )
     monkeypatch.setattr("backend.config.get_llm_settings_payload", lambda: payload)
 
@@ -346,7 +352,7 @@ def test_reasoning_effort_is_not_applied_without_exact_model_declaration(monkeyp
 def test_provider_config_update_refreshes_session_models_from_current_config(monkeypatch):
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda: AppConfig(llm=LLMSettings(api_key="test-key", model="deepseek-v4-pro")),
+        lambda **_: AppConfig(llm=LLMSettings(api_key="test-key", model="deepseek-v4-pro")),
     )
     monkeypatch.setattr(
         "backend.config.get_llm_settings_payload",
@@ -376,7 +382,7 @@ def test_provider_config_update_refreshes_session_models_from_current_config(mon
     )
     monkeypatch.setattr(
         "backend.llm.model_registry.create_session_llm",
-        lambda config, model_override=None, **_kwargs: SimpleNamespace(model=model_override),
+        unexpected_adapter,
     )
 
     session = _Session()

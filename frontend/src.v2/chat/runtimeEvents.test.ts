@@ -5,6 +5,7 @@ import { handleChatStreamEvent } from "./chatStreamEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { buildInterruptCommand } from "../lib/interrupt-command";
@@ -1318,6 +1319,68 @@ describe("runtime capability events", () => {
       type: "runtime.capabilities", ...scope,
       capabilities: { skills: [{ name: "foreign-skill" }] },
     } as unknown as ServerEvent)).toBe(true);
+    expect(useAppStore.getState().runtimeCapabilities).toBeNull();
+  });
+
+  it("normalizes model capability patches and preserves this owner's catalogs while updating tools", () => {
+    const full = normalizeInboundServerEvent({
+      type: "runtime.capabilities", conversation_id: "conv-capabilities", workspace_root: "C:/capabilities",
+      capabilities: {
+        skills: [{ name: "owned-skill", description: "Owned workflow" }],
+        composer_commands: [{ name: "owned-command", command: "owned-command", description: "Owned action", type: "local" }],
+        feature_flags: { global_search: { enabled: false } },
+        permission: { mode: "bypass" },
+        provider_capabilities: { model: "model-a", configured_reasoning_effort: "low" },
+        tool_views: [{ name: "read_file", exposure: "core", direct: true, schema_available: true }],
+        summary: { skills: 1, skill_catalog: true, tools_total: 1, direct_tools: 1 },
+      },
+    });
+    expect(full).not.toBeNull();
+    handleRuntimeEvent(full!);
+    const catalog = useAppStore.getState().runtimeCapabilities;
+    const skills = useAppStore.getState().availableSkills;
+    const commands = useAppStore.getState().slashCommands;
+    const rawPatch = {
+      type: "runtime.capabilities", source: "llm.model.set", conversation_id: "conv-capabilities", workspace_root: "C:/capabilities",
+      capabilities: {
+        provider_capabilities: { model: "model-b", configured_reasoning_effort: "high" },
+        tools: [],
+        tool_views: [{ name: "read_file", exposure: "code_mode_only", direct: false, schema_available: true }],
+        summary: { tools_total: 1, direct_tools: 0, code_mode_tools: 1 },
+      },
+    };
+    const patch = normalizeInboundServerEvent(rawPatch);
+    expect(patch).toBe(rawPatch);
+    expect(patch).not.toHaveProperty("capabilities.skills");
+    expect(patch).not.toHaveProperty("capabilities.composer_commands");
+    handleRuntimeEvent(patch!);
+    expect(useAppStore.getState().runtimeCapabilities).toMatchObject({
+      skills: catalog?.skills, composer_commands: catalog?.composer_commands,
+      feature_flags: catalog?.feature_flags, permission: catalog?.permission,
+      provider_capabilities: { model: "model-b", configured_reasoning_effort: "high" },
+      tool_views: rawPatch.capabilities.tool_views,
+      summary: { skills: 1, skill_catalog: true, tools_total: 1, direct_tools: 0, code_mode_tools: 1 },
+    });
+    expect(useAppStore.getState().availableSkills).toEqual(skills);
+    expect(useAppStore.getState().slashCommands).toEqual(commands);
+    expect(rawPatch).not.toHaveProperty("capabilities.skills");
+
+    useAppStore.getState().applyConversationSwitched({ conversationId: "next-owner" });
+    expect(useAppStore.getState().runtimeCapabilities).toBeNull();
+    expect(useAppStore.getState().availableSkills).toEqual([]);
+    expect(useAppStore.getState().slashCommands).toEqual([]);
+    handleRuntimeEvent(patch!);
+    expect(useAppStore.getState().runtimeCapabilities).toBeNull();
+    const nextPatch = normalizeInboundServerEvent({ ...rawPatch, conversation_id: "next-owner" });
+    expect(nextPatch).not.toBeNull();
+    handleRuntimeEvent(nextPatch!);
+    expect(useAppStore.getState().runtimeCapabilities).not.toHaveProperty("skills");
+    expect(useAppStore.getState().runtimeCapabilities).not.toHaveProperty("composer_commands");
+    useAppStore.setState({ conversations: [{ id: "next-owner", title: "Next", updatedAt: "2026-10-08T00:00:00Z", workspaceRoot: "C:/next-workspace" }] });
+    useAppStore.getState().applyConversationSwitched({ conversationId: "next-owner" });
+    expect(useAppStore.getState().workingDirectory).toBe("C:/next-workspace");
+    expect(useAppStore.getState().runtimeCapabilities).toBeNull();
+    handleRuntimeEvent(nextPatch!);
     expect(useAppStore.getState().runtimeCapabilities).toBeNull();
   });
 });

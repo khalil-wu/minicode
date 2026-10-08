@@ -84,30 +84,49 @@ export const resolveBrandIcon = (value: string): BrandAsset | { label: string; i
     ?? null;
 };
 
-const safeWebUrl = (value?: string): URL | null => {
+const webUrl = (value?: string): URL | null => {
   if (!value?.trim()) return null;
   try {
     const url = value.startsWith("/") && typeof window !== "undefined"
       ? new URL(value, window.location.origin) : new URL(value);
-    if (url.protocol === "https:") return url;
-    if (url.protocol === "http:" && (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
-      || (typeof window !== "undefined" && url.origin === window.location.origin))) return url;
+    if (url.protocol === "https:" || url.protocol === "http:") return url;
   } catch {
     return null;
   }
   return null;
 };
 
+const safeWebIconUrl = (value?: string): URL | null => {
+  const url = webUrl(value);
+  return url && (url.protocol === "https:" || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    || (typeof window !== "undefined" && url.origin === window.location.origin)) ? url : null;
+};
+
+const WEBSITE_BRANDS: Array<[string, string]> = [
+  ["drive.google.com", "Google Drive"], ["gemini.google.com", "Gemini"], ["ai.google.dev", "Gemini"],
+  ["openai.com", "OpenAI"], ["chatgpt.com", "OpenAI"], ["claude.ai", "Claude"], ["anthropic.com", "Anthropic"],
+  ["deepseek.com", "DeepSeek"], ["openrouter.ai", "OpenRouter"], ["figma.com", "Figma"], ["notion.so", "Notion"],
+  ["vercel.com", "Vercel"], ["microsoft.com", "Microsoft"], ["google.com", "Google"],
+  ["github.com", "GitHub"], ["slack.com", "Slack"], ["discord.com", "Discord"], ["discord.gg", "Discord"],
+  ["docker.com", "Docker"], ["cloudflare.com", "Cloudflare"], ["linear.app", "Linear"], ["sentry.io", "Sentry"],
+  ["stripe.com", "Stripe"], ["supabase.com", "Supabase"], ["mongodb.com", "MongoDB"], ["mysql.com", "MySQL"],
+  ["redis.io", "Redis"], ["dropbox.com", "Dropbox"], ["npmjs.com", "npm"], ["npmjs.org", "npm"],
+  ["postgresql.org", "PostgreSQL"], ["sqlite.org", "SQLite"], ["playwright.dev", "Playwright"],
+  ["pptr.dev", "Puppeteer"], ["brave.com", "Brave"],
+];
+
+export const resolveWebsiteBrandIcon = (value?: string): ReturnType<typeof resolveBrandIcon> => {
+  const host = webUrl(value)?.hostname.toLowerCase();
+  const brand = host && WEBSITE_BRANDS.find(([domain]) => host === domain || host.endsWith(`.${domain}`));
+  return brand ? resolveBrandIcon(brand[1]) : null;
+};
+
 export const resolveWebsiteIconCandidates = (iconUrl?: string, websiteUrl?: string): string[] => {
   const candidates: string[] = [];
-  const explicitIcon = safeWebUrl(iconUrl);
+  const explicitIcon = safeWebIconUrl(iconUrl);
   if (explicitIcon) candidates.push(explicitIcon.toString());
-  const website = safeWebUrl(websiteUrl);
+  const website = safeWebIconUrl(websiteUrl);
   if (website) {
-    const domainIcon = new URL("https://www.google.com/s2/favicons");
-    domainIcon.searchParams.set("domain_url", website.origin);
-    domainIcon.searchParams.set("sz", "64");
-    candidates.push(domainIcon.toString());
     candidates.push(new URL("/favicon.ico", website.origin).toString());
   }
   return [...new Set(candidates)];
@@ -137,22 +156,23 @@ export const BrandIcon = ({
   fallbackIcon?: ReactNode;
   inferBrand?: boolean;
 }) => {
-  const brandValue = fallback === "web" && websiteUrl ? safeWebUrl(websiteUrl)?.hostname ?? "" : value;
-  const brand = inferBrand ? resolveBrandIcon(brandValue) : null;
-  const remoteCandidates = resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
+  const brand = inferBrand ? websiteUrl ? resolveWebsiteBrandIcon(websiteUrl) : resolveBrandIcon(value) : null;
+  const remoteCandidates = fallback === "web" && brand ? [] : resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
   const remoteCandidateKey = remoteCandidates.join("\n");
   const [failedRemoteIcons, setFailedRemoteIcons] = useState<{ scope: string; urls: string[] }>({ scope: remoteCandidateKey, urls: [] });
   const failures = failedRemoteIcons.scope === remoteCandidateKey ? failedRemoteIcons.urls : [];
   const remoteIcon = remoteCandidates.find((candidate) => !failures.includes(candidate)) ?? "";
-  // A bundle's declared icon is authoritative. Brand inference applies only
-  // when that asset is absent or fails, and never overrides an extension logo.
-  const showRemoteIcon = Boolean(remoteIcon);
+  const [remoteImage, setRemoteImage] = useState({ url: remoteIcon, loaded: false });
+  if (remoteImage.url !== remoteIcon) setRemoteImage({ url: remoteIcon, loaded: false });
+  // Known websites use their bundled identity. Declared extension logos and
+  // unknown sites replace the local icon only after the image really loads.
+  const showRemoteIcon = Boolean(remoteIcon) && remoteImage.url === remoteIcon && remoteImage.loaded;
   const style = { width: size, height: size } satisfies CSSProperties;
   const accessibleTitle = title ?? brand?.label ?? value;
 
   return (
     <span className={`brand-icon${className ? ` ${className}` : ""}`} style={style} title={accessibleTitle} aria-hidden="true" data-brand={showRemoteIcon ? "website" : brand?.label.toLowerCase() ?? "generic"}>
-      {showRemoteIcon ? (
+      {remoteIcon && (
         <img
           key={remoteIcon}
           src={remoteIcon}
@@ -160,10 +180,14 @@ export const BrandIcon = ({
           width={size}
           height={size}
           referrerPolicy="no-referrer"
+          className="brand-icon-remote"
+          hidden={!showRemoteIcon}
+          onLoad={() => setRemoteImage({ url: remoteIcon, loaded: true })}
           onError={() => setFailedRemoteIcons((failed) => ({ scope: remoteCandidateKey,
             urls: [...(failed.scope === remoteCandidateKey ? failed.urls : []), remoteIcon] }))}
         />
-      ) : brand && "asset" in brand ? (
+      )}
+      {!showRemoteIcon && (brand && "asset" in brand ? (
         <img src={brand.asset} alt="" width={size} height={size} className="brand-icon-image" data-icon-kind={brand.color ? "color" : "mono"} />
       ) : brand && "icon" in brand ? (
         <Icon icon={brand.icon} width={size} height={size} />
@@ -175,7 +199,7 @@ export const BrandIcon = ({
         <BookOpenText size={size} strokeWidth={1.8} />
       ) : (
         <Blocks size={size} strokeWidth={1.8} />
-      )}
+      ))}
     </span>
   );
 };

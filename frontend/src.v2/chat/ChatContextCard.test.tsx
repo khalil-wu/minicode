@@ -154,9 +154,13 @@ describe("ChatContextCard", () => {
     expect(screen.getByRole("region", { name: "环境信息" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" }).title).toContain("codex/ui-polish");
-    expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe(
-      "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fdocs.example.com&sz=64",
-    );
+    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
+    expect(icon.src).toBe("https://docs.example.com/favicon.ico");
+    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
+    fireEvent.load(icon);
+    expect(container.querySelector('[data-brand="website"] img')).toBe(icon);
+    expect(icon.hidden).toBe(false);
   });
 
   it("closes the summary without leaving a second toolbar glyph in Cowork", () => {

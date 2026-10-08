@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -80,6 +81,35 @@ def test_runtime_capability_payload_carries_producer_owner(tmp_path):
     assert payload["conversation_id"] == "scope-owner"
     assert payload["workspace_root"] == str(tmp_path)
     assert payload["capabilities"]["skills"] == catalog
+
+
+@pytest.mark.asyncio
+async def test_model_capability_projection_skips_skill_discovery_and_sandbox_probe(tmp_path):
+    from backend.tools.registry import ToolRegistry
+
+    owner = SimpleNamespace(
+        active_conversation_id="model-owner", session_id="model-session",
+        refresh_tool_registry_if_mcp_changed=Mock(), tool_registry=ToolRegistry(),
+        permission_checker=None, permission_context=None, _mcp_registry_version_snapshot=0,
+        runtime_toolset_policy=lambda _: None,
+        _provider_capabilities_payload=lambda: {"model": "chosen-model", "configured_reasoning_effort": "high"},
+        send_payload=AsyncMock(),
+    )
+    lifecycle = SessionLifecycle(owner)
+    lifecycle.workspace_root_for_conversation = lambda: tmp_path
+    owner.session_lifecycle = lifecycle
+    owner.runtime_capability_snapshot = lambda **kwargs: WebSocketSession.runtime_capability_snapshot(owner, **kwargs)
+    owner.runtime_capabilities_payload = lambda **kwargs: WebSocketSession.runtime_capabilities_payload(owner, **kwargs)
+    # The owner deliberately has no skill manager or command catalog. A model
+    # choice needs its current tool policy, not workspace catalog discovery.
+    await lifecycle.send_runtime_capabilities(source="llm.model.set", include_catalogs=False)
+    payload = owner.send_payload.call_args.args[0]
+    assert payload["conversation_id"] == "model-owner" and payload["workspace_root"] == str(tmp_path)
+    assert payload["capabilities"]["provider_capabilities"] == {"model": "chosen-model", "configured_reasoning_effort": "high"}
+    assert payload["capabilities"]["tools"] == [] and payload["capabilities"]["tool_views"] == []
+    assert "skills" not in payload["capabilities"] and "composer_commands" not in payload["capabilities"]
+    assert "skills" not in payload["capabilities"]["summary"]
+    assert lifecycle.sandbox_capability_task is None
 
 
 @pytest.mark.asyncio

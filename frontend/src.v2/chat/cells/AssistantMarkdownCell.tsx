@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, FileText, GitBranch, Image as ImageIcon, Maximize2, Quote, RotateCw, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, GitBranch, Image as ImageIcon, Maximize2, Quote, RotateCw, X } from "lucide-react";
 import { fileIcon } from "../../lib/file-icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
@@ -322,7 +322,7 @@ export function AssistantMarkdownCell({
                   role="note"
                 >
                   <span className="assistant-cell-source-favicon" aria-hidden="true">
-                    <BrandIcon value={`${source.label} ${source.title || ""}`} fallbackIcon={<FileText size={14} />} size={14} />
+                    {fileIcon(source.title || source.label, { size: 14, className: "assistant-cell-source-file-icon" })}
                   </span>
                   <span className="assistant-cell-source-label">{source.label}</span>
                 </span>

@@ -50,7 +50,9 @@ def config_with_model_budget(
     )
 
 
-def model_thinking_levels(model: Any, adapter: Any | None = None) -> tuple[str, ...]:
+def model_thinking_levels(
+    model: Any, adapter: Any | None = None, *, configured_reasoning_effort: str = "",
+) -> tuple[str, ...]:
     """Return the exact reasoning values the selected transport can honor."""
     if model is None:
         supported = getattr(adapter, "supported_reasoning_efforts", None)
@@ -61,6 +63,12 @@ def model_thinking_levels(model: Any, adapter: Any | None = None) -> tuple[str, 
         return ("off",)
     supported = getattr(adapter, "supported_reasoning_efforts", None)
     adapter_levels = tuple(dict.fromkeys(supported())) if callable(supported) else ()
+    if adapter is None and getattr(model, "api", "") == "anthropic-messages":
+        configured = configured_reasoning_effort.strip().lower()
+        declared = tuple(getattr(model, "reasoning_effort_levels", ()) or ())
+        adapter_levels = tuple(dict.fromkeys(("off", *declared))) if declared else (
+            tuple(dict.fromkeys(("off", "high", configured))) if configured else ("off", "high")
+        )
     if adapter_levels == ("off", "high"):
         return adapter_levels
     declared = tuple(

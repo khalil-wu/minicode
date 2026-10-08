@@ -257,7 +257,7 @@ async def apply_llm_config_update(
     reasoning_effort = str(data.get("reasoning_effort") or "").strip().lower()
 
     provider = config_mod._normalize_provider(raw_provider) if raw_provider else "openai"
-    config = config_mod.load_config()
+    config = config_mod.load_config(resolve_credentials=False)
     saved_payload = config_mod.get_llm_settings_payload()
     notice: CommandResultNotice | None = None
 
@@ -300,7 +300,7 @@ async def apply_llm_config_update(
                     # provider-history entries, including environment-only
                     # local proxy endpoints.
                     config_mod.save_llm_settings({target_provider: dict(section)})
-                    config = config_mod.load_config()
+                    config = config_mod.load_config(resolve_credentials=False)
                     saved_payload = config_mod.get_llm_settings_payload()
         else:
             if not from_slash_command:

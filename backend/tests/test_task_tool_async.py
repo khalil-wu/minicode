@@ -2242,8 +2242,8 @@ def test_task_status_collects_a_parallel_batch_in_one_call(tmp_path):
     asyncio.run(_test_task_status_collects_a_parallel_batch_in_one_call(tmp_path))
 
 
-def test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path):
-    asyncio.run(_test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path))
+def test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path, monkeypatch):
+    asyncio.run(_test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path, monkeypatch))
 
 
 def test_task_status_batch_display_reports_mixed_status_counts(tmp_path):
@@ -2340,7 +2340,7 @@ async def _test_task_status_collects_a_parallel_batch_in_one_call(tmp_path):
     assert result.display_summary == "2 delegated task(s): completed"
 
 
-async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path):
+async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path, monkeypatch):
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
     runtime.start_run(conversation_id="conv-any", run_id="run-any")
     for subagent_id in ("subagent-fast", "subagent-slow"):
@@ -2357,9 +2357,20 @@ async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path):
         metadata={"run_id": "run-any"},
         run_context=RunContext(agent_runtime=runtime),
     )
+    entered = asyncio.Event()
+    winners = []
+    wait_for_any = runtime.wait_for_any_subagent
+
+    async def observed_wait(subagent_ids, timeout):
+        entered.set()
+        winner = await wait_for_any(subagent_ids, timeout)
+        winners.append(winner)
+        return winner
+
+    monkeypatch.setattr(runtime, "wait_for_any_subagent", observed_wait)
 
     async def finish_fast() -> None:
-        await asyncio.sleep(0.02)
+        await entered.wait()
         runtime.complete_subagent(
             "subagent-fast",
             "completed",
@@ -2374,18 +2385,17 @@ async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path):
         )
 
     finisher = asyncio.create_task(finish_fast())
-    result = await asyncio.wait_for(
-        TaskStatusTool().execute(
+    result = await TaskStatusTool().execute(
             {
                 "subagent_ids": ["subagent-fast", "subagent-slow"],
                 "wait_seconds": 1,
                 "include_result": True,
             },
             context=context,
-        ),
-        timeout=0.25,
     )
     await finisher
+    assert winners == ["subagent-fast"]
+    assert runtime.get_subagent("subagent-slow").status == "running"
 
     assert result.status == "running"
     assert "Fast result is ready." in result.content

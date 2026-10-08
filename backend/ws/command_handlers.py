@@ -197,7 +197,11 @@ class SessionCommandHandlersMixin:
         workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         if owner_id and conversation is None:
             raise ValueError("The conversation selected for this model change no longer exists")
-        scoped_config = config_override or load_config(cwd=workspace_root)
+        live_execution = (
+            self.run_manager.running_task_for(owner_id or "") is not None
+            and self.run_manager.context_for(owner_id or "") is not None
+        )
+        scoped_config = config_override or load_config(cwd=workspace_root, resolve_credentials=live_execution)
         scoped_settings = (
             scoped_config.config_layer_stack.effective_config()
             if scoped_config.config_layer_stack is not None
@@ -235,7 +239,7 @@ class SessionCommandHandlersMixin:
         if model_runtime is not None:
             if config_override is not None:
                 model_runtime.refresh(settings_snapshot=scoped_settings)
-            if refresh_auth:
+            if live_execution and refresh_auth:
                 await model_runtime.refresh_oauth_credentials(normalized_provider)
                 await model_runtime.refresh_provider_auth(normalized_provider)
             runtime_models = model_runtime.get_models(normalized_provider)
@@ -267,7 +271,7 @@ class SessionCommandHandlersMixin:
             self.refresh_llm_selection(prefer_config=True)
             return False
         from backend.agent.model_execution import ModelExecutionSnapshot
-        from backend.llm.model_selection import model_thinking_levels
+        from backend.llm.model_selection import clamp_model_thinking_level, model_thinking_levels
         from backend.ws.agent_runner import (
             _apply_thinking_level, _config_with_runtime_model_budget,
             _get_or_create_session_llm,
@@ -282,26 +286,39 @@ class SessionCommandHandlersMixin:
                 model=normalized_model, reasoning_effort=effort)),
             model_runtime=model_runtime, provider=normalized_provider, model=normalized_model,
         )
-        adapter = _get_or_create_session_llm(self, config=config,
-            provider=normalized_provider, model=normalized_model, model_runtime=model_runtime)
-        supported = model_thinking_levels(selected_runtime_model, adapter)
+        adapter = None
+        if live_execution:
+            adapter = _get_or_create_session_llm(self, config=config,
+                provider=normalized_provider, model=normalized_model, model_runtime=model_runtime)
+            supported = model_thinking_levels(selected_runtime_model, adapter)
+        elif selected_runtime_model is not None:
+            provider_metadata = model_runtime.provider_payload(normalized_provider, normalized_model)
+            supported = model_thinking_levels(selected_runtime_model,
+                configured_reasoning_effort=provider_metadata["configured_reasoning_effort"])
+        else:
+            from backend.llm.capabilities import capabilities_from_settings
+
+            supported = capabilities_from_settings(config.llm,
+                provider=normalized_provider).reasoning_effort_levels
         if reasoning_effort is not None and reasoning_effort not in supported:
             raise ValueError(f"Reasoning effort '{reasoning_effort}' is not supported for '{normalized_provider}/{normalized_model}'. Supported: {', '.join(supported) or 'none'}.")
-        effective = _apply_thinking_level(adapter, selected_runtime_model, effort)
+        effective = (_apply_thinking_level(adapter, selected_runtime_model, effort)
+                     if live_execution else clamp_model_thinking_level(effort, supported) or "off")
         config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
         models_source = (
             "extension" if model_runtime is not None
             and model_runtime.get_registered_provider_config(normalized_provider) is not None
             else resolve_models_source(normalized_provider)
         )
-        snapshot = ModelExecutionSnapshot(config=config, llm=adapter,
-            provider=normalized_provider, model=normalized_model, thinking_level=effective,
-            model_runtime=model_runtime, available_models=tuple(available_models),
-            models_source=models_source, model_info=selected_runtime_model)
         if conversation is not None and manual_override:
             self.conversation_repo.update_model_selection(conversation.id,
                 provider=normalized_provider, model=normalized_model, reasoning_effort=effective)
-        self.publish_live_model_execution(owner_id or "", snapshot)
+        if live_execution:
+            snapshot = ModelExecutionSnapshot(config=config, llm=adapter,
+                provider=normalized_provider, model=normalized_model, thinking_level=effective,
+                model_runtime=model_runtime, available_models=tuple(available_models),
+                models_source=models_source, model_info=selected_runtime_model)
+            self.publish_live_model_execution(owner_id or "", snapshot)
         if owner_id == self.active_conversation_id:
             self.config = config
             self.provider = normalized_provider
@@ -310,9 +327,10 @@ class SessionCommandHandlersMixin:
             self.models_source = models_source
             self._model_override_active = manual_override
             self._provider_override_active = bool(manual_override and normalized_provider != resolve_provider())
-            self.llm = adapter
-            self.context_builder.bind_llm(adapter)
-            self.context_builder.bind_budget(config.token_budget)
+            if live_execution:
+                self.llm = adapter
+                self.context_builder.bind_llm(adapter)
+                self.context_builder.bind_budget(config.token_budget)
         return True
 
     async def set_selected_model(self, model: str, *, manual_override: bool,
@@ -327,7 +345,8 @@ class SessionCommandHandlersMixin:
             conversation = self.conversation_repo.get_conversation_summary(owner_id)
             if conversation is None:
                 raise ValueError("The conversation selected for this model change no longer exists")
-            config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(conversation))
+            config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(conversation),
+                                 resolve_credentials=False)
             provider = conversation.model_selection.get("provider", config.llm.provider)
             current_model = conversation.model_selection.get("model", config.llm.model)
         return await self._set_selected_provider_model(

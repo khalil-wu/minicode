@@ -689,6 +689,14 @@ def test_budget_adapter_exposes_only_off_high_and_restores_its_budget() -> None:
     assert adapter._thinking_budget == 4096
 
 
+def test_anthropic_catalog_thinking_levels_match_transport_without_constructing_client() -> None:
+    model = replace(_model(), api="anthropic-messages")
+    assert model_thinking_levels(model) == ("off", "high")
+    assert model_thinking_levels(model, configured_reasoning_effort="medium") == ("off", "high", "medium")
+    declared = replace(model, reasoning_effort_levels=("low", "medium", "high"))
+    assert model_thinking_levels(declared) == ("low", "medium", "high")
+
+
 def test_modern_pi_api_key_login_persists_and_resolves_without_exposing_secret() -> None:
     seen: dict[str, object] = {}
 

@@ -96,9 +96,10 @@ async def test_tool_timeout_cancels_real_write_before_cleanup_is_reported(tmp_pa
 async def test_managed_timeout_retains_cancellation_resistant_source_until_real_settlement(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.agent.tool_execution.CANCELLATION_DRAIN_TIMEOUT_SECONDS", .01)
     monkeypatch.setattr("backend.tools.registry.CANCELLATION_DRAIN_TIMEOUT_SECONDS", .01)
-    cancelled, release = asyncio.Event(), asyncio.Event()
+    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     class Tool(_DelayedWrite):
         async def execute(self, args, context=None):
+            entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -111,6 +112,22 @@ async def test_managed_timeout_retains_cancellation_resistant_source_until_real_
     registry.register(tool)
     context = ToolExecutionContext(permission=PermissionContext(mode="bypass"),
         workspace_root=tmp_path, task_manager=manager, cancel_event=asyncio.Event())
+    wait = asyncio.wait
+
+    async def wait_after_source_entry(tasks, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        if timeout == tool.timeout_seconds:
+            # Exercise cancellation of an executing source, independently of
+            # cold schema/hook setup before the source coroutine is scheduled.
+            source_entry = asyncio.create_task(entered.wait())
+            try:
+                await wait(set(tasks) | {source_entry}, return_when=asyncio.FIRST_COMPLETED)
+                assert entered.is_set(), "Managed source did not enter execution"
+            finally:
+                source_entry.cancel()
+                await asyncio.gather(source_entry, return_exceptions=True)
+        return await wait(tasks, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr("backend.agent.tool_execution.asyncio.wait", wait_after_source_entry)
     try:
         result = await run_tool_with_timeout(ToolCallEvent("resistant", tool.name, {}), registry, context)
         assert cancelled.is_set()

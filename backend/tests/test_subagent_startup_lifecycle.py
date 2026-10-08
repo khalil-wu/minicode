@@ -291,6 +291,15 @@ async def test_team_owner_survives_next_turn_and_runtime_rebuild(startup_case, r
             swarm_store_dir=startup_case.workspace.parent / "swarm", enable_lease_heartbeat=False,
         )
         startup_case.context.run_context.agent_runtime = runtime
+    owned_workers = []
+    original_emit = startup_case.context.emit_event
+
+    async def capture_owned_worker(event_type, payload):
+        if event_type == "subagent.start":
+            owned_workers.append(runtime._subagent_tasks[payload["subagent_id"]])
+        await original_emit(event_type, payload)
+
+    startup_case.context.emit_event = capture_owned_worker
     try:
         runtime.start_run(run_id="next-turn", conversation_id="conversation")
         startup_case.context.metadata["run_id"] = "next-turn"
@@ -298,7 +307,9 @@ async def test_team_owner_survives_next_turn_and_runtime_rebuild(startup_case, r
         assert not result.is_error
         assert child_id == "alice@audit"
         assert runtime.get_subagent(child_id).team_name == "audit"
-        assert await runtime.wait_for_subagent(child_id, 3)
+        await asyncio.gather(*owned_workers)
+        assert await runtime.wait_for_subagent(child_id, 0)
+        assert runtime.get_subagent(child_id).status == "completed"
         team = runtime.list_swarm_teams(conversation_id="conversation")[0]
         assert team.created_by == "parent"
         duplicate = await TeamCreateTool().execute({"team_name": "second"}, startup_case.context)
@@ -308,6 +319,10 @@ async def test_team_owner_survives_next_turn_and_runtime_rebuild(startup_case, r
         deleted = await TeamDeleteTool().execute({"team_name": "audit"}, startup_case.context)
         assert not deleted.is_error
     finally:
+        for worker in owned_workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*owned_workers, return_exceptions=True)
         if rebuild_runtime:
             runtime.close()
 

@@ -1,11 +1,13 @@
 "use strict";
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 if (process.env.MINICODE_VIEWPORT_TEST_CHILD === "1") {
   const { app, BrowserWindow, webContents } = require("electron");
+  app.setPath("userData", path.resolve(process.env.MINICODE_VIEWPORT_TEST_USER_DATA_DIR));
   const browser = require("./embedded-browser-manager");
-  app.setPath("userData", path.resolve(__dirname, "../output/playwright/minicode-three-batches-20261005/viewport-runtime"));
   app.whenReady().then(async () => {
     const window = new BrowserWindow({ width: 1200, height: 950, show: false });
     browser.init({ getMainWindow: () => window });
@@ -35,15 +37,30 @@ if (process.env.MINICODE_VIEWPORT_TEST_CHILD === "1") {
   const { test } = require("node:test");
   const { spawn } = require("node:child_process");
   test("native embedded preview uses the requested CSS viewport", async () => {
-    const env = { ...process.env, MINICODE_VIEWPORT_TEST_CHILD: "1" };
+    const tempRoot = path.resolve(os.tmpdir());
+    const profilePrefix = "minicode-editor-viewport-e2e-";
+    const userDataDir = fs.mkdtempSync(path.join(tempRoot, profilePrefix));
+    const env = { ...process.env, MINICODE_VIEWPORT_TEST_CHILD: "1", MINICODE_VIEWPORT_TEST_USER_DATA_DIR: userDataDir };
     delete env.ELECTRON_RUN_AS_NODE;
-    const child = spawn(require("electron"), [__filename], { cwd: __dirname, env, windowsHide: true });
+    // Match electron-smoke's isolated test-process launch on Linux CI, whose
+    // npm-installed Electron has no root-owned SUID sandbox helper.
+    const args = ["--disable-gpu"];
+    if (process.platform !== "win32") args.push("--no-sandbox");
+    args.push(__filename);
+    const child = spawn(require("electron"), args, { cwd: __dirname, env, windowsHide: true });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
     const timer = setTimeout(() => child.kill(), 20000);
-    const code = await new Promise((resolve) => child.once("exit", resolve));
-    clearTimeout(timer);
-    assert.equal(code, 0, output);
+    try {
+      const code = await new Promise((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
+      assert.equal(code, 0, output);
+    } finally {
+      clearTimeout(timer);
+      const profile = path.resolve(userDataDir);
+      assert.equal(path.dirname(profile), tempRoot);
+      assert.ok(path.basename(profile).startsWith(profilePrefix));
+      fs.rmSync(profile, { recursive: true, force: true });
+    }
   });
 }

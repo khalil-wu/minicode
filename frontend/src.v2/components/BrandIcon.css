@@ -15,6 +15,7 @@
 }
 
 .brand-icon > img { object-fit: contain; }
+.brand-icon-remote[hidden] { display: none; }
 
 /* Bundled monochrome assets share the same treatment in source and model rows.
    Remote extension logos retain their own colors. Dark is the root theme. */

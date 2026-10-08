@@ -141,9 +141,13 @@ describe("AssistantMarkdownCell sources", () => {
     expect(document.body.textContent).not.toContain("[1]");
     expect(document.querySelector(".assistant-inline-source-chip")).toBeNull();
     expect(document.querySelector(".assistant-cell-source-chip")).toBeTruthy();
-    expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe(
-      "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fwww.nmc.cn&sz=64",
-    );
+    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
+    expect(icon.src).toBe("https://www.nmc.cn/favicon.ico");
+    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('.assistant-cell-source-favicon svg')).toBeTruthy();
+    fireEvent.load(icon);
+    expect(container.querySelector('[data-brand="website"] img')).toBe(icon);
+    expect(icon.hidden).toBe(false);
   });
 
   it("renders provider-native sources even when the answer has no numeric markers", () => {
@@ -187,6 +191,14 @@ describe("AssistantMarkdownCell sources", () => {
     expect(screen.getByText("Pages 2–3")).toBeTruthy();
     expect(screen.queryByRole("link")).toBeNull();
     expect(document.body.textContent).not.toContain("anthropic:document:abc123");
+  });
+
+  it("keeps a local document icon when a citation title mentions a model publisher", () => {
+    const { container } = render(<AssistantMarkdownCell cell={cell({ markdownSource: "Document source.", citations: [{
+      source: "anthropic:document:example", title: "OpenAI report.pdf", label: "Pages 2–3", providerNative: true, range: [2, 3],
+    }] })} />);
+    expect(container.querySelector('.assistant-cell-source-file-icon[data-file-kind="pdf"]')).toBeTruthy();
+    expect(container.querySelector('.brand-icon')).toBeNull();
   });
 
   it("normalizes split host labels in citation source chips", () => {

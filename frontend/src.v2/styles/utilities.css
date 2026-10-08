@@ -223,11 +223,11 @@
   box-shadow: 0 0 0 1px color-mix(in oklch, var(--border-subtle) 76%, transparent);
 }
 
-.md-body .md-web-link-icon > img {
+.md-body .md-web-link-icon > img:not([data-icon-kind="mono"]) {
   filter: drop-shadow(0 0 0.8px rgb(24 24 27 / 0.72));
 }
 
-html[data-theme="dark"] .md-body .md-web-link-icon > img {
+html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mono"]) {
   filter: drop-shadow(0 0 0.8px rgb(255 255 255 / 0.68));
 }
 

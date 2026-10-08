@@ -2219,58 +2219,11 @@ def _expand_unreadable_glob(pattern: str, max_depth: int | None) -> tuple[Path, 
             f"Deny-read glob search root is not a directory: {search_root}"
         )
 
-    rg = shutil.which("rg")
-    if rg:
-        args = [rg, "--files", "--hidden", "--no-ignore", "--null"]
-        if max_depth is not None:
-            args.extend(("--max-depth", str(max_depth)))
-        args.extend(("--glob", relative_pattern, "--", str(search_root)))
-        try:
-            completed = subprocess.run(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=15.0,
-            )
-        except OSError as exc:
-            if isinstance(exc, FileNotFoundError):
-                raw_matches = _walk_unreadable_glob(
-                    search_root,
-                    relative_pattern,
-                    max_depth,
-                )
-            else:
-                raise SandboxUnavailableError(
-                    f"Failed to scan deny-read glob {pattern!r}: {exc}"
-                ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise SandboxUnavailableError(
-                f"Deny-read glob scan timed out for {pattern!r}"
-            ) from exc
-        else:
-            if completed.returncode == 1 and not completed.stderr:
-                raw_matches = []
-            elif completed.returncode != 0:
-                detail = _decode_command_bytes(completed.stderr).strip()
-                raise SandboxUnavailableError(
-                    f"Ripgrep deny-read scan failed for {search_root}: "
-                    f"{detail or completed.returncode}"
-                )
-            else:
-                raw_matches = []
-                for raw in completed.stdout.split(b"\0"):
-                    if not raw:
-                        continue
-                    decoded = os.fsdecode(raw)
-                    candidate = Path(decoded)
-                    raw_matches.append(
-                        candidate.absolute()
-                        if candidate.is_absolute()
-                        else (search_root / candidate).absolute()
-                    )
-    else:
-        raw_matches = _walk_unreadable_glob(search_root, relative_pattern, max_depth)
+    # rg --files omits symlink entries. Policy expansion must retain the
+    # matching lexical alias and its target, independently of installed CLIs.
+    # The canonical walker also preserves component globs and depth limits
+    # without following directory links into unrelated trees.
+    raw_matches = _walk_unreadable_glob(search_root, relative_pattern, max_depth)
 
     matches: list[Path] = []
     seen: set[str] = set()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -299,31 +300,23 @@ def test_unreadable_glob_scan_failure_and_match_cap_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import backend.sandbox.runner as runner_module
+    scandir = runner_module.os.scandir
 
-    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(
-        runner_module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=["rg"],
-            returncode=2,
-            stdout=b"",
-            stderr=b"scan failed",
-        ),
-    )
+    def denied_scan(path):
+        if Path(path) == tmp_path:
+            raise PermissionError("scan failed")
+        return scandir(path)
+
+    monkeypatch.setattr(runner_module.os, "scandir", denied_scan)
     with pytest.raises(SandboxUnavailableError, match="scan failed"):
         _expand_unreadable_glob(str(tmp_path / "*.env"), None)
 
-    output = b"\0".join(f"item-{index}.env".encode() for index in range(8193)) + b"\0"
+    entries = [SimpleNamespace(
+        path=str(tmp_path / f"item-{index}.env"), is_symlink=lambda: False,
+        is_file=lambda **_kwargs: True, is_dir=lambda **_kwargs: False,
+    ) for index in range(8193)]
     monkeypatch.setattr(
-        runner_module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=["rg"],
-            returncode=0,
-            stdout=output,
-            stderr=b"",
-        ),
+        runner_module.os, "scandir", lambda path: iter(entries) if Path(path) == tmp_path else scandir(path),
     )
     with pytest.raises(SandboxUnavailableError, match="8192"):
         _expand_unreadable_glob(str(tmp_path / "*.env"), None)

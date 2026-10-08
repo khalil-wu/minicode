@@ -173,6 +173,15 @@ async def test_protocol_start_restore_catalogs_and_files_do_not_bind_a_model(
             assert session.is_connected
             assert session.llm is None and session.context_builder._llm is None
             assert session._llm_adapter_cache == {}
+            if selected_model:
+                await socket.command("llm.config.set", provider="custom", source="frontend.footer", reasoning_effort="high",
+                    client_command_id="blank-footer-effort")
+                blank_state = await socket.until("llm.model.updated", client_command_id="blank-footer-effort")
+                assert blank_state["effective_reasoning_effort"] == "high"
+                blank_capabilities = await socket.until("runtime.capabilities", client_command_id="blank-footer-effort")
+                assert blank_capabilities["conversation_id"] == ""
+                assert "skills" not in blank_capabilities["capabilities"]
+                assert session.llm is session.context_builder._llm is None and adapter_calls == []
             if not selected_model:
                 capabilities = session._provider_capabilities_payload()
                 assert capabilities["model"] == "" and capabilities["reasoning_effort_supported"] is False
@@ -572,19 +581,42 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             assert session._provider_capabilities_payload()["model"] == "gpt-6.1-sol"
             assert session.runtime_toolset_policy(session.tool_registry).code_mode_enabled is True
             assert len(adapters) == len(requests) == 2 and session.llm is adapters[1]
+            skill_snapshot = session.skill_manager.snapshot
+            skill_reads = []
+
+            def counted_skill_snapshot(*args, **kwargs):
+                skill_reads.append(args)
+                return skill_snapshot(*args, **kwargs)
+
+            monkeypatch.setattr(session.skill_manager, "snapshot", counted_skill_snapshot)
             await socket.command("llm.model.set", model="gpt-6.1-sol", conversation_id=conversation_id, client_command_id="explicit-model-change")
             model_changed = await socket.until("llm.model.updated", conversation_id=conversation_id, client_command_id="explicit-model-change")
             assert model_changed["model"] == "gpt-6.1-sol"
-            assert session.llm.model_id() == "gpt-6.1-sol"
+            assert session.llm is adapters[1] and len(adapters) == 2
             assert session.context_builder._llm is session.llm
             assert len(requests) == 2
+            model_capabilities = await socket.until("runtime.capabilities", client_command_id="explicit-model-change")
+            assert model_capabilities["capabilities"]["provider_capabilities"]["model"] == "gpt-6.1-sol"
+            assert "skills" not in model_capabilities["capabilities"] and "composer_commands" not in model_capabilities["capabilities"]
+            assert model_capabilities["capabilities"]["tool_views"]
+            assert skill_reads == []
             await socket.command("llm.config.set", source="frontend.footer", reasoning_effort="high", conversation_id=conversation_id,
                 client_command_id="explicit-effort-change")
             effort_changed = await socket.until("llm.model.updated", conversation_id=conversation_id,
                 client_command_id="explicit-effort-change", effective_reasoning_effort="high")
             assert effort_changed["model"] == "gpt-6.1-sol"
             assert session.context_builder._llm is session.llm
-            assert session.llm.current_reasoning_effort() == "high" and len(requests) == 2
+            assert session.llm is adapters[1] and len(adapters) == len(requests) == 2
+            effort_capabilities = await socket.until("runtime.capabilities", client_command_id="explicit-effort-change")
+            assert effort_capabilities["capabilities"]["provider_capabilities"]["effective_reasoning_effort"] == "high"
+            assert skill_reads == []
+            monkeypatch.setattr(session.skill_manager, "snapshot", skill_snapshot)
+            await socket.command("user_message", content="Use the new task selection", conversation_id=conversation_id,
+                client_command_id="selected-next-query", user_message_id="selected-user", assistant_message_id="selected-assistant")
+            selected_done = await socket.until("done", conversation_id=conversation_id)
+            assert selected_done["status"] == "completed"
+            assert len(adapters) == len(requests) == 3 and session.llm is adapters[2]
+            assert requests[2]["model"] == "gpt-6.1-sol" and requests[2]["reasoning"]["effort"] == "high"
             await socket.command("ping")
             await socket.until("pong")
             assert session.is_connected
