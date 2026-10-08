@@ -33,8 +33,29 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: desktop/language-services/package-lock.json
-      - name: Install native search and editor dependencies
-        run: sudo apt-get update && sudo apt-get install -y ripgrep clangd
+      - name: Install native execution, search and editor dependencies
+        run: sudo apt-get update && sudo apt-get install -y git build-essential ripgrep clangd bubblewrap
+      - name: Verify Linux sandbox namespaces
+        run: |
+          probe_bwrap() {
+            bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc --dev /dev --perms 000 --tmpfs /tmp --remount-ro /tmp -- true
+          }
+          if probe_bwrap 2> "$RUNNER_TEMP/minicode-bwrap-probe.log"; then
+            exit 0
+          fi
+          cat "$RUNNER_TEMP/minicode-bwrap-probe.log"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1
+          # Ubuntu's outer AppArmor userns restriction needs a grant for this
+          # one launcher. Bubblewrap still enforces filesystem/network isolation.
+          sudo tee /etc/apparmor.d/minicode-ci-bwrap > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile minicode-ci-bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/minicode-ci-bwrap
+          probe_bwrap
       - name: Install bundled editor language services
         run: npm ci --prefix desktop/language-services --omit=dev --no-audit --no-fund
       - name: Install backend
@@ -50,18 +71,28 @@ jobs:
       - name: Run backend and root tests
         run: |
           set -o pipefail
-          python -m pytest "${{ matrix.test_path }}" --maxfail=1 --tb=short 2>&1 | tee "pytest-${{ matrix.suite }}.log"
+          python -m pytest "${{ matrix.test_path }}" --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
         if: failure()
         run: |
           if grep -q '^=\+ FAILURES =\+' "pytest-${{ matrix.suite }}.log"; then
-            failure_lines=$(sed -n '/^=\+ FAILURES =\+/,/^=\+ short test summary info =\+/p' "pytest-${{ matrix.suite }}.log" | head -160)
+            failure_lines=$(sed -n '/^=\+ FAILURES =\+/,/^=\+ short test summary info =\+/p' "pytest-${{ matrix.suite }}.log")
           else
             failure_lines=$(tail -120 "pytest-${{ matrix.suite }}.log")
           fi
           while IFS= read -r line; do
             echo "::error file=pytest-${{ matrix.suite }}.log::${line}"
           done <<< "$failure_lines"
+          sed -n '/^=\+ short test summary info =\+/,$p' "pytest-${{ matrix.suite }}.log"
+      - name: Upload complete backend test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.suite }}-test-evidence
+          path: |
+            pytest-${{ matrix.suite }}.log
+            pytest-${{ matrix.suite }}.xml
+          if-no-files-found: ignore
 
   windows-harness:
     name: Windows harness and process contracts

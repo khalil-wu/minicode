@@ -5,6 +5,7 @@ import { inheritMessageTopology } from "../lib/message-changes";
 import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
+import { modelSelectionPatch } from "../lib/model-selection";
 
 const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "planning",
@@ -478,6 +479,7 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
   setRuntimeCapabilities: (capabilities) =>
     set((s) => ({
       runtimeCapabilities: capabilities,
+      ...modelSelectionPatch(capabilities?.provider_capabilities),
       ...(!capabilityFeatureEnabled(capabilities, "global_search", true)
         ? { quickOpenVisible: false, quickOpenResults: [], quickOpenLoading: false }
         : {}),

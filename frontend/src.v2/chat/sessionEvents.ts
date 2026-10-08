@@ -33,7 +33,6 @@ import type {
   AgentProgressEntry,
   ChatMessage,
   ConversationAgentState,
-  EffortLevel,
   PlanState,
   SubagentMessageState,
   SubagentState,
@@ -66,6 +65,7 @@ import { isDesktop, ptyKillConversation } from "../desktop/runtime";
 import { releasePreviewScope } from "./previewRequestScope";
 import { providerTracePayloadFromDone } from "./providerTrace";
 import { incomingConversationMetaIsStale, isVisibleConversationMeta, normalizedConversationRevision } from "./activeConversation";
+import { modelSelectionPatch, runtimeModelSelectionPatch } from "../lib/model-selection";
 
 type ConversationSummary = ConversationSummaryPayload;
 type ConversationPayload = ConversationRecordPayload;
@@ -1098,6 +1098,7 @@ const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined
   if (session.active_conversation_id === state.conversationId && session.workspace_root !== undefined) {
     state.setWorkingDirectory(session.workspace_root ?? "");
   }
+  useAppStore.setState(runtimeModelSelectionPatch(session, useAppStore.getState()));
   applyQueuedUserMessageSnapshot(session.queued_user_messages);
   applyPendingTurnInputSnapshot(session.pending_turn_inputs);
   applyActiveStreamSnapshot(session);
@@ -1138,21 +1139,7 @@ export const handleSessionEvent = (
       }
       if (ev.conversation_id !== undefined && (ev.conversation_id || null) !== (s.conversationId || null)) return true;
       const model = stringValue(ev.current_model) || stringValue(ev.model);
-      if (model) s.setCurrentModel(model);
-      if (ev.provider) s.setCurrentProvider(ev.provider);
-      const effectiveReasoningEffort = String(
-        ev.effective_reasoning_effort || "",
-      ).trim().toLowerCase();
-      // The backend emits an effective value only after matching it against
-      // this model's provider-declared catalog, including MiniCode custom levels.
-      if (effectiveReasoningEffort) {
-        useAppStore.setState({ effortLevel: effectiveReasoningEffort as EffortLevel });
-      }
-      s.setCurrentProviderMeta({
-        providerId: stringValue(ev.provider_id),
-        baseUrl: stringValue(ev.base_url),
-        wireApi: stringValue(ev.wire_api),
-      });
+      useAppStore.setState(modelSelectionPatch(ev));
             setAvailableModelsForCurrentProvider(ev.available_models, model, maybeString(ev.provider), maybeString(ev.models_source));
       const workingDirectory = maybeString(ev.working_directory);
       if (workingDirectory && !activeConversationWorkspace()) {

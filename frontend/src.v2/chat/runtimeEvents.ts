@@ -2,6 +2,7 @@ import { useAppStore } from "../stores";
 import { subagentModelPatch } from "../lib/subagent-model";
 import { mcpProjectionMatches } from "./mcpProjectionScope";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { runtimeModelSelectionPatch } from "../lib/model-selection";
 import type {
   AgentProgressEvent,
   AgentRunCompletedEvent,
@@ -1010,6 +1011,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
 
       if ("session" in ev && ev.session) {
         s.setRuntimeSession(ev.partial ? { ...s.runtimeSession, ...ev.session } : ev.session);
+        useAppStore.setState(runtimeModelSelectionPatch(ev.session, useAppStore.getState()));
         if (ev.session.permission_mode) {
           useAppStore.setState({ permissionMode: fromBackendPermissionMode(ev.session.permission_mode) });
         }

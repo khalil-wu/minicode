@@ -7,6 +7,9 @@ import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-
 import { FooterRow } from "./FooterRow";
 import { uploadComposerFiles } from "./uploads";
 import { showConfirm } from "../overlays/DialogService";
+import { handleSessionEvent } from "../chat/sessionEvents";
+import { handleRuntimeEvent } from "../chat/runtimeEvents";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -48,6 +51,53 @@ vi.mock("../overlays/ToastContainer", () => ({
 }));
 
 describe("FooterRow permission picker", () => {
+  it.each(["conversation.switched", "session.restored", "session.synced", "conversation.list", "task.update", "runtime.capabilities"])(
+    "restores a cached task's model, provider and effort through %s without a model-update event", (source) => {
+      const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as Parameters<typeof handleSessionEvent>[1];
+      const task = (id: string) => ({ id, title: id, updated_at: "2026-10-08T00:00:00Z", workspace_root: `C:/${id}`, transcript: [] });
+      const low = task("task-low"), high = task("task-high");
+      const selection = (effort: "low" | "high") => ({
+        provider: effort === "low" ? "custom" : "openai", model: effort === "low" ? "gpt-6.1-sol" : "gpt-6-luna",
+        provider_id: `${effort}-provider`, base_url: `https://${effort}.invalid/v1`, wire_api: "responses",
+        configured_reasoning_effort: effort, effective_reasoning_effort: effort,
+        reasoning_effort_supported: true, reasoning_effort_levels: ["low", "high"],
+      });
+      const snapshot = (effort: "low" | "high") => ({
+        active_conversation_id: `task-${effort}`, workspace_root: `C:/task-${effort}`,
+        selected_model: selection(effort).model, capabilities: { provider_capabilities: selection(effort) },
+      });
+      const receive = (raw: unknown) => {
+        const frame = normalizeInboundServerEvent(raw);
+        expect(frame).toBe(raw);
+        expect(frame).not.toBeNull();
+        act(() => { if (!handleSessionEvent(frame!, buffers)) expect(handleRuntimeEvent(frame!)).toBe(true); });
+      };
+      useAppStore.setState({
+        pendingConversationSwitchId: null, pendingConversationCreateId: null, conversationInventoryInstanceId: null,
+        conversationInventoryRevision: 0, conversations: [], conversationMessages: {}, conversationStreaming: {},
+        availableModels: ["gpt-6.1-sol", "gpt-6-luna"], modelsSource: "live", messages: [], isStreaming: false,
+      });
+      render(<FooterRow sendState="idle" onSend={() => {}} />);
+      receive({ type: "conversation.switched", conversation_id: low.id, conversation: low, session: snapshot("low") });
+      expect(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，低" })).toBeTruthy();
+      receive({ type: "conversation.switched", conversation_id: high.id, conversation: high, session: snapshot("high") });
+      expect(screen.getByRole("button", { name: "模型与推理强度：6 Luna，高" })).toBeTruthy();
+      if (source !== "conversation.switched") receive({ type: "conversation.switched", conversation_id: low.id, conversation: low });
+      if (source === "conversation.switched") receive({ type: source, conversation_id: low.id, conversation: low, session: snapshot("low") });
+      else if (source === "runtime.capabilities") receive({ type: source, conversation_id: low.id, workspace_root: low.workspace_root, capabilities: snapshot("low").capabilities });
+      else if (source === "task.update") receive({ type: source, conversation_id: low.id, partial: true,
+        session: { active_conversation_id: low.id, workspace_root: low.workspace_root, selected_model: selection("low").model, provider_capabilities: selection("low") } });
+      else if (source === "conversation.list") receive({ type: source, inventory_instance_id: "footer-epoch", inventory_revision: 1,
+        conversations: [low, high], active_conversation_id: low.id, active_conversation: low, session: snapshot("low") });
+      else receive({ type: source, active_conversation_id: low.id, active_conversation: low, conversation: low, session: snapshot("low") });
+      expect(useAppStore.getState()).toMatchObject({ currentModel: "gpt-6.1-sol", currentProvider: "custom", currentProviderId: "low-provider",
+        currentProviderBaseUrl: "https://low.invalid/v1", currentWireApi: "responses", effortLevel: "low" });
+      expect(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，低" })).toBeTruthy();
+      receive({ type: "task.update", conversation_id: high.id, session: snapshot("high") });
+      receive({ type: "runtime.capabilities", conversation_id: low.id, workspace_root: "C:/other", capabilities: snapshot("high").capabilities });
+      expect(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，低" })).toBeTruthy();
+    },
+  );
   it("shows a GitHub connection failure while retaining the last PR and retries in its owner scope", () => {
     useAppStore.setState({ workingDirectory: "C:/project", prStatusIssue: { message: "gh auth login", code: "auth_required" },
       prMonitor: { prNumber: 7, prUrl: "https://example.invalid/pr/7", ciStatus: "passed", autoFix: false, autoMerge: false, lastCheckedAt: 1 } });

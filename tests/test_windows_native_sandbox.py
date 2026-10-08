@@ -122,8 +122,18 @@ def _records(home: Path, marker: str | None = None) -> None:
 
 @pytest.fixture(autouse=True)
 def owner_boundary(monkeypatch):
+    # Exercise the Windows adapter's mocked native boundary without changing
+    # the host platform used by pathlib, subprocesses or other modules.
+    monkeypatch.setattr(windows_native, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(windows_native, "_current_user_sid", lambda: _SID)
     monkeypatch.setattr(windows_native, "inspect_runtime_owner", lambda executable, home: _identity(home))
+
+
+def test_other_platforms_refuse_windows_runtime_before_native_inspection(monkeypatch):
+    monkeypatch.setattr(windows_native, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(windows_native, "inspect_runtime_owner", lambda *_args: pytest.fail("A Windows runtime was inspected on another host"))
+    runtime, reason = windows_native.discover_runtime()
+    assert runtime is None and reason == "the native Windows sandbox is Windows-only"
 
 
 def _home(tmp_path: Path, *, marker: str | None = None) -> tuple[Path, Path]:
