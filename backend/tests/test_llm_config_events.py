@@ -101,7 +101,7 @@ def test_model_updated_event_distinguishes_saved_and_effective_reasoning(monkeyp
     monkeypatch.delenv("MINICODE_MAX_CONTEXT_TOKENS", raising=False)
     monkeypatch.setattr(
         "backend.services.llm_config_service.get_custom_settings",
-        lambda: {
+        lambda **_kwargs: {
             "base_url": "https://api.deepseek.com/v1",
             "model": "deepseek-v4-flash",
             "wire_api": "chat",
@@ -131,7 +131,7 @@ def test_model_updated_event_reports_provider_declared_capabilities(monkeypatch)
     monkeypatch.delenv("MINICODE_MAX_CONTEXT_TOKENS", raising=False)
     monkeypatch.setattr(
         "backend.services.llm_config_service.get_custom_settings",
-        lambda: {
+        lambda **_kwargs: {
             "base_url": "https://gateway.example/v1",
             "model": "provider-model",
             "wire_api": "responses",

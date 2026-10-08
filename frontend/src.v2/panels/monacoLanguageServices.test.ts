@@ -9,6 +9,8 @@ import {
   editorModelUri,
   loadMiniCodeLanguageServices,
   registerMiniCodeEditorOpener,
+  setWorkspaceTypeScriptFiles,
+  syncWorkspaceTypeScriptModels,
 } from "./monacoLanguageServices";
 
 vi.hoisted(() => {
@@ -31,6 +33,33 @@ vi.mock("monaco-editor/languages/features/json/json.worker?worker", () => ({ def
 await import("monaco-editor/languages/features/typescript/tsMode.js");
 
 describe("MiniCode Monaco language services", () => {
+  it("awaits both workers' current source snapshot before exposing project queries", async () => {
+    await loadMiniCodeLanguageServices();
+    const typescript = await import("monaco-editor/languages/features/typescript/register.js");
+    const resource = Monaco.Uri.parse(editorModelUri("src/main.ts", "/current"));
+    setWorkspaceTypeScriptFiles({ workspaceRoot: editorModelUri(".", "/current"), sourceFileNames: [resource.toString()], readOnlyFileNames: [], caseSensitive: true },
+      [{ filePath: resource.toString(), content: "export const current = 1;" }]);
+    let finish!: () => void;
+    const workers = [
+      { updateExtraLibs: vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })), getConfigurationFileRequests: vi.fn(async () => []) },
+      { updateExtraLibs: vi.fn(async () => {}), getConfigurationFileRequests: vi.fn(async () => []) },
+    ];
+    const getters = [
+      vi.spyOn(typescript, "getTypeScriptWorker").mockResolvedValue(async () => workers[0] as never),
+      vi.spyOn(typescript, "getJavaScriptWorker").mockResolvedValue(async () => workers[1] as never),
+    ];
+    const pending = syncWorkspaceTypeScriptModels([]);
+    let completed = false;
+    void pending.then(() => { completed = true; });
+    await vi.waitFor(() => expect(workers[0].updateExtraLibs).toHaveBeenCalledOnce());
+    expect(workers[1].updateExtraLibs).toHaveBeenCalledWith(expect.objectContaining({ [resource.toString()]: expect.objectContaining({ content: "export const current = 1;" }) }));
+    expect(completed).toBe(false);
+    finish();
+    await (await pending).configurationRequests();
+    expect(workers.every((worker) => worker.getConfigurationFileRequests.mock.calls.length === 1)).toBe(true);
+    getters.forEach((getter) => getter.mockRestore());
+  });
+
   it("loads real feature registrations once and keeps their standard providers and libraries", async () => {
     const firstLoad = loadMiniCodeLanguageServices();
     expect(loadMiniCodeLanguageServices()).toBe(firstLoad);

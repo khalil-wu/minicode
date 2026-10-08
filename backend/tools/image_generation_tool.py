@@ -43,6 +43,10 @@ class GenerateImageTool(BaseTool):
     activity_kind = "imageGeneration"
     display_label = "Generate image"
 
+    def __init__(self, *, settings_snapshot: dict[str, Any] | None = None, provider: str | None = None) -> None:
+        self._settings_snapshot = settings_snapshot
+        self._provider = provider
+
     @staticmethod
     def _provider_for_context(context: ToolExecutionContext | None) -> str | None:
         if context is None:
@@ -90,7 +94,9 @@ class GenerateImageTool(BaseTool):
         return get_image_generation_settings(provider, settings_data=settings_data)
 
     def get_spec(self) -> ToolSpec:
-        settings = self._settings_for_context()
+        settings = get_image_generation_settings(
+            self._provider, self._settings_snapshot, resolve_credentials=False,
+        )
         return ToolSpec(
             name=self.name,
             capability="image.generate",

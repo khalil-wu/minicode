@@ -340,10 +340,10 @@ def get_available_models(
 ) -> list[str]:
     active_provider = _normalize_provider(provider or get_llm_provider(settings_data))
     if active_provider == "anthropic":
-        return get_anthropic_settings(settings_data)["available_models"]
+        return get_anthropic_settings(settings_data, resolve_credentials=False)["available_models"]
     if active_provider == "custom":
-        return get_custom_settings(settings_data)["available_models"]
-    return get_openai_settings(settings_data)["available_models"]
+        return get_custom_settings(settings_data, resolve_credentials=False)["available_models"]
+    return get_openai_settings(settings_data, resolve_credentials=False)["available_models"]
 
 
 def get_models_source(
@@ -353,10 +353,10 @@ def get_models_source(
     """Return the persisted model list source ('live' or '') for the given provider."""
     active_provider = _normalize_provider(provider or get_llm_provider(settings_data))
     if active_provider == "anthropic":
-        return get_anthropic_settings(settings_data).get("models_source", "")
+        return get_anthropic_settings(settings_data, resolve_credentials=False).get("models_source", "")
     if active_provider == "custom":
-        return get_custom_settings(settings_data).get("models_source", "")
-    return get_openai_settings(settings_data).get("models_source", "")
+        return get_custom_settings(settings_data, resolve_credentials=False).get("models_source", "")
+    return get_openai_settings(settings_data, resolve_credentials=False).get("models_source", "")
 
 
 

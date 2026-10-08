@@ -345,10 +345,12 @@ def build_conversation_truncate_failed_outcome(
     )
 
 
-def choose_conversation_activation_target(conversation_repo: Any, preferred_id: str | None = None) -> Any | None:
+def choose_conversation_activation_target(
+    conversation_repo: Any, preferred_id: str | None = None, *, conversations: list[Any] | None = None,
+) -> Any | None:
     clean_preferred_id = str(preferred_id or "").strip()
     if clean_preferred_id:
-        candidate = conversation_repo.get_conversation(clean_preferred_id)
+        candidate = conversation_repo.get_conversation_summary(clean_preferred_id)
         if (
             candidate is not None
             and not getattr(candidate, "archived", False)
@@ -357,17 +359,17 @@ def choose_conversation_activation_target(conversation_repo: Any, preferred_id: 
             return candidate
         return None
 
-    conversations = [
+    available = [
         item
-        for item in conversation_repo.list_conversations()
+        for item in (conversations if conversations is not None else conversation_repo.list_conversations())
         if (
             not getattr(item, "archived", False)
             and normalize_conversation_type(getattr(item, "conversation_type", None)) == "main"
         )
     ]
-    if not conversations:
+    if not available:
         return None
-    return conversation_repo.get_conversation(conversations[0].id)
+    return available[0]
 
 
 def create_isolated_worktree_binding(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Callable, Set, Optional
 from watchdog.observers import Observer
@@ -20,6 +21,13 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
 from backend.config_helpers import DATA_ROOT
+
+if os.name == "nt":
+    from watchdog.observers import winapi
+
+    # Windows reports LAST_ACCESS as FileModifiedEvent. Indexing and editor
+    # reads must not announce content changes and restart their own scan.
+    winapi.WATCHDOG_FILE_NOTIFY_FLAGS &= ~winapi.FILE_NOTIFY_CHANGE_LAST_ACCESS
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +197,9 @@ class WorkspaceFileWatcher:
 
                 # Invalidate derived state, then notify consumers.
                 try:
+                    from backend.workspace.project_index_runtime import project_index_runtime
+
+                    project_index_runtime.invalidate_path(self.workspace_root, path)
                     # 使文件缓存失效
                     if event_type in ("modified", "deleted"):
                         cache = get_global_file_cache()
@@ -237,6 +248,9 @@ class WorkspaceFileWatcher:
             recursive=True
         )
         self.observer.start()
+        from backend.workspace.project_index_runtime import project_index_runtime
+
+        project_index_runtime.retain_workspace(self.workspace_root)
         self._running = True
         self._closed = False
 
@@ -248,6 +262,9 @@ class WorkspaceFileWatcher:
             return
         self._running = False
         self._closed = True
+        from backend.workspace.project_index_runtime import project_index_runtime
+
+        project_index_runtime.release_workspace(self.workspace_root)
 
         # 取消所有防抖任务
         for task in self._debounce_tasks.values():

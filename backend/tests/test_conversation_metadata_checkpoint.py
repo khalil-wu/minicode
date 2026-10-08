@@ -60,6 +60,28 @@ def test_metadata_revision_survives_checkpoint_recovery_and_delete(tmp_path):
     assert tombstone["deletion_generation"] > updated.revision
 
 
+def test_summary_inventory_uses_manifest_and_observes_other_repository_edits(tmp_path, monkeypatch):
+    repo = ConversationRepository(tmp_path)
+    created = repo.create_conversation(title="Before", transcript=[{"role": "user", "content": "history"}])
+    repo.list_conversations()
+
+    def history_stamp_forbidden(_identity):
+        raise AssertionError("Summary reads must not inspect provider history checkpoints")
+
+    monkeypatch.setattr(repo, "_record_disk_stamp", history_stamp_forbidden)
+    assert repo.get_conversation_summary(created.id).title == "Before"
+    assert repo.list_conversations()[0].title == "Before"
+    other = ConversationRepository(tmp_path)
+    other.rename_conversation(created.id, "After")
+    other.set_archived(created.id, True)
+    summary = repo.get_conversation_summary(created.id)
+    assert summary.title == "After" and summary.archived
+    assert repo.list_conversations()[0].archived
+    other.delete_conversation(created.id)
+    assert repo.get_conversation_summary(created.id) is None
+    assert repo.list_conversations() == []
+
+
 @pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
 def test_legacy_checkpoint_is_readable_and_metadata_write_upgrades_manifest(tmp_path, version):
     repo = ConversationRepository(tmp_path)

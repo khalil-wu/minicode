@@ -178,7 +178,7 @@ vi.mock("monaco-editor/editor/editor.api.js", async () => {
 });
 vi.mock("./monacoTheme", () => ({ defineMiniCodeMonacoTheme: vi.fn(), miniCodeMonacoThemeName: (theme: string) => `minicode-${theme}` }));
 vi.mock("./useWorkspaceModelIndex", () => ({ useWorkspaceModelIndex: () => ({
-  initialize: vi.fn(), retainsModel: () => false, ownsModel: () => false, refresh: vi.fn(),
+  initialize: vi.fn(), retainsModel: () => false, ownsModel: () => false, refresh: vi.fn(), sourceFiles: () => [],
   status: { phase: "idle", sourceCount: 0, issues: [] },
 }) }));
 vi.mock("monaco-editor/languages/definitions/typescript/register.js", () => ({}));

@@ -89,13 +89,24 @@ describe("tool result disclosure", () => {
   });
 
   it.each([
-    ["failed", "未获取有效内容"], ["partial", "内容不完整"], ["ok", "已获取正文"],
-  ])("uses extraction status %s for a legacy success card", (extractionStatus, label) => {
-    render(<ToolCallCard record={{
+    ["failed", "失败"], ["partial", "部分完成"], ["ok", null],
+  ] as const)("uses the actual %s extraction outcome in the action row without extra evidence badges", (extractionStatus, status) => {
+    const record: ToolCallRecord = {
       id: "legacy-fetch", name: "web_fetch", args: { url: "https://example.test/jobs" }, status: "success",
       extractionStatus, evidenceType: "fetched", summary: "Actual extraction outcome",
-    }} viewMode="verbose" conversationId="fetch-owner" />);
-    expect(screen.queryAllByText(label)).toHaveLength(extractionStatus === "ok" ? 0 : 1);
+    };
+    const ui = render(<ToolCallCard record={record} viewMode="verbose" conversationId="fetch-owner" />);
+    if (status) expect(screen.getAllByText(status)).toHaveLength(1);
+    expect(document.body.textContent).toContain("Actual extraction outcome");
+    expect(document.body.textContent).not.toMatch(/未获取有效内容|抓取状态未确认|已获取正文|内容不完整/);
     expect(document.body.textContent).not.toContain("已获取证据");
+    expect(record.status).toBe("success");
+
+    ui.unmount();
+    render(<ActivityCell cell={expandedCell(record)} conversationId="fetch-owner" />);
+    if (status) expect(screen.getAllByText(status)).toHaveLength(1);
+    expect(document.body.textContent).toContain("Actual extraction outcome");
+    expect(document.body.textContent).not.toMatch(/未获取有效内容|抓取状态未确认|已获取正文|内容不完整/);
+    expect(record.status).toBe("success");
   });
 });

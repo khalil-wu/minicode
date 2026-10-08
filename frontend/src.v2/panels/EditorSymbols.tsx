@@ -3,14 +3,15 @@ import { createPortal } from "react-dom";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import { Braces, Search, X } from "lucide-react";
 import { useAppStore } from "../stores";
-import { workspacePathWithin, workspacePathsEqual } from "../lib/workspace-path";
+import { workspaceFilePathsEqual, workspacePathWithin, workspacePathsEqual } from "../lib/workspace-path";
 import { isDependencyIndexPath } from "./workspaceModelIndex";
 import { documentSymbols } from "./editorNativeServices";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface SymbolRow { name: string; detail: string; path: string; line: number; column: number; depth: number }
-export function EditorSymbols({ monaco, workspaceRoot, path, project, onClose }: {
+export function EditorSymbols({ monaco, workspaceRoot, path, project, sourceFiles, onClose }: {
   monaco: typeof Monaco; workspaceRoot: string; path: string; project: boolean; onClose: () => void;
+  sourceFiles: () => Array<{ uri: Monaco.Uri; content: string }>;
 }) {
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<SymbolRow[]>([]);
@@ -22,21 +23,32 @@ export function EditorSymbols({ monaco, workspaceRoot, path, project, onClose }:
   useEffect(() => {
     const cancellation = new monaco.CancellationTokenSource();
     const load = async () => {
-      const files = monaco.editor.getModels().filter((model) => model.uri.scheme === "file" && workspacePathWithin(model.uri.fsPath, workspaceRoot)
+      const models = monaco.editor.getModels().filter((model) => model.uri.scheme === "file" && workspacePathWithin(model.uri.fsPath, workspaceRoot)
         && !isDependencyIndexPath(model.uri.fsPath) && (project || workspacePathsEqual(model.uri.fsPath, monaco.Uri.parse(path).fsPath)));
-      const result = await Promise.all(files.map(async (model) => {
+      const files = new Map((project ? sourceFiles() : []).map((file) => [file.uri.toString(), file]));
+      for (const model of models) files.set(model.uri.toString(), { uri: model.uri, content: model.getValue(undefined, true) });
+      const result: SymbolRow[] = [];
+      for (const file of files.values()) {
+        if (cancellation.token.isCancellationRequested) break;
+        const existing = monaco.editor.getModel(file.uri);
+        const model = existing ?? monaco.editor.createModel(file.content,
+          /\.[cm]?tsx?$/i.test(file.uri.path) ? "typescript" : "javascript", file.uri);
         const flatten = (symbols: Monaco.languages.DocumentSymbol[], depth = 0): SymbolRow[] => symbols.flatMap((symbol) => [
           { name: symbol.name, detail: symbol.detail, path: model.uri.fsPath, line: symbol.selectionRange.startLineNumber, column: symbol.selectionRange.startColumn, depth },
           ...flatten(symbol.children ?? [], depth + 1),
         ]);
-        return flatten(await documentSymbols(model, cancellation.token));
-      }));
-      if (!cancellation.token.isCancellationRequested) setRows(result.flat());
+        try { result.push(...flatten(await documentSymbols(model, cancellation.token))); }
+        finally {
+          const open = useAppStore.getState().editorTabs.some((tab) => workspaceFilePathsEqual(tab.path, file.uri.fsPath, workspaceRoot));
+          if (!existing && !open && model.getValue(undefined, true) === file.content) model.dispose();
+        }
+      }
+      if (!cancellation.token.isCancellationRequested) setRows(result);
     };
     void load().catch((reason) => { if (!cancellation.token.isCancellationRequested) setError(String(reason)); })
       .finally(() => { if (!cancellation.token.isCancellationRequested) setLoading(false); });
     return () => cancellation.dispose(true);
-  }, [monaco, workspaceRoot, path, project]);
+  }, [monaco, workspaceRoot, path, project, sourceFiles]);
   const matches = rows.filter((row) => (row.name + " " + (project ? row.path : "")).toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   const open = (row: SymbolRow) => { useAppStore.getState().openEditorFile(row.path, undefined, { line: row.line, column: row.column, exact: true }); onClose(); };
   useEffect(() => { list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }); }, [selected]);

@@ -1821,7 +1821,6 @@ class SessionAgentRunnerMixin:
         current_manager = self._mcp_manager_for_workspace(workspace_root)
         current_version = int(getattr(current_manager, "registry_version", 0) or 0)
         workspace_key = self._extension_workspace_key(workspace_root)
-        effective_config = load_config(cwd=workspace_root)
         existing = registries.get(clean_id)
         if isinstance(existing, tuple) and len(existing) == 3:
             version, registry_workspace_key, registry = existing
@@ -1841,6 +1840,7 @@ class SessionAgentRunnerMixin:
                 # later turn rebuilds after the MCP/config generation changes.
                 return registry
 
+        effective_config = load_config(cwd=workspace_root, resolve_credentials=False)
         registry = self._build_conversation_tool_registry(
             clean_id,
             workspace_root=workspace_root,

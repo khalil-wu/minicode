@@ -66,8 +66,8 @@ class ModelRegistry:
         return self.runtime.get_provider(provider)
 
     def get_provider_display_name(self, provider: str) -> str:
-        definition = self.runtime.get_provider(provider)
-        return definition.name if definition is not None else provider
+        metadata = self.runtime.provider_payload(provider)
+        return str(metadata["display_name"]) if metadata else provider
 
     async def get_provider_auth(self, provider: str) -> dict[str, Any] | None:
         await self.runtime.refresh_provider_auth(provider)

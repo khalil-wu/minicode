@@ -376,10 +376,10 @@ class _CatalogRuntime:
     def get_registered_provider_config(self, _provider: str):
         return {}
 
-    def get_provider(self, provider: str):
+    def provider_payload(self, provider: str):
         if self._fail_provider:
             raise RuntimeError("Model runtime belongs to a retired extension generation")
-        return SimpleNamespace(name=f"{provider} display")
+        return {"display_name": f"{provider} display"}
 
 
 class _CatalogSession:

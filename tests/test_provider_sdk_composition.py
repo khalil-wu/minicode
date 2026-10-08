@@ -286,7 +286,7 @@ def test_ws_model_selection_uses_active_conversation_config(monkeypatch, tmp_pat
 
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda *, cwd=None: loaded.append(cwd) or config,
+        lambda *, cwd=None, **_kwargs: loaded.append(cwd) or config,
     )
 
     session = Session()

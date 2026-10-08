@@ -86,6 +86,9 @@ def invalidate_workspace_file_caches(
     invalidate their known paths more cheaply. It is used for shell commands,
     where the affected path set is unknowable without parsing the shell.
     """
+    from backend.workspace.project_index_runtime import project_index_runtime
+
+    project_index_runtime.invalidate_all()
     if file_tree_changed:
         from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
 

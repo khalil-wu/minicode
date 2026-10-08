@@ -58,6 +58,7 @@ describe('workspace Problems native diagnostics and edits', () => {
     render(<Fixture />)
     const message = await screen.findByText(/Cannot find name 'mesage'/)
     expect(useAppStore.getState().editorTabs).toHaveLength(0)
+    expect(monaco.editor.getModels()).toEqual([])
     expect(screen.getByText('/project/src/unopened.ts')).toBeTruthy()
     fireEvent.click(message)
     expect(useAppStore.getState().workingDirectory).toBe('/project')

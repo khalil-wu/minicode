@@ -61,14 +61,15 @@ export function isWebFetchRecord(record: ActivityToolRecord): boolean {
   return name === "web_fetch" || name === "webfetch" || resultKind === "web";
 }
 
-export function webFetchEvidenceLabel(record: ActivityToolRecord): string {
-  if (!isWebFetchRecord(record) && record.evidenceType !== "fetched") return "";
-  if (record.extractionStatus === "failed" || ["failed", "blocked", "timeout", "cancelled"].includes(record.status)) {
-    return "未获取有效内容";
+export function recordPresentationStatus(record: ActivityToolRecord): ActivityToolRecord["status"] {
+  // Older fetch receipts called the transport successful even when extraction
+  // failed. Use the actual extraction outcome in the existing action row,
+  // while keeping the original receipt and diagnostics unchanged.
+  if (isWebFetchRecord(record) && record.status === "success") {
+    if (record.extractionStatus === "failed") return "failed";
+    if (record.extractionStatus === "partial") return "partial";
   }
-  if (record.extractionStatus === "partial" || record.status === "partial") return "内容不完整";
-  if (record.extractionStatus === "ok") return "";
-  return record.status === "success" ? "抓取状态未确认" : "";
+  return record.status;
 }
 
 export function isWebFetchActivity(

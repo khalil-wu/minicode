@@ -142,14 +142,24 @@ class WorkspaceService:
         application_roots: tuple[Path, ...],
     ) -> WorkspaceFileResponse:
         """Recheck a scanned file's real target using this index request's roots."""
+        return self._read_indexed_file_snapshot(path, root=root, application_roots=application_roots)[0]
+
+    def _read_indexed_file_snapshot(
+        self, path: Path, *, root: Path, application_roots: tuple[Path, ...],
+    ) -> tuple[WorkspaceFileResponse, os.stat_result]:
         target = path.resolve()
         if target != root and root not in target.parents:
             raise HTTPException(status_code=400, detail="Path is outside workspace root.")
         self.ensure_not_sensitive_file(path, application_roots=application_roots, resolved_path=target)
         self.ensure_not_sensitive_file(target, application_roots=application_roots, resolved_path=target)
-        return self._read_file_snapshot(target, root, path.relative_to(root).as_posix())
+        return self._read_file_snapshot_with_stat(target, root, path.relative_to(root).as_posix())
 
     def _read_file_snapshot(self, target: Path, root: Path, requested_path: str) -> WorkspaceFileResponse:
+        return self._read_file_snapshot_with_stat(target, root, requested_path)[0]
+
+    def _read_file_snapshot_with_stat(
+        self, target: Path, root: Path, requested_path: str,
+    ) -> tuple[WorkspaceFileResponse, os.stat_result]:
         try:
             with target.open("rb") as handle:
                 stat = os.fstat(handle.fileno())
@@ -168,7 +178,7 @@ class WorkspaceService:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {requested_path}") from exc
 
-        return WorkspaceFileResponse(
+        snapshot = WorkspaceFileResponse(
             workspace_root=str(root),
             path=target.relative_to(root).as_posix(),
             name=target.name,
@@ -178,6 +188,7 @@ class WorkspaceService:
             modified_at=self.iso_timestamp(stat.st_mtime),
             language_hint=self.infer_language_hint(target),
         )
+        return snapshot, stat
 
     def project_index(self, *, include_dependencies: bool = True) -> WorkspaceProjectIndexResponse:
         from .project_index import build_project_index

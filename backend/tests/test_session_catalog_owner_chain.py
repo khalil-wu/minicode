@@ -13,7 +13,7 @@ def test_agent_model_catalog_matches_workspace_including_projectless(tmp_path, m
     project = tmp_path / "project"
     model = SimpleNamespace(id="owned-model", provider="owned-provider", api="openai-responses", reasoning=False)
     runtime = SimpleNamespace(active=True, get_available_snapshot=lambda: [model],
-        get_provider=lambda provider: SimpleNamespace(name="Owned provider"))
+        provider_payload=lambda provider: {"display_name": "Owned provider"})
     session = SimpleNamespace(is_connected=True, active_conversation_id="conversation",
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: project if session_scope else None),
         _model_runtime_for_conversation=lambda conversation_id: runtime)

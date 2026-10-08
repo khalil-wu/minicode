@@ -3,9 +3,10 @@ from __future__ import annotations
 from backend.async_cleanup import to_thread_cancel_safe
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -145,14 +146,39 @@ def create_workspace_router() -> APIRouter:
 
     @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
     async def workspace_project_index_api(
+        request: Request,
         workspace_root: str = Query(..., min_length=1),
         include_dependencies: bool = Query(True),
     ) -> WorkspaceProjectIndexResponse:
         service = _service(workspace_root)
+        from .project_index_runtime import project_index_runtime
+
+        async def wait_for_disconnect() -> None:
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    return
+
+        scan = asyncio.create_task(project_index_runtime.read(service, include_dependencies=include_dependencies))
+        disconnect = asyncio.create_task(wait_for_disconnect())
         try:
-            return await asyncio.to_thread(service.project_index, include_dependencies=include_dependencies)
+            completed, _ = await asyncio.wait((scan, disconnect), return_when=asyncio.FIRST_COMPLETED)
+            if scan not in completed:
+                scan.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scan
+                raise HTTPException(status_code=499, detail="Workspace project scan cancelled because the client disconnected.")
+            return await scan
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Workspace project scan failed: {exc}") from exc
+        finally:
+            disconnect.cancel()
+            with suppress(asyncio.CancelledError):
+                await disconnect
+            if not scan.done():
+                scan.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scan
 
     @router.get("/file", response_model=WorkspaceFileResponse)
     async def workspace_read_file_api(

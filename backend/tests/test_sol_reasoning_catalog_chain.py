@@ -27,7 +27,7 @@ def test_sol_catalog_projects_the_actual_reasoning_ladder(model, default, monkey
     definition = _base_model("custom", model, api="openai-responses", base_url="https://example.test/v1", max_tokens=0, settings=section)
     assert definition.reasoning is True
     assert definition.reasoning_effort_levels == SOL_EFFORTS
-    monkeypatch.setattr("backend.services.llm_config_service.get_custom_settings", lambda: section)
+    monkeypatch.setattr("backend.services.llm_config_service.get_custom_settings", lambda **_kwargs: section)
     event = llm_model_updated_payload(provider="custom", selected_model=model, available_models=[model], workspace_root="C:/repo")
     assert event["reasoning_effort_supported"] is True
     assert tuple(event["reasoning_effort_levels"]) == SOL_EFFORTS

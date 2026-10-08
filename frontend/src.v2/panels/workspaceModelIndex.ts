@@ -15,13 +15,14 @@ const modelLanguage = (path: string) => /\.[cm]?tsx?$/i.test(path) ? "typescript
 
 type OwnedModel = { model: Monaco.editor.ITextModel; listener: Monaco.IDisposable; disposal: Monaco.IDisposable };
 
-/** Owns real source models without opening tabs. Native bulk edits become
- * ordinary dirty buffers; disk snapshots never replace a user's draft. */
+/** Publishes project sources to the worker and owns models that are actually
+ * opened or touched by a native edit. Disk snapshots never replace drafts. */
 export class WorkspaceModelIndex {
   private files = new Map<string, WorkspaceProjectIndexFile>();
   private diskKeys = new Set<string>();
   private models = new Map<string, OwnedModel>();
   private pending = new Set<string>();
+  private deletedOpenBuffers = new Set<string>();
   private suppressChanges = false;
   private disposed = false;
   private lastTabs: EditorTab[];
@@ -115,6 +116,7 @@ export class WorkspaceModelIndex {
         changedNames = true;
       }
       const key = this.key(this.uri(tab.path));
+      if (old?.externalChanged && !tab.externalChanged) this.deletedOpenBuffers.delete(tab.id);
       const record = this.files.get(key);
       if (!record) { this.files.set(key, this.tabSnapshot(tab)); changedNames = true; }
       else if (old && (old.original !== tab.original || old.contentHash !== tab.contentHash)) this.files.set(key, this.tabSnapshot(tab));
@@ -125,8 +127,10 @@ export class WorkspaceModelIndex {
       }
     }
     for (const tab of previous) {
-      if (tabs.some((entry) => entry.id === tab.id) || !this.eligibleTab(tab)) continue;
+      if (tabs.some((entry) => entry.id === tab.id)) continue;
       const key = this.key(this.uri(tab.path));
+      this.deletedOpenBuffers.delete(tab.id);
+      if (!this.eligibleTab(tab)) continue;
       const file = this.files.get(key);
       const owned = this.models.get(key);
       if (!this.diskKeys.has(key)) {
@@ -167,22 +171,35 @@ export class WorkspaceModelIndex {
     }
     this.files = next;
     this.diskKeys = new Set(next.keys());
+    for (const tab of this.store.getState().editorTabs) {
+      if (this.eligibleTab(tab) && !this.diskKeys.has(this.key(this.uri(tab.path)))) {
+        this.deletedOpenBuffers.add(tab.id);
+        this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot });
+      }
+    }
     this.addOpenBuffers(this.store.getState().editorTabs);
-    let processed = 0;
     for (const file of sources) {
       if (signal.aborted || this.disposed) return issues;
       const tab = this.tabFor(file.path);
       const dirty = tab && tab.content !== tab.original;
-      const model = this.monaco.editor.getModel(this.uri(file.path)) ?? this.monaco.editor.createModel(dirty ? tab.content : file.content, modelLanguage(file.path), this.uri(file.path));
-      this.attachModel(model);
+      const deletedOpenBuffer = Boolean(tab && this.deletedOpenBuffers.has(tab.id));
+      // Native TS providers already create target models from extraLibs when
+      // navigation or a rename touches them. Indexing needs no TextModels.
+      const model = this.monaco.editor.getModel(this.uri(file.path))
+        ?? (tab ? this.monaco.editor.createModel(dirty ? tab.content : file.content, modelLanguage(file.path), this.uri(file.path)) : null);
+      if (model) this.attachModel(model);
       if (dirty) {
-        this.setModelValue(model, tab.content);
-        this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot, changed: file.content !== tab.original });
+        this.setModelValue(model!, tab.content);
+        this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot,
+          changed: file.content !== tab.original || deletedOpenBuffer });
       } else if (tab) {
         if (tab.original !== file.content || tab.contentHash !== file.content_hash) this.store.getState().markTabLoaded(tab.path, file.content, undefined, file.content_hash, { sizeBytes: file.size_bytes ?? file.size, readOnly: tab.readOnly });
-        this.setModelValue(model, file.content);
-      } else this.setModelValue(model, file.content);
-      if (++processed % 80 === 0) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        this.setModelValue(model!, file.content);
+        if (deletedOpenBuffer) {
+          this.deletedOpenBuffers.add(tab.id);
+          this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot });
+        }
+      } else if (model) this.setModelValue(model, file.content);
     }
     for (const [key, owned] of [...this.models]) {
       if (this.files.has(key)) continue;
@@ -209,7 +226,10 @@ export class WorkspaceModelIndex {
       const key = this.key(this.uri(change.path));
       this.diskKeys.delete(key);
       const tab = this.tabFor(change.path);
-      if (tab) this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot });
+      if (tab) {
+        this.deletedOpenBuffers.add(tab.id);
+        this.store.getState().markTabExternalChanged(tab.path, { workspaceRoot: this.workspaceRoot });
+      }
       else {
         this.files.delete(key);
         this.models.get(key)?.model.dispose();
@@ -226,6 +246,9 @@ export class WorkspaceModelIndex {
       [...this.files.values()].map((file) => ({ filePath: this.uri(file.path).toString(), content: file.content })));
   }
   resources(): Monaco.Uri[] { return [...this.models.values()].map(({ model }) => model.uri); }
+  sourceFiles(): Array<{ uri: Monaco.Uri; content: string }> {
+    return [...this.files.values()].filter(isIndexedSource).map((file) => ({ uri: this.uri(file.path), content: file.content }));
+  }
   ownsModel(path: string): boolean { return this.models.has(this.key(this.uri(path))); }
   sourceCount(): number { return [...this.files.entries()].filter(([key, file]) => this.diskKeys.has(key) && isIndexedSource(file)).length; }
   configurationPath(uri: string): string { return this.monaco.Uri.parse(uri).fsPath; }

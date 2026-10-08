@@ -47,6 +47,58 @@ class ProtocolSocket(RecordingSocket):
 
 
 @pytest.mark.asyncio
+async def test_archive_publishes_fallback_without_waiting_for_provider_history(
+    monkeypatch, protocol_environment,
+):
+    import threading
+
+    socket = ProtocolSocket("session_archive_paged_fallback")
+    release_history = threading.Event()
+    async with main.lifespan(main.app):
+        task = asyncio.create_task(main.websocket_endpoint(socket))
+        try:
+            await socket.until("llm.model.updated")
+            session = main._state.ws_manager.get_session(socket.query_params["session_id"])
+            archived = session.conversation_repo.create_conversation(title="Archive me")
+            fallback = session.conversation_repo.create_conversation(title="Fallback",
+                transcript=[{"role": "user", "content": f"History {index}"} for index in range(120)],
+                context_snapshot={"history": [{"role": "user", "content": f"History {index}"} for index in range(120)]})
+            await socket.command("conversation.switch", conversation_id=archived.id)
+            await socket.until("conversation.switched", conversation_id=archived.id, is_hydrating=False)
+            read_history = session.conversation_repo.get_conversation
+
+            def blocked_history(identity):
+                if identity == fallback.id:
+                    assert release_history.wait(5)
+                return read_history(identity)
+
+            monkeypatch.setattr(session.conversation_repo, "get_conversation", blocked_history)
+            read_inventory = session.conversation_repo.list_conversations_with_revision
+            inventory_reads = []
+
+            def counted_inventory():
+                inventory = read_inventory()
+                inventory_reads.append(inventory)
+                return inventory
+
+            monkeypatch.setattr(session.conversation_repo, "list_conversations_with_revision", counted_inventory)
+            await socket.command("conversation.archive", conversation_id=archived.id)
+            result = await socket.until("command.result", command="conversation.archive")
+            assert result["level"] == "success"
+            assert len(inventory_reads) == 1
+            assert session.active_conversation_id == fallback.id
+            assert session.conversation_repo.get_conversation_summary(archived.id).archived
+            switched = next(event for event in socket.sent if event.get("type") == "conversation.switched"
+                and event.get("conversation_id") == fallback.id)
+            assert switched["is_hydrating"] and switched["conversation"]["transcript_page"]["total_messages"] == 120
+            release_history.set()
+            await socket.until("conversation.switched", conversation_id=fallback.id, is_hydrating=False)
+        finally:
+            release_history.set()
+            await socket.finish(task)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("wire_api", ["chat", "responses", "anthropic"])
 async def test_declared_capabilities_match_actual_wire_adapter_before_sampling(wire_api):
     from backend.services.llm_adapter_factory import build_wire_adapter

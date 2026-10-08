@@ -72,7 +72,14 @@ function disposeOwner(owner: WorkspaceModelIndex) {
   owners.splice(owners.indexOf(owner), 1);
 }
 const uri = (path: string, workspaceRoot = ROOT) => monaco.Uri.parse(editorModelUri(path, workspaceRoot));
-const model = (path: string, workspaceRoot = ROOT) => monaco.editor.getModel(uri(path, workspaceRoot))!;
+// Native LibFiles creates only the target model requested by an editor action.
+const model = (path: string, workspaceRoot = ROOT) => {
+  const resource = uri(path, workspaceRoot);
+  const existing = monaco.editor.getModel(resource);
+  if (existing) return existing;
+  const content = latestPublication()[1].find((file) => file.filePath === resource.toString())!.content;
+  return monaco.editor.createModel(content, /\.[cm]?tsx?$/i.test(path) ? "typescript" : "javascript", resource);
+};
 const tab = (path: string) => useAppStore.getState().editorTabs.find((entry) => entry.path === path)!;
 const latestPublication = () => publish.mock.calls.at(-1)! as [
   { workspaceRoot: string; sourceFileNames: string[]; caseSensitive: boolean }, Array<{ filePath: string; content: string }>,
@@ -166,18 +173,19 @@ describe("workspace model indexing and real editor-buffer adoption", () => {
     expect(latestPublication()[0]).toMatchObject({ readOnlyFileNames: [] });
   });
 
-  it("owns hidden project sources supplied by the real source-index contract", async () => {
+  it("owns a hidden project source only when a native action creates its model", async () => {
     const owner = createOwner();
     const source = file(".storybook/preview.ts", "export const preview = 1;");
     await apply(owner, [source]);
-    expect(owner.ownsModel(source.path)).toBe(true);
+    expect(owner.ownsModel(source.path)).toBe(false);
+    expect(monaco.editor.getModels()).toEqual([]);
     expect(owner.sourceCount()).toBe(1);
     type(model(source.path), "export const preview = 2;");
     await Promise.resolve();
     expect(tab(source.path)).toMatchObject({ content: "export const preview = 2;", original: source.content, contentHash: source.content_hash });
   });
 
-  it.each([ROOT, "C:/项目"])("loads TS, JS and project declarations as hidden models in %s, while dependency types and metadata stay in extras", async (workspaceRoot) => {
+  it.each([ROOT, "C:/项目"])("indexes TS, JS and project declarations in %s without creating unopened models", async (workspaceRoot) => {
     useAppStore.setState({ workingDirectory: workspaceRoot });
     const files = [
       file("src/中文.tsx", "export const 标题 = <div />;\r\n"),
@@ -192,7 +200,9 @@ describe("workspace model indexing and real editor-buffer adoption", () => {
     expect(useAppStore.getState().editorTabs).toEqual([]);
     expect(useAppStore.getState().activeTabPath).toBeNull();
     expect(owner.sourceCount()).toBe(3);
-    expect(new Set(owner.resources().map((resource) => resource.toString()))).toEqual(new Set(files.slice(0, 3).map((source) => uri(source.path, workspaceRoot).toString())));
+    expect(owner.resources()).toEqual([]);
+    expect(monaco.editor.getModels()).toEqual([]);
+    expect(owner.sourceFiles().map((source) => source.uri.toString())).toEqual(files.slice(0, 3).map((source) => uri(source.path, workspaceRoot).toString()));
     expect(model("src/中文.tsx", workspaceRoot).getValue(undefined, true)).toBe(files[0].content);
     expect(model("src/中文.tsx", workspaceRoot).getLanguageId()).toBe("typescript");
     expect(model("shared/helper.mjs", workspaceRoot).getLanguageId()).toBe("javascript");
@@ -203,6 +213,24 @@ describe("workspace model indexing and real editor-buffer adoption", () => {
     expect(new Set(metadata.sourceFileNames)).toEqual(new Set(owner.resources().map((resource) => resource.toString())));
     expect(metadata.workspaceRoot).toBe(uri(".", workspaceRoot).toString());
     expect(extras).toEqual(expect.arrayContaining(files.map((source) => ({ filePath: uri(source.path, workspaceRoot).toString(), content: source.content }))));
+  });
+
+  it("keeps a large index as worker sources while retaining a real user's draft model and Undo", async () => {
+    const owner = createOwner();
+    const sources = Array.from({ length: 700 }, (_, index) => file(`src/file${index}.ts`, `export const value${index} = ${index};`));
+    await apply(owner, sources);
+    expect(owner.sourceCount()).toBe(700);
+    expect(monaco.editor.getModels()).toEqual([]);
+    open(sources[0]);
+    const draft = model(sources[0].path);
+    type(draft, "export const unsaved = 1;");
+    await Promise.resolve();
+    await apply(owner, sources, false);
+    expect(monaco.editor.getModels()).toEqual([draft]);
+    expect(model(sources[0].path)).toBe(draft);
+    expect(draft.getValue()).toBe("export const unsaved = 1;");
+    await draft.undo();
+    expect(draft.getValue()).toBe(sources[0].content);
   });
 
   it("refreshes the complete source set without removing already loaded dependency types", async () => {
@@ -348,6 +376,55 @@ describe("workspace model indexing and real editor-buffer adoption", () => {
     expect(model(b.path).getValue()).toBe(b.content);
     expect(owner.sourceCount()).toBe(0);
     expect(latestPublication()[0].sourceFileNames).toEqual([uri(b.path).toString()]);
+  });
+
+  it.each([false, true])("detects a missing open source from the snapshot alone, preserves its draft=%s and replacement conflict until reload", async (dirty) => {
+    const source = file("src/missing.ts", "export const original = 1;");
+    const owner = createOwner();
+    await apply(owner, [source]);
+    open(source);
+    const opened = model(source.path);
+    if (dirty) { type(opened, "export const unsaved = 2;"); await Promise.resolve(); }
+    const version = opened.getAlternativeVersionId();
+    await apply(owner, [], false);
+    expect(tab(source.path).externalChanged).toBe(true);
+    expect(model(source.path)).toBe(opened);
+    expect(opened.getAlternativeVersionId()).toBe(version);
+    await apply(owner, [source], false);
+    expect(tab(source.path).externalChanged).toBe(true);
+    expect(opened.getValue()).toBe(dirty ? "export const unsaved = 2;" : source.content);
+    useAppStore.getState().markTabLoaded(source.path, source.content, undefined, source.content_hash);
+    await apply(owner, [source], false);
+    expect(tab(source.path).externalChanged).toBe(false);
+  });
+
+  it("keeps deletion history with a renamed draft and does not give a fresh buffer at the old path that conflict", async () => {
+    const source = file("src/old.ts", "export const original = 1;");
+    const destination = file("src/new.ts", source.content);
+    const owner = createOwner();
+    await apply(owner, [source]);
+    open(source);
+    const originalModel = model(source.path);
+    type(originalModel, "export const unsaved = 2;");
+    await Promise.resolve();
+    const bufferId = tab(source.path).id;
+    await apply(owner, [], false);
+    useAppStore.getState().renameEditorPath(source.path, destination.path, ROOT);
+    const renamed = renameMonacoModel(monaco, originalModel, uri(destination.path));
+    originalModel.dispose();
+    open(source, false);
+    await apply(owner, [source, destination], false);
+    expect(tab(destination.path)).toMatchObject({ id: bufferId, content: "export const unsaved = 2;", externalChanged: true });
+    expect(tab(source.path).id).not.toBe(bufferId);
+    expect(tab(source.path).externalChanged).toBe(false);
+    expect(model(destination.path)).toBe(renamed);
+    await renamed.undo();
+    expect(renamed.getValue()).toBe(source.content);
+    useAppStore.getState().closeEditorTab(destination.path);
+    open(destination, false);
+    await apply(owner, [source, destination], false);
+    expect(tab(destination.path).id).not.toBe(bufferId);
+    expect(tab(destination.path).externalChanged).toBe(false);
   });
 
   it("flushes pending old-workspace edits into its real buffer cache when disposed after an owner switch", async () => {

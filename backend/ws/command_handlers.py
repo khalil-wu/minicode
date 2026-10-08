@@ -33,7 +33,7 @@ class SessionCommandHandlersMixin:
         from backend.ws.agent_runner import _resolver_accepts_positional_arguments
 
         workspace_root = self.session_lifecycle.workspace_root_for_conversation()
-        scoped_config = load_config(cwd=workspace_root)
+        scoped_config = load_config(cwd=workspace_root, resolve_credentials=False)
         scoped_settings = (
             scoped_config.config_layer_stack.effective_config()
             if scoped_config.config_layer_stack is not None
@@ -87,8 +87,8 @@ class SessionCommandHandlersMixin:
             elif builtin_provider:
                 self.models_source = resolve_models_source(provider)
             elif model_runtime is not None:
-                declared_provider = model_runtime.get_provider(provider)
-                self.models_source = declared_provider.source if declared_provider is not None else "unavailable"
+                declared_provider = model_runtime.provider_payload(provider)
+                self.models_source = declared_provider["models_source"] if declared_provider else "unavailable"
             else:
                 self.models_source = "unavailable"
             self.config = replace(scoped_config, llm=replace(
@@ -120,7 +120,7 @@ class SessionCommandHandlersMixin:
             models = list(model_runtime.get_models(provider))
             available_models = [model.id for model in models]
             selected_model = str(self.selected_model or "").strip()
-            if model_runtime.get_provider(provider) is not None and (
+            if model_runtime.provider_payload(provider) and (
                 not selected_model or selected_model in available_models
             ):
                 self.config = scoped_config

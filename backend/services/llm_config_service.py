@@ -126,24 +126,24 @@ def llm_model_updated_payload(
         ).strip()
     elif normalized_provider == "anthropic":
         payload_section = (
-            get_anthropic_settings(settings_data)
+            get_anthropic_settings(settings_data, resolve_credentials=False)
             if settings_data is not None
-            else get_anthropic_settings()
+            else get_anthropic_settings(resolve_credentials=False)
         )
         provider_id = "anthropic"
     elif normalized_provider == "custom":
         payload_section = (
-            get_custom_settings(settings_data)
+            get_custom_settings(settings_data, resolve_credentials=False)
             if settings_data is not None
-            else get_custom_settings()
+            else get_custom_settings(resolve_credentials=False)
         )
         wire_api = str(payload_section.get("wire_api") or "chat").strip()
         provider_id = "custom_anthropic" if wire_api == "anthropic" else "custom"
     elif normalized_provider == "openai":
         payload_section = (
-            get_openai_settings(settings_data)
+            get_openai_settings(settings_data, resolve_credentials=False)
             if settings_data is not None
-            else get_openai_settings()
+            else get_openai_settings(resolve_credentials=False)
         )
         provider_id = "openai"
     else:

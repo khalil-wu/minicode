@@ -159,7 +159,11 @@ def build_tool_registry(
     from backend.tools.web_tools import WebFetchTool, WebSearchTool
     registry.register(WebFetchTool(artifact_store))
     from backend.tools.image_generation_tool import GenerateImageTool
-    registry.register(GenerateImageTool())
+    registry.register(GenerateImageTool(
+        settings_snapshot=(config_snapshot.config_layer_stack.effective_config()
+                           if config_snapshot.config_layer_stack is not None else None),
+        provider=config_snapshot.llm.provider,
+    ))
     registry.register(WebSearchTool(llm_provider))
     registry.register(BrowserControlTool())
 

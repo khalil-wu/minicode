@@ -234,9 +234,9 @@ class ModelRuntime:
 
     def _load_base_providers(self) -> dict[str, dict[str, Any]]:
         return _load_base_providers(
-            openai=get_openai_settings(self._settings_snapshot),
-            anthropic=get_anthropic_settings(self._settings_snapshot),
-            custom=get_custom_settings(self._settings_snapshot),
+            openai=get_openai_settings(self._settings_snapshot, resolve_credentials=False),
+            anthropic=get_anthropic_settings(self._settings_snapshot, resolve_credentials=False),
+            custom=get_custom_settings(self._settings_snapshot, resolve_credentials=False),
         )
 
     def _provider_lock(self, provider_id: str, *, oauth: bool) -> asyncio.Lock:
@@ -2569,6 +2569,10 @@ class ModelRuntime:
         if "api_key" in config:
             return str(config.get("api_key") or "")
         base = self._base_providers.get(provider_id, {})
+        if provider_id in {"openai", "anthropic", "custom"} and not base.get("api_key"):
+            from backend.config_helpers import _provider_api_key_for_base_url
+
+            return _provider_api_key_for_base_url(provider_id, str(base.get("base_url") or ""))
         return str(base.get("api_key") or "")
 
     def _raw_provider_headers(self, provider_id: str) -> dict[str, Any]:
@@ -2711,7 +2715,11 @@ class ModelRuntime:
         provider_ids = (
             (_clean_text(provider_id),)
             if provider_id is not None
-            else tuple(provider.id for provider in self.get_providers())
+            else tuple(dict.fromkeys([
+                *self._base_providers,
+                *self._model_configs,
+                *self._extension_providers,
+            ]))
         )
         available: list[ModelDefinition] = []
         for clean_id in provider_ids:
@@ -3244,11 +3252,15 @@ class ModelRuntime:
         provider_id: str,
         model_id: str | None = None,
     ) -> dict[str, Any]:
-        provider = self.get_provider(provider_id)
-        if provider is None:
+        clean_id = _clean_text(provider_id)
+        base = self._base_providers.get(clean_id, {})
+        config = self._model_configs.get(clean_id, {})
+        extension = self._extension_providers.get(clean_id, {})
+        if clean_id in self._composition_errors and clean_id not in self._base_providers:
             return {}
-        model = self.get_model(provider_id, model_id) if model_id else None
-        base = self._base_providers.get(provider_id, {})
+        if not base and not config and not extension:
+            return {}
+        model = self.get_model(clean_id, model_id) if model_id else None
         levels = (
             model_thinking_levels(model)
             if model is not None and model.reasoning else ()
@@ -3306,12 +3318,15 @@ class ModelRuntime:
             if levels else ""
         )
         return {
-            "provider_id": provider.id,
-            "display_name": provider.name,
-            "base_url": provider.base_url,
+            "provider_id": clean_id,
+            "display_name": (_clean_text(extension.get("name")) or _clean_text(config.get("name"))
+                             or _clean_text(base.get("name")) or clean_id),
+            "base_url": (_clean_text(extension.get("base_url")) or _clean_text(config.get("base_url"))
+                         or _clean_text(base.get("base_url"))),
             "wire_api": wire_api,
             "proxy_mode": _clean_text(base.get("proxy_mode")) or "inherit",
-            "models_source": provider.source,
+            "models_source": ("extension" if clean_id in self._extension_providers
+                              else "models_json" if clean_id in self._model_configs else "settings"),
             "reasoning_effort": configured_effort,
             "configured_reasoning_effort": configured_effort,
             "effective_reasoning_effort": effective_effort,

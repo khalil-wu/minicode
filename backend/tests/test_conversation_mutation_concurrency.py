@@ -336,7 +336,8 @@ def test_archive_coordinates_only_target_resources_before_persisting(monkeypatch
 
     target = SimpleNamespace(id="conv_archive")
     repository = SimpleNamespace(
-        get_conversation=lambda _conversation_id: target,
+        get_conversation_summary=lambda _conversation_id: target,
+        list_conversations_with_revision=Mock(return_value=("archive-inventory", 8, [])),
         set_archived=Mock(return_value=SimpleNamespace(id=target.id, title="Archived", revision=8)),
     )
     session = _command_result_session(
@@ -377,7 +378,8 @@ def test_archive_coordinates_only_target_resources_before_persisting(monkeypatch
         owner.terminal_manager.destroy_sessions_for_conversation.assert_awaited_once_with(target.id)
         assert any(call.args == (owner, target.id) and call.kwargs["reason"] == "conversation_archived"
                    for call in stop_runs.await_args_list)
-    activate.assert_awaited_once_with(session)
+    repository.list_conversations_with_revision.assert_called_once()
+    activate.assert_awaited_once_with(session, conversation_summaries=[])
     result = session.emit_command_result.await_args
     assert result.args[0] == "conversation.archive"
     assert result.args[1] == "会话已归档。"
@@ -389,7 +391,7 @@ def test_archive_retains_conversation_when_a_cleanup_handle_remains(monkeypatch)
     from backend.preview import launcher
 
     target = SimpleNamespace(id="conv_archive_pending")
-    repository = SimpleNamespace(get_conversation=lambda _: target, set_archived=Mock())
+    repository = SimpleNamespace(get_conversation_summary=lambda _: target, set_archived=Mock())
     session = _command_result_session(conversation_id=target.id, repository=repository)
     session.background_manager = SimpleNamespace(list_commands=lambda **_: [], cancel=AsyncMock())
     session.terminal_manager = SimpleNamespace(destroy_sessions_for_conversation=AsyncMock(side_effect=RuntimeError("terminal_cleanup_pending")))
@@ -412,7 +414,8 @@ def test_archive_waits_for_native_cleanup_ack_from_every_connected_window(monkey
     from backend.preview import launcher
 
     target = SimpleNamespace(id="archive-native-ack")
-    repository = SimpleNamespace(get_conversation=lambda _: target,
+    repository = SimpleNamespace(get_conversation_summary=lambda _: target,
+        list_conversations_with_revision=Mock(return_value=("archive-native-inventory", 1, [])),
         set_archived=Mock(return_value=SimpleNamespace(id=target.id, revision=1)))
     first = _command_result_session(conversation_id=target.id, repository=repository)
     second = _command_result_session(conversation_id="other", repository=repository)
@@ -474,7 +477,8 @@ def test_archive_stops_real_owned_terminal_and_keeps_other_chat_shell(monkeypatc
     from backend.terminal.session import TerminalSessionManager
 
     target = SimpleNamespace(id="archive-real-terminal")
-    repository = SimpleNamespace(get_conversation=lambda _: target,
+    repository = SimpleNamespace(get_conversation_summary=lambda _: target,
+        list_conversations_with_revision=Mock(return_value=("archive-terminal-inventory", 1, [])),
         set_archived=Mock(return_value=SimpleNamespace(id=target.id, revision=1)))
     session = _command_result_session(conversation_id=target.id, repository=repository)
     session.background_manager = SimpleNamespace(list_commands=lambda **_: [])

@@ -7,7 +7,7 @@ import { normalizeWorkspacePath, workspaceFilePathsEqual, workspacePathWithin, w
 import { configureMiniCodeMonacoWorkers, editorModelUri, getWorkspaceTypeScriptWorker, loadMiniCodeLanguageServices } from './monacoLanguageServices'
 import { useWorkspaceModelIndex } from './useWorkspaceModelIndex'
 import { isDependencyIndexPath } from './workspaceModelIndex'
-import { applyWorkspaceBufferEdits, type WorkspaceBufferEdit } from './applyWorkspaceBufferEdits'
+import { applyWorkspaceBufferEdits, offsetRange, type WorkspaceBufferEdit } from './applyWorkspaceBufferEdits'
 
 export interface WorkspaceProblem {
   id: string
@@ -22,6 +22,7 @@ export interface WorkspaceProblem {
   workerDiagnostic: boolean
   start: number
   length: number
+  sourceText?: string
 }
 export interface ProblemQuickFix { id: string; description: string; changes: WorkspaceBufferEdit[] }
 export interface WorkspaceProblemsState {
@@ -34,29 +35,36 @@ const flattenMessage = (message: string | TS.DiagnosticMessageChain): string => 
   ? message : [message.messageText, ...(message.next ?? []).map(flattenMessage)].join('\n')
 
 export function problemFromTypeScriptDiagnostic(model: Monaco.editor.ITextModel, diagnostic: TS.Diagnostic): WorkspaceProblem {
+  return problemFromSourceDiagnostic(model.uri, model.getValue(undefined, true), model.getVersionId(), diagnostic)
+}
+
+function problemFromSourceDiagnostic(uri: Monaco.Uri, content: string, version: number, diagnostic: TS.Diagnostic): WorkspaceProblem {
   const start = diagnostic.start ?? 0
   const length = diagnostic.length ?? 0
-  const from = model.getPositionAt(start)
-  const to = model.getPositionAt(start + length)
-  const uri = model.uri.toString()
+  const resource = uri.toString()
   return {
-    id: `typescript:${uri}:${diagnostic.code}:${start}:${length}`, path: normalizeWorkspacePath(model.uri.fsPath), uri,
+    id: `typescript:${resource}:${diagnostic.code}:${start}:${length}`, path: normalizeWorkspacePath(uri.fsPath), uri: resource,
     severity: diagnostic.category === 1 ? 'error' : diagnostic.category === 0 ? 'warning' : diagnostic.category === 2 ? 'hint' : 'info',
     source: 'TypeScript', code: diagnostic.code, message: flattenMessage(diagnostic.messageText),
-    range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column },
-    modelVersion: model.getVersionId(), workerDiagnostic: true, start, length,
+    range: offsetRange(content, { offset: start, length, text: '' }),
+    modelVersion: version, workerDiagnostic: true, start, length, sourceText: content,
   }
 }
 
 const isTypeScriptModel = (model: Monaco.editor.ITextModel) => ['typescript', 'javascript'].includes(model.getLanguageId())
 const webMarkerLanguages = new Set(['html', 'handlebars', 'razor', 'css', 'scss', 'less', 'json', 'python', 'yaml'])
-export async function collectWorkspaceProblems(monaco: typeof Monaco, workspaceRoot: string): Promise<WorkspaceProblem[]> {
+export async function collectWorkspaceProblems(monaco: typeof Monaco, workspaceRoot: string, indexedSources: Array<{ uri: Monaco.Uri; content: string }> = []): Promise<WorkspaceProblem[]> {
   const models = monaco.editor.getModels().filter((model) => model.uri.scheme === 'file'
     && workspacePathWithin(model.uri.fsPath, workspaceRoot) && !isDependencyIndexPath(model.uri.fsPath))
-  const problems = await Promise.all(models.filter(isTypeScriptModel).map(async (model) => {
-    const worker = await getWorkspaceTypeScriptWorker(model.uri)
-    const diagnostics = (await Promise.all([worker.getSyntacticDiagnostics(model.uri.toString()), worker.getSemanticDiagnostics(model.uri.toString()), worker.getSuggestionDiagnostics(model.uri.toString())])).flat()
-    return diagnostics.map((diagnostic) => problemFromTypeScriptDiagnostic(model, diagnostic as TS.Diagnostic))
+  const sources = new Map(indexedSources.map((source) => [source.uri.toString(), source]))
+  for (const model of models.filter(isTypeScriptModel)) sources.set(model.uri.toString(), { uri: model.uri, content: model.getValue(undefined, true) })
+  const problems = await Promise.all([...sources.values()].map(async (source) => {
+    const worker = await getWorkspaceTypeScriptWorker(source.uri)
+    const resource = source.uri.toString()
+    const content = (await worker.getScriptText(resource))!
+    const model = monaco.editor.getModel(source.uri)
+    const diagnostics = (await Promise.all([worker.getSyntacticDiagnostics(resource), worker.getSemanticDiagnostics(resource), worker.getSuggestionDiagnostics(resource)])).flat()
+    return diagnostics.map((diagnostic) => problemFromSourceDiagnostic(source.uri, content, model?.getVersionId() ?? 0, diagnostic as TS.Diagnostic))
   }))
   const webModels = new Map(models.filter((model) => webMarkerLanguages.has(model.getLanguageId())).map((model) => [model.uri.toString(), model]))
   const markers = monaco.editor.getModelMarkers({}).flatMap((marker) => {
@@ -114,7 +122,7 @@ export function useWorkspaceProblems(workspaceRoot: string, visible: boolean) {
       const request = ++revision
       window.clearTimeout(timer)
       timer = window.setTimeout(() => {
-        void collectWorkspaceProblems(monaco, workspaceRoot).then((items) => {
+        void collectWorkspaceProblems(monaco, workspaceRoot, projectIndex.sourceFiles()).then((items) => {
           if (!disposed && request === revision && workspaceRootsEqual(useAppStore.getState().workingDirectory, workspaceRoot)) setState({ phase: projectIndex.status.phase === 'partial' ? 'partial' : 'ready', items, issues: projectIndex.status.issues })
         }).catch((error: unknown) => {
           if (!disposed && request === revision) setState({ phase: 'error', items: [], issues: [{ path: workspaceRoot, message: error instanceof Error ? error.message : String(error) }] })
@@ -141,9 +149,11 @@ export function useWorkspaceProblems(workspaceRoot: string, visible: boolean) {
   const quickFixes = useCallback(async (problem: WorkspaceProblem): Promise<ProblemQuickFix[]> => {
     if (!problem.workerDiagnostic || typeof problem.code !== 'number') return []
     const monaco = monacoRef.current!
-    const model = monaco.editor.getModel(monaco.Uri.parse(problem.uri))!
-    if (model.getVersionId() !== problem.modelVersion) throw new Error('文件内容已变化，请刷新问题后再选择修复。')
-    const worker = await getWorkspaceTypeScriptWorker(model.uri)
+    const resource = monaco.Uri.parse(problem.uri)
+    const model = monaco.editor.getModel(resource)
+    const worker = await getWorkspaceTypeScriptWorker(resource)
+    if ((model && problem.modelVersion !== 0 && model.getVersionId() !== problem.modelVersion)
+      || (await worker.getScriptText(problem.uri)) !== problem.sourceText) throw new Error('文件内容已变化，请刷新问题后再选择修复。')
     const versions = new Map(monaco.editor.getModels().map((entry) => [entry.uri.toString(), entry.getVersionId()]))
     const actions = await worker.getCodeFixesAtPosition(problem.uri, problem.start, problem.start + problem.length, [problem.code], {}) as readonly TS.CodeFixAction[]
     const fixes: ProblemQuickFix[] = []

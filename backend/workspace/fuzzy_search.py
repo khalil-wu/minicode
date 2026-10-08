@@ -38,10 +38,13 @@ def iter_search_paths(
     include_hidden: bool = False,
     ignore_dirs: set[str] = _IGNORE_DIRS,
     ignore_rules: Literal["all", "directories", "none"] = "all",
+    check_cancelled: Callable[[], None] | None = None,
 ) -> Iterator[tuple[Path, bool]]:
     """Walk searchable files and folders, pruning ignored and linked directories."""
     pending: list[tuple[Path, tuple[tuple[Path, GitIgnoreSpec], ...]]] = [(root, ())]
     while pending:
+        if check_cancelled is not None:
+            check_cancelled()
         directory, ignore_specs = pending.pop()
         ignore_lines = []
         if ignore_rules != "none":
@@ -54,6 +57,8 @@ def iter_search_paths(
 
         with os.scandir(directory) as entries:
             for entry in entries:
+                if check_cancelled is not None:
+                    check_cancelled()
                 if (not include_hidden and entry.name.startswith(".")) or entry.is_symlink():
                     continue
                 path = Path(entry.path)

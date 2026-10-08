@@ -1060,6 +1060,8 @@ def _history_identity(provider: str, base_url: str, wire_api: str) -> tuple[str,
 def _provider_image_fields(
     provider: str,
     provider_data: Mapping[str, Any],
+    *,
+    resolve_credentials: bool = True,
 ) -> dict[str, Any]:
     normalized = _normalize_provider(provider)
     env_prefix = normalized.upper()
@@ -1081,7 +1083,7 @@ def _provider_image_fields(
     image_quality = _normalize_image_quality(
         provider_data.get("image_quality", os.getenv(f"{env_prefix}_IMAGE_QUALITY", "")),
     )
-    independent_key = _image_api_key_for_base_url(normalized, image_base_url)
+    independent_key = _image_api_key_for_base_url(normalized, image_base_url) if resolve_credentials else ""
     return {
         "image_mode": image_mode,
         "image_api_key": independent_key,
@@ -1134,13 +1136,13 @@ def _provider_request_material(provider_data: Mapping[str, Any]) -> dict[str, An
     }
 
 
-def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def get_openai_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True) -> dict[str, Any]:
     llm_data = _get_llm_section(settings_data)
     raw = llm_data.get("openai", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
     base_url = str(provider_data.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
-    api_key = _provider_api_key_for_base_url("openai", base_url)
+    api_key = _provider_api_key_for_base_url("openai", base_url) if resolve_credentials else ""
     model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "")).strip()
     small_fast_model = str(
         provider_data.get("small_fast_model")
@@ -1211,6 +1213,7 @@ def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     image_fields = _provider_image_fields(
         "openai",
         provider_data,
+        resolve_credentials=resolve_credentials,
     )
 
     return {
@@ -1247,13 +1250,13 @@ def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     }
 
 
-def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def get_anthropic_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True) -> dict[str, Any]:
     llm_data = _get_llm_section(settings_data)
     raw = llm_data.get("anthropic", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
     base_url = str(provider_data.get("base_url") or os.getenv("ANTHROPIC_BASE_URL", "")).strip()
-    api_key = _provider_api_key_for_base_url("anthropic", base_url)
+    api_key = _provider_api_key_for_base_url("anthropic", base_url) if resolve_credentials else ""
     model = str(
         provider_data.get("model") or os.getenv("ANTHROPIC_MODEL", "")
     ).strip()
@@ -1291,6 +1294,7 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
     image_fields = _provider_image_fields(
         "anthropic",
         provider_data,
+        resolve_credentials=resolve_credentials,
     )
 
     return {
@@ -1325,14 +1329,14 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
     }
 
 
-def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def get_custom_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True) -> dict[str, Any]:
     """Read the explicitly configured custom provider transport."""
     llm_data = _get_llm_section(settings_data)
     raw = llm_data.get("custom", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
     base_url = str(provider_data.get("base_url") or os.getenv("CUSTOM_BASE_URL", "")).strip()
-    api_key = _custom_provider_api_key(base_url)
+    api_key = _custom_provider_api_key(base_url) if resolve_credentials else ""
     model = str(provider_data.get("model") or os.getenv("CUSTOM_MODEL", "")).strip()
     small_fast_model = str(
         provider_data.get("small_fast_model")
@@ -1417,6 +1421,7 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     image_fields = _provider_image_fields(
         "custom",
         provider_data,
+        resolve_credentials=resolve_credentials,
     )
 
     return {
@@ -1458,6 +1463,8 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
 def get_image_generation_settings(
     provider: str | None = None,
     settings_data: dict[str, Any] | None = None,
+    *,
+    resolve_credentials: bool = True,
 ) -> dict[str, Any]:
     """Resolve image capability from the active Provider profile.
 
@@ -1470,13 +1477,13 @@ def get_image_generation_settings(
         settings_data = _load_effective_settings_json()
     selected_provider = _normalize_provider(provider or get_llm_provider(settings_data))
     if selected_provider == "anthropic":
-        section = get_anthropic_settings(settings_data)
+        section = get_anthropic_settings(settings_data, resolve_credentials=resolve_credentials)
         inherited_wire_api = "anthropic"
     elif selected_provider == "custom":
-        section = get_custom_settings(settings_data)
+        section = get_custom_settings(settings_data, resolve_credentials=resolve_credentials)
         inherited_wire_api = str(section.get("wire_api") or "chat").strip().lower()
     else:
-        section = get_openai_settings(settings_data)
+        section = get_openai_settings(settings_data, resolve_credentials=resolve_credentials)
         inherited_wire_api = str(section.get("wire_api") or "responses").strip().lower()
 
     mode = _normalize_image_mode(section.get("image_mode"))
@@ -1515,7 +1522,7 @@ def get_image_generation_settings(
         reason = ""
         if not base_url:
             reason = "Independent image generation requires an image base URL."
-        elif auth_header and not api_key:
+        elif resolve_credentials and auth_header and not api_key:
             reason = "auth_header=true requires an image API key."
         elif not configured_model:
             reason = "Independent image generation requires an image model."
@@ -1531,7 +1538,7 @@ def get_image_generation_settings(
             )
         elif not base_url:
             reason = "Inherited image generation requires the provider base URL."
-        elif auth_header and not api_key:
+        elif resolve_credentials and auth_header and not api_key:
             reason = "auth_header=true requires the provider API key."
         elif not configured_model:
             reason = "Set an image model before using image generation."
@@ -1819,18 +1826,16 @@ def get_llm_settings_payload(
     }
 
 
-@_serialized_settings_update
-
-def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSettings:
+def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True) -> LLMSettings:
     """从环境变量与 settings.json 加载 LLM 配置。"""
     if settings_data is None:
         settings_data = _load_effective_settings_json()
     active_provider = get_llm_provider(settings_data)
 
     if active_provider == "anthropic":
-        anthropic = get_anthropic_settings(settings_data)
+        anthropic = get_anthropic_settings(settings_data, resolve_credentials=resolve_credentials)
         model_metadata = get_provider_model_metadata(anthropic, anthropic["model"])
-        if anthropic["auth_header"] and not anthropic["api_key"]:
+        if resolve_credentials and anthropic["auth_header"] and not anthropic["api_key"]:
             raise SettingsError(
                 "auth_header=true requires an API key for the selected Anthropic provider"
             )
@@ -1871,16 +1876,16 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         )
 
     if active_provider == "custom":
-        custom = get_custom_settings(settings_data)
+        custom = get_custom_settings(settings_data, resolve_credentials=resolve_credentials)
         model_metadata = get_provider_model_metadata(custom, custom["model"])
         from backend.llm.capabilities import is_gpt_image_model
 
         image_config = (
-            get_image_generation_settings("custom", settings_data)
+            get_image_generation_settings("custom", settings_data, resolve_credentials=resolve_credentials)
             if is_gpt_image_model(str(custom.get("model") or ""))
             else None
         )
-        if custom["auth_header"] and not custom["api_key"]:
+        if resolve_credentials and custom["auth_header"] and not custom["api_key"]:
             raise SettingsError(
                 "auth_header=true requires an API key for the selected custom provider"
             )
@@ -1925,16 +1930,16 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             image_quality=str(image_config["quality"] if image_config else custom["image_quality"]),
         )
 
-    openai = get_openai_settings(settings_data)
+    openai = get_openai_settings(settings_data, resolve_credentials=resolve_credentials)
     model_metadata = get_provider_model_metadata(openai, openai["model"])
     from backend.llm.capabilities import is_gpt_image_model
 
     image_config = (
-        get_image_generation_settings("openai", settings_data)
+        get_image_generation_settings("openai", settings_data, resolve_credentials=resolve_credentials)
         if is_gpt_image_model(str(openai.get("model") or ""))
         else None
     )
-    if openai["auth_header"] and not openai["api_key"]:
+    if resolve_credentials and openai["auth_header"] and not openai["api_key"]:
         raise SettingsError(
             "auth_header=true requires an API key for the selected OpenAI provider"
         )

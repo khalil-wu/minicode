@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -120,6 +121,40 @@ def test_real_editor_reads_do_not_feed_back_into_file_change_notifications(tmp_p
             await asyncio.sleep(0.15)
             assert changes == ["modified"]
             assert reloads == ["updated\n"]
+        finally:
+            watcher.stop()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Exercises real Windows ReadDirectoryChangesW notifications")
+def test_windows_index_reads_are_not_modifications_but_writes_and_renames_are(tmp_path):
+    from watchdog.observers import winapi
+
+    assert not winapi.WATCHDOG_FILE_NOTIFY_FLAGS & winapi.FILE_NOTIFY_CHANGE_LAST_ACCESS
+    target = tmp_path / "app.ts"
+    target.write_text("export const version = 1;", encoding="utf-8")
+    service = WorkspaceService(lambda: tmp_path)
+
+    async def exercise():
+        changes = []
+        watcher = WorkspaceFileWatcher(tmp_path, lambda path, event: changes.append((path, event)), stability_threshold=0.02)
+        watcher.start()
+        try:
+            await asyncio.to_thread(service.project_index, include_dependencies=False)
+            await asyncio.to_thread(service.read_file, target.name)
+            await asyncio.sleep(0.1)
+            assert changes == []
+            target.write_text("export const version = 2;", encoding="utf-8")
+            async with asyncio.timeout(3):
+                while (target, "modified") not in changes:
+                    await asyncio.sleep(0.01)
+            renamed = target.with_name("renamed.ts")
+            target.rename(renamed)
+            async with asyncio.timeout(3):
+                while (target, "deleted") not in changes or (renamed, "moved") not in changes:
+                    await asyncio.sleep(0.01)
+            assert service.read_file(renamed.name).content == "export const version = 2;"
         finally:
             watcher.stop()
 

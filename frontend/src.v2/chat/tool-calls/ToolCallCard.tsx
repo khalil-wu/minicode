@@ -24,7 +24,7 @@ import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult, usesCodeTypography } from "./renderers/ToolTextRenderer";
-import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, webFetchEvidenceLabel } from "../cells/activityCellHelpers";
+import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
@@ -46,13 +46,6 @@ function isWebSearchRecord(record: ToolCallRecord): boolean {
   return record.resultKind === "search" || record.name === "web_search" || record.name === "websearch";
 }
 
-function evidenceLabel(record: ToolCallRecord): string {
-  const fetchedLabel = webFetchEvidenceLabel(record);
-  if (fetchedLabel) return fetchedLabel;
-  if (record.evidenceType === "candidate") return "候选来源";
-  return "";
-}
-
 function normalizeLocalUrl(url: string): string {
   return url.replace(/^https?:\/\/0\.0\.0\.0/i, (prefix) => prefix.replace("0.0.0.0", "localhost"));
 }
@@ -62,11 +55,12 @@ const Spinner = () => (
 );
 
 function phaseLabel(record: ToolCallRecord): string {
-  if (record.status === "failed") return "失败";
-  if (record.status === "timeout") return "超时";
-  if (record.status === "blocked") return "已阻止";
-  if (record.status === "partial") return "部分完成";
-  if (record.status === "cancelled") return "已取消";
+  const status = recordPresentationStatus(record);
+  if (status === "failed") return "失败";
+  if (status === "timeout") return "超时";
+  if (status === "blocked") return "已阻止";
+  if (status === "partial") return "部分完成";
+  if (status === "cancelled") return "已取消";
   if (isCodeModeRecord(record) && ["Script yielded", "Script running", "脚本仍在运行"].includes(record.displaySummary || "")) return "运行中";
   if (record.status === "success") return "已完成";
   const transition = String(record.transition || "").toLowerCase();
@@ -121,7 +115,7 @@ export const ToolCallCard = memo(({
   /** Explicit transcript owner; side/history views must not borrow the active chat. */
   conversationId?: string;
 }) => {
-  const hasFailure = ["failed", "blocked", "timeout"].includes(record.status);
+  const hasFailure = ["failed", "blocked", "timeout"].includes(recordPresentationStatus(record));
   const cleanupNotice = toolCleanupNotice(record.cleanupReceipt);
   const [open, setOpen] = useState(() => shouldAutoOpen(viewMode) || hasFailure);
   const [outputExpanded, setOutputExpanded] = useState(false);
@@ -157,7 +151,6 @@ export const ToolCallCard = memo(({
   const toolLabel = readableRecordLabel(record);
   const phase = phaseLabel(record);
   const showStatus = phase !== "已完成";
-  const evidence = evidenceLabel(record);
   const imageArtifact = recordHasImageArtifact(record)
     ? {
         kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
@@ -287,11 +280,6 @@ export const ToolCallCard = memo(({
             <FileText size={14} />
             {isWebFetchRecord(record) ? "页面正文" : "产物"}
           </SmallAction>
-        )}
-        {evidence && (
-          <span style={evidenceBadgeStyle}>
-            {evidence}
-          </span>
         )}
         {previewUrl && (
           <SmallAction label={`在预览面板中打开 ${previewUrl}`} onClick={openPreviewUrl}>
@@ -512,22 +500,8 @@ const toolInputInlineStyle: React.CSSProperties = {
   fontFamily: "var(--font-ui)",
 };
 
-const evidenceBadgeStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  minHeight: 22,
-  padding: "0 7px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-base)",
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-ui)",
-  flexShrink: 0,
-};
-
 const phaseBadgeStyle = (record: ToolCallRecord): React.CSSProperties => {
-  const status = record.status;
+  const status = recordPresentationStatus(record);
   const tone = status === "failed" || status === "timeout" || status === "blocked"
     ? "var(--state-warning)"
     : status === "success"

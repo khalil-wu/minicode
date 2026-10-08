@@ -124,7 +124,7 @@ def test_subagent_completion_survives_reload_at_its_stream_position_without_dupl
         yield AgentEvent.done()
 
     session.query_engine = QueryEngine(runner=runner)
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -191,7 +191,7 @@ def test_runner_streams_raw_reasoning_but_persists_only_summary(tmp_path, monkey
     session = _Session(tmp_path, events, runner_events=runner_events)
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -569,7 +569,7 @@ def test_runner_persists_all_yielded_provider_progress_for_restore(
     session = _Session(tmp_path, events, runner_events=runner_events)
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -1133,7 +1133,7 @@ def test_runner_sends_done_when_filtered_stream_omits_done(tmp_path, monkeypatch
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -1202,7 +1202,7 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1266,7 +1266,7 @@ def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path
         await asyncio.Event().wait()
 
     session.query_engine = QueryEngine(runner=blocking_runner)
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -1457,7 +1457,7 @@ def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path
 def test_runner_sends_done_when_terminal_projections_fail(tmp_path, monkeypatch):
     events: list[dict] = []
     session = _Session(tmp_path, events)
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -1519,7 +1519,7 @@ def test_runner_emits_no_synthetic_tool_failure_answer_before_failed_done(tmp_pa
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1559,7 +1559,7 @@ def test_runner_initialization_failure_emits_idle_and_failed_done(tmp_path, monk
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1618,7 +1618,7 @@ def test_runner_persists_and_emits_terminal_failure_recoverability(tmp_path, mon
         ],
     )
 
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -1666,7 +1666,7 @@ def test_runner_clears_transient_failure_metadata_after_success(tmp_path, monkey
         ],
     )
 
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -1705,7 +1705,7 @@ def test_runner_preserves_partial_done_status_when_deferring_terminal_event(tmp_
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1769,7 +1769,7 @@ def test_runner_projects_durable_terminal_over_conflicting_provider_done(
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1819,7 +1819,7 @@ def test_runner_downgrades_tool_only_success_to_partial_and_persists_status(tmp_
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1894,7 +1894,7 @@ def test_runner_persists_presented_file_and_suppresses_deleted_helper(tmp_path, 
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1946,7 +1946,7 @@ def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -1998,7 +1998,7 @@ def test_runner_keeps_low_value_reply_when_no_tool_summary_exists(tmp_path, monk
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr(
@@ -2197,7 +2197,7 @@ def test_runner_persists_completed_agent_message_as_final_text_block(tmp_path, m
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -2257,7 +2257,7 @@ def test_runner_settles_in_progress_item_as_partial_when_done_has_no_completed_i
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -2337,7 +2337,7 @@ def test_runner_preserves_collaboration_final_report_narration(tmp_path, monkeyp
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -2400,7 +2400,7 @@ def test_runner_preserves_collaboration_answer_announcement(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",
@@ -2462,7 +2462,7 @@ def test_runner_does_not_emit_tool_only_failure_after_live_final_answer(tmp_path
 
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
-        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+        lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")),
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.get_llm_provider",

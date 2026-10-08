@@ -31,6 +31,22 @@ const fixture = (files: IndexedFile[], root = "/project", caseSensitive = true) 
 };
 
 describe("workspace TypeScript service", () => {
+  it("keeps the native parsed project for a repeated versioned snapshot and rebuilds when source content changes", async () => {
+    const files = [
+      { path: "tsconfig.json", content: '{"compilerOptions":{"strict":true},"include":["src"]}' },
+      { path: "src/main.ts", content: "export const value: number = 1;" },
+    ];
+    const { service, uri } = fixture(files);
+    const parsed = service.parsedConfig(uri("tsconfig.json"));
+    expect(await service.getSemanticDiagnostics(uri("src/main.ts"))).toEqual([]);
+    await service.updateExtraLibs(indexExtras(files));
+    expect(service.parsedConfig(uri("tsconfig.json"))).toBe(parsed);
+    files[1].content = 'export const value: number = "changed";';
+    await service.updateExtraLibs(indexExtras(files));
+    expect(service.parsedConfig(uri("tsconfig.json"))).not.toBe(parsed);
+    expect(await service.getSemanticDiagnostics(uri("src/main.ts"))).toEqual(expect.arrayContaining([expect.objectContaining({ code: 2322 })]));
+  });
+
   it("gives an opened mirror a native root before the source index arrives", async () => {
     const { service, mirrors, uri } = fixture([]);
     const path = uri("src/open.ts");

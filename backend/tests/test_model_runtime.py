@@ -68,17 +68,17 @@ def test_base_provider_runtime_projects_saved_proxy_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         model_runtime_module,
         "get_openai_settings",
-        lambda _snapshot: section("openai", "inherit"),
+        lambda _snapshot, **_kwargs: section("openai", "inherit"),
     )
     monkeypatch.setattr(
         model_runtime_module,
         "get_anthropic_settings",
-        lambda _snapshot: section("anthropic", "inherit"),
+        lambda _snapshot, **_kwargs: section("anthropic", "inherit"),
     )
     monkeypatch.setattr(
         model_runtime_module,
         "get_custom_settings",
-        lambda _snapshot: section("custom", "direct"),
+        lambda _snapshot, **_kwargs: section("custom", "direct"),
     )
 
     runtime = object.__new__(ModelRuntime)

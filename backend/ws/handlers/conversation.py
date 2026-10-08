@@ -64,7 +64,9 @@ def _conversation_cleanup_owner(
     return session.cleanup_tasks
 
 
-async def _broadcast_conversation_lists(session: "WebSocketSession") -> list[str]:
+async def _broadcast_conversation_lists(
+    session: "WebSocketSession", *, inventory: tuple[str, int, list[Any]] | None = None,
+) -> list[str]:
     """Publish one authoritative inventory snapshot to every connected renderer."""
 
     errors: list[str] = []
@@ -73,7 +75,8 @@ async def _broadcast_conversation_lists(session: "WebSocketSession") -> list[str
             continue
         try:
             sent = await await_with_deadline(
-                owner_session.send_conversation_list(),
+                (owner_session.send_conversation_list() if inventory is None
+                 else owner_session.send_conversation_list(inventory=inventory)),
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                 label=f"conversation inventory for session {owner_session.session_id}",
             )
@@ -884,7 +887,6 @@ async def handle_conversation_export(session: "WebSocketSession", data: dict[str
 
 async def handle_conversation_switch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.conversations.models import ConversationRecord
-    from datetime import UTC, datetime
 
     conversation_id = str(data.get("conversation_id", ""))
     view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, conversation_id)
@@ -911,6 +913,15 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     target = ConversationRecord.from_dict(view)
     if not await session.switch_workspace_for_conversation(target, announce=True, error_command="conversation.switch"):
         return True
+    await _publish_conversation_switch(session, target, view, data)
+    return True
+
+
+async def _publish_conversation_switch(
+    session: "WebSocketSession", target: Any, view: dict[str, Any], data: dict[str, Any],
+) -> None:
+    from datetime import UTC, datetime
+
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
     session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
@@ -924,7 +935,8 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
             await session._on_conversation_hydration_complete(owner)
             return
         generation = session.conversation_runtime._hydration_generation
-        await session.reconcile_persisted_ui_agent_state(owner)
+        if data.get("_reconcile_agent_state", True):
+            await session.reconcile_persisted_ui_agent_state(owner)
         session.refresh_llm_selection()
         current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
         if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
@@ -942,7 +954,6 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
                                 "session": session.runtime_snapshot(include_capabilities=False),
                                 "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
     session.start_active_conversation_hydration(target.id)
-    return True
 
 
 def _clear_context_builder(session: "WebSocketSession", *, reason: str) -> None:
@@ -982,9 +993,9 @@ async def _activate_conversation_or_blank(
     preferred_id: str | None = None,
     *,
     reconcile_agent_state: bool = True,
+    conversation_summaries: list[Any] | None = None,
 ) -> None:
     from backend.services.conversation_payload_service import (
-        build_conversation_switched_payload,
         choose_conversation_activation_target,
     )
 
@@ -993,17 +1004,18 @@ async def _activate_conversation_or_blank(
         choose_conversation_activation_target(session.conversation_repo, previous_active_id)
         if previous_active_id else None
     )
-    target = choose_conversation_activation_target(session.conversation_repo, preferred_id)
+    target = choose_conversation_activation_target(
+        session.conversation_repo, preferred_id, conversations=conversation_summaries,
+    )
     if target is None:
         if not preferred_id or previous_active is None:
             _clear_active_conversation_runtime(session)
         return
 
-    if reconcile_agent_state:
-        target = await session.reconcile_persisted_ui_agent_state(
-            target.id,
-            conversation=target,
-        ) or target
+    from backend.conversations.models import ConversationRecord
+
+    view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, target.id)
+    target = ConversationRecord.from_dict(view)
     session.active_conversation_id = target.id
     if not await session.switch_workspace_for_conversation(target, announce=True):
         if previous_active is not None:
@@ -1012,20 +1024,9 @@ async def _activate_conversation_or_blank(
         # The previous owner is gone. Keep the fallback transcript available,
         # with no workspace tools until its directory can be opened or trusted.
         session.session_lifecycle.clear_workspace_runtime()
-    is_hydrating = session.load_active_conversation_snapshot(
-        target.id, target.context_snapshot, notify=True, defer_start=True,
+    await _publish_conversation_switch(
+        session, target, view, {"_reconcile_agent_state": reconcile_agent_state},
     )
-    session.sync_permission_mode_with_active_conversation(source="conversation.activate")
-    await session.send_payload(
-        build_conversation_switched_payload(
-            target,
-            is_hydrating=is_hydrating,
-            runtime_snapshot=session.runtime_snapshot(),
-        ),
-        log_context="conversation.switched",
-    )
-    if is_hydrating:
-        session.start_active_conversation_hydration(target.id)
 
 
 async def handle_conversation_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -1079,7 +1080,7 @@ async def handle_conversation_rename(session: "WebSocketSession", data: dict[str
 
 async def handle_conversation_archive(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     conversation_id = str(data.get("conversation_id", "")).strip()
-    target = session.conversation_repo.get_conversation(conversation_id)
+    target = session.conversation_repo.get_conversation_summary(conversation_id)
     if target is None:
         await emit_conversation_not_found(session, conversation_id)
         from backend.ws.command_results import emit_command_error
@@ -1188,7 +1189,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
                         level="error", data={"conversation_id": conversation_id, "reason": "client_resource_active", "retryable": True},
                     )
                     return True
-        updated = session.conversation_repo.set_archived(conversation_id, True)
+        updated = await to_thread_cancel_safe(session.conversation_repo.set_archived, conversation_id, True)
         if updated is None:
             await emit_conversation_not_found(session, conversation_id)
             from backend.ws.command_results import emit_command_error
@@ -1201,11 +1202,12 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
             )
             return True
         fallback_errors: list[str] = []
+        inventory = await asyncio.to_thread(session.conversation_repo.list_conversations_with_revision)
         for owner_session in _all_live_sessions(session):
             if owner_session.active_conversation_id != conversation_id:
                 continue
             try:
-                await _activate_conversation_or_blank(owner_session)
+                await _activate_conversation_or_blank(owner_session, conversation_summaries=inventory[2])
             except Exception:
                 logger.exception(
                     "Failed to activate a fallback after archiving %s for session %s",
@@ -1214,7 +1216,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
                 )
                 fallback_errors.append(str(owner_session.session_id))
         _schedule_long_term_memory_forgetting(session, updated)
-        broadcast_errors = await _broadcast_conversation_lists(session)
+        broadcast_errors = await _broadcast_conversation_lists(session, inventory=inventory)
         projection_errors = list(dict.fromkeys([*fallback_errors, *broadcast_errors]))
         await session.emit_command_result(
             "conversation.archive",

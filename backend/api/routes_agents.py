@@ -63,12 +63,12 @@ def _live_agent_model_catalog(workspace_root_override: str = "") -> list[dict[st
                     # MiniCode's concrete Messages adapter exposes one configured
                     # budget, so its faithful surface is off/high.
                     levels = ("off", "high")
-                provider = runtime.get_provider(model.provider)
+                provider = runtime.provider_payload(model.provider)
                 catalog.append(
                     {
                         "provider": model.provider,
                         "provider_name": (
-                            str(getattr(provider, "name", "") or model.provider)
+                            str(provider.get("display_name") or model.provider)
                         ),
                         "model": model.id,
                         "model_name": str(getattr(model, "name", "") or model.id),

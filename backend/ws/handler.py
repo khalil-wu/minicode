@@ -1343,7 +1343,7 @@ class WebSocketSession(
             self.tool_registry = bootstrap.create_tool_registry(
                 self.artifact_store,
                 workspace_root=workspace_root,
-                config=load_config(cwd=workspace_root),
+                config=load_config(cwd=workspace_root, resolve_credentials=False),
                 mcp_manager=manager,
             )
         except Exception as exc:  # pragma: no cover - never break a run/inspect
@@ -1429,7 +1429,7 @@ class WebSocketSession(
             wait_for_delivery=wait_for_delivery,
         )
 
-    async def send_conversation_list(self) -> None:
+    async def send_conversation_list(self, *, inventory: tuple[str, int, list[Any]] | None = None) -> None:
         list_with_revision = getattr(
             self.conversation_repo,
             "list_conversations_with_revision",
@@ -1438,7 +1438,7 @@ class WebSocketSession(
         inventory_instance_id: str | None = None
         inventory_revision: int | None = None
         if callable(list_with_revision):
-            versioned_listing = list_with_revision()
+            versioned_listing = inventory if inventory is not None else list_with_revision()
             if isinstance(versioned_listing, tuple) and len(versioned_listing) == 3:
                 raw_instance_id, raw_revision, summaries = versioned_listing
                 if not isinstance(raw_instance_id, str) or not raw_instance_id.strip():

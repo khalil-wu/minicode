@@ -26,10 +26,14 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
         attachment_store=SimpleNamespace(share_for_conversation=Mock()),
         artifact_store=SimpleNamespace(share_for_conversation=Mock()),
         diagnostic_store=SimpleNamespace(share_for_conversation=Mock()),
-        runtime_snapshot=lambda: {"active_conversation_id": session.active_conversation_id},
+        runtime_snapshot=lambda **_: {"active_conversation_id": session.active_conversation_id},
         context_builder=SimpleNamespace(clear=Mock()),
         session_lifecycle=SimpleNamespace(clear_workspace_runtime=Mock()),
     )
+    session.permission_context_for_conversation = Mock(return_value=SimpleNamespace(mode="bypass"))
+    session.refresh_llm_selection = Mock()
+    session.session_lifecycle.schedule_runtime_capabilities = Mock()
+    session.conversation_runtime = SimpleNamespace(defer_repository_hydration=Mock())
     return session
 
 
@@ -92,6 +96,9 @@ def test_preferred_list_switch_requires_activation_and_canonical_event(tmp_path,
         assert session.active_conversation_id == target.id
         assert session.send_payload.await_args.args[0]["type"] == "conversation.switched"
         assert session.send_payload.await_args.args[0]["conversation_id"] == target.id
+        assert session.send_payload.await_args.args[0]["context_pending"] is True
+        session.conversation_runtime.defer_repository_hydration.assert_called_once()
+        session.start_active_conversation_hydration.assert_called_once_with(target.id)
     else:
         assert session.active_conversation_id == previous.id
         session.load_active_conversation_snapshot.assert_not_called()
@@ -140,6 +147,8 @@ def test_list_fallback_failure_opens_history_without_an_unavailable_workspace(tm
     asyncio.run(conversation.handle_conversation_list(session, {}))
 
     assert session.active_conversation_id == fallback.id
-    session.load_active_conversation_snapshot.assert_called_once()
+    session.load_active_conversation_snapshot.assert_not_called()
+    session.conversation_runtime.defer_repository_hydration.assert_called_once()
+    session.start_active_conversation_hydration.assert_called_once_with(fallback.id)
     session.session_lifecycle.clear_workspace_runtime.assert_called_once()
     assert session.send_payload.await_args.args[0]["conversation_id"] == fallback.id

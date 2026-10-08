@@ -1362,7 +1362,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         </div>
       )}
 
-      {symbolMode && monacoRef.current && <Suspense fallback={null}><LazyEditorSymbols monaco={monacoRef.current} workspaceRoot={workingDirectory} path={activeMonacoUri} project={symbolMode === "project"} onClose={() => setSymbolMode(null)} /></Suspense>}
+      {symbolMode && monacoRef.current && <Suspense fallback={null}><LazyEditorSymbols monaco={monacoRef.current} workspaceRoot={workingDirectory} path={activeMonacoUri} project={symbolMode === "project"} sourceFiles={projectIndex.sourceFiles} onClose={() => setSymbolMode(null)} /></Suspense>}
       {activeTab?.externalChanged && !isPreviewableMediaPath(activeTab.path) && (
         <div
           className="min-h-9 px-3 py-1.5 flex items-center gap-2 border-b"

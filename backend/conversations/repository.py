@@ -202,10 +202,19 @@ class ConversationRepository:
 
     def get_conversation_summary(self, conversation_id: str) -> ConversationSummary | None:
         with self._store_lock(conversation_id):
-            cached = self._record_cache.get(conversation_id)
-            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
-                return cached.to_summary()
-            return self._load_summary(conversation_id)
+            stamp = self._summary_disk_stamp(conversation_id)
+            cached = (self._summary_index or {}).get(conversation_id)
+            if cached is not None and self._summary_index_stamps.get(conversation_id) == stamp:
+                return copy.deepcopy(cached)
+            summary = self._load_summary(conversation_id)
+            if self._summary_index is not None:
+                if summary is None:
+                    self._summary_index.pop(conversation_id, None)
+                    self._summary_index_stamps.pop(conversation_id, None)
+                else:
+                    self._summary_index[conversation_id] = copy.deepcopy(summary)
+                    self._summary_index_stamps[conversation_id] = stamp
+            return summary
 
     def get_transcript_page(
         self, conversation_id: str, *, limit: int = 80, before_message_id: str = "",
@@ -1336,7 +1345,7 @@ class ConversationRepository:
         mutate: Callable[[ConversationRecord], None],
     ) -> ConversationRecord | None:
         with self._store_lock(conversation_id):
-            record = self._load_record_for_mutation(conversation_id)
+            record = self._load_record_for_mutation(conversation_id, copy_history=False)
             if record is None:
                 return None
             mutate(record)
@@ -1430,7 +1439,23 @@ class ConversationRepository:
         return tuple(stamps)
 
     def _summary_disk_stamp(self, conversation_id: str) -> tuple[tuple[int, int], ...]:
-        return self._record_disk_stamp(conversation_id)
+        # The manifest publishes the summary independently of immutable
+        # provider history. Only older layouts need their metadata file.
+        paths = [self._manifest_path_for(conversation_id)]
+        manifest = self._read_manifest(conversation_id, log_errors=False)
+        if manifest is None:
+            paths.extend((self._meta_path_for(conversation_id), self._legacy_path_for(conversation_id)))
+        elif not self._manifest_is_deleted(manifest) and manifest.get("metadata") is None:
+            paths.append(self._generation_paths(conversation_id, manifest["current_generation"])[0])
+        stamps = []
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                stamps.append((-1, -1))
+            else:
+                stamps.append((stat.st_mtime_ns, stat.st_size))
+        return tuple(stamps)
 
     @staticmethod
     def _manifest_generations(manifest: dict[str, Any]) -> tuple[int, ...]:

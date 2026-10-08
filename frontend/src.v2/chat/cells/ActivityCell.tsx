@@ -20,7 +20,7 @@ import {
   type PlanUpdateStep,
   isWebFetchActivity,
   isWebFetchRecord,
-  webFetchEvidenceLabel,
+  recordPresentationStatus,
   isBrowserRecord,
   browserFailureGuidance,
   isCodeModeRecord,
@@ -90,7 +90,11 @@ export const ActivityCell = memo(function ActivityCell({
   const isWebAction = cell.activityKind === "webSearch";
   const isWebFetchAction = isWebFetchActivity(cell);
   const isInlineAction = isRead || isWorkspaceSearch || isWorkspaceList || isWebAction;
-  const status = activityCellStatus(cell.status);
+  const recordStatuses = records.map(recordPresentationStatus);
+  const presentationStatus = cell.status === "done" && recordStatuses.some((status, index) => status !== records[index].status)
+    ? recordStatuses.every((status) => status === "failed") ? "failed" : "partial"
+    : cell.status;
+  const status = activityCellStatus(presentationStatus);
   const isRunning = isRunningCellStatus(status);
   const fileChangeStats = useMemo(() => {
     if (!isFileChange) return undefined;
@@ -116,16 +120,16 @@ export const ActivityCell = memo(function ActivityCell({
     previousId.current = cell.id;
   }, [cell.id, shouldAutoExpand]);
 
-  const isFailed = cell.status === "failed" || cell.status === "interrupted";
-  const isPartial = cell.status === "partial";
+  const isFailed = presentationStatus === "failed" || presentationStatus === "interrupted";
+  const isPartial = presentationStatus === "partial";
   const needsApproval = records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
   const attentionLabel = needsApproval ? "等待批准"
-    : cell.status === "interrupted" ? "已中断"
+    : presentationStatus === "interrupted" ? "已中断"
     : isPartial ? "部分完成"
     : [
     records.some((record) => record.status === "cancelled") ? "已中断" : "",
     records.some((record) => record.status === "failed")
-      || (cell.status === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "失败" : "",
+      || (presentationStatus === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "失败" : "",
     records.some((record) => record.status === "blocked") ? "已阻止" : "",
     records.some((record) => record.status === "timeout") ? "超时" : "",
     isPartial || records.some((record) => record.status === "partial") ? "部分完成" : "",
@@ -190,7 +194,7 @@ export const ActivityCell = memo(function ActivityCell({
     return expression.trim() || output.trim() || error.trim() ? [{ record, expression, output, error }] : [];
   });
   const errorDetails = records.flatMap((record) => {
-    if (isBrowserRecord(record) || !["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)) return [];
+    if (isBrowserRecord(record) || !["failed", "blocked", "timeout", "cancelled", "partial"].includes(recordPresentationStatus(record))) return [];
     const rawError = purifyToolErrorText((isCodeModeRecord(record) ? getRecordOutputText(record) : "")
       || record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
     if (isInlineAction && rawError.trim() === getRecordOutputPreview(record).trim()) return [];
@@ -346,10 +350,6 @@ export const ActivityCell = memo(function ActivityCell({
       {records.map((record) => {
         const notice = toolCleanupNotice(record.cleanupReceipt);
         return notice ? <div key={`cleanup-${record.id}`} className="activity-cell-detail-meta" role="status">{notice}</div> : null;
-      })}
-      {records.filter(isWebFetchRecord).map((record) => {
-        const evidence = webFetchEvidenceLabel(record);
-        return evidence ? <div key={`fetch-evidence-${record.id}`} className="activity-cell-detail-meta" role="status">{evidence}</div> : null;
       })}
       {browserRecords.filter((record) => ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)
         || record.transition === "waiting_approval" || record.waitingOn === "approval").map((record) => (

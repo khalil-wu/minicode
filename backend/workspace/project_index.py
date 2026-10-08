@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +30,20 @@ _DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
 # Published declarations commonly live in dist/build, and pnpm stores their
 # real files below .pnpm. The dependency pass reads only types and metadata.
 _DEPENDENCY_IGNORED_DIRS = _IGNORE_DIRS - {"node_modules", "dist", "build"}
+
+
+class ProjectIndexScanCancelled(Exception):
+    """The last reader relinquished this workspace scan."""
+
+
+@dataclass(frozen=True)
+class CachedProjectIndexFile:
+    version: tuple[int, int, int]
+    file: WorkspaceProjectIndexFile
+
+
+def _file_version(metadata: os.stat_result) -> tuple[int, int, int]:
+    return metadata.st_mtime_ns, metadata.st_size, metadata.st_ino
 
 
 def _file_kind(path: Path, *, dependency: bool) -> ProjectIndexFileKind | None:
@@ -63,6 +79,7 @@ def _project_files(
     *,
     include_dependencies: bool,
     application_roots: tuple[Path, ...],
+    check_cancelled: Callable[[], None] | None = None,
 ) -> Iterator[tuple[Path, ProjectIndexFileKind]]:
     dependency_roots: list[Path] = []
     if include_dependencies:
@@ -72,7 +89,7 @@ def _project_files(
     # root is canonical and the shared walker does not traverse links or
     # junctions. These lexical checks prune protected candidates without I/O;
     # read_indexed_file resolves every real target again before opening it.
-    for path, is_dir in iter_search_paths(root, include_hidden=True):
+    for path, is_dir in iter_search_paths(root, include_hidden=True, check_cancelled=check_cancelled):
         if is_dir:
             if include_dependencies and not is_protected_write_path(path, application_roots=application_roots, resolved_path=path):
                 dependency_root = _dependency_directory(path, application_roots)
@@ -86,6 +103,7 @@ def _project_files(
     for directory in dependency_roots:
         for path, is_dir in iter_search_paths(
             directory, include_hidden=True, ignore_dirs=_DEPENDENCY_IGNORED_DIRS, ignore_rules="none",
+            check_cancelled=check_cancelled,
         ):
             if is_dir:
                 continue
@@ -94,35 +112,75 @@ def _project_files(
                 yield path, kind
 
 
-def build_project_index(service: WorkspaceService, *, include_dependencies: bool = True) -> WorkspaceProjectIndexResponse:
+def build_project_index(
+    service: WorkspaceService, *, include_dependencies: bool = True,
+    stop: threading.Event | None = None,
+    cached_files: dict[str, CachedProjectIndexFile] | None = None,
+    updated_files: dict[str, CachedProjectIndexFile] | None = None,
+    dirty_paths: frozenset[str] = frozenset(),
+) -> WorkspaceProjectIndexResponse:
     root = service.workspace_root_path()
     application_roots = sensitive_files.application_state_roots()
     files: list[WorkspaceProjectIndexFile] = []
     issues: list[WorkspaceProjectIndexIssue] = []
+    cached_files = cached_files or {}
 
-    def read_file(entry: tuple[Path, ProjectIndexFileKind]) -> WorkspaceProjectIndexFile | WorkspaceProjectIndexIssue:
+    def check_cancelled() -> None:
+        if stop is not None and stop.is_set():
+            raise ProjectIndexScanCancelled()
+
+    def read_file(entry: tuple[Path, ProjectIndexFileKind]) -> CachedProjectIndexFile | WorkspaceProjectIndexIssue:
         path, kind = entry
         relative = path.relative_to(root).as_posix()
         try:
-            snapshot = service.read_indexed_file(path, root=root, application_roots=application_roots)
+            check_cancelled()
+            cached = cached_files.get(relative)
+            if (cached is not None and relative not in dirty_paths
+                    and cached.file.size_bytes <= service._max_file_bytes
+                    and cached.version == _file_version(path.lstat())):
+                return cached
+            snapshot, metadata = service._read_indexed_file_snapshot(path, root=root, application_roots=application_roots)
+            check_cancelled()
         except HTTPException as exc:
             return WorkspaceProjectIndexIssue(path=relative, status_code=exc.status_code, message=str(exc.detail))
         except OSError as exc:
             status_code = 404 if isinstance(exc, FileNotFoundError) else 403 if isinstance(exc, PermissionError) else 500
             return WorkspaceProjectIndexIssue(path=relative, status_code=status_code, message=str(exc))
         else:
-            return WorkspaceProjectIndexFile(**snapshot.model_dump(), kind=kind)
+            return CachedProjectIndexFile(_file_version(metadata), WorkspaceProjectIndexFile(**snapshot.model_dump(), kind=kind))
 
-    # Keep one fixed I/O pool per request. Directory traversal has already
-    # pruned links; each worker still resolves and checks the real target before
-    # using the same bounded UTF-8/hash/fstat snapshot reader as /file.
+    # Bound submitted work as well as the I/O pool. Executor.map eagerly
+    # queued the complete tree, leaving thousands of reads after HTTP abort.
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="workspace-index") as readers:
-        entries = _project_files(root, include_dependencies=include_dependencies, application_roots=application_roots)
-        for result in readers.map(read_file, entries):
-            if isinstance(result, WorkspaceProjectIndexIssue):
-                issues.append(result)
-            else:
-                files.append(result)
+        entries = iter(_project_files(root, include_dependencies=include_dependencies,
+            application_roots=application_roots, check_cancelled=check_cancelled))
+        pending = set()
+        exhausted = False
+        try:
+            while pending or not exhausted:
+                check_cancelled()
+                while len(pending) < 8 and not exhausted:
+                    entry = next(entries, None)
+                    if entry is None:
+                        exhausted = True
+                    else:
+                        pending.add(readers.submit(read_file, entry))
+                if not pending:
+                    break
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    result = future.result()
+                    if isinstance(result, WorkspaceProjectIndexIssue):
+                        issues.append(result)
+                    else:
+                        files.append(result.file)
+                        if updated_files is not None:
+                            updated_files[result.file.path] = result
+        finally:
+            for future in pending:
+                future.cancel()
+            entries.close()
+    check_cancelled()
     files.sort(key=lambda file: file.path)
     issues.sort(key=lambda issue: issue.path)
     return WorkspaceProjectIndexResponse(workspace_root=str(root), files=files, complete=not issues, issues=issues)

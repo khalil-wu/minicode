@@ -136,13 +136,13 @@ def test_project_index_reports_failed_file_reads_without_claiming_complete_data(
 def test_project_index_marks_a_file_removed_during_read_as_missing_then_refreshes(tmp_path, monkeypatch):
     _write(tmp_path, "removed.ts", "export {}")
     service = WorkspaceService(lambda: tmp_path)
-    read_file = service.read_indexed_file
+    read_file = service._read_indexed_file_snapshot
 
     def remove_before_read(path, **kwargs):
         path.unlink()
         return read_file(path, **kwargs)
 
-    monkeypatch.setattr(service, "read_indexed_file", remove_before_read)
+    monkeypatch.setattr(service, "_read_indexed_file_snapshot", remove_before_read)
     first = service.project_index()
     assert first.complete is False
     assert [(issue.path, issue.status_code) for issue in first.issues] == [("removed.ts", 404)]

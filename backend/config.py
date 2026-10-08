@@ -628,8 +628,8 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
     return rules
 
 
-def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET) -> AppConfig:
-    """Load the effective application config and retain its provenance stack."""
+def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_credentials: bool = True) -> AppConfig:
+    """Load effective config; metadata consumers leave credentials at execution."""
     config_layer_stack = load_config_layer_stack(cwd=cwd)
     settings_data = config_layer_stack.effective_config()
     feature_flags = load_feature_flags(
@@ -641,7 +641,8 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET) -> AppConfig:
     # load_llm_settings raises only for contradictory provider configuration;
     # those errors must remain visible instead of being replaced with an empty
     # provider that silently changes the runtime boundary.
-    llm = load_llm_settings(settings_data)
+    llm = (load_llm_settings(settings_data) if resolve_credentials
+           else load_llm_settings(settings_data, resolve_credentials=False))
 
     permissions = permission_settings_from_config(settings_data)
 

@@ -101,6 +101,10 @@ export async function syncWorkspaceTypeScriptModels(resources: Monaco.Uri[]): Pr
     getConfigurationDiagnostics: () => Promise<Array<{ path: string; message: string }>>;
     updateExtraLibs: (extraLibs: IExtraLibs) => Promise<void>;
   }>;
+  // setExtraLibs schedules Monaco's automatic update for a later macrotask.
+  // Await this snapshot before asking already-running workers about it.
+  await Promise.all(workers.map((worker, index) => worker.updateExtraLibs(index === 0
+    ? typescriptServices.typescriptDefaults.getExtraLibs() : typescriptServices.javascriptDefaults.getExtraLibs())));
   return {
     configurationRequests: async () => [...new Set((await Promise.all(workers.map((worker) => worker.getConfigurationFileRequests()))).flat())],
     configurationDiagnostics: async () => [...new Map((await Promise.all(workers.map((worker) => worker.getConfigurationDiagnostics()))).flat().map((issue) => [`${issue.path}:${issue.message}`, issue])).values()],

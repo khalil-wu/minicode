@@ -315,6 +315,9 @@ class AppBootstrap:
                 logger.info("LSP manager stopped")
             except Exception as exc:
                 logger.debug("LSP manager stop error (harmless): %s", exc)
+            from backend.workspace.project_index_runtime import project_index_runtime
+
+            await project_index_runtime.shutdown()
             try:
                 from backend.lsp.editor import editor_language_servers
                 await editor_language_servers.shutdown()

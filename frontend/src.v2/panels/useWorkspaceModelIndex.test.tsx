@@ -59,6 +59,7 @@ describe("workspace index request lifecycle", () => {
     screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
     await waitFor(() => expect(screen.getAllByText("ready:1")).toHaveLength(2));
     expect(runtime.owners).toHaveLength(1);
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce();
     const owner = runtime.owners[0];
     rerender(<Pair second={false} />);
     expect(owner.dispose).not.toHaveBeenCalled();
@@ -75,6 +76,101 @@ describe("workspace index request lifecycle", () => {
     useAppStore.setState({ workingDirectory: "/project", fileChanges: [], editorTabs: [] });
   });
   afterEach(() => cleanup());
+
+  it("shares one pending request and coalesces a hundred file notifications into one current-source refresh", async () => {
+    let finishFirst!: (value: ReturnType<typeof snapshot>) => void;
+    let finishSecond!: (value: ReturnType<typeof snapshot>) => void;
+    vi.mocked(readWorkspaceProjectIndex)
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    render(<><Fixture /><Fixture /></>);
+    screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce());
+    const signal = vi.mocked(readWorkspaceProjectIndex).mock.calls[0][2]!;
+    act(() => {
+      for (let sequence = 1; sequence <= 100; sequence++) useAppStore.setState((state) => ({ fileChanges: [...state.fileChanges,
+        { path: `src/source${sequence}.ts`, event: "modified", timestamp: sequence, workspaceRoot: "/project", sequence }] }));
+    });
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce();
+    expect(signal.aborted).toBe(false);
+    await act(async () => finishFirst(snapshot()));
+    expect(screen.getAllByText("ready:1")).toHaveLength(2);
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", false, signal);
+    expect(runtime.owners[0].noteFileChanges.mock.calls.at(-1)![0]).toHaveLength(100);
+    await act(async () => finishSecond(snapshot()));
+    expect(screen.getAllByText("ready:1")).toHaveLength(2);
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2);
+    expect(runtime.owners[0].applySnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("merges refreshes from both consumers while retaining dependency refresh requested during a source read", async () => {
+    render(<><Fixture /><Fixture /></>);
+    screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
+    await waitFor(() => expect(screen.getAllByText("ready:1")).toHaveLength(2));
+    let finish!: (value: ReturnType<typeof snapshot>) => void;
+    vi.mocked(readWorkspaceProjectIndex).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    act(() => useAppStore.setState({ fileChanges: [{ path: "src/main.ts", event: "modified", timestamp: 1, workspaceRoot: "/project", sequence: 1 }] }));
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
+    const signal = vi.mocked(readWorkspaceProjectIndex).mock.calls[1][2]!;
+    screen.getAllByText("刷新").forEach((button) => { fireEvent.click(button); fireEvent.click(button); });
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2);
+    expect(signal.aborted).toBe(false);
+    await act(async () => finish(snapshot()));
+    expect(screen.getAllByText("ready:1")).toHaveLength(2);
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(3));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, signal);
+    await waitFor(() => expect(screen.getAllByText("ready:1")).toHaveLength(2));
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the latest real sequence per path while deletion and rename notifications outlive the global history", async () => {
+    let finish!: (value: ReturnType<typeof snapshot>) => void;
+    vi.mocked(readWorkspaceProjectIndex).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<Fixture />);
+    fireEvent.click(screen.getByText("初始化"));
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce());
+    act(() => {
+      useAppStore.getState().addFileChange({ path: "src/old.ts", event: "deleted", timestamp: 1 });
+      useAppStore.getState().addFileChange({ path: "src/new.ts", event: "moved", timestamp: 2 });
+      for (let timestamp = 3; timestamp <= 202; timestamp++) useAppStore.getState().addFileChange({ path: "src/main.ts", event: "modified", timestamp });
+    });
+    expect(useAppStore.getState().fileChanges).toHaveLength(100);
+    await act(async () => finish(snapshot()));
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
+    expect(runtime.owners[0].noteFileChanges.mock.calls.at(-1)![0]).toEqual([
+      expect.objectContaining({ path: "src/old.ts", event: "deleted", sequence: 1 }),
+      expect.objectContaining({ path: "src/new.ts", event: "moved", sequence: 2 }),
+      expect.objectContaining({ path: "src/main.ts", event: "modified", sequence: 202 }),
+    ]);
+    await screen.findByText("ready:1");
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a shared pending read alive when one consumer leaves and aborts it when the last owner leaves", async () => {
+    vi.mocked(readWorkspaceProjectIndex).mockImplementationOnce(() => new Promise(() => {}));
+    const Pair = ({ second = true }) => <><Fixture key="editor" />{second && <Fixture key="problems" />}</>;
+    const { rerender, unmount } = render(<Pair />);
+    screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
+    await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce());
+    const signal = vi.mocked(readWorkspaceProjectIndex).mock.calls[0][2]!;
+    rerender(<Pair second={false} />);
+    expect(signal.aborted).toBe(false);
+    expect(runtime.owners[0].dispose).not.toHaveBeenCalled();
+    unmount();
+    expect(signal.aborted).toBe(true);
+    expect(runtime.owners[0].dispose).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a failed source read to both consumers without automatically retrying it", async () => {
+    vi.mocked(readWorkspaceProjectIndex).mockRejectedValueOnce(new Error("Project scan failed"));
+    render(<><Fixture /><Fixture /></>);
+    screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
+    await waitFor(() => expect(screen.getAllByText("error:0")).toHaveLength(2));
+    expect(screen.getAllByText("/project: Project scan failed")).toHaveLength(2);
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledOnce();
+  });
 
   it("indexes dependencies once, refreshes source changes without rereading dependencies, and explicitly reloads on demand", async () => {
     render(<Fixture />);
@@ -138,13 +234,17 @@ describe("workspace index request lifecycle", () => {
     fireEvent.click(screen.getByText("初始化"));
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(1));
     const owner = runtime.owners[0];
+    const signal = vi.mocked(readWorkspaceProjectIndex).mock.calls[0][2]!;
+    act(() => useAppStore.setState({ fileChanges: [{ path: "src/main.ts", event: "modified", timestamp: 1, workspaceRoot: "/project", sequence: 1 }] }));
     act(() => useAppStore.setState({ workingDirectory: "/other", fileChanges: [] }));
     rerender(<Fixture root="/other" />);
+    expect(signal.aborted).toBe(true);
     fireEvent.click(screen.getByText("初始化"));
     await screen.findByText("ready:1");
     await act(async () => finish(snapshot()));
     expect(owner.dispose).toHaveBeenCalledOnce();
     expect(owner.applySnapshot).not.toHaveBeenCalled();
     expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/other", true, expect.any(AbortSignal));
+    expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2);
   });
 });

@@ -295,6 +295,12 @@ export class WorkspaceTypeScriptService implements TypeScriptWorkerRpc {
     })));
   }
   async updateExtraLibs(extraLibs: IExtraLibs): Promise<void> {
+    // Explicit index synchronization and Monaco's scheduled notification can
+    // deliver the same versioned snapshot. Keep its native compiler program.
+    const current = this.createData.extraLibs;
+    const names = Object.keys(extraLibs);
+    if (names.length === Object.keys(current).length && names.every((name) =>
+      current[name]?.version === extraLibs[name].version && current[name]?.content === extraLibs[name].content)) return;
     for (const project of [...this.projects.values(), ...this.viewProjects.values(), this.defaultProject]) project.worker?._languageService.dispose();
     this.createData = { ...this.createData, extraLibs };
     this.snapshot = new WorkspaceSnapshot(this.context, extraLibs);

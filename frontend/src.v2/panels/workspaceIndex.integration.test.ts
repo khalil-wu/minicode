@@ -6,6 +6,8 @@ import * as monaco from "monaco-editor/editor/editor.api.js";
 import { IBulkEditService, type BulkEditService } from "monaco-editor/editor/browser/services/bulkEditService.js";
 import { StandaloneServices } from "monaco-editor/editor/standalone/browser/standaloneServices.js";
 import { typescript as ts } from "monaco-editor/languages/features/typescript/lib/typescriptServices.js";
+import { typescriptDefaults } from "monaco-editor/languages/features/typescript/register.js";
+import { DefinitionAdapter, LibFiles, RenameAdapter } from "monaco-editor/languages/features/typescript/languageFeatures.js";
 import type { IExtraLibs } from "monaco-editor/languages/features/typescript/register.js";
 import type { WorkspaceProjectIndex, WorkspaceProjectIndexFile } from "../protocol/workspace";
 import { useAppStore } from "../stores";
@@ -42,7 +44,8 @@ const services: WorkspaceTypeScriptService[] = [];
 const subscriptions: Array<() => void> = [];
 const actualAdopt = useAppStore.getState().adoptEditorModelChanges;
 const uri = (path: string) => monaco.Uri.parse(editorModelUri(path, ROOT));
-const model = (path: string) => monaco.editor.getModel(uri(path))!;
+const model = (path: string) => monaco.editor.getModel(uri(path))
+  ?? monaco.editor.createModel(publication.extraLibs[uri(path).toString()].content, /\.[cm]?tsx?$/i.test(path) ? "typescript" : "javascript", uri(path));
 const tab = (path: string) => useAppStore.getState().editorTabs.find((entry) => entry.path === path)!;
 const metadata = () => JSON.parse(publication.extraLibs[WORKSPACE_TYPESCRIPT_METADATA_URI].content) as WorkspaceTypeScriptMetadata;
 
@@ -73,6 +76,7 @@ afterEach(async () => {
   clearEditorWorkspaceBufferCacheForTests();
   localStorage.clear();
   vi.restoreAllMocks();
+  typescriptDefaults.setExtraLibs([]);
 });
 
 function file(path: string, content: string, kind: WorkspaceProjectIndexFile["kind"] = "source"): WorkspaceProjectIndexFile {
@@ -96,6 +100,41 @@ function workerService(): WorkspaceTypeScriptService {
 }
 
 describe("workspace index, compiler and native editor integration", () => {
+  it("indexes hundreds of unopened sources while native navigation and Rename materialize only their targets", async () => {
+    const greet = file("src/greet.ts", 'export function greet(name: string) { return "Hello " + name; }\n');
+    const main = file("src/main.ts", 'import { greet } from "./greet";\nexport const result = greet("MiniCode");\n');
+    const others = Array.from({ length: 700 }, (_, index) => file(`src/unused${index}.ts`, `export const unused${index} = ${index};\n`));
+    useAppStore.getState().openEditorTab(main.path);
+    useAppStore.getState().markTabLoaded(main.path, main.content, null, main.content_hash, { sizeBytes: main.size_bytes });
+    const owner = new WorkspaceModelIndex(monaco, ROOT);
+    owners.push(owner);
+    await apply(owner, [greet, main, ...others]);
+    expect(monaco.editor.getModels().map((current) => current.uri.toString())).toEqual([uri(main.path).toString()]);
+    expect(owner.sourceCount()).toBe(702);
+    typescriptDefaults.setExtraLibs(Object.entries(publication.extraLibs).map(([filePath, entry]) => ({ filePath, content: entry.content })));
+    const service = workerService();
+    const nativeLibs = new LibFiles(async () => service as never);
+    const source = model(main.path);
+    const position = source.getPositionAt(main.content.indexOf('greet("') + 2);
+    const token = new monaco.CancellationTokenSource();
+    const definitions = await new DefinitionAdapter(nativeLibs, async () => service as never).provideDefinition(source, position, token.token);
+    expect(definitions?.map((entry) => entry.uri.toString())).toContain(uri(greet.path).toString());
+    expect(monaco.editor.getModels()).toHaveLength(2);
+    const edits = await new RenameAdapter(nativeLibs, async () => service as never).provideRenameEdits(source, position, "hello", token.token);
+    const bulk = StandaloneServices.get<BulkEditService>(IBulkEditService);
+    expect(await bulk.apply(edits!, { label: "Rename greet" })).toMatchObject({ isApplied: true });
+    await Promise.resolve();
+    expect(monaco.editor.getModels()).toHaveLength(2);
+    expect(model(greet.path).getValue()).toContain("function hello(");
+    expect(source.getValue()).toContain('hello("MiniCode")');
+    expect(useAppStore.getState().editorTabs).toHaveLength(2);
+    await source.undo();
+    await Promise.resolve();
+    expect(source.getValue()).toBe(main.content);
+    expect(model(greet.path).getValue()).toBe(greet.content);
+    token.dispose();
+  });
+
   it("navigates and renames hidden sources, preserves multi-file undo, and observes subsequent disk refresh and deletion", async () => {
     const greet = file("src/greet.ts", 'export function greet(name: string) { return "Hello " + name; }\n');
     const main = file("src/main.ts", [
