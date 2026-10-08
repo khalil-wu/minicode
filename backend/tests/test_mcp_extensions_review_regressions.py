@@ -353,7 +353,8 @@ def test_registration_owner_is_internal_not_provider_config(tmp_path):
     asyncio.run(run())
 
 
-def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path, monkeypatch):
+@pytest.mark.parametrize("listener_only_wait", [False, True])
+def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path, monkeypatch, listener_only_wait):
     import backend.mcp.client as client_module
     from backend.mcp.client import MCPClient, MCPTransport
     from backend.mcp.manager import MCPServerConfig, MCPServerManager, MCPServerState, ServerStatus
@@ -361,6 +362,12 @@ def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path,
 
     async def run():
         callback = await create_loopback_callback(interactive=False, server_url="http://127.0.0.1:12345/mcp")
+        if listener_only_wait:
+            async def listener_closed():
+                # Python 3.11's listener close does not await accepted peers.
+                return None
+
+            monkeypatch.setattr(callback.server, "wait_closed", listener_closed)
         close_entered = asyncio.Event()
         close = callback.close
 
@@ -412,14 +419,16 @@ def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path,
         try:
             await client.connect()
             reader, writer = await asyncio.open_connection("127.0.0.1", callback.server.sockets[0].getsockname()[1])
-            await asyncio.sleep(0.01)
+            async with asyncio.timeout(2):
+                while callback.active_connections != 1:
+                    await asyncio.sleep(0)
             transport_closed[0].set()
             await asyncio.wait_for(close_entered.wait(), 2)
             stop = asyncio.create_task(manager.stop_server("lifecycle"))
             await asyncio.sleep(0.03)
             assert not stop.done()
             assert state.client is client
-            assert callback.server._active_count == 1
+            assert callback.active_connections == 1
             assert not client._lifecycle_task.done()
             assert replacement_attempts == []
             writer.write(("GET " + callback.callback_path + "?code=bounded&state=bounded HTTP/1.1\r\nHost: localhost\r\n\r\n").encode())
@@ -431,7 +440,7 @@ def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path,
             assert await asyncio.wait_for(stop, 2)
             assert state.status == ServerStatus.OFFLINE
             assert state.client is None
-            assert callback.server._active_count == 0
+            assert callback.active_connections == 0
             assert client._lifecycle_task is None
         finally:
             if writer is not None:
@@ -443,6 +452,53 @@ def test_disconnect_stop_waits_for_real_oauth_peer_and_keeps_old_owner(tmp_path,
                 await asyncio.gather(stop, return_exceptions=True)
             if client._lifecycle_task is not None:
                 await asyncio.gather(client._lifecycle_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_oauth_close_owns_real_peer_queued_before_connection_made(monkeypatch):
+    from backend.mcp.oauth import create_loopback_callback
+
+    async def run():
+        callback = await create_loopback_callback(interactive=False)
+        port = callback.server.sockets[0].getsockname()[1]
+        connection_made = asyncio.StreamReaderProtocol.connection_made
+        closing = None
+
+        async def listener_closed():
+            return None
+
+        def queued_connection_made(protocol, transport):
+            nonlocal closing
+            if transport.get_extra_info("sockname")[1] == port:
+                # Put close before the real accepted callback in the ready
+                # queue, after asyncio has attached its transport to server.
+                closing = asyncio.create_task(callback.close())
+                asyncio.get_running_loop().call_soon(connection_made, protocol, transport)
+            else:
+                connection_made(protocol, transport)
+
+        monkeypatch.setattr(callback.server, "wait_closed", listener_closed)
+        monkeypatch.setattr(asyncio.StreamReaderProtocol, "connection_made", queued_connection_made)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            async with asyncio.timeout(2):
+                while callback.active_connections != 1:
+                    await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            closed_before_peer_settled = closing.done()
+            writer.write(("GET " + callback.callback_path + "?code=queued&state=owned HTTP/1.1\r\nHost: localhost\r\n\r\n").encode())
+            await writer.drain()
+            reply = await asyncio.wait_for(reader.read(), 2)
+            await asyncio.wait_for(closing, 2)
+            assert not closed_before_peer_settled
+            assert b"200 OK" in reply
+            assert callback.future.result() == ("queued", "owned")
+            assert callback.active_connections == 0
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await callback.close()
 
     asyncio.run(run())
 

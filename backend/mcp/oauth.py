@@ -401,11 +401,13 @@ class LoopbackOAuthCallback:
         *,
         interactive: bool,
         callback_path: str,
+        handler_tasks: set[asyncio.Task[None]],
     ) -> None:
         self.server = server
         self.future = future
         self.interactive = interactive
         self.callback_path = callback_path
+        self._handler_tasks = handler_tasks
         socket = server.sockets[0]
         self.redirect_uri = f"http://127.0.0.1:{socket.getsockname()[1]}{callback_path}"
 
@@ -426,9 +428,21 @@ class LoopbackOAuthCallback:
 
     async def close(self) -> None:
         self.server.close()
+        # Accepted transports queue connection_made with call_soon. Dispatch
+        # those callbacks before taking ownership of their handler tasks.
+        await asyncio.sleep(0)
         await self.server.wait_closed()
+        # Server.wait_closed only closes the listener on Python 3.11. Own the
+        # accepted callbacks explicitly until their stream/finally has settled.
+        peers = set(self._handler_tasks)
+        if peers:
+            await asyncio.gather(*peers)
         if not self.future.done():
             self.future.cancel()
+
+    @property
+    def active_connections(self) -> int:
+        return len(self._handler_tasks)
 
 
 async def create_loopback_callback(
@@ -460,6 +474,7 @@ async def create_loopback_callback(
 
     loop = asyncio.get_running_loop()
     result: asyncio.Future[tuple[str, str | None]] = loop.create_future()
+    handler_tasks: set[asyncio.Task[None]] = set()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -506,12 +521,18 @@ async def create_loopback_callback(
             writer.close()
             await writer.wait_closed()
 
-    server = await asyncio.start_server(handle, "127.0.0.1", int(port or 0))
+    def own_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.create_task(handle(reader, writer))
+        handler_tasks.add(task)
+        task.add_done_callback(handler_tasks.discard)
+
+    server = await asyncio.start_server(own_connection, "127.0.0.1", int(port or 0))
     return LoopbackOAuthCallback(
         server,
         result,
         interactive=interactive,
         callback_path=callback_path,
+        handler_tasks=handler_tasks,
     )
 
 

@@ -5,7 +5,6 @@ import importlib.util
 import json
 from pathlib import Path
 import re
-import zipfile
 
 import pytest
 
@@ -19,15 +18,11 @@ spec.loader.exec_module(patcher)
 
 @pytest.fixture(scope="module")
 def patched():
-    # Use the cached pinned archive, not a report, scanner result or dirty generated source.
-    archive = ROOT / ".tmp" / f"codex-rust-v{patcher.UPSTREAM_VERSION}.zip"
+    # These unchanged pinned sources are tracked, so a clean offline checkout
+    # exercises the same real anchors as the production patcher.
+    fixture = ROOT / "tests/fixtures" / f"codex-windows-sandbox-v{patcher.UPSTREAM_VERSION}" / "src"
     source = Path("fixture/codex-rs/windows-sandbox-rs/src")
-    prefix = f"codex-rust-v{patcher.UPSTREAM_VERSION}/codex-rs/windows-sandbox-rs/src/"
-    with zipfile.ZipFile(archive) as bundle:
-        texts = {
-            source / name.removeprefix(prefix): bundle.read(name).decode("utf-8")
-            for name in bundle.namelist() if name.startswith(prefix) and name.endswith(".rs")
-        }
+    texts = {source / path.relative_to(fixture): path.read_text(encoding="utf-8") for path in fixture.rglob("*.rs")}
     assert source / "setup.rs" in texts
     for path, original in list(texts.items()):
         text = original

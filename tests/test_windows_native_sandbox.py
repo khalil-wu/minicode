@@ -267,6 +267,9 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch, s
 
 
 def test_runner_prefers_native_wfp_when_runtime_is_ready(tmp_path, monkeypatch):
+    import backend.sandbox.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "sys", SimpleNamespace(platform="win32"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / ".git").mkdir()
@@ -394,8 +397,11 @@ def test_prepare_grants_only_exact_queried_owner_group(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "_runtime_path", lambda _: runtime)
     monkeypatch.setattr(prepare, "_identity", lambda *_: owner)
     monkeypatch.setattr(prepare, "_status", lambda *_: {"ready": True})
-    monkeypatch.setattr(prepare.sys, "executable", str(Path.home() / "minicode-test-python/python.exe"))
-    monkeypatch.setattr(prepare.sys, "argv", ["prepare", "--target-home", str(home)])
+    monkeypatch.setattr(prepare, "sys", SimpleNamespace(
+        platform="win32",
+        executable=str(Path.home() / "minicode-test-python/python.exe"),
+    ))
+    monkeypatch.setattr("sys.argv", ["prepare", "--target-home", str(home)])
     monkeypatch.setattr(prepare.subprocess, "run", lambda argv, **_: calls.append(argv))
     assert prepare.main() == 0
     assert calls[0] == [str(runtime), "sandbox", "setup", "--elevated", "--current-user", "--codex-home", str(home)]

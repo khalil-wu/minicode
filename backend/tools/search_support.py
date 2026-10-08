@@ -97,6 +97,10 @@ _IGNORED_PATH_PARTS = {"__pycache__", "node_modules", ".git"}
 
 _GREP_OUTPUT_MODES = {"content", "files_with_matches", "count"}
 
+# Declare this supported native type rather than depending on the installed
+# rg release's built-in type registry. Keep rg's ignore/type intersection.
+_NATIVE_GREP_TYPES: dict[str, tuple[str, ...]] = {"vue": ("*.vue",)}
+
 _GREP_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "py": (".py",),
     "python": (".py",),
@@ -907,6 +911,8 @@ async def _grep_with_ripgrep(
             file_filters.extend(["--type-add", f"minicodeextensions:*{extension}"])
         file_filters.extend(["--type", "minicodeextensions"])
     elif file_type:
+        for type_glob in _NATIVE_GREP_TYPES.get(file_type.casefold(), ()):
+            file_filters.extend(["--type-add", f"{file_type}:{type_glob}"])
         file_filters.extend(["--type", file_type])
     cmd.extend(file_filters)
 

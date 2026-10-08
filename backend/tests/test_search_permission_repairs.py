@@ -120,9 +120,26 @@ def test_authorized_ripgrep_keeps_native_types_and_ignore_rules(tmp_path: Path, 
         file.write_text("NEEDLE\n", encoding="utf-8")
     (tmp_path / ".gitignore").write_text("ignored.vue\nignored/\n", encoding="utf-8")
     owner = context(tmp_path, deny=[])
+    spawn = search_support.spawn_exec
+    native_type_calls = []
+
+    async def tracked_spawn(*args, **kwargs):
+        if "--type" in args:
+            native_type_calls.append(args)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(search_support, "spawn_exec", tracked_spawn)
     default = asyncio.run(search_tools.GrepFilesTool().execute({"pattern": "NEEDLE", "type": "vue"}, owner))
     explicit = asyncio.run(search_tools.GrepFilesTool().execute({"pattern": "NEEDLE", "glob": "*.vue"}, owner))
     assert not default.is_error and not explicit.is_error
+    assert len(native_type_calls) == 2
+    assert "--files" in native_type_calls[0] and "--files" not in native_type_calls[1]
+    for command in native_type_calls:
+        declaration = command.index("--type-add")
+        selection = command.index("--type")
+        assert command[declaration + 1] == "vue:*.vue"
+        assert declaration < selection and command[selection + 1] == "vue"
+    assert native_type_calls[1][native_type_calls[1].index("--") - 1] == "NEEDLE"
     assert "visible.vue" in default.content and "ignored.vue" not in default.content
     assert "other.txt" not in default.content and "hidden.vue" not in default.content
     assert "ignored.vue" in explicit.content and "hidden.vue" not in explicit.content
