@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import httpx
+import pytest
 
 from backend.main import app
 
@@ -9,6 +10,20 @@ def test_llm_check_reports_missing_custom_key_without_preset_success(monkeypatch
     monkeypatch.delenv("CUSTOM_ALLOW_OPENAI_KEY_FALLBACK", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://lucen.cc/v1")
+    probes = []
+
+    async def models(base_url, api_key, **_kwargs):
+        probes.append(("models", base_url, api_key))
+        request = httpx.Request("GET", f"{base_url}/models")
+        response = httpx.Response(401, request=request, text="Authentication Required")
+        raise httpx.HTTPStatusError("authentication rejected", request=request, response=response)
+
+    async def generation(base_url, api_key, *_args, **_kwargs):
+        probes.append(("generation", base_url, api_key))
+        raise httpx.ConnectError("generation connection failed", request=httpx.Request("POST", f"{base_url}/chat/completions"))
+
+    monkeypatch.setattr("backend.api.routes_llm._fetch_openai_compatible_models", models)
+    monkeypatch.setattr("backend.api.routes_llm._check_openai_compatible_generation", generation)
 
     with TestClient(app) as client:
         response = client.post(
@@ -33,6 +48,52 @@ def test_llm_check_reports_missing_custom_key_without_preset_success(monkeypatch
     assert payload["failure_kind"] == "authentication_failed"
     assert payload["status_code"] == 401
     assert "Authentication" in payload["message"]
+    assert payload["model_discovery_status_code"] == 401
+    assert payload["generation_failure_kind"] == "network_error"
+    assert payload["generation_status_code"] is None
+    assert probes == [("models", "https://api.deepseek.com/v1", ""), ("generation", "https://api.deepseek.com/v1", "")]
+
+
+@pytest.mark.parametrize("discovery_status", [401, 403])
+@pytest.mark.parametrize("generation_result", ["network", "http_failure", "success"])
+def test_connection_check_preserves_both_probe_results_and_real_http_evidence(monkeypatch, discovery_status, generation_result):
+    async def models(base_url, _api_key, **_kwargs):
+        request = httpx.Request("GET", f"{base_url}/models")
+        response = httpx.Response(discovery_status, request=request, text="Authentication Required")
+        raise httpx.HTTPStatusError("model-list authentication rejected", request=request, response=response)
+
+    async def generation(base_url, _api_key, *_args, **_kwargs):
+        request = httpx.Request("POST", f"{base_url}/chat/completions")
+        if generation_result == "network":
+            raise httpx.ConnectError("generation connection failed", request=request)
+        if generation_result == "http_failure":
+            response = httpx.Response(404, request=request, text="Generation endpoint not found")
+            raise httpx.HTTPStatusError("generation route rejected", request=request, response=response)
+
+    monkeypatch.setattr("backend.api.routes_llm._fetch_openai_compatible_models", models)
+    monkeypatch.setattr("backend.api.routes_llm._check_openai_compatible_generation", generation)
+    with TestClient(app) as client:
+        response = client.post("/api/llm/check", json={"provider": "custom", "custom": {
+            "base_url": "https://diagnostic.invalid/v1", "model": "selected-model", "wire_api": "chat",
+        }})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model_discovery_ok"] is False
+    assert payload["model_discovery_status_code"] == discovery_status
+    assert payload["model_discovery_failure_kind"] == "authentication_failed"
+    if generation_result == "success":
+        assert payload["ok"] is True and payload["generation_ok"] is True
+        assert payload["failure_kind"] == "" and payload["generation_failure_kind"] == ""
+    elif generation_result == "http_failure":
+        assert payload["ok"] is False and payload["generation_ok"] is False
+        assert payload["status_code"] == payload["generation_status_code"] == 404
+        assert payload["failure_kind"] == payload["generation_failure_kind"] == "model_or_endpoint_not_found"
+    else:
+        assert payload["ok"] is False and payload["generation_ok"] is False
+        assert payload["status_code"] == discovery_status
+        assert payload["failure_kind"] == "authentication_failed"
+        assert payload["generation_status_code"] is None
+        assert payload["generation_failure_kind"] == "network_error"
 
 
 def test_llm_check_validates_selected_openai_compatible_model_generation(monkeypatch) -> None:

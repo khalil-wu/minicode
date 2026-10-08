@@ -22,6 +22,23 @@ vi.mock("../protocol/workspace", () => ({ compareWriteWorkspaceFile: seams.write
 vi.mock("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/editor/editor.api.js", () => ({}));
 vi.mock("@monaco-editor/react", () => ({ default: () => <div>Editor</div>, loader: { config: vi.fn() } }));
+// These ownership tests replace the editor surface. Keep its native language
+// bootstrap at that same boundary; native registrations have their own suite.
+vi.mock("./monacoLanguageServices", async (original) => ({
+  ...await original<typeof import("./monacoLanguageServices")>(),
+  configureMiniCodeMonacoWorkers: vi.fn(),
+  loadMiniCodeLanguageServices: vi.fn(async () => {}),
+  registerMiniCodeEditorOpener: vi.fn(() => ({ dispose: vi.fn() })),
+}));
+vi.mock("monaco-editor/languages/definitions/typescript/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/javascript/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/css/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/scss/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/less/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/html/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/markdown/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/python/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/yaml/register.js", () => ({}));
 
 const patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
 const original = useAppStore.getState();

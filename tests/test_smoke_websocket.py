@@ -60,10 +60,10 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
     raise AssertionError("did not receive a non task.update/file.changed websocket event in time")
 
 
-def _receive_next_type(ws, event_type: str, *, max_attempts: int = 20) -> dict[str, object]:
+def _receive_next_type(ws, event_type: str, *, max_attempts: int = 20, **fields: object) -> dict[str, object]:
     for _ in range(max_attempts):
         payload = _receive_next_non_task_update(ws)
-        if payload.get("type") == event_type:
+        if payload.get("type") == event_type and all(payload.get(key) == value for key, value in fields.items()):
             return payload
     raise AssertionError(f"did not receive websocket event type {event_type!r} in time")
 
@@ -372,41 +372,46 @@ def test_websocket_conversation_goal_command_round_trip() -> None:
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_goal_command") as ws:
             _assert_startup_events(ws)
-            _create_active_conversation(ws, title="Goal command smoke")
+            conversation_id = _create_active_conversation(ws, title="Goal command smoke")["active_conversation_id"]
 
             ws.send_json({
                 "type": "conversation.goal.set",
+                "conversation_id": conversation_id,
+                "client_command_id": "goal-round-trip-start",
                 "text": "对标 Codex 桌面端",
             })
 
-            updated = _receive_next_non_task_update(ws)
-            assert updated["type"] == "goal.updated"
+            updated = _receive_next_type(ws, "goal.updated", conversation_id=conversation_id,
+                client_command_id="goal-round-trip-start")
             assert updated["goal"]["text"] == "对标 Codex 桌面端"
             assert updated["goal"]["status"] == "active"
 
-            listing = _receive_next_non_task_update(ws)
-            assert listing["type"] == "conversation.list"
+            listing = _receive_next_type(ws, "conversation.list", conversation_id=conversation_id,
+                client_command_id="goal-round-trip-start")
             assert listing["active_conversation"]["goal"]["text"] == "对标 Codex 桌面端"
 
-            result = _receive_next_non_task_update(ws)
-            assert result["type"] == "command.result"
+            result = _receive_next_type(ws, "command.result", conversation_id=conversation_id,
+                client_command_id="goal-round-trip-start")
             assert result["command"] == "goal"
 
-            conversation_id = listing["active_conversation_id"]
             ws.send_json({
                 "type": "conversation.goal.set",
                 "conversation_id": conversation_id,
                 "action": "pause",
+                "client_command_id": "goal-round-trip-pause",
             })
-            paused = _receive_next_type(ws, "goal.updated")
+            paused = _receive_next_type(ws, "goal.updated", conversation_id=conversation_id,
+                client_command_id="goal-round-trip-pause")
             assert paused["goal"]["status"] == "paused"
 
             ws.send_json({
                 "type": "conversation.goal.set",
                 "conversation_id": conversation_id,
                 "action": "clear",
+                "client_command_id": "goal-round-trip-clear",
             })
-            cleared = _receive_next_type(ws, "goal.updated")
+            cleared = _receive_next_type(ws, "goal.updated", conversation_id=conversation_id,
+                client_command_id="goal-round-trip-clear")
             assert cleared["goal"] == {}
 
 

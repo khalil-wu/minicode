@@ -81,6 +81,23 @@ async def test_python_search_cancel_keeps_actual_file_reader_owned(tmp_path, mon
 async def test_native_search_selection_and_sort_are_owned_workers(tmp_path, monkeypatch, phase):
     (tmp_path / "source.py").write_text("NEEDLE\n", encoding="utf-8")
     monkeypatch.setattr(search_tools, "_HAS_RIPGREP", True)
+
+    # These cases prove ownership of the real Python selection/sort workers;
+    # the native process result is their input, not a runner prerequisite.
+    async def spawn(*args, **kwargs):
+        assert args[0] == "rg" and kwargs["cwd"] == str(tmp_path)
+        return SimpleNamespace(args=args, returncode=0)
+
+    async def communicate(proc, **_kwargs):
+        filename = str(tmp_path / "source.py")
+        if "--files" in proc.args:
+            return (filename + "\0").encode(), b""
+        if "--files-with-matches" in proc.args:
+            return (filename + "\n").encode(), b""
+        return (filename + ":1:NEEDLE\n").encode(), b""
+
+    monkeypatch.setattr(search_support, "spawn_exec", spawn)
+    monkeypatch.setattr(search_support, "communicate_bounded", communicate)
     loop = asyncio.get_running_loop()
     entered, release, finished = asyncio.Event(), threading.Event(), threading.Event()
     if phase == "grep_candidates":

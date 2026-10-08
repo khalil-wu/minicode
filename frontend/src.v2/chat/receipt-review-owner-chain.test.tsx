@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ToolCallEvent, ToolResultEvent } from "../protocol/events";
@@ -23,11 +21,12 @@ import { ToolCallCard } from "./tool-calls/ToolCallCard";
 import { InlineDiff } from "./diff/InlineDiff";
 import { useWorkspaceGit } from "../hooks/useWorkspaceGit";
 import { fetchWorkspaceGitWorktree } from "../protocol/workspace";
+import receiptCapture from "./fixtures/tool-cleanup-pending.json";
 
 vi.mock("../protocol/workspace", async (original) => ({ ...await original<typeof import("../protocol/workspace")>(), fetchWorkspaceGitWorktree: vi.fn() }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
-const capture = JSON.parse(readFileSync(resolve(process.cwd(), "../.tmp/full-chain-audit-20261002/parallel-receipt-review-chain-20261004/receipt-capture.json"), "utf8")) as {
+const capture = receiptCapture as {
   call: ToolCallEvent; result: ToolResultEvent; restored: ToolCallRecord;
 };
 const initial = useAppStore.getState();

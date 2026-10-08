@@ -57,18 +57,26 @@ def test_indexed_page_combines_current_partial_projection_and_metadata(tmp_path)
     assert view["revision"] > partial.revision
 
 
-def test_indexed_read_uses_existing_generation_recovery_for_a_damaged_transcript(tmp_path):
+@pytest.mark.parametrize("warm_inventory", [False, True])
+def test_indexed_read_uses_existing_generation_recovery_for_a_damaged_transcript(tmp_path, warm_inventory):
     repo = ConversationRepository(tmp_path)
     original = repo.create_conversation(transcript=history(120), context_snapshot={"history": history(120)})
     changed = repo.append_transcript_message(original.id, {"id": "new", "role": "user", "content": "new"})
     repo.transcript_path(original.id).write_text("broken JSON\n", encoding="utf-8")
     reader = ConversationRepository(tmp_path)
+    if warm_inventory:
+        assert reader.list_conversations()[0].revision == changed.revision
     view = reader.get_conversation_view(original.id)
     assert view["transcript"][-1]["id"] == "m-119"
     assert view["revision"] == original.revision < changed.revision
     assert reader.get_conversation_summary(original.id).revision == original.revision
+    assert reader.list_conversations()[0].revision == original.revision
     with pytest.raises(ValueError, match="anchor"):
         reader.get_conversation_view(original.id, before_message_id="missing")
+    repaired = ConversationRepository(tmp_path).append_transcript_message(original.id, {"id": "repaired", "role": "user", "content": "repaired"})
+    assert repaired.revision > changed.revision
+    assert reader.get_conversation_summary(original.id).revision == repaired.revision
+    assert reader.list_conversations()[0].revision == repaired.revision
 
 
 def test_snapshot_delta_serializes_only_changed_messages_and_survives_rewrite(tmp_path, monkeypatch):

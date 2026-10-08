@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const path = require("node:path");
 const { PassThrough } = require("node:stream");
 
 const backendSidecar = require("./backend-sidecar");
@@ -104,13 +105,18 @@ test("stale child exit and error events do not clear the current owner", () => {
 test("backend receives the packaged resources directory separately from user folders", () => {
   const child = createChild(151);
   let spawnOptions;
+  const resourcesDirectory = path.resolve("Program Files", "MiniCode", "resources");
+  const pythonDirectory = path.join(resourcesDirectory, "python-runtime");
+  const githubDirectory = path.join(resourcesDirectory, "github-runtime", "bin");
+  const languageServicesDirectory = path.join(resourcesDirectory, "language-services");
+  const desktopDirectory = path.resolve("Users", "alice", "Desktop");
   initialize({
     config: {
-      pythonCommand: "C:\\Program Files\\MiniCode\\resources\\python-runtime\\python.exe",
-      githubCliCommand: "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
-      appResourcesDir: "C:\\Program Files\\MiniCode\\resources",
-      editorLanguageServicesDir: "C:\\Program Files\\MiniCode\\resources\\language-services",
-      desktopDir: "C:\\Users\\alice\\Desktop",
+      pythonCommand: path.join(pythonDirectory, process.platform === "win32" ? "python.exe" : "python3"),
+      githubCliCommand: path.join(githubDirectory, process.platform === "win32" ? "gh.exe" : "gh"),
+      appResourcesDir: resourcesDirectory,
+      editorLanguageServicesDir: languageServicesDirectory,
+      desktopDir: desktopDirectory,
     },
     spawnProcess: (_command, _args, options) => {
       spawnOptions = options;
@@ -122,31 +128,30 @@ test("backend receives the packaged resources directory separately from user fol
 
   assert.equal(
     spawnOptions.env.MINICODE_APP_RESOURCES_DIR,
-    "C:\\Program Files\\MiniCode\\resources",
+    resourcesDirectory,
   );
-  assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, "C:\\Users\\alice\\Desktop");
-  assert.equal(spawnOptions.env.MINICODE_EDITOR_LANGUAGE_SERVICES_DIR, "C:\\Program Files\\MiniCode\\resources\\language-services");
+  assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, desktopDirectory);
+  assert.equal(spawnOptions.env.MINICODE_EDITOR_LANGUAGE_SERVICES_DIR, languageServicesDirectory);
   assert.equal(
     spawnOptions.env.MINICODE_GH_COMMAND,
-    "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
+    path.join(githubDirectory, process.platform === "win32" ? "gh.exe" : "gh"),
   );
   const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
   assert.equal(
-    spawnOptions.env[pathKey].split(require("node:path").delimiter)[0],
-    "C:\\Program Files\\MiniCode\\resources\\python-runtime",
+    spawnOptions.env[pathKey].split(path.delimiter)[0],
+    pythonDirectory,
   );
   assert.equal(
-    spawnOptions.env[pathKey].split(require("node:path").delimiter)[1],
-    "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin",
+    spawnOptions.env[pathKey].split(path.delimiter)[1],
+    githubDirectory,
   );
   releaseChild(child);
 });
 
 test("source desktop makes its prepared GitHub runtime available to the backend and shell tools", () => {
-  const path = require("node:path");
   const child = createChild(152);
   const sourceRoot = path.resolve(__dirname, "..");
-  const githubCliCommand = path.join(sourceRoot, "desktop", "github-runtime", "bin", "gh.exe");
+  const githubCliCommand = path.join(sourceRoot, "desktop", "github-runtime", "bin", process.platform === "win32" ? "gh.exe" : "gh");
   let spawnOptions;
   initialize({
     config: { githubCliCommand, appResourcesDir: sourceRoot, editorLanguageServicesDir: path.join(__dirname, "language-services") },
@@ -164,6 +169,28 @@ test("source desktop makes its prepared GitHub runtime available to the backend 
   const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
   assert.equal(spawnOptions.env[pathKey].split(path.delimiter)[0], path.dirname(githubCliCommand));
   releaseChild(child);
+});
+
+test("PATH-resolved commands keep the inherited search path without inventing runtime directories", () => {
+  const child = createChild(153);
+  const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "PATH";
+  const previousPath = process.env[pathKey];
+  const inheritedPath = [path.resolve("system-bin"), path.resolve("user-bin")].join(path.delimiter);
+  let spawnOptions;
+  process.env[pathKey] = inheritedPath;
+  try {
+    initialize({
+      config: { pythonCommand: "python3", githubCliCommand: "gh" },
+      spawnProcess: (_command, _args, options) => { spawnOptions = options; return child; },
+    });
+    backendSidecar.startBackendSidecar();
+    assert.equal(spawnOptions.env[pathKey], inheritedPath);
+    assert.equal(spawnOptions.env.MINICODE_GH_COMMAND, "gh");
+  } finally {
+    if (previousPath === undefined) delete process.env[pathKey];
+    else process.env[pathKey] = previousPath;
+    releaseChild(child);
+  }
 });
 
 test("concurrent managed launches resolve runtime and spawn only once", async () => {

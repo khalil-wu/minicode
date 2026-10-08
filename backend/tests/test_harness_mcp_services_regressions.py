@@ -489,7 +489,7 @@ async def test_slash_archive_does_not_announce_success_after_real_handler_refuse
     outcomes = []
     async def emit(command, message, **kwargs): outcomes.append((command, message, kwargs))
     ws = SimpleNamespace(active_conversation_id="conv", ws_manager=None, cleanup_tasks=set(), command_registry=CommandRegistry(), emit_command_result=emit,
-                         conversation_repo=SimpleNamespace(get_conversation=lambda _: SimpleNamespace(id="conv")))
+                         conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: SimpleNamespace(id="conv")))
     ws.command_registry.register("conversation.archive", lambda payload: conversation_handlers.handle_conversation_archive(ws, payload))
     monkeypatch.setattr(scheduler_module, "get_global_scheduler", lambda: SimpleNamespace(pause_for_conversation=AsyncMock(return_value=0)))
     monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", AsyncMock(return_value=False))

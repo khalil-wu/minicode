@@ -1,0 +1,132 @@
+{
+  "_fixture": {
+    "source": "Public tool-call, terminal result, and restored tool record captured on 2026-10-04.",
+    "sanitization": "Local workspace replaced with C:/receipt-owner; unrelated command-boundary capture omitted."
+  },
+  "call": {
+    "type": "tool_call",
+    "id": "actual-call",
+    "name": "grep_files",
+    "args": {
+      "pattern": "NEEDLE"
+    },
+    "turn_id": "actual-run",
+    "iteration_id": "iter:1",
+    "step_id": "actual-call"
+  },
+  "result": {
+    "type": "tool_result",
+    "id": "actual-call",
+    "summary": "Tool 'grep_files' execution failed (SubprocessTimeoutError: recorded OS search timeout).",
+    "is_error": true,
+    "status": "failed",
+    "duration_ms": 14,
+    "display_summary": "Failed: Search",
+    "result_kind": "file",
+    "activity_kind": "workspaceSearch",
+    "visibility": "timeline",
+    "group_id": "iter:1",
+    "step_id": "actual-call",
+    "error_info": {
+      "error_kind": "execution_error",
+      "user_summary": "工具执行失败。",
+      "developer_detail": "recorded OS search timeout",
+      "recoverable": true,
+      "projection": "error",
+      "model_observation": "The tool execution failed. Check the arguments or try another approach."
+    },
+    "error_kind": "execution_error",
+    "user_summary": "工具执行失败。",
+    "developer_detail": "recorded OS search timeout",
+    "recoverable": true,
+    "projection": "error",
+    "turn_id": "actual-run",
+    "iteration_id": "iter:1",
+    "phase": "tool",
+    "side_effect_kind": "none",
+    "idempotent": true,
+    "idempotency_key": "grep_files:ece47ee538add4b2d00089526118324f322209d48751360e5ef656fbed146025",
+    "cleanup_receipt": {
+      "resource_kind": "tool",
+      "resource_id": "actual-call",
+      "reason": "subprocess_tree_survived_kill:pid=4242",
+      "requested": true,
+      "acknowledged": true,
+      "completed": false,
+      "pending": 1,
+      "manual_recovery_required": true,
+      "retry_safe": false,
+      "resource_cleanup": {
+        "resource_kind": "process",
+        "resource_id": "4242",
+        "reason": "subprocess_tree_survived_kill:pid=4242",
+        "requested": true,
+        "acknowledged": true,
+        "completed": false,
+        "pending": 1,
+        "manual_recovery_required": true,
+        "conversation_id": "receipt-owner",
+        "workspace_root": "C:/receipt-owner"
+      }
+    },
+    "request_digest": "f240c506d869338d321e85c142877f56ff4ca33f33d98ae6a2f90b0024be30ff",
+    "completed_at_ms": 1791091614234
+  },
+  "restored": {
+    "id": "actual-call",
+    "name": "grep_files",
+    "status": "failed",
+    "summary": "Tool 'grep_files' execution failed (SubprocessTimeoutError: recorded OS search timeout).",
+    "displaySummary": "Failed: Search",
+    "resultKind": "file",
+    "activityKind": "workspaceSearch",
+    "visibility": "timeline",
+    "errorKind": "execution_error",
+    "userSummary": "工具执行失败。",
+    "developerDetail": "recorded OS search timeout",
+    "projection": "error",
+    "groupId": "iter:1",
+    "stepId": "actual-call",
+    "turnId": "actual-run",
+    "iterationId": "iter:1",
+    "phase": "tool",
+    "args": {
+      "pattern": "NEEDLE"
+    },
+    "durationMs": 14,
+    "startedAt": 1800000000000,
+    "finishedAt": 1791091614234,
+    "recoverable": true,
+    "cleanupReceipt": {
+      "resource_kind": "tool",
+      "resource_id": "actual-call",
+      "reason": "subprocess_tree_survived_kill:pid=4242",
+      "requested": true,
+      "acknowledged": true,
+      "completed": false,
+      "pending": 1,
+      "manual_recovery_required": true,
+      "retry_safe": false,
+      "resource_cleanup": {
+        "resource_kind": "process",
+        "resource_id": "4242",
+        "reason": "subprocess_tree_survived_kill:pid=4242",
+        "requested": true,
+        "acknowledged": true,
+        "completed": false,
+        "pending": 1,
+        "manual_recovery_required": true,
+        "conversation_id": "receipt-owner",
+        "workspace_root": "C:/receipt-owner"
+      }
+    },
+    "errorInfo": {
+      "error_kind": "execution_error",
+      "user_summary": "工具执行失败。",
+      "developer_detail": "recorded OS search timeout",
+      "recoverable": true,
+      "projection": "error",
+      "model_observation": "The tool execution failed. Check the arguments or try another approach."
+    }
+  }
+}

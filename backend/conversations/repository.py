@@ -2104,6 +2104,14 @@ class ConversationRepository:
             manifest = self._read_manifest(conversation_id)
             if self._manifest_is_deleted(manifest):
                 return None
+            record = self._record_cache.get(conversation_id)
+            if (record is not None and record.revision < self._manifest_revision(manifest)
+                    and self._record_cache_stamps[conversation_id][0] == self._manifest_cache[conversation_id][0]
+                    and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id)):
+                # History already recovered a readable committed generation.
+                # Keep cold inventory and direct summary reads on that version;
+                # healthy metadata reads still never scan the history files.
+                return record.to_summary()
             metadata = manifest.get("metadata")
             if metadata is None:
                 metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])

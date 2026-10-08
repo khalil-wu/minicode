@@ -28,7 +28,7 @@ def test_phase2_exhausted_retry_budget_stops_until_new_input(tmp_path: Path) -> 
 
 def test_preview_runtime_args_preserve_literal_values_in_real_shell(tmp_path: Path) -> None:
     program = tmp_path / "args probe.py"
-    program.write_text("import json,sys; print(json.dumps(sys.argv[1:],ensure_ascii=False))", encoding="utf-8")
+    program.write_text("import json,sys; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps(sys.argv[1:],ensure_ascii=False))", encoding="utf-8")
     expected = ["hello world", "a&b", "$PATH", "it's literal", "中文"]
     config = _coerce_config({"runtimeExecutable": sys.executable,
                              "runtimeArgs": [str(program), *expected]}, tmp_path, "fixture.launch")

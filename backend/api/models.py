@@ -307,6 +307,16 @@ class LLMCheckResponse(BaseModel):
     status_code: int | None = None
     model_discovery_ok: bool | None = None
     generation_ok: bool | None = None
+    model_discovery_status_code: int | None = None
+    model_discovery_failure_kind: str = ""
+    model_discovery_retryable: bool = False
+    model_discovery_message: str = ""
+    model_discovery_hint: str = ""
+    generation_status_code: int | None = None
+    generation_failure_kind: str = ""
+    generation_retryable: bool = False
+    generation_message: str = ""
+    generation_hint: str = ""
     failure_kind: str = ""
     retryable: bool = False
     message: str = ""

@@ -126,27 +126,71 @@ def test_runtime_auth_rejects_websocket_query_token(monkeypatch) -> None:
     assert exc_info.value.code == 1008
 
 
-def test_websocket_llm_initialization_failure_is_terminal(monkeypatch) -> None:
+def test_websocket_llm_initialization_failure_settles_query_and_keeps_transport(monkeypatch) -> None:
+    import backend.main as backend_main
+    from backend.agent.runtime import default_runtime
+
+    monkeypatch.delenv("MINICODE_RUNTIME_TOKEN", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_MODEL", "initialization-test-model")
+    monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "initialization-test-model")
+    adapter_calls = []
+
+    def unavailable_adapter(*args, **kwargs):
+        adapter_calls.append((args, kwargs))
+        raise RuntimeError("provider is not configured")
+
+    monkeypatch.setattr(backend_main, "_create_session_llm", unavailable_adapter)
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", unavailable_adapter)
+
+    with TestClient(backend_main.app) as client:
+        with client.websocket_connect("/ws?session_id=session_llm_init_failure") as ws:
+            def receive(event_type):
+                for _ in range(50):
+                    payload = ws.receive_json()
+                    if payload["type"] == event_type:
+                        return payload
+                pytest.fail(f"Expected {event_type} from the actual WebSocket protocol")
+
+            receive("llm.model.updated")
+            assert adapter_calls == []
+            ws.send_json({"type": "conversation.create", "activate": True, "title": "Unavailable provider"})
+            conversation_id = receive("conversation.switched")["conversation_id"]
+            ws.send_json({"type": "user_message", "conversation_id": conversation_id, "content": "Inspect the task",
+                "client_command_id": "initialization-failure-query", "user_message_id": "initialization-user",
+                "assistant_message_id": "initialization-assistant"})
+            error = receive("error")
+            assert error["message"] and error["error_type"]
+            assert error["conversation_id"] == conversation_id
+            done = receive("done")
+            assert done["status"] == "failed" and done["reason"] == "llm_initialization_failed"
+            assert len(adapter_calls) == 1
+            terminal = default_runtime().latest_main_run(conversation_id)
+            assert terminal.status == "failed" and terminal.terminal_reason == "llm_initialization_failed"
+            assert terminal.error == error["message"]
+            ws.send_json({"type": "ping"})
+            assert receive("pong")["type"] == "pong"
+
+
+def test_websocket_session_initialization_failure_is_terminal(monkeypatch) -> None:
     import backend.main as backend_main
 
     monkeypatch.delenv("MINICODE_RUNTIME_TOKEN", raising=False)
-    monkeypatch.setattr(
-        "backend.bootstrap.app.AppBootstrap.create_llm",
-        lambda _bootstrap: (_ for _ in ()).throw(
-            RuntimeError("provider is not configured")
-        ),
-    )
 
+    def unavailable_registry(*_args, **_kwargs):
+        raise RuntimeError("session registry initialization failed")
+
+    monkeypatch.setattr("backend.bootstrap.app.AppBootstrap.create_tool_registry", unavailable_registry)
     with TestClient(backend_main.app) as client:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws?session_id=session_llm_init_failure") as ws:
                 error = ws.receive_json()
                 assert error["type"] == "error"
                 assert error["recoverable"] is False
-                assert error["error_code"] == "connection.llm_initialization_failed"
+                assert error["error_code"] == "connection.session_initialization_failed"
                 ws.receive_json()
 
-    assert exc_info.value.code == 1008
+    assert exc_info.value.code == 1011
 
 
 def test_runtime_auth_allows_websocket_token_subprotocol(monkeypatch) -> None:

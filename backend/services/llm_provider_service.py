@@ -977,17 +977,29 @@ async def check_llm_connection(
                 "The model list endpoint accepted the current credentials, but generation is "
                 "temporarily unavailable. This does not mean the API key was rejected."
             )
-        return {
-            **base_payload,
-            "ok": False,
+        generation_failure = {
             "status_code": status_code,
-            "model_discovery_ok": model_discovery_ok,
-            "generation_ok": False,
-            **discovery_evidence,
             "failure_kind": failure_kind,
             "retryable": retryable,
             "message": _http_error_message(generation_exc),
             "hint": hint,
+        }
+        failure = generation_failure
+        if (failure_kind == "network_error" and discovery_failure is not None
+                and discovery_failure["failure_kind"] == "authentication_failed"):
+            # A failed connection supplies no later HTTP evidence that can
+            # replace the provider's explicit credential rejection.
+            failure = {**discovery_failure, "hint": _status_hint_for_provider(
+                provider_id, discovery_failure["status_code"], bool(generation_api_key.strip()),
+            )}
+        return {
+            **base_payload,
+            "ok": False,
+            "model_discovery_ok": model_discovery_ok,
+            "generation_ok": False,
+            **discovery_evidence,
+            **failure,
+            **{f"generation_{key}": value for key, value in generation_failure.items()},
             **image_payload,
             "models": response_models(models),
         }
