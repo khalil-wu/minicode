@@ -350,6 +350,48 @@ def test_web_search_schema_matches_openai_hosted_tool_domain_filter() -> None:
     }
 
 
+def test_configured_tavily_precedes_context_native_search_and_exposes_its_domain_filter(monkeypatch):
+    from backend.tools.web_tools import WebSearchTool
+
+    native = _HostedSearchLLM(blocked_domains=False, error=AssertionError("Tavily must be selected before native search"))
+    tool = WebSearchTool(native)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "fixture-search-key")
+    monkeypatch.setattr("backend.tools.web_tools.assess_network_url", lambda _url: type("A", (), {"allowed": True})())
+    requests = []
+
+    class Client:
+        def stream(self, method, url, **kwargs):
+            requests.append((method, url, kwargs))
+            return _FakeStreamResponse(b'{"results":[{"title":"Actual candidate","url":"https://news.example/article","content":"Current bulletin"}]}',
+                headers={"content-type": "application/json"})
+
+    tool._client = Client()
+    tool._proxy_url = "http://fixture.proxy"
+    for schema in [tool.get_schema(), tool.model_schema()]:
+        assert "blocked_domains" in schema.parameters["properties"]
+    result = asyncio.run(tool.execute({"query": "Current news", "blocked_domains": ["excluded.test"]},
+        ToolExecutionContext(PermissionContext(mode="bypass"), llm=native)))
+    assert not result.is_error and result.provider == "tavily"
+    assert len(requests) == 1 and requests[0][1] == "https://api.tavily.com/search"
+    assert requests[0][2]["json"]["exclude_domains"] == ["excluded.test"]
+    assert native.calls == []
+
+
+def test_configured_tavily_failure_does_not_retry_through_native_search(monkeypatch):
+    from backend.tools.web_tools import WebSearchTool
+
+    native = _HostedSearchLLM()
+    tool = WebSearchTool(native)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "fixture-search-key")
+    request = httpx.Request("POST", "https://api.tavily.com/search")
+    failure = httpx.HTTPStatusError("Tavily 429", request=request, response=httpx.Response(429, request=request))
+    tool._direct_search = AsyncMock(side_effect=failure)
+    with pytest.raises(httpx.HTTPStatusError, match="Tavily 429"):
+        asyncio.run(tool.execute({"query": "Current news"}, ToolExecutionContext(PermissionContext(mode="bypass"), llm=native)))
+    tool._direct_search.assert_awaited_once()
+    assert native.calls == []
+
+
 def test_web_tools_declare_open_world_runtime_metadata(tmp_path: Path) -> None:
     from backend.artifact.store import ArtifactStore
     from backend.tools.web_tools import WebFetchTool, WebSearchTool

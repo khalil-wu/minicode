@@ -645,7 +645,7 @@ class WebSearchTool(BaseTool):
         # provider credentials. Factory-backed sources are resolved at execute.
         llm = None if callable(self._llm_provider) else self._llm_provider
         supports_hosted_search = callable(getattr(llm, "supports_hosted_web_search", None)) and llm.supports_hosted_web_search()
-        supports_blocked_domains = not supports_hosted_search or (
+        supports_blocked_domains = self._direct_source_available() or not supports_hosted_search or (
             callable(getattr(llm, "hosted_web_search_supports_blocked_domains", None))
             and llm.hosted_web_search_supports_blocked_domains()
         )
@@ -676,7 +676,13 @@ class WebSearchTool(BaseTool):
         self._direct_search_configured = False
 
     def source_available(self, *, hosted_search: bool) -> bool:
-        if hosted_search or os.getenv("TAVILY_API_KEY", "").strip():
+        return hosted_search or self._direct_source_available()
+
+    def model_schema_revision(self) -> bool:
+        return self._direct_source_available()
+
+    def _direct_source_available(self) -> bool:
+        if os.getenv("TAVILY_API_KEY", "").strip():
             return True
         from backend.vault.store import VAULT_FILE
 
@@ -843,6 +849,16 @@ class WebSearchTool(BaseTool):
         if allowed_domains and blocked_domains:
             return self._error_result(
                 "Cannot specify both allowed_domains and blocked_domains in the same request."
+            )
+
+        # A configured dedicated search source owns search independently of
+        # the conversation model. Select it before resolving hosted capability;
+        # failures stay with the selected source and never switch providers.
+        if self._direct_source_available():
+            return await self._direct_search(
+                query,
+                allowed_domains=allowed_domains,
+                blocked_domains=blocked_domains,
             )
 
         llm = getattr(context, "llm", None) if context is not None else None

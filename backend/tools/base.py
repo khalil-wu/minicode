@@ -619,6 +619,10 @@ class BaseTool(ABC):
         """
         return self.get_execution_schema()
 
+    def model_schema_revision(self) -> Any:
+        """Current configuration revision for cached model-facing schemas."""
+        return 0
+
     def runtime_description(self) -> str:
         """Human/UI-facing description. Defaults to ``description``."""
         return getattr(self, "description", "") or ""

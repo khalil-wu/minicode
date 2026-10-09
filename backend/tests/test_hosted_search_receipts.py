@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 
 from backend.llm.anthropic_adapter import AnthropicAdapter
 from backend.llm.base import LLMMessage, SideQueryOptions
@@ -70,9 +71,12 @@ def anthropic_adapter(outcome: str):
 def test_openai_hosted_search_requires_completed_native_receipt(monkeypatch, outcome):
     adapter, responses = _adapter([openai_response(outcome)])
     tool = WebSearchTool(adapter)
-    monkeypatch.setattr(tool, "_search_api_key", lambda: pytest.fail("native search failure silently changed providers"))
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "")
+    tool._direct_search = AsyncMock(side_effect=AssertionError("native search silently changed providers"))
 
     result = asyncio.run(tool.execute({"query": "Agent backend jobs", "allowed_domains": ["example.test"]}))
+    tool._direct_search.assert_not_awaited()
 
     request = responses.requests[0]
     assert request["tool_choice"] == "required"
@@ -93,9 +97,12 @@ def test_openai_hosted_search_requires_completed_native_receipt(monkeypatch, out
 def test_anthropic_hosted_search_requires_native_result_block(monkeypatch, outcome):
     adapter, requests = anthropic_adapter(outcome)
     tool = WebSearchTool(adapter)
-    monkeypatch.setattr(tool, "_search_api_key", lambda: pytest.fail("native search failure silently changed providers"))
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "")
+    tool._direct_search = AsyncMock(side_effect=AssertionError("native search silently changed providers"))
 
     result = asyncio.run(tool.execute({"query": "Agent backend jobs", "blocked_domains": ["excluded.test"]}))
+    tool._direct_search.assert_not_awaited()
 
     request = requests[0]
     assert request["tool_choice"] == {"type": "tool", "name": "web_search"}

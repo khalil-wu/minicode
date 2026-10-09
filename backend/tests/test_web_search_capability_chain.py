@@ -18,6 +18,7 @@ from backend.tools.tool_search import ToolSearchTool
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 from backend.tools.web_tools import WebSearchTool
 from backend.vault.store import EnvVault, VaultReadError
+from tests.test_web_tools import _FakeStreamResponse, _HostedSearchLLM
 
 
 def policy(registry, *, hosted=False, mode="direct"):
@@ -102,6 +103,95 @@ def test_tavily_presence_refreshes_after_real_vault_publication_without_repeated
     assert policy(registry).is_available(spec)
     monkeypatch.delenv("TAVILY_API_KEY")
     assert not policy(registry).is_available(spec)
+
+
+@pytest.mark.parametrize("mode", ["direct", "code_mode_only"])
+def test_vault_add_remove_refreshes_warm_search_schemas_and_returns_to_native(search_case, monkeypatch, mode):
+    import backend.vault.store as vault_module
+
+    _search, registry = search_case
+    native = _HostedSearchLLM(blocked_domains=False)
+    search = WebSearchTool(native)
+    registry.register(search, replace=True)
+    stored, reads = {}, []
+    monkeypatch.setattr(vault_module.keyring, "get_password", lambda service, name: (reads.append(name), stored.get((service, name)))[1])
+    monkeypatch.setattr(vault_module.keyring, "set_password", lambda service, name, value: stored.__setitem__((service, name), value))
+    monkeypatch.setattr(vault_module.keyring, "delete_password", lambda service, name: stored.pop((service, name)))
+
+    def blocked_domains_available(target):
+        schemas = target.get_schemas(toolset_policy=policy(target, hosted=True, mode=mode))
+        if mode == "code_mode_only":
+            wrapper = next(item["function"] for item in schemas if item["function"]["name"] == "tool_exec")
+            return "blocked_domains" in wrapper["description"]
+        schema = next(item["function"] for item in schemas if item["function"]["name"] == "web_search")
+        return "blocked_domains" in schema["parameters"]["properties"]
+
+    assert not blocked_domains_available(registry)
+    fork = registry.fork()
+    assert not blocked_domains_available(fork)
+    vault = EnvVault()
+    vault.set("TAVILY_API_KEY", "fixture-priority-key")
+    reads.clear()
+    for _ in range(3):
+        assert blocked_domains_available(registry)
+        assert blocked_domains_available(fork)
+    assert reads == ["TAVILY_API_KEY"]
+    vault.delete("TAVILY_API_KEY")
+    assert not blocked_domains_available(registry)
+    assert not blocked_domains_available(fork)
+    result = asyncio.run(search.execute({"query": "After explicit source removal"}))
+    assert not result.is_error and len(native.calls) == 1
+    assert result.provider == "_HostedSearchLLM"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["direct", "code_mode_only"])
+async def test_configured_tavily_runs_through_direct_and_code_mode_without_native_calls(search_case, tmp_path, monkeypatch, mode):
+    from backend.tests.test_model_execution_ownership import Model, execute, setup
+
+    search, _registry = search_case
+    monkeypatch.setattr(search, "_search_api_key", lambda: "fixture-priority-key")
+    monkeypatch.setattr(Model, "supports_hosted_web_search", lambda self: True)
+
+    async def forbidden_native(*args, **kwargs):
+        pytest.fail("configured Tavily dispatched a native search side call")
+
+    monkeypatch.setattr(Model, "side_query", forbidden_native)
+    monkeypatch.setattr("backend.tools.web_tools.assess_network_url", lambda _url: SimpleNamespace(allowed=True))
+    requests = []
+
+    class Client:
+        def stream(self, method, url, **kwargs):
+            requests.append((method, url, kwargs))
+            return _FakeStreamResponse(b'{"results":[{"title":"Current result","url":"https://example.test/news","content":"Observed source"}]}',
+                headers={"content-type": "application/json"})
+
+    search._client = Client()
+    search._proxy_url = "http://fixture.proxy"
+    model_calls = 0
+
+    async def behavior(model, messages):
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls == 1:
+            visible = model.tool_names[-1]
+            if mode == "direct":
+                assert "web_search" in visible and "tool_exec" not in visible
+                return ToolCallEvent(id="direct-search", name="web_search", arguments={"query": "Current news"})
+            assert "tool_exec" in visible and "web_search" not in visible
+            return ToolCallEvent(id="code-search", name="tool_exec", arguments={"code": 'text(await tools.web_search({query:"Current news"}));'})
+        return None
+
+    fixture = setup(tmp_path, monkeypatch, behavior, extra_tools=[search], tool_modes={"model-a": mode})
+    fixture.owner.model_execution = replace(fixture.owner.model_execution,
+        model_info=fixture.owner.model_execution.model_runtime.get_model("custom", "model-a"))
+    fixture.owner.permission_context_provider = lambda: fixture.session.permission_checker.build_context(mode="bypass")
+    await execute(fixture, tmp_path)
+    assert len(requests) == 1 and requests[0][1] == "https://api.tavily.com/search"
+    assert requests[0][2]["json"]["query"] == "Current news"
+    results = [event.payload for event in fixture.owner.execution_journal.read_events()
+        if event.event_type == "tool_result" and event.payload.get("tool_name") == "web_search"]
+    assert len(results) == 1 and results[0]["provider"] == "tavily" and results[0]["status"] == "success"
 
 
 def test_unreadable_search_credential_is_an_explicit_configuration_error(search_case, monkeypatch):

@@ -12,6 +12,7 @@ from backend.config import LLMSettings
 from backend.llm.anthropic_adapter import AnthropicAdapter
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.tools.base import ToolResult
 from backend.tools.web_tools import WebFetchTool, WebSearchTool
 from tests.test_web_tools import _FakeStreamClient, _FakeStreamResponse, _HostedSearchLLM
 
@@ -54,10 +55,25 @@ def test_unconfigured_search_does_not_make_rss_or_other_requests(monkeypatch):
 def test_search_provider_factory_uses_declared_hosted_capability(monkeypatch):
     llm = _HostedSearchLLM(blocked_domains=False)
     tool = WebSearchTool(lambda: llm)
-    monkeypatch.setattr(tool, "_search_api_key", lambda: pytest.fail("hosted search queried an unrelated credential"))
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "")
     result = asyncio.run(tool.execute({"query": "Agent 后端", "allowed_domains": ["nowcoder.com"]}))
     assert not result.is_error
     assert llm.calls[0][1].web_search_allowed_domains == ("nowcoder.com",)
+
+
+def test_configured_tavily_search_and_schema_do_not_instantiate_a_model(monkeypatch):
+    def unavailable_model():
+        pytest.fail("configured Tavily search instantiated the model factory")
+
+    tool = WebSearchTool(unavailable_model)
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "fixture-search-key")
+    tool._direct_search = AsyncMock(return_value=ToolResult(
+        "Configured search result", provider="tavily", result_kind="search"))
+    assert "blocked_domains" in tool.model_schema().parameters["properties"]
+    result = asyncio.run(tool.execute({"query": "Current news", "blocked_domains": ["excluded.test"]}))
+    assert result.provider == "tavily"
+    tool._direct_search.assert_awaited_once_with("Current news", allowed_domains=[], blocked_domains=["excluded.test"])
 
 
 def test_tool_directory_does_not_require_model_instantiation():

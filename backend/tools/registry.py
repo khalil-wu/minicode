@@ -513,6 +513,7 @@ class CapabilityRegistry:
                     name,
                     id(tool),
                     self._tool_schema_revisions[name],
+                    tool.model_schema_revision(),
                     getattr(spec, "toolset", ""),
                     getattr(spec, "exposure", ""),
                     bool(getattr(spec, "always_load", False)),
