@@ -638,8 +638,9 @@ class WebSocketSession(
     def runtime_toolset_policy(self, registry: ToolRegistry):
         """Project the admitted tool surface, or derive the next idle surface."""
         from backend.agent.tool_schema_derivation import effective_toolset_policy
-        from backend.llm.provider_contracts import normalize_tool_mode
+        from backend.llm.provider_contracts import hosted_web_search_supported, normalize_tool_mode
         from backend.tools.toolsets import ToolsetPolicy
+        from backend.tools.web_tools import WebSearchTool
 
         context = self.run_manager.context_for(self.active_conversation_id or "")
         if context is not None and context.toolset_policy is not None:
@@ -654,6 +655,13 @@ class WebSocketSession(
         tool_mode = normalize_tool_mode(
             (model.tool_mode if model is not None else "") or self.config.llm.tool_mode
         ) or ("code_mode_only" if self.config.agent.code_mode_only else "code_mode")
+        hosted_search = False
+        if isinstance(registry.get_tool("web_search"), WebSearchTool):
+            model_selection = self._llm_selection_payload()
+            hosted_search = hosted_web_search_supported(
+                wire_api=model_selection["wire_api"], base_url=model_selection["base_url"],
+                declared=model_selection["supports_hosted_web_search"],
+            )
         return effective_toolset_policy(
             base_policy=base,
             tool_registry=registry,
@@ -661,6 +669,7 @@ class WebSocketSession(
             requires_explicit_workspace=True,
             workspace_root=self.session_lifecycle.current_workspace_root(),
             permission_mode=self.permission_context.mode,
+            hosted_web_search=hosted_search,
             tool_mode="code_mode" if selection is not None else tool_mode,
         )
 

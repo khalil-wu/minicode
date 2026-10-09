@@ -2,7 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Check,
   ExternalLink,
-  FileDiff,
+  File,
+  Hand,
   LoaderCircle,
   MessageSquare,
   ShieldAlert,
@@ -25,9 +26,10 @@ import type {
 } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { promptDraftKey } from "../stores/prompt-drafts";
-import { ToolGlyph, summarizeArgs, humanizeKey } from "./toolUtils";
+import { summarizeArgs, humanizeKey } from "./toolUtils";
 import { readableToolLabel } from "./toolDisplayName";
-import { deriveCommandPrefix } from "./commandPrefix";
+import { SelectMenu } from "../components/SelectMenu";
+import { openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { Button } from "../components/Button";
@@ -86,10 +88,6 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
 
 const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue: PendingApproval[] }) => {
   const [responding, setResponding] = useState(false);
-  const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
-  const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
-  const amending = draft?.amending ?? false;
-  const feedback = draft?.feedback ?? "";
   const subagents = useAppStore((s) => s.subagents);
   const collaborationTool = ["task", "task_status", "task_stop", "send_message"].includes(request.toolName);
   const collaborationArgs = request.toolName === "task" && Array.isArray(request.args.parallel_tasks)
@@ -99,7 +97,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     Object.entries(request.args).filter(([key]) =>
       !/(?:^|_)(?:id|ids|epoch|session|thread|sender|recipient|source)(?:_|$)|^(?:agent|call|run)$/i.test(key)
       && !/^(?:agent|subagent|thread|call|toolCall|session|run|request|conversation|turn|message)Ids?$|^source(?:Agent|Thread|Tool)$/.test(key)
-      && !["command", "cmd", "justification", "with_escalated_permissions"].includes(key)),
+      && !["command", "cmd", "reason", "justification", "with_escalated_permissions"].includes(key)),
   )).filter((item) => item.label !== "request"), [request.args, collaborationTool]);
   const total = 1 + queue.length;
   const displayName = displayToolName(request.toolName);
@@ -114,10 +112,6 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     && sandboxStatus.network_isolated === false;
   const networkUnisolated = request.toolName === "run_command"
     && (request.networkUnisolated === true || networkBoundaryUnavailable);
-  const requiresIndividualReview = (item: PendingApproval) =>
-    isEscalatedApproval(item) || isExitPlanModeApproval(item)
-    || (item.toolName === "run_command"
-      && (item.networkUnisolated === true || networkBoundaryUnavailable));
   const escalationJustification = String(request.args?.justification ?? "").trim();
   const sourceLabel = approvalSourceLabel(request, subagents);
   const expiry = useApprovalExpiry(request.expiresAt);
@@ -126,7 +120,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     setResponding(false);
   }, [request.requestId]);
 
-  const respond = async (allowed: boolean, fb?: string) => {
+  const respond = async (allowed: boolean, rememberForSession = false) => {
     if (responding) return;
     setResponding(true);
     try {
@@ -134,7 +128,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         request.requestId,
         allowed ? "approve" : "reject",
         {
-          feedback: fb,
+          rememberForSession,
           owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId },
         },
       );
@@ -150,98 +144,37 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     }
   };
 
-  const allowAll = async () => {
-    if (responding) return;
-    setResponding(true);
-    const store = useAppStore.getState();
-    // "Allow all" is a bulk convenience — it must NOT silently approve elevated
-    // (unsandboxed / escalated) requests. Those stay queued for an explicit,
-    // individually-reviewed decision so the user always sees the sandbox warning.
-    const all = [request, ...queue].filter((item) => !requiresIndividualReview(item));
-    const accepted: string[] = [];
-    for (const item of all) {
-      try {
-        const command = buildApprovalResponseCommand(
-          item.requestId,
-          "approve",
-          { owner: { conversationId: item.conversationId, turnId: item.turnId, messageId: item.messageId } },
-        );
-        const result = await sendPromptResponseCommand(command);
-        if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
-        accepted.push(item.requestId);
-      } catch (error) {
-        store.markApprovalError(
-          item.requestId,
-          error instanceof Error ? error.message : "审批提交失败",
-        );
-      }
-    }
-    if (accepted.length > 0) store.clearApprovals(accepted);
-    setResponding(false);
-  };
-  // Escalated requests and ExitPlanMode are always reviewed individually.
-  const individuallyReviewedQueueCount = [request, ...queue].filter(requiresIndividualReview).length;
-  const bulkReviewCount = total - individuallyReviewedQueueCount;
-
-  // "Always allow <prefix>": persist a run_command(prefix:*) content rule so future
-  // commands with the same prefix skip prompting, then approve this one.
-  const commandText = String(request.args?.command ?? request.args?.cmd ?? "");
-  const alwaysPrefix = deriveCommandPrefix(commandText);
-  const alwaysAllowPrefix = async () => {
-    if (responding) return;
-    if (!alwaysPrefix) {
-      respond(true);
-      return;
-    }
-    setResponding(true);
-    const rule = `run_command(${alwaysPrefix}:*)`;
-    try {
-      const result = await sendClientCommandAwaitResult({
-        type: "permissions.content_rule.add",
-        rule,
-        deny: false,
-        scope: "global",
-        source: "approval.always_allow_prefix",
-      }, "permissions.content_rule.add");
-      const failed = ["error", "failed", "warning"].includes(String(result.level || "").toLowerCase());
-      if (failed || result.data?.rule !== rule || result.data?.deny === true) {
-        throw new Error(result.message || "权限规则未保存。");
-      }
-      const command = buildApprovalResponseCommand(
-        request.requestId,
-        "approve",
-        { owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } },
-      );
-      const approvalResult = await sendPromptResponseCommand(command);
-      if (!commandResultSucceeded(approvalResult)) {
-        throw new Error(approvalResult.message || "审批未被后端接受");
-      }
-      useAppStore.getState().clearApproval(request.requestId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "权限规则保存失败";
-      useAppStore.getState().markApprovalError(request.requestId, message);
-      setResponding(false);
-    }
-  };
+  const commandText = String(request.args.command ?? request.args.cmd ?? "");
+  const filePath = typeof request.args.path === "string" ? request.args.path
+    : typeof request.args.file_path === "string" ? request.args.file_path : "";
+  const fileAction = ["write_file", "edit_file", "apply_patch"].includes(request.toolName) ? "编辑"
+    : request.toolName === "read_file" ? "读取" : "";
+  const fileName = filePath.replaceAll("\\", "/").split("/").filter(Boolean).pop() || filePath;
 
   return (
     <section
       className="inline-approval-bar"
       aria-label="Agent is waiting for input"
+      aria-busy={responding}
     >
-      <div className="inline-approval-icon">
-        <ToolGlyph />
+      <div className="inline-approval-heading">
+        <Hand size={18} aria-hidden="true" />
+        <span>权限</span>
+        {total > 1 && <span className="inline-prompt-pending">{total} 项待处理</span>}
       </div>
 
       <div className="inline-approval-main">
         <div className="inline-prompt-title-row">
-          <span className="inline-prompt-title">允许使用 {displayName}？</span>
-          {total > 1 && <span className="inline-prompt-pending">{total} 项待处理</span>}
+          <span className="inline-prompt-title">{filePath && fileAction ? <>
+            允许 MiniCode {fileAction}{" "}
+            <button type="button" className="inline-approval-target" title={filePath}
+              onClick={() => openWorkspaceFilePreview({ path: filePath, name: fileName, conversationId: request.conversationId })}>
+              <File size={15} aria-hidden="true" />{fileName}
+            </button> 的内容？
+          </> : request.toolName === "run_command" ? "允许 MiniCode 运行此命令？" : `允许使用 ${displayName}？`}</span>
         </div>
         <div className="inline-prompt-subtitle">
-          {escalated
-            ? "请求提升权限，将在沙箱外运行并访问完整文件系统和网络。"
-            : "运行此工具前需要你的授权。"}
+          {escalationJustification || (typeof request.args.reason === "string" ? request.args.reason : "")}
           {sourceLabel ? ` 来源：${sourceLabel}。` : ""}
           {expiry.label && (
             <span className="inline-prompt-expiry" data-urgent={expiry.urgent}>
@@ -255,7 +188,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
             <ShieldAlert size={14} />
             <span>
               <strong>将在沙箱外运行。</strong>
-              {escalationJustification ? ` ${escalationJustification}` : " Agent 表示沙箱内运行失败，需要完整访问权限。"}
+
             </span>
           </div>
         )}
@@ -268,9 +201,9 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         )}
 
         <div className="inline-approval-summary">
-          {summary.slice(0, 2).map((item) => (
+          {summary.filter((item) => !fileAction || item.value !== filePath).slice(0, 2).map((item) => (
             <span key={item.label} className="inline-approval-argument" title={`${item.label}: ${item.value}`}>
-              <span className="inline-approval-argument-label">{item.label}</span>
+              <span className="inline-approval-argument-label">{item.label === "cwd" ? "工作目录" : item.label}</span>
               <span className="inline-approval-argument-value">{item.value}</span>
             </span>
           ))}
@@ -314,27 +247,6 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <pre className="inline-approval-command" aria-label="即将运行的命令">{commandText}</pre>
         )}
 
-        {amending && (
-          <div className="inline-prompt-feedback">
-            <textarea
-              value={feedback}
-              onChange={(e) => updatePromptDraft(request, { feedback: e.target.value })}
-              placeholder="给 Agent 补充说明，例如拒绝原因或需要调整的内容…"
-              aria-label="给 Agent 补充说明"
-              rows={2}
-              className="inline-prompt-feedback-input"
-            />
-            <div className="inline-prompt-feedback-actions">
-              <Button variant="primary" size="sm" onClick={() => respond(false, feedback)} disabled={responding || !feedback.trim()}>
-                拒绝并发送说明
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => updatePromptDraft(request, { amending: false })} disabled={responding}>
-                取消
-              </Button>
-            </div>
-          </div>
-        )}
-
         {queue.length > 0 && (
           <div className="inline-approval-queue">
             接下来：{queue.map((item) => displayToolName(item.toolName)).join("、")}
@@ -345,49 +257,50 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         )}
       </div>
 
-      <div className="inline-approval-actions">
-        <Button variant="secondary" size="sm" onClick={() => respond(false)} disabled={responding} aria-label="拒绝使用工具">
-          <X size={14} />
-          拒绝
-        </Button>
-        <Button variant="primary" size="sm" onClick={() => respond(true)} disabled={responding} aria-label="允许使用工具">
-          <Check size={14} />
-          允许
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => updatePromptDraft(request, { amending: !amending })} disabled={responding} aria-label="补充说明" title="为本次决定补充说明">
-          <MessageSquare size={14} />
-          说明
-        </Button>
-        {alwaysPrefix && !networkUnisolated && (
-          <Button
-            variant="accent"
-            size="sm"
-            onClick={alwaysAllowPrefix}
-            disabled={responding}
-            aria-label={`全局始终允许 ${alwaysPrefix} 命令`}
-            title={`在所有工作区全局允许“${alwaysPrefix}”命令`}
-          >
-            <ShieldCheck size={14} />
-            全局允许 {alwaysPrefix}
-          </Button>
-        )}
-        {queue.length > 0 && bulkReviewCount > 0 && (
-          <Button
-            variant="accent"
-            size="sm"
-            onClick={allowAll}
-            disabled={responding}
-            aria-label="允许所有未提升权限的待处理工具请求"
-            title={individuallyReviewedQueueCount > 0
-              ? `允许队列中的普通请求；仍有 ${individuallyReviewedQueueCount} 项请求需要单独审阅`
-              : "允许所有待处理工具请求"}
-          >
-            {individuallyReviewedQueueCount > 0 ? "允许普通请求" : "全部允许"}
-          </Button>
-        )}
-      </div>
+      <ApprovalActions responding={responding} onDeny={() => void respond(false)} onAllow={() => void respond(true)}
+        onAllowConversation={() => void respond(true, true)} />
     </section>
   );
+};
+
+const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation,
+  denyLabel = "拒绝使用工具", allowLabel = "允许使用工具",
+}: {
+  responding: boolean;
+  onDeny: () => void;
+  onAllow: () => void;
+  onAllowConversation?: () => void;
+  denyLabel?: string;
+  allowLabel?: string;
+}) => {
+  const actionsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (document.querySelector(".inline-approval-actions") !== actionsRef.current) return;
+      if (responding || event.defaultPrevented || event.isComposing || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target as HTMLElement;
+      if (target.closest('input, textarea, select, button, [contenteditable="true"], [role="menu"], [role="listbox"]')) return;
+      if (event.key === "Escape" || event.key === "Enter") {
+        event.preventDefault();
+        (event.key === "Escape" ? onDeny : onAllow)();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [responding, onDeny, onAllow]);
+  return <div ref={actionsRef} className="inline-approval-actions">
+    <Button variant="secondary" size="sm" onClick={onDeny} disabled={responding} aria-label={denyLabel}
+      className="inline-approval-deny">拒绝<kbd>Esc</kbd></Button>
+    <div className="inline-approval-allow-group">
+      <Button variant="primary" size="sm" onClick={onAllow} disabled={responding} aria-label={allowLabel}
+        className="inline-approval-allow">{responding ? "正在提交…" : "允许一次"}<kbd>↵</kbd></Button>
+      {onAllowConversation && <SelectMenu value="once" ariaLabel="选择允许范围" align="end" disabled={responding}
+        className="inline-approval-scope" onValueChange={(scope) => scope === "conversation" ? onAllowConversation() : onAllow()}>
+        <option value="once">允许一次</option>
+        <option value="conversation">允许此次对话</option>
+      </SelectMenu>}
+    </div>
+  </div>;
 };
 
 const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
@@ -731,9 +644,9 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   };
 
   return (
-    <section className="inline-prompt-card">
+    <section className="inline-prompt-card inline-approval-bar" aria-busy={responding}>
+      <div className="inline-approval-heading"><Hand size={18} aria-hidden="true" /><span>权限</span></div>
       <div className="inline-prompt-header">
-        <FileDiff size={16} color="var(--accent-primary)" />
         <div className="inline-prompt-header-copy">
           <div className="inline-prompt-title">审阅文件更改</div>
           <div className="inline-prompt-subtitle">
@@ -761,18 +674,11 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
 
       {error && <div role="alert" className="inline-prompt-error">{error}</div>}
       <div className="inline-prompt-actions inline-prompt-button-row">
-        <Button variant="secondary" size="sm" onClick={openDiff}>
-          <ExternalLink size={14} />
-          打开差异
+        <Button variant="ghost" size="sm" onClick={openDiff}>
+          <ExternalLink size={14} />打开差异
         </Button>
-        <Button variant="secondary" size="sm" disabled={responding} onClick={() => void respond(false)} aria-label="拒绝文件更改">
-          <X size={14} />
-          拒绝
-        </Button>
-        <Button variant="primary" size="sm" disabled={responding} onClick={() => void respond(true)} aria-label="允许文件更改">
-          <Check size={14} />
-          允许
-        </Button>
+        <ApprovalActions responding={responding} onDeny={() => void respond(false)} onAllow={() => void respond(true)}
+          denyLabel="拒绝文件更改" allowLabel="允许文件更改" />
       </div>
     </section>
   );

@@ -18,7 +18,7 @@ export type CellStatus =
   | "cancelled";
 
 /** Visual tone. Fewer tones than statuses: several failures share one look. */
-export type CellTone = "running" | "success" | "partial" | "failed" | "cancelled";
+export type CellTone = "pending" | "running" | "success" | "partial" | "failed" | "cancelled";
 
 const STATUS_LABELS: Record<CellStatus, string> = {
   pending: "准备中",
@@ -32,7 +32,7 @@ const STATUS_LABELS: Record<CellStatus, string> = {
 };
 
 const STATUS_TONES: Record<CellStatus, CellTone> = {
-  pending: "running",
+  pending: "pending",
   running: "running",
   success: "success",
   partial: "partial",
@@ -47,12 +47,13 @@ export const cellStatusLabel = (status: CellStatus): string => STATUS_LABELS[sta
 export const cellStatusTone = (status: CellStatus): CellTone => STATUS_TONES[status];
 
 export const isRunningCellStatus = (status: CellStatus): boolean =>
-  status === "pending" || status === "running";
+  status === "running";
 
 /** Map ActivityCellState.status onto the shared vocabulary. */
 export const activityCellStatus = (
-  status: "running" | "done" | "partial" | "failed" | "interrupted",
+  status: "pending" | "pending_approval" | "running" | "done" | "partial" | "failed" | "interrupted",
 ): CellStatus => {
+  if (status === "pending_approval") return "pending";
   if (status === "done") return "success";
   if (status === "interrupted") return "cancelled";
   return status;
@@ -60,7 +61,7 @@ export const activityCellStatus = (
 
 /** Map ExecCellState.status onto the shared vocabulary. */
 export const execCellStatus = (
-  status: "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled",
+  status: "pending" | "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled",
 ): CellStatus => (status === "pending_approval" ? "pending" : status);
 
 /**

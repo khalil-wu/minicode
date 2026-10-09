@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UserMessageCell } from "./UserMessageCell";
 import { useAppStore } from "../../stores";
 
-const { sendMock, cancelQueuedMessageMock, openAttachmentPreviewMock, openLocalFilePreviewMock } = vi.hoisted(() => {
+const { sendMock, cancelQueuedMessageMock, openAttachmentPreviewMock, openLocalFilePreviewMock, socket } = vi.hoisted(() => {
+  Object.defineProperty(globalThis, "__MINICODE_RUNTIME__", { configurable: true,
+    value: { runtimeToken: "attachment-thumbnail-test-token", apiBaseUrl: "http://127.0.0.1:8000" } });
   Object.defineProperty(globalThis, "matchMedia", {
     configurable: true,
     writable: true,
@@ -21,6 +23,7 @@ const { sendMock, cancelQueuedMessageMock, openAttachmentPreviewMock, openLocalF
     }),
   });
   return {
+    socket: { sessionId: "" },
     sendMock: vi.fn(),
     cancelQueuedMessageMock: vi.fn(async () => ({
       type: "command_result",
@@ -33,7 +36,7 @@ const { sendMock, cancelQueuedMessageMock, openAttachmentPreviewMock, openLocalF
 });
 
 vi.mock("../../hooks/useWebSocket", () => ({
-  getWebSocket: () => ({ send: sendMock }),
+  getWebSocket: () => ({ send: sendMock, sessionId: socket.sessionId }),
 }));
 
 vi.mock("../../protocol/ws-outbox", () => ({
@@ -58,15 +61,52 @@ afterEach(() => {
   openAttachmentPreviewMock.mockClear();
   openLocalFilePreviewMock.mockClear();
   useAppStore.setState({
+    isConnected: false,
     conversationId: null,
     messages: [],
     conversationStreaming: {},
     isStreaming: false,
   });
   vi.restoreAllMocks();
+  socket.sessionId = "";
 });
 
 describe("UserMessageCell", () => {
+  it("keeps signed thumbnail URLs stable across turn rebuilds and refreshes them for a new session", () => {
+    let now = 100_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    socket.sessionId = "session-a";
+    useAppStore.setState({ isConnected: true });
+    const cell = () => ({ kind: "user_message" as const, id: "image-owner", content: "图片", createdAt: 1,
+      attachments: [{ id: "image", artifactId: "image-artifact", name: "image.png", type: "image/png", size: 1 }] });
+    const view = render(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    const image = screen.getByRole("img", { name: "image.png" });
+    const first = image.getAttribute("src");
+    now += 15_000;
+    view.rerender(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    expect(image.getAttribute("src")).toBe(first);
+    socket.sessionId = "session-b";
+    view.rerender(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    expect(image.getAttribute("src")).not.toBe(first);
+    expect(image.getAttribute("src")).toContain("owner-A");
+  });
+  it("places image thumbnails and files above a separate message bubble", () => {
+    const { container } = render(<UserMessageCell conversationId="owner" cell={{
+      kind: "user_message", id: "attachments-above", createdAt: 1, content: "核对这两份资料",
+      attachments: [
+        { id: "img", name: "diagram.png", type: "image/png", size: 1, dataUrl: "data:image/png;base64,AA==" },
+        { id: "doc", name: "brief.pdf", type: "application/pdf", size: 1, artifactId: "pdf-artifact" },
+      ],
+    }} />);
+    const attachments = container.querySelector(".user-cell-attachments")!;
+    const bubble = container.querySelector(".edit-bubble-wrap")!;
+    expect(attachments.nextElementSibling).toBe(bubble);
+    expect(bubble.querySelector(".user-cell-attachments")).toBeNull();
+    expect(screen.getByRole("img", { name: "diagram.png" }).getAttribute("src")).toBe("data:image/png;base64,AA==");
+    expect(screen.getByRole("button", { name: "brief.pdf" }).closest(".user-cell-attachments")).toBe(attachments);
+    fireEvent.click(screen.getByRole("button", { name: "diagram.png" }));
+    expect(openLocalFilePreviewMock).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "owner", id: "img" }));
+  });
   it("labels messages initiated by a scheduled task", () => {
     render(
       <UserMessageCell
@@ -156,6 +196,7 @@ describe("UserMessageCell", () => {
     );
 
     expect(container.querySelector(".user-cell-content")).toBeNull();
+    expect(container.querySelector(".user-cell-bubble")).toBeNull();
     expect(container.querySelector(".user-cell-attachments-only")).toBeTruthy();
     expect(screen.getByText("brief.md")).toBeTruthy();
   });

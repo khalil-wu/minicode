@@ -31,6 +31,7 @@ import {
 } from "../lib/runtime-commands";
 import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-command";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
+import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 
 let initialCatalogRequested = false;
 
@@ -135,7 +136,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const selectedMentions = useAppStore((s) => s.selectedMentions);
-  const hasPendingPrompt = useAppStore((s) => Boolean(s.pendingAskUser || s.pendingApproval || s.pendingDiffReview));
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const hasPendingPrompt = useAppStore((s) => hasLocalPendingPromptForConversation([
+    s.pendingApproval, ...s.approvalQueue, s.pendingAskUser, ...s.askUserQueue,
+    s.pendingDiffReview, ...s.diffReviewQueue,
+  ], s.conversationId));
+  const hasPendingApproval = useAppStore((s) => !s.pendingConversationSwitchId && hasLocalPendingPromptForConversation([
+    s.pendingApproval, ...s.approvalQueue, s.pendingDiffReview, ...s.diffReviewQueue,
+  ], s.conversationId));
   const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
@@ -316,10 +324,10 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     sendClientCommand(command);
   };
 
-  const composerFingerprint = () => {
-    const state = useAppStore.getState();
+  const composerFingerprint = (state = useAppStore.getState()) => {
     return JSON.stringify({
       conversationId: String(state.conversationId || ""),
+      workspaceRoot: state.workingDirectory,
       draft: state.draft,
       attachments: state.attachments.map((item) => ({
         id: item.id,
@@ -347,9 +355,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
   };
 
-  const submit = () => runSubmission(submitCurrentDraft);
+  const submit = () => {
+    if (hasPendingApproval) return;
+    return runSubmission(submitCurrentDraft);
+  };
 
   const submitCurrentDraft = async () => {
+    if (useAppStore.getState().pendingConversationSwitchId) return;
     if (sendState === "stop" && !draft.trim()) return;
     if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
     const queueWhileStreaming = sendState === "queue";
@@ -438,6 +450,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const finalContent = content;
     const composerStateAtSend = composerFingerprint();
     const conversationAtSend = String(useAppStore.getState().conversationId || "").trim();
+    const workspaceAtSend = useAppStore.getState().workingDirectory;
     const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const displayContent = content;
 
@@ -465,6 +478,18 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (sameConversation && composerFingerprint() === composerStateAtSend) {
       if (finalContent.trim()) appendPromptHistory(workingDirectory, finalContent);
       resetComposer();
+    } else if (!sameConversation && conversationAtSend) {
+      const savedComposer = stateAfterSend.conversationWorkbenchStates[conversationAtSend];
+      if (savedComposer && composerFingerprint({ ...stateAfterSend, ...savedComposer,
+        conversationId: conversationAtSend, workingDirectory: workspaceAtSend }) === composerStateAtSend) {
+        for (const attachment of savedComposer.attachments) {
+          if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
+        }
+        useAppStore.setState((state) => ({ conversationWorkbenchStates: {
+          ...state.conversationWorkbenchStates,
+          [conversationAtSend]: { ...savedComposer, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
+        } }));
+      }
     }
   };
 
@@ -661,6 +686,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   }, [minimal]);
 
   const handleDrop = (e: React.DragEvent) => {
+    if (hasPendingApproval || pendingConversationSwitchId) return;
     const files = e.dataTransfer.files;
     if (!files.length) return;
     e.preventDefault();
@@ -678,6 +704,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       <div
         ref={containerRef}
         onDragOver={(e) => {
+          if (hasPendingApproval || pendingConversationSwitchId) return;
           if (!e.dataTransfer.types.includes("Files")) return;
           e.preventDefault();
           setDragOver(true);
@@ -688,6 +715,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onDropCapture={() => setDragOver(false)}
         onDrop={handleDrop}
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
+        data-approval-replacement={hasPendingApproval ? "true" : "false"}
         data-command-mode={commandModeActive ? "true" : "false"}
         data-drag-over={dragOver ? "true" : "false"}
         data-empty={!draft.length && !hasComposerAttachments && !selectedSkills.length && !selectedMentions.length && !quotedMessage && !activeGoal && !activeSlashCommand
@@ -706,8 +734,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           padding: codeLayout ? "0" : "8px 10px 10px",
         }}
       >
+      {!pendingConversationSwitchId && <InlineAgentPrompt />}
+      <div className="composer-input-region" hidden={hasPendingApproval}>
       {activeGoal && <GoalBar />}
-      <InlineAgentPrompt />
       <ContextChipRegion />
       <AttachmentStrip />
       {quotedMessage && <MessageQuote message={quotedMessage} onRemove={clearQuotedMessage} />}
@@ -738,7 +767,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         placeholder={selectedSlashCommand ? "补充指令…" : "描述任务或提出问题…"}
       />
       <MenuOverlay
-        open={slashPanelOpen || mentionPanelOpen || skillPanelOpen}
+        open={!hasPendingApproval && (slashPanelOpen || mentionPanelOpen || skillPanelOpen)}
         kind={slashPanelOpen ? "slash" : skillPanelOpen ? "skill" : "mention"}
         filter={menuFilter}
         onSelect={handleMenuSelect}
@@ -752,7 +781,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         minimal={minimal}
       />
       <PromptHistoryOverlay
-        open={historyOpen}
+        open={historyOpen && !hasPendingApproval}
         items={historyItems}
         placement={minimal ? "below" : "above"}
         onClose={() => setHistoryOpen(false)}
@@ -766,6 +795,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           setHistoryItems([]);
         }}
       />
+      </div>
       </div>
     </>
   );

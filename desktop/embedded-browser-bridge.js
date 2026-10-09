@@ -93,12 +93,31 @@ function ownedOperation(payload) {
   return operation;
 }
 
+function backendNavigationAuthorization(payload) {
+  const authorization = payload.navigation_authorization;
+  if (authorization == null) return undefined;
+  if (payload.action !== "navigate" || authorization.kind !== "owned_preview"
+    || typeof payload.operation_id !== "string" || !payload.operation_id
+    || authorization.url !== payload.url || authorization.conversation_id !== payload.conversation_id
+    || authorization.operation_id !== payload.operation_id
+    || typeof authorization.session_id !== "string" || !authorization.session_id
+    || typeof authorization.preview_id !== "string" || !authorization.preview_id
+    || !["bypass", "auto", "confirm", "plan"].includes(authorization.permission_mode)
+    || new URL(authorization.preview_url).origin !== new URL(payload.url).origin) {
+    throw new Error("Owned preview navigation authorization does not match this browser operation.");
+  }
+  return { ...authorization };
+}
+
 async function executeOwnedCommand(payload, response) {
   const id = payload.operation_id || crypto.randomUUID();
   const existing = ownedOperation({ ...payload, operation_id: id });
   if (existing) return { ok: false, status: existing.status,
     error: "This browser operation was already admitted; inspect its recorded outcome instead of executing it again.",
     cleanup_receipt: operationReceipt(existing) };
+  // Only the token-authenticated backend bridge may supply this execution
+  // option. Renderer/manual navigation payloads never become authority.
+  const navigationAuthorization = backendNavigationAuthorization(payload);
   const operation = createOperation(id, payload.conversation_id);
   operation.promise = Promise.resolve().then(async () => {
     operation.controller.signal.throwIfAborted();
@@ -106,6 +125,8 @@ async function executeOwnedCommand(payload, response) {
     operation.status = "running";
     return manager.executeControlCommand(payload, {
       signal: operation.controller.signal,
+      navigationAuthorization,
+      requestPresentation: true,
       onSubmitted() { operation.submitted = true; },
     });
   }).then((result) => {

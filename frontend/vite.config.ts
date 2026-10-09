@@ -83,6 +83,12 @@ export default defineConfig(async ({ command, mode }) => {
   return {
     base: "./",
     plugins: [react(), devCspRelaxPlugin],
+    // The workspace TypeScript service lives behind a Worker URL. Include its
+    // import graph in the initial scan so opening the editor cannot replace
+    // optimized React dependencies while a lazy panel is being loaded.
+    optimizeDeps: {
+      entries: ["index.html", "src.v2/panels/workspaceTypeScriptWorker.ts"],
+    },
     test: {
       setupFiles: [path.resolve(__dirname, "test/setup-browser.ts")],
       exclude: ["tests/**", "node_modules/**", ".minicode/**"],

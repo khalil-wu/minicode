@@ -21,10 +21,11 @@ const mocks = vi.hoisted(() => {
 
   return {
     sendClientCommand: vi.fn(() => true),
-    sendChatMessage: vi.fn(() => true),
+    sendChatMessage: vi.fn((): boolean | Promise<boolean> => true),
     pushToast: vi.fn(),
     buildContextPayload: vi.fn(async () => "File: src/App.tsx\n```tsx\nexport const value = 1;\n```"),
     buildContextNativeAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], notes: "" })),
+    promptResponse: vi.fn(async () => ({ type: "command.result", level: "success", message: "", data: {} })),
     menuSelection: "/usage",
   };
 });
@@ -32,6 +33,8 @@ const mocks = vi.hoisted(() => {
 vi.mock("../protocol/ws-outbox", () => ({
   registerWebSocketSender: vi.fn(),
   sendClientCommand: mocks.sendClientCommand,
+  commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed",
+  sendPromptResponseCommand: mocks.promptResponse,
 }));
 
 vi.mock("../chat/sendChatMessage", () => ({
@@ -132,18 +135,35 @@ describe("Composer goal bar", () => {
     mocks.sendChatMessage.mockClear();
     mocks.pushToast.mockClear();
     mocks.buildContextPayload.mockClear();
+    mocks.promptResponse.mockClear();
     mocks.menuSelection = "/usage";
     useAppStore.setState({
+      pendingConversationSwitchId: null,
       pendingApproval: null,
       approvalQueue: [],
       pendingAskUser: null,
+      askUserQueue: [],
       pendingDiffReview: null,
+      diffReviewQueue: [],
       quotedMessage: null,
     });
   });
 
   afterEach(() => {
     cleanup();
+  });
+
+  it.each(["old draft", "/permissions auto"])("does not start preparing or dispatching %s while switching owners", async (draft) => {
+    useAppStore.setState({ conversationId: "old-owner", pendingConversationSwitchId: "new-owner", draft,
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false });
+    render(<Composer />);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "composer" }), { key: "Enter" });
+    await act(async () => Promise.resolve());
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(mocks.buildContextPayload).not.toHaveBeenCalled();
+    expect(mocks.sendClientCommand).not.toHaveBeenCalled();
+    expect(useAppStore.getState().draft).toBe(draft);
   });
 
   it("submits once while context preparation is pending and preserves a newly typed draft", async () => {
@@ -164,6 +184,26 @@ describe("Composer goal bar", () => {
     expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
     expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ displayContent: "first draft" }));
     expect(useAppStore.getState().draft).toBe("next draft");
+  });
+
+  it.each([true, false])("clears only the original owner's unchanged composer after a delayed submission returns %s", async (accepted) => {
+    let finishSend!: (value: boolean) => void;
+    mocks.sendChatMessage.mockReturnValueOnce(new Promise((resolve) => { finishSend = resolve; }));
+    useAppStore.setState({ conversationId: "send-owner-a", workingDirectory: "C:/owner-a", draft: "A requested task",
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      quotedMessage: null, slashPanelOpen: false, mentionPanelOpen: false });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalled());
+    expect(useAppStore.getState().draft).toBe("A requested task");
+    act(() => {
+      useAppStore.getState().snapshotWorkbenchState("send-owner-a");
+      useAppStore.setState({ conversationId: "send-owner-b", workingDirectory: "C:/owner-b", draft: "B unsent task" });
+    });
+    await act(async () => { finishSend(accepted); });
+
+    expect(useAppStore.getState().draft).toBe("B unsent task");
+    expect(useAppStore.getState().conversationWorkbenchStates["send-owner-a"].draft).toBe(accepted ? "" : "A requested task");
   });
 
   it("keeps raw display text and quoted metadata separate from references in the assembled input", async () => {
@@ -736,14 +776,14 @@ describe("Composer goal bar", () => {
     expect(screen.queryByRole("button", { name: /Review diff/ })).toBeNull();
   });
 
-  it("renders pending tool approval inside the composer", async () => {
+  it("replaces the composer with its approval and restores the same draft, selection and attachment after acceptance", async () => {
     const { useAppStore } = await import("../stores");
     const { Composer } = await import("./Composer");
 
     useAppStore.setState({
       conversationId: "conv-approval",
       appMode: "chat",
-      draft: "",
+      draft: "unfinished task",
       currentModel: "gpt-5",
       isConnected: true,
       isStreaming: false,
@@ -752,19 +792,118 @@ describe("Composer goal bar", () => {
       attachments: [],
       selectedSkills: [],
       gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
+      pendingApproval: null,
+      approvalQueue: [],
+    });
+
+    const { container } = render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "composer" }) as HTMLTextAreaElement;
+    input.setSelectionRange(3, 7);
+    const attachment = { id: "draft-file", name: "notes.txt", type: "text/plain", size: 4, status: "ready" as const,
+      conversationId: "conv-approval", artifactId: "draft-artifact",
+      attachment: { id: "draft-artifact", artifact_id: "draft-artifact", file_name: "notes.txt", media_type: "text/plain", kind: "document" } };
+    act(() => useAppStore.setState({
+      attachments: [attachment],
       pendingApproval: {
         requestId: "approval-inline",
         conversationId: "conv-approval",
         toolName: "run_command",
         args: { command: "npm test" },
       },
-      approvalQueue: [],
-    });
+    }));
 
-    const { container } = render(<Composer />);
-
-    expect(container.querySelector(".composer-container")?.textContent).toContain("允许使用 运行？");
+    expect(container.querySelector(".composer-container")?.textContent).toContain("允许 MiniCode 运行此命令？");
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("true");
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    expect(container.querySelector("textarea")).toBe(input);
+    expect(input.closest(".composer-input-region")?.hasAttribute("hidden")).toBe(true);
     expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByText("Send", { selector: "button" }));
+    await act(async () => Promise.resolve());
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(mocks.buildContextPayload).not.toHaveBeenCalled();
+    expect(mocks.promptResponse).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "允许使用工具" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "composer" })).toBe(input));
+    expect(input.value).toBe("unfinished task");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([3, 7]);
+    expect(useAppStore.getState().attachments).toEqual([attachment]);
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("false");
+  });
+
+  it("replaces input only for the current owner's queued approval and suppresses old approval during a switch", () => {
+    useAppStore.setState({ conversationId: "composer-owner", draft: "kept draft", currentModel: "gpt-5",
+      isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false,
+      pendingApproval: { requestId: "other-approval", conversationId: "another-owner", toolName: "read_file", args: {} },
+    });
+    const { container } = render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "composer" });
+    expect(screen.queryByText("权限")).toBeNull();
+    act(() => useAppStore.setState({ approvalQueue: [
+      { requestId: "owned-approval", conversationId: "composer-owner", toolName: "run_command", args: { command: "npm test" } },
+    ] }));
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.getByText("允许 MiniCode 运行此命令？")).toBeTruthy();
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "another-owner" }));
+    expect(screen.queryByText("权限")).toBeNull();
+    expect(container.querySelector("textarea")).toBe(input);
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("false");
+    act(() => useAppStore.setState({ pendingConversationSwitchId: null, conversationId: "new-owner" }));
+    expect(screen.getByRole("textbox", { name: "composer" })).toBe(input);
+    expect(screen.queryByText("权限")).toBeNull();
+  });
+
+  it("keeps the ordinary composer alongside a question", () => {
+    useAppStore.setState({ conversationId: "question-owner", draft: "kept draft", currentModel: "gpt-5",
+      isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false,
+      pendingAskUser: { requestId: "question", conversationId: "question-owner", question: "Choose a direction" },
+    });
+    const { container } = render(<Composer />);
+    expect(screen.getByRole("textbox", { name: "composer" })).toBeTruthy();
+    expect(screen.getByText("Choose a direction")).toBeTruthy();
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("false");
+  });
+
+  it("suspends the saved input menu while approval replaces it and restores the menu afterward", () => {
+    useAppStore.setState({ conversationId: "menu-owner", draft: "/usage", currentModel: "gpt-5",
+      isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: true, mentionPanelOpen: false,
+    });
+    const { container } = render(<Composer />);
+    expect(screen.getByText("Mock slash option")).toBeTruthy();
+    act(() => useAppStore.setState({ pendingApproval: {
+      requestId: "menu-approval", conversationId: "menu-owner", toolName: "run_command", args: { command: "npm test" },
+    } }));
+    expect(container.querySelector(".composer-input-region")?.textContent).not.toContain("Mock slash option");
+    expect(useAppStore.getState().slashPanelOpen).toBe(true);
+    act(() => useAppStore.getState().clearApproval("menu-approval"));
+    expect(screen.getByText("Mock slash option")).toBeTruthy();
+    expect(useAppStore.getState().draft).toBe("/usage");
+  });
+
+  it("uses the queued file review's owner to replace input and keeps unrelated reviews out", () => {
+    useAppStore.setState({ conversationId: "review-owner", draft: "kept draft", currentModel: "gpt-5",
+      isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false,
+      pendingDiffReview: { requestId: "other-review", conversationId: "another-owner", filePath: "other.ts", diff: "+other" },
+    });
+    const { container } = render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "composer" });
+    act(() => useAppStore.setState({ diffReviewQueue: [
+      { requestId: "owned-review", conversationId: "review-owner", filePath: "app.ts", diff: "-old\n+new" },
+    ] }));
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(container.querySelector("textarea")).toBe(input);
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("true");
+    expect(container.querySelector(".inline-agent-prompt")?.textContent).not.toContain("other.ts");
+    act(() => useAppStore.getState().clearDiffReview("owned-review"));
+    expect(screen.getByRole("textbox", { name: "composer" })).toBe(input);
+    expect(useAppStore.getState().pendingDiffReview?.requestId).toBe("other-review");
   });
 
   it("hides review diff in code mode until changes exist", async () => {

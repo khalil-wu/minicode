@@ -4,8 +4,9 @@ import { expect, Page, test } from "@playwright/test";
 async function mockCellWebSocket(page: Page) {
   await page.addInitScript(() => {
     const messages: string[] = [];
+    const NativeWebSocket = window.WebSocket;
 
-    // 手写坚若磐石的模拟 WebSocket 事件机制，消除任何继承兼容性断层
+    // Mock the app-server transport while retaining Vite's real HMR connection.
     class MockWebSocket {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -17,7 +18,7 @@ async function mockCellWebSocket(page: Page) {
       CLOSED = 3;
 
       readyState = 1;
-      url: string;
+      url = "";
       protocol = "";
       extensions = "";
       bufferedAmount = 0;
@@ -29,7 +30,10 @@ async function mockCellWebSocket(page: Page) {
 
       listeners: Record<string, Function[]> = {};
 
-      constructor(url: string) {
+      constructor(url: string, protocols?: string | string[]) {
+        if (new URL(url, location.href).pathname !== "/ws") {
+          return new NativeWebSocket(url, protocols) as unknown as MockWebSocket;
+        }
         this.url = url;
         (window as any).__mockWs = this;
         (window as any).__mockWsMessages = messages;
@@ -116,18 +120,20 @@ async function mockCellWebSocket(page: Page) {
               type: "agent.progress",
               id: "planning-step",
               stage: "planning",
+              phase: "planning",
+              visibility: "timeline",
               status: "running",
               message: "正在制定执行计划",
               ...owner,
             });
             
             this._receive({
-              type: "plan_updated",
-              plan_id: "plan-12345",
-              status: "executing",
-              steps: [
-                { id: "step-1", title: "Inspect frontend", status: "running" },
-                { id: "step-2", title: "Refine rendering", status: "pending" }
+              type: "turn.plan.updated",
+              thread_id: owner.conversation_id,
+              turn_id: `turn-${owner.message_id}`,
+              plan: [
+                { step: "Inspect frontend", status: "in_progress" },
+                { step: "Refine rendering", status: "pending" }
               ],
               ...owner,
             });
@@ -310,7 +316,7 @@ async function mockCellWebSocket(page: Page) {
             // 6. 结束流式，生成最终回答
             this._receive({
               type: "item.started",
-              item: { id: "cell-answer", type: "agent_message" },
+              item: { id: "cell-answer", type: "agent_message", text: "", status: "in_progress", source: "model_final" },
               ...owner,
             });
             this._receive({
@@ -321,7 +327,7 @@ async function mockCellWebSocket(page: Page) {
             });
             this._receive({
               type: "item.completed",
-              item: { id: "cell-answer", type: "agent_message", text: "我已经为您成功制定了计划并分析了当前结构。", status: "completed" },
+              item: { id: "cell-answer", type: "agent_message", text: "我已经为您成功制定了计划并分析了当前结构。", status: "completed", source: "model_final" },
               ...owner,
             });
 
@@ -405,6 +411,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     }, filePath);
     await expect(page.locator(".activity-cell-running")).toHaveCount(1);
     await expect(page.getByRole("status", { name: "处理中", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("status", { name: /^已处理 / })).toHaveCount(1);
     await expect(page.locator(".thinking-cell").filter({ hasText: /^\.\.\.$/ })).toHaveCount(0);
     const plan = page.getByRole("button", { name: "已完成 2 / 3 项 · 更新 README" });
     await expect(plan).toBeVisible();
@@ -416,7 +423,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
       summary: "(no matches)", activity_kind: "workspaceSearch", conversation_id: "conv-cells", message_id: "readme-answer",
     }));
     await expect(page.locator(".activity-cell-running")).toHaveCount(0);
-    await expect(page.getByRole("status", { name: "处理中", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("status", { name: /^已处理 / })).toHaveCount(1);
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       const content = "已核实备份使用 JSON，依据 `src/backup/backupService.native.ts`。";

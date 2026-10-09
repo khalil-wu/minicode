@@ -128,6 +128,27 @@
   text-rendering: optimizeLegibility;
 }
 
+.md-mermaid {
+  max-width: 100%;
+  max-height: min(65vh, 620px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) var(--surface-soft);
+}
+
+.md-mermaid > svg { display: block; max-width: none; flex-shrink: 0; }
+.md-mermaid svg text { fill: var(--text-primary); opacity: 1; }
+.md-mermaid::-webkit-scrollbar { width: 10px; height: 10px; }
+.md-mermaid::-webkit-scrollbar-thumb { background: var(--text-muted); border: 2px solid var(--surface-soft); border-radius: 6px; }
+.md-mermaid::-webkit-scrollbar-track,
+.md-mermaid::-webkit-scrollbar-corner { background: var(--surface-soft); }
+.md-mermaid:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+
 .cjk-title {
   font-family: var(--font-ui);
   font-weight: var(--fw-regular);
@@ -385,8 +406,7 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
 /* ════════════════════════════════════════════════════════
    CJK Typography — Anthropic-inspired optimization
    
-   Interface text uses Anthropic Sans / Noto Sans SC. Latin prose uses
-   Anthropic Serif with the same Chinese family; all fonts load locally.
+   Interface and prose use Anthropic Sans / Noto Sans SC; both fonts load locally.
    
    These rules improve Chinese text readability:
    - font-variant-east-asian: proportional-width for mixed Latin+CJK

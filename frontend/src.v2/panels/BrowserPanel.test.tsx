@@ -7,6 +7,7 @@ import { handlePreviewEvent } from "../chat/previewEvents";
 import type { ServerEvent } from "../protocol/events";
 import type { EmbeddedBrowserState } from "../desktop/runtime";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
+import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import { ContextMenu } from "../components/ContextMenu";
 import { __resetOpenWebInBrowserForTests, openWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
 
@@ -104,10 +105,15 @@ const openBrowserAction = (name: string) => {
 describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeMocks.onEvent.mockImplementation((_callback) => () => {});
     __resetOpenWebInBrowserForTests();
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     useAppStore.setState({
       conversationId: "conv-browser",
+      pendingConversationSwitchId: null,
+      rightStackTab: "tasks",
+      rightPanelOpen: false,
+      rightStackTabLocked: false,
       permissionMode: "bypass",
       workingDirectory: "C:/browser",
       conversationWorkbenchStates: {},
@@ -124,6 +130,77 @@ describe("BrowserPanel", () => {
       turnDiffs: {},
       diffReview: null,
     });
+  });
+
+  it("presents an authorized tool's exact native target and reports the real pane bounds", async () => {
+    const listeners = new Set<(event: EmbeddedBrowserState) => void>();
+    runtimeMocks.onEvent.mockImplementation((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+    const bounds = { x: 650, y: 80, left: 650, top: 80, right: 1330, bottom: 840, width: 680, height: 760, toJSON: () => ({}) };
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      return this.classList.contains("mc-browser-surface") ? bounds : originalBounds.call(this);
+    });
+    const target = { ...page("tool-native", "Tool page", "https://tool.example/"), type: "presentation-requested" as const };
+    runtimeMocks.list.mockResolvedValueOnce([page("existing", "Existing page", "https://existing.example/", true), target]);
+    const Harness = () => {
+      useDesktopEvents();
+      const visible = useAppStore(state => state.rightPanelOpen && state.rightStackTab === "browser");
+      return visible ? <BrowserPanel /> : null;
+    };
+    render(<Harness />);
+    act(() => { for (const listener of [...listeners]) listener(target); });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Tool page" }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(runtimeMocks.activate).toHaveBeenCalledWith("conv-browser", "tool-native"));
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith(expect.objectContaining({
+      id: "tool-native", conversationId: "conv-browser", x: 650, y: 80, width: 680, height: 760,
+    })));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(runtimeMocks.create).not.toHaveBeenCalled();
+    expect(useAppStore.getState().rightStackTabLocked).toBe(false);
+  });
+
+  it.each(["closed", "switched"] as const)("does not reopen or reactivate a tool page after the user %s during native listing", async (action) => {
+    const listeners = new Set<(event: EmbeddedBrowserState) => void>();
+    runtimeMocks.onEvent.mockImplementation((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    const target = { ...page("tool-native", "Tool page", "https://tool.example/"), type: "presentation-requested" as const };
+    const Harness = () => {
+      useDesktopEvents();
+      const visible = useAppStore(state => state.rightPanelOpen && state.rightStackTab === "browser");
+      return visible ? <BrowserPanel /> : null;
+    };
+    render(<Harness />);
+    act(() => { for (const listener of [...listeners]) listener(target); });
+    await waitFor(() => expect(runtimeMocks.list).toHaveBeenCalledWith("conv-browser"));
+    act(() => {
+      if (action === "closed") useAppStore.getState().toggleRightPanel();
+      else useAppStore.setState({ conversationId: "next-owner", rightPanelOpen: false });
+    });
+    runtimeMocks.activate.mockClear();
+    await act(async () => listing.resolve([target]));
+    act(() => { for (const listener of [...listeners]) listener(target); });
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
+    expect(runtimeMocks.activate).not.toHaveBeenCalled();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(runtimeMocks.create).not.toHaveBeenCalled();
+    act(() => useAppStore.getState().setRightStackTab("browser"));
+    await screen.findByText("开始浏览");
+    expect(screen.queryByRole("tab", { name: "Tool page" })).toBeNull();
+  });
+
+  it("does not let a background owner or pending navigation steal the current pane", () => {
+    const listeners = new Set<(event: EmbeddedBrowserState) => void>();
+    runtimeMocks.onEvent.mockImplementation((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+    const Harness = () => { useDesktopEvents(); return null; };
+    render(<Harness />);
+    const target = { ...page("background", "Background", "https://background.example/"), type: "presentation-requested" as const };
+    act(() => { for (const listener of listeners) listener({ ...target, conversationId: "another-owner" }); });
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "next-owner" }));
+    act(() => { for (const listener of listeners) listener(target); });
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
+    expect(runtimeMocks.list).not.toHaveBeenCalled();
   });
 
   it("applies real viewport dimensions and keeps multiple picked elements in one feedback draft", async () => {

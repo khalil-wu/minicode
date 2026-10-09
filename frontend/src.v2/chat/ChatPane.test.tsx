@@ -15,6 +15,7 @@ describe("ChatPane search shortcuts", () => {
       conversationId: "conv-chat-pane",
       pendingConversationSwitchId: null,
       conversationHydration: {},
+      messages: [],
       appMode: "cowork",
       panelSlots: [{ id: "main-chat", kind: "chat", focused: true }],
     });
@@ -86,18 +87,22 @@ describe("ChatPane search shortcuts", () => {
     useAppStore.setState({ draft: "Unsent prompt" });
     const { container } = render(<ChatPane />);
     expect(screen.getByText("messages")).toBeTruthy();
+    const composer = screen.getByRole("textbox", { name: "composer" });
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
     expect(container.querySelector(".chat-pane")?.getAttribute("data-switching")).toBe("true");
     expect(screen.queryByText("messages")).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "composer" })).toBe(composer);
+    expect(composer.closest<HTMLElement>(".chat-pane-composer-region")?.inert).toBe(true);
     const opening = screen.getByRole("status");
     expect(opening.textContent).toContain("正在打开会话");
     expect(opening.className).toBe("chat-pane-switch-status");
+    expect(opening.parentElement?.classList.contains("chat-pane-message-transition")).toBe(true);
     expect(opening.querySelector("svg.animate-spin")?.getAttribute("aria-hidden")).toBe("true");
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
+    expect(composer.closest<HTMLElement>(".chat-pane-composer-region")?.inert).toBe(false);
     expect(screen.getByText("messages")).toBeTruthy();
     expect(screen.queryByText("正在打开会话…")).toBeNull();
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
@@ -105,6 +110,7 @@ describe("ChatPane search shortcuts", () => {
 
   it("shows an informative hydration status while backend context is being restored", () => {
     useAppStore.setState({
+      messages: [{ id: "cached", role: "user", content: "cached content", timestamp: 1, artifacts: [] }],
       conversationHydration: {
         "conv-chat-pane": { isHydrating: true, updatedAt: 1 },
       },
@@ -113,5 +119,18 @@ describe("ChatPane search shortcuts", () => {
     render(<ChatPane />);
 
     expect(screen.getByRole("status").textContent).toContain("正在恢复会话上下文、运行状态和工具记录");
+    expect(screen.getByText("messages")).toBeTruthy();
+    expect(screen.getByRole("status").querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("centers cold-loading progress in the message area and retains the composer", () => {
+    useAppStore.setState({ conversationHydration: { "conv-chat-pane": { isHydrating: true, updatedAt: 1 } } });
+    render(<ChatPane />);
+    expect(screen.queryByText("messages")).toBeNull();
+    expect(screen.getByRole("status").querySelector(".animate-spin")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "composer" })).toBeTruthy();
+    act(() => useAppStore.setState({ conversationHydration: {} }));
+    expect(screen.getByText("messages")).toBeTruthy();
+    expect(screen.queryByText("正在打开会话…")).toBeNull();
   });
 });

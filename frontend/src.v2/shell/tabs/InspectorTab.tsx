@@ -235,9 +235,11 @@ const RunOverviewSection = () => {
     ? `${summary.failedOrBlocked} 项需要处理`
     : summary.outcome === 'running'
       ? `${summary.running} 项进行中`
-      : summary.outcome === 'completed'
-        ? '已完成'
-        : '尚未开始'
+      : summary.outcome === 'pending'
+        ? `${summary.pending} 项等待中`
+        : summary.outcome === 'completed'
+          ? '已完成'
+          : '尚未开始'
   return (
     <div style={{ display: 'grid', gap: 8 }}>
       <SectionLabel label="本次运行" />
@@ -299,7 +301,7 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
       {traceExportEnabled && sessionReplayStatus && <div style={sessionReplayStatusStyle}>{sessionReplayStatus}</div>}
       <InfoCard>
         <InfoRow label="事件" value={replayEvents.length === 0 ? '暂无运行事件' : `${replayEvents.length} 条`} mono />
-        <InfoRow label="状态" value={replaySummary.outcome === 'needs_attention' ? `${replaySummary.failedOrBlocked} 项需要处理` : replaySummary.outcome === 'running' ? `${replaySummary.running} 项进行中` : replaySummary.outcome === 'completed' ? '已完成' : '空闲'} tone={replaySummary.outcome === 'needs_attention' ? 'warning' : replaySummary.outcome === 'running' ? 'accent' : 'muted'} />
+        <InfoRow label="状态" value={replaySummary.outcome === 'needs_attention' ? `${replaySummary.failedOrBlocked} 项需要处理` : replaySummary.outcome === 'running' ? `${replaySummary.running} 项进行中` : replaySummary.outcome === 'pending' ? `${replaySummary.pending} 项等待中` : replaySummary.outcome === 'completed' ? '已完成' : '空闲'} tone={replaySummary.outcome === 'needs_attention' ? 'warning' : replaySummary.outcome === 'running' ? 'accent' : 'muted'} />
         <InfoRow label="耗时" value={replaySummary.spanMs == null ? '—' : `${(replaySummary.spanMs / 1000).toFixed(1)} 秒`} mono />
       </InfoCard>
       {expanded && (
@@ -914,6 +916,7 @@ const coordinationMetricLabel = (summary: RuntimeMetricSummary): string => {
 const replayOutcomeLabel = (summary: RunReplaySummary): string => {
   if (summary.outcome === 'empty') return '暂无回放事件'
   if (summary.outcome === 'running') return `${summary.running} 项仍在运行`
+  if (summary.outcome === 'pending') return `${summary.pending} 项等待中`
   if (summary.outcome === 'needs_attention') return `${summary.failedOrBlocked} 项需要处理`
   return '回放已完成'
 }

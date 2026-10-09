@@ -297,6 +297,8 @@ describe("FooterRow permission picker", () => {
   });
 
   it("asks for confirmation before switching to bypass", async () => {
+    let accept!: (value: Awaited<ReturnType<typeof sendClientCommandAwaitResult>>) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { accept = resolve; }));
     const confirmSpy = vi.mocked(showConfirm);
     confirmSpy.mockClear();
     confirmSpy.mockResolvedValue(true);
@@ -313,6 +315,10 @@ describe("FooterRow permission picker", () => {
     }, "conversation.permission_mode.set"));
     expect(useAppStore.getState().permissionMode).toBe("auto");
     expect(confirmSpy).toHaveBeenCalledWith(expect.objectContaining({ danger: true }));
+    await act(async () => accept({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "",
+      data: { conversation_id: "conv-footer", mode: "bypass" } }));
+    expect(useAppStore.getState().permissionMode).toBe("bypass");
+    expect(screen.getByTitle("权限：完全访问")).toBeTruthy();
   });
 
   it("keeps the current mode when the bypass confirmation is cancelled", async () => {

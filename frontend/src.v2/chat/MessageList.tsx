@@ -15,6 +15,7 @@ import { hasVisibleActiveConversation } from "./activeConversation";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 import type { ChatTurnState } from "./cells/cellTypes";
 import { loadRevealMessage } from "./revealConversationMessage";
+import { useReplyViewport } from "./useReplyViewport";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -61,6 +62,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const ref = useRef<HTMLDivElement>(null);
   const getScrollElement = useCallback(() => ref.current, []);
   const contentRef = useRef<HTMLDivElement>(null);
+  const tailRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [isFollowing, setIsFollowing] = useState(true);
   const isNearBottom = useRef(true);
@@ -68,6 +70,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const lastRenderedMessageIdRef = useRef<string | null>(messages.at(-1)?.id ?? null);
   const lastRenderedMessageCountRef = useRef(messages.length);
   const userScrollIntentRef = useRef(0);
+  const followPausedRef = useRef(false);
+  followPausedRef.current = searchActive || Boolean(sourceMessage);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [isScrollbarActive, setIsScrollbarActive] = useState(false);
   const scrollbarFadeTimerRef = useRef<number | null>(null);
@@ -104,6 +108,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   // conversation always paints its latest result before observers settle.
   const tailTurn = turns.at(-1) ?? null;
   const liveTurn = isStreaming && tailTurn?.status === "streaming" ? tailTurn : null;
+  const reserveLatestReply = Boolean(tailTurn?.userCell && !searchActive && !sourceMessage);
   const historicalTurns = tailTurn ? turns.slice(0, -1) : turns;
   // DOM Range search needs all loaded turns, not just the current viewport.
   // Use the existing full-history renderer only while the user searches.
@@ -143,11 +148,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       return;
     }
     target.scrollIntoView({ block: "center", behavior: "smooth" });
-    target.classList.add("chat-message-reveal-target");
     ref.current?.focus({ preventScroll: true });
     setRevealStatus("");
     if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
-    return () => target.classList.remove("chat-message-reveal-target");
   }, [sourceMessage, showAllHistory]);
   const firstHistoricalTurnId = historicalTurns[0]?.id;
   const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
@@ -244,8 +247,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     });
   }, []);
 
-  const scheduleBottomScroll = useCallback((behavior: ScrollBehavior = "auto", force = false) => {
-    if (!force && !isNearBottom.current) return;
+  const scheduleBottomScroll = useCallback((behavior: ScrollBehavior = "auto", force = false, alignTurnStart = false) => {
+    if (!force && (!isNearBottom.current || followPausedRef.current)) return;
     if (force) {
       isNearBottom.current = true;
       setIsFollowing(true);
@@ -259,7 +262,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
       const el = ref.current;
-      if (!el || (!force && !isNearBottom.current)) return;
+      if (!el || (!force && (!isNearBottom.current || followPausedRef.current))) return;
       if (force) {
         isNearBottom.current = true;
         setIsFollowing(true);
@@ -268,16 +271,21 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       // Mark this as programmatic so the resulting scroll event doesn't
       // re-engage auto-follow or fight a user reading upstream. One snap per
       // frame is enough — the old second-rAF re-snap caused a visible jog.
-      const top = el.scrollHeight;
+      const tail = tailRef.current;
+      const top = alignTurnStart && tail
+        ? el.scrollTop + tail.getBoundingClientRect().top - el.getBoundingClientRect().top
+          - Number(getComputedStyle(el).paddingTop.replace("px", ""))
+        : el.scrollHeight;
       setScrollTop(el, top, behavior);
     });
   }, [setScrollTop]);
   const followBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     scheduleBottomScroll(behavior, false);
   }, [scheduleBottomScroll]);
-  const forceBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    scheduleBottomScroll(behavior, true);
+  const startLatestTurn = useCallback(() => {
+    scheduleBottomScroll("auto", true, true);
   }, [scheduleBottomScroll]);
+  useReplyViewport(ref, followBottom);
 
   useLayoutEffect(() => {
     if (prevConvId.current !== conversationId) {
@@ -320,13 +328,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   }, [conversationId, showAllHistory, timelineMessages, setScrollTop]);
 
   const scrollToBottom = useCallback(() => {
-    const el = ref.current;
-    if (!el) return;
-    isNearBottom.current = true;
-    setIsFollowing(true);
-    setShowScrollBtn(false);
-    setScrollTop(el, el.scrollHeight, "smooth");
-  }, [setScrollTop]);
+    setSourceMessage(null);
+    scheduleBottomScroll("smooth", true);
+  }, [scheduleBottomScroll]);
 
   useEffect(() => {
     const el = ref.current;
@@ -405,9 +409,13 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     const messageChanged = Boolean(latestId && latestId !== lastRenderedMessageIdRef.current);
     lastRenderedMessageIdRef.current = latestId;
     if (!messageChanged && appendedMessages.length === 0) return;
-    if (appendedMessages.some((message) => message.role === "user")) forceBottom();
+    if (appendedMessages.some((message) => message.role === "user" && message.queueState !== "queued"
+      && message.messageSource?.kind !== "scheduled_task") && !searchActive) {
+      setSourceMessage(null);
+      startLatestTurn();
+    }
     else if (latest?.role === "assistant") followBottom();
-  }, [followBottom, forceBottom, messages, shouldShowMessages]);
+  }, [followBottom, startLatestTurn, messages, searchActive, shouldShowMessages, sourceMessage]);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -458,6 +466,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
           style={{
             gap: "var(--space-turn-gap)",
             minHeight: "100%",
+            flex: "0 0 auto",
           }}
         >
           {!shouldShowMessages || timelineMessages.length === 0 ? (
@@ -539,8 +548,10 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
             })}
             {tailTurn && (
               <div
+                ref={tailRef}
                 data-testid={liveTurn ? "streaming-turn-tail" : "latest-turn-tail"}
-                style={{ flex: "0 0 auto" }}
+                data-reply-viewport={reserveLatestReply ? "true" : "false"}
+                style={{ flex: "0 0 auto", minHeight: reserveLatestReply ? "var(--reply-viewport-height)" : undefined }}
               >
                 <ChatTurn turn={tailTurn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
               </div>

@@ -146,7 +146,7 @@ describe("image progress uses the actual terminal status", () => {
     seedMessage([imageProgress("partial")], false, [image]);
     renderOwnedAnswer();
     expect(document.querySelector('.assistant-cell-image-placeholder[data-status="partial"]')?.getAttribute("data-running")).toBe("false");
-    expect(screen.getByAltText("模型生成的图片")).toBeTruthy();
+    expect(screen.getByAltText("图片")).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
   });
 
@@ -178,11 +178,11 @@ describe("generated-image modal borrows the existing focus owner", () => {
     seedMessage([], false, [image]);
     renderOwnedAnswer();
     // Unit DOM does not fetch PNG bytes; the native Chrome replay checks real load.
-    fireEvent.load(screen.getByAltText("模型生成的图片"));
-    const opener = screen.getByRole("button", { name: "查看生成图片大图" });
+    fireEvent.load(screen.getByAltText("图片"));
+    const opener = screen.getByRole("button", { name: "查看图片大图" });
     opener.focus();
     fireEvent.click(opener);
-    const dialog = screen.getByRole("dialog", { name: "生成图片大图" });
+    const dialog = screen.getByRole("dialog", { name: "图片大图" });
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
     return { opener, dialog };
   }
@@ -203,7 +203,7 @@ describe("generated-image modal borrows the existing focus owner", () => {
     const { opener, dialog } = await openLightbox();
     expect(document.body.style.overflow).toBe("hidden");
     fireEvent.keyDown(dialog, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "生成图片大图" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
     expect(document.activeElement).toBe(opener);
     expect(document.body.style.overflow).toBe("auto");
   });
@@ -211,7 +211,7 @@ describe("generated-image modal borrows the existing focus owner", () => {
   it("restores the opener when the actual backdrop closes", async () => {
     const { opener, dialog } = await openLightbox();
     fireEvent.click(dialog);
-    expect(screen.queryByRole("dialog", { name: "生成图片大图" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
 });

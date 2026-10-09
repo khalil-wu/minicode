@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
 import { readableToolLabel } from "../toolDisplayName";
 import { isProviderRequestProgress, providerProgressLabel } from "../../lib/provider-progress";
+import { isToolCallAwaitingApproval, isToolCallExecuting, type ToolCallRecord } from "../../lib/tool-call-reducer";
 
 export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
 
@@ -13,7 +14,7 @@ export type TimelineItem = {
   phase: TimelinePhase;
   label: string;
   summary?: string;
-  status: "running" | "completed" | "failed" | "blocked" | "partial" | "cancelled" | "info";
+  status: "pending" | "pending_approval" | "running" | "completed" | "failed" | "blocked" | "partial" | "timeout" | "cancelled" | "info";
   startedAt: number;
   finishedAt?: number;
   toolName?: string;
@@ -40,10 +41,11 @@ export type RunReplaySummary = {
   coveragePercent: number;
   failedOrBlocked: number;
   running: number;
+  pending: number;
   firstStartedAt: number | null;
   lastFinishedAt: number | null;
   spanMs: number | null;
-  outcome: "completed" | "needs_attention" | "running" | "empty";
+  outcome: "completed" | "needs_attention" | "running" | "pending" | "empty";
 };
 
 const PHASE_LABELS: Record<TimelinePhase, string> = {
@@ -190,7 +192,7 @@ export function buildRunTimelineItems(
         ? tc.displayHint || tc.name || "工具"
         : tc.displaySummary || tc.displayHint || tc.name || "工具"),
       summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
-      status: normalizeToolStatus(tc.status),
+      status: normalizeToolStatus(tc),
       startedAt: tc.startedAt || message.timestamp || Date.now(),
       finishedAt: tc.finishedAt,
       toolName: tc.name,
@@ -266,6 +268,7 @@ export function buildRunReplaySummary(events: RunReplayEvent[]): RunReplaySummar
       coveragePercent: 0,
       failedOrBlocked: 0,
       running: 0,
+      pending: 0,
       firstStartedAt: null,
       lastFinishedAt: null,
       spanMs: null,
@@ -274,8 +277,9 @@ export function buildRunReplaySummary(events: RunReplayEvent[]): RunReplaySummar
   }
   const phases = PHASE_ORDER.filter((phase) => events.some((event) => event.phase === phase));
   const timed = events.filter((event) => Number.isFinite(event.started_at) && (event.finished_at == null || Number.isFinite(event.finished_at))).length;
-  const failedOrBlocked = events.filter((event) => event.status === "failed" || event.status === "blocked" || event.status === "partial" || event.status === "cancelled").length;
+  const failedOrBlocked = events.filter((event) => event.status === "failed" || event.status === "blocked" || event.status === "partial" || event.status === "timeout" || event.status === "cancelled").length;
   const running = events.filter((event) => event.status === "running").length;
+  const pending = events.filter((event) => event.status === "pending" || event.status === "pending_approval").length;
   const firstStartedAt = Math.min(...events.map((event) => event.started_at));
   const finishedValues = events.map((event) => event.finished_at ?? event.started_at).filter((value) => Number.isFinite(value));
   const lastFinishedAt = finishedValues.length > 0 ? Math.max(...finishedValues) : null;
@@ -285,10 +289,11 @@ export function buildRunReplaySummary(events: RunReplayEvent[]): RunReplaySummar
     coveragePercent: Math.round((timed / events.length) * 100),
     failedOrBlocked,
     running,
+    pending,
     firstStartedAt,
     lastFinishedAt,
     spanMs: lastFinishedAt != null ? Math.max(0, lastFinishedAt - firstStartedAt) : null,
-    outcome: running > 0 ? "running" : failedOrBlocked > 0 ? "needs_attention" : "completed",
+    outcome: running > 0 ? "running" : failedOrBlocked > 0 ? "needs_attention" : pending > 0 ? "pending" : "completed",
   };
 }
 
@@ -325,20 +330,26 @@ function phaseForTool(value?: string): TimelinePhase {
     : "tool";
 }
 
-function normalizeToolStatus(status: string): TimelineItem["status"] {
-  if (status === "success") return "completed";
-  if (status === "pending") return "running";
-  if (status === "timeout") return "failed";
-  if (status === "failed" || status === "blocked" || status === "partial" || status === "running" || status === "cancelled") return status;
-  return "info";
+function normalizeToolStatus(record: ToolCallRecord): TimelineItem["status"] {
+  if (isToolCallAwaitingApproval(record)) return "pending_approval";
+  if (record.status === "pending" || record.status === "running") {
+    return isToolCallExecuting(record) ? "running" : "pending";
+  }
+  return record.status === "success" ? "completed" : record.status;
 }
 
 function statusLabel(status: TimelineItem["status"]): string {
   switch (status) {
+    case "pending":
+      return "准备中";
+    case "pending_approval":
+      return "等待批准";
     case "completed":
       return "已完成";
     case "failed":
       return "失败";
+    case "timeout":
+      return "超时";
     case "blocked":
       return "已阻止";
     case "partial":
@@ -356,7 +367,8 @@ function statusColor(status: TimelineItem["status"]): string {
   if (status === "completed") return "var(--state-success)";
   if (status === "failed") return "var(--state-danger)";
   if (status === "cancelled") return "var(--text-muted)";
-  if (status === "blocked" || status === "partial") return "var(--state-warning)";
+  if (status === "blocked" || status === "partial" || status === "timeout" || status === "pending_approval") return "var(--state-warning)";
+  if (status === "pending") return "var(--text-muted)";
   if (status === "info") return "var(--text-muted)";
   return "var(--accent-primary)";
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,6 +15,7 @@ from backend.services.conversation_permission_service import plan_permission_mod
 from backend.tools.command_tool import RunCommandTool
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.turn_wait_state import TurnWaitState
+from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 
 
 class _Registry:
@@ -22,6 +24,43 @@ class _Registry:
 
     def get_tool(self, name: str):
         return self._tool if name == "run_command" else None
+
+
+def test_permission_mode_event_keeps_its_owner_while_delivery_is_pending(tmp_path: Path) -> None:
+    delivered: list[dict] = []
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+
+        async def send_payload(payload: dict, **_kwargs) -> None:
+            await release.wait()
+            delivered.append(payload)
+
+        workspace = tmp_path / "owner-a"
+        session = SimpleNamespace(
+            session_id="permission-session",
+            active_conversation_id="owner-a",
+            permission_context=SimpleNamespace(mode="bypass", source="frontend.ui"),
+            session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: workspace),
+            send_payload=send_payload,
+        )
+        delivery = asyncio.create_task(SessionPermissionRuntimeMixin.emit_permission_mode_updated(session))
+        await asyncio.sleep(0)
+        session.active_conversation_id = "owner-b"
+        workspace = tmp_path / "owner-b"
+        session.permission_context.mode = "confirm"
+        release.set()
+        await delivery
+
+    asyncio.run(scenario())
+    assert delivered == [{
+        "type": "permission.mode.updated",
+        "session_id": "permission-session",
+        "conversation_id": "owner-a",
+        "workspace_root": str(tmp_path / "owner-a"),
+        "mode": "bypass",
+        "source": "frontend.ui",
+    }]
 
 
 class _Session(SessionApprovalRuntimeMixin):

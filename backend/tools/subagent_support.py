@@ -301,31 +301,6 @@ def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]], workspace_root:
     return scopes
 
 
-def _parallel_undeclared_writers(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return write-capable parallel tasks that declare no write_scope.
-
-    Two writers with no disjoint write_scope race on the same file
-    (last-writer-wins) with no mutual exclusion, so they must not be scheduled
-    concurrently. Read-only tasks (explore/plan or explicit read_only) may
-    overlap freely — independent review of the same files is safe.
-    """
-    writers: list[dict[str, Any]] = []
-    for task in tasks:
-        if bool(task.get("read_only")):
-            continue
-        if str(task.get("agent_type") or "").lower() in {"explore", "plan"}:
-            continue
-        raw_scope = task.get("write_scope")
-        paths = raw_scope if isinstance(raw_scope, list) else []
-        declared = any(
-            str(path or "").strip().replace("\\", "/").strip("/")
-            for path in paths
-        )
-        if not declared:
-            writers.append(task)
-    return writers
-
-
 def _available_agent_types() -> list[str]:
     """Return built-in plus discovered custom subagent types for model schema."""
     return available_agent_types(discover_agents)

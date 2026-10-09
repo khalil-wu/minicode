@@ -95,6 +95,36 @@ describe('InspectorTab control-plane refresh', () => {
 
   afterEach(() => cleanup())
 
+  it('keeps queued and approval-waiting tools out of running and completed summaries', () => {
+    useAppStore.setState({ messages: [{ id: 'assistant-waiting', role: 'assistant', content: '', timestamp: 100, artifacts: [], toolCalls: [
+      { id: 'queued', name: 'read_file', args: {}, status: 'running', transition: 'queued', startedAt: 100 },
+      { id: 'approval', name: 'web_fetch', args: {}, status: 'running', waitingOn: 'approval', transition: 'waiting_approval', startedAt: 200 },
+    ] }] })
+
+    render(<InspectorTab />)
+    expect(screen.getByText('2 项等待中')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }))
+    fireEvent.click(screen.getByRole('button', { name: '查看最近事件' }))
+    expect(screen.getByText('准备中')).toBeTruthy()
+    expect(screen.getByText('等待批准')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('运行中')
+    expect(document.body.textContent).not.toContain('回放已完成')
+    expect(document.body.textContent).not.toContain('项进行中')
+  })
+
+  it('preserves timeout as the event outcome and counts it as needing attention', () => {
+    useAppStore.setState({ messages: [{ id: 'assistant-timeout', role: 'assistant', content: '', timestamp: 100, artifacts: [], toolCalls: [
+      { id: 'timeout', name: 'web_fetch', args: {}, status: 'timeout', startedAt: 100, finishedAt: 60100 },
+    ] }] })
+
+    render(<InspectorTab />)
+    expect(screen.getByText('1 项需要处理')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }))
+    fireEvent.click(screen.getByRole('button', { name: '查看最近事件' }))
+    expect(screen.getByText('超时')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('回放已完成')
+  })
+
   it('selects the exact Inspector kind and hides other conversation records', () => {
     const state = useAppStore.getState();
     state.addInspectorEntry({ targetKind: 'provider', targetId: 'shared', payload: { conversation_id: 'conv-inspector', kind: 'provider_trace', model: 'current-model' }, timestamp: 1 });

@@ -1,12 +1,25 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentProcessSummary } from "./AgentProcessSummary";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("AgentProcessSummary", () => {
+  it("updates real elapsed time while running and freezes it at completion", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const props = { processExpanded: true, hasTimelineItems: true, startedAt: 53_000, onToggle: () => undefined };
+    const view = render(<AgentProcessSummary {...props} status="running" durationMs={null} />);
+    expect(screen.getByText("已处理 47秒")).toBeTruthy();
+    expect(view.container.querySelector('[data-running="true"]')).toBeNull();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByText("已处理 48秒")).toBeTruthy();
+    view.rerender(<AgentProcessSummary {...props} status="completed" durationMs={48_000} />);
+    act(() => vi.advanceTimersByTime(5000));
+    expect(screen.getByText("已处理 48秒")).toBeTruthy();
+  });
   it("shows only completed state and elapsed seconds in the settled heading", () => {
     render(
       <AgentProcessSummary
@@ -18,7 +31,7 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByText("用时 26秒")).toBeTruthy();
+    expect(screen.getByText("已处理 26秒")).toBeTruthy();
     expect(screen.queryByText(/个工具|个失败|输入|输出|推理/)).toBeNull();
   });
 

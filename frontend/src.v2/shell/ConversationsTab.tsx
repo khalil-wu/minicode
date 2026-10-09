@@ -61,7 +61,6 @@ const readConversationUiState = () => {
 
 export type EnrichedConversation = ConversationMeta & {
   sessionStatus: "running" | "waiting" | "idle";
-  isHydrating: boolean;
   waitingLabel: string | null;
 };
 
@@ -184,7 +183,6 @@ export const ConversationsTab = ({
   const isConnected = useAppStore((s) => s.isConnected);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
-  const conversationHydration = useAppStore((s) => s.conversationHydration);
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
   const pendingApproval = useAppStore((s) => s.pendingApproval);
@@ -274,28 +272,26 @@ export const ConversationsTab = ({
 
   const enrichedConversations = useMemo(() => {
     return conversations.map((conversation) => {
-      const isHydrating = conversationHydration[conversation.id]?.isHydrating === true;
       const waitingLabel = waitingLabelsByConversation.get(conversation.id)
         ?? runtimePendingUserActionLabelForConversation(runtimeSession, conversation.id);
-      let sessionStatus: EnrichedConversation["sessionStatus"] = conversation.sessionStatus || "idle";
-      if (isHydrating || isConversationRunning({
+      let sessionStatus: EnrichedConversation["sessionStatus"] = "idle";
+      if (waitingLabel) {
+        sessionStatus = "waiting";
+      } else if (isConversationRunning({
         conversationId: conversation.id,
         activeConversationId: conversationId,
         activeIsStreaming: isStreaming,
         conversationStreaming,
       })) {
         sessionStatus = "running";
-      } else if (waitingLabel) {
-        sessionStatus = "waiting";
       }
       return {
         ...conversation,
-        isHydrating,
         waitingLabel,
         sessionStatus,
       };
     });
-  }, [conversations, conversationId, isStreaming, conversationStreaming, conversationHydration, waitingLabelsByConversation, runtimeSession]);
+  }, [conversations, conversationId, isStreaming, conversationStreaming, waitingLabelsByConversation, runtimeSession]);
 
   const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
 
@@ -531,7 +527,6 @@ export const ConversationsTab = ({
       rowId={`${scene}:${conversation.id}`}
       conversation={conversationsById.get(conversation.id) ?? conversation}
       sessionStatus={conversation.sessionStatus}
-      isHydrating={conversation.isHydrating}
       active={conversation.id === conversationIdRef.current}
       menuOpen={menuFor === `${scene}:${conversation.id}`}
       renaming={renaming === conversation.id && renamingRow === `${scene}:${conversation.id}`}
@@ -622,7 +617,7 @@ export const ConversationsTab = ({
                     ? <Folder className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-closed-${projectKey}`} />
                     : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}
                 </span>
-                <span className="mc-workspace-label">{group.label}</span>
+                <span className="mc-workspace-label" title={group.path}>{group.label}</span>
               </button>
               <button
                   type="button"

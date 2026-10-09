@@ -1,11 +1,13 @@
 import { ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
 import type { AgentTurnStatus } from "../projection/project-turn";
+import { useSharedSecondTick } from "../../lib/shared-tick";
 
 type AgentProcessSummaryProps = {
   status: AgentTurnStatus;
   processExpanded: boolean;
   hasTimelineItems: boolean;
   durationMs: number | null;
+  startedAt?: number;
   failureMessage?: string;
   canCollapse?: boolean;
   canExpand?: boolean;
@@ -18,6 +20,7 @@ export function AgentProcessSummary({
   processExpanded,
   hasTimelineItems,
   durationMs,
+  startedAt,
   failureMessage,
   canCollapse = status === "completed",
   canExpand = false,
@@ -25,6 +28,7 @@ export function AgentProcessSummary({
   onToggle,
 }: AgentProcessSummaryProps) {
   const running = status === "running";
+  const now = useSharedSecondTick(running && startedAt !== undefined);
   const statusLabel = running
     ? "处理中"
     : status === "failed"
@@ -34,9 +38,9 @@ export function AgentProcessSummary({
         : status === "stopped"
           ? "已停止"
           : "已处理";
-  const durationLabel = running ? "" : formatElapsedSeconds(durationMs);
+  const durationLabel = formatElapsedSeconds(running && startedAt !== undefined ? Math.max(0, now - startedAt) : durationMs);
   const displayLabel = durationLabel
-    ? status === "completed" ? `用时 ${durationLabel}` : `${statusLabel} · ${durationLabel}`
+    ? running || status === "completed" ? `已处理 ${durationLabel}` : `${statusLabel} · ${durationLabel}`
     : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
@@ -54,7 +58,7 @@ export function AgentProcessSummary({
         <span className="chat-turn-process-summary-text">
           <span
             className="agent-loop-process-summary-status"
-            data-running={running ? "true" : undefined}
+            data-running={running && !durationLabel ? "true" : undefined}
           >
             <span className="agent-loop-process-summary-status-label">
               {displayLabel}
@@ -114,6 +118,11 @@ function formatElapsedSeconds(durationMs: number | null): string {
     const roundedSeconds = Math.round(seconds);
     const minutes = Math.floor(roundedSeconds / 60);
     const remainder = roundedSeconds % 60;
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      return `${hours}小时${remainingMinutes ? `${remainingMinutes}分钟` : ""}${remainder ? `${remainder}秒` : ""}`;
+    }
     return remainder > 0 ? `${minutes}分钟${remainder}秒` : `${minutes}分钟`;
   }
   const value = seconds < 10

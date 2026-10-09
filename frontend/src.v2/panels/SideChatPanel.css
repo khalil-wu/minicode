@@ -49,6 +49,19 @@
   flex-direction: column;
 }
 
+.side-chat-composer[hidden] {
+  display: none;
+}
+
+.side-chat-composer-region[data-approval-replacement="true"] .inline-agent-prompt {
+  margin-bottom: 16px;
+}
+
+.side-chat-composer-region[data-approval-replacement="true"] .inline-approval-bar {
+  width: 100%;
+  margin: 0;
+}
+
 .side-chat-panel .side-chat-composer .side-chat-composer-footer {
   display: flex;
   justify-content: space-between;

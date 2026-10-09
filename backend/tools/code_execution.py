@@ -38,17 +38,27 @@ async def _present_result(result: ToolResult, context: ToolExecutionContext, max
             else:
                 high = keep - 1
         result = replace(result, content=encoded, artifact_id=artifact_id)
+    presented_images = []
     for image in result.images:
         image_bytes = len(base64.b64decode(image["data"], validate=True))
-        artifact_id = await to_thread_cancel_safe(context.artifact_store.save, image["data"], source="tool_exec.image", type="image",
-            media_type=image["media_type"], conversation_id=context.conversation_id, workspace_root=artifact_owner_workspace_root(context))
+        owner = {"conversation_id": context.conversation_id, "workspace_root": artifact_owner_workspace_root(context)}
+        artifact_id = image.get("artifact_id")
+        if artifact_id:
+            meta = await to_thread_cancel_safe(context.artifact_store.get_meta, artifact_id, **owner)
+            original = await to_thread_cancel_safe(context.artifact_store.get, artifact_id, **owner)
+            if meta is None or meta.type != "image" or meta.media_type != image["media_type"] or original != image["data"]:
+                artifact_id = None
+        if not artifact_id:
+            artifact_id = await to_thread_cancel_safe(context.artifact_store.save, image["data"], source="tool_exec.image", type="image",
+                media_type=image["media_type"], **owner)
+        presented_images.append({**image, "artifact_id": artifact_id})
         await context.run_context.publish_nested_event(AgentEvent("artifact.preview", {
             "artifact_id": artifact_id, "conversation_id": context.conversation_id,
             "message_id": str(context.metadata.get("assistant_message_id") or ""),
             "kind": "image", "media_type": image["media_type"], "summary": "Code cell image",
             "bytes": image_bytes,
         }))
-    return result
+    return replace(result, images=presented_images) if presented_images else result
 
 
 class ToolExecTool(BaseTool):

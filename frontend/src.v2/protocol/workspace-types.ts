@@ -255,6 +255,8 @@ export interface GuidelinesUpdatedEvent extends WorkspaceOwnedEvent {
 export interface PermissionModeUpdatedEvent {
   type: "permission.mode.updated";
   session_id: string;
+  conversation_id: string;
+  workspace_root: string;
   mode: string;
   source: string;
 }

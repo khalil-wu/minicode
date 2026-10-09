@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -15,7 +16,7 @@ from backend.agent.worktree import create_agent_worktree
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, PermissionSettings, TokenBudget
 from backend.hooks.manager import HookResult
-from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType
+from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_tools import TaskStatusTool, TaskTool
@@ -66,8 +67,8 @@ async def test_ordinary_child_refreshes_parent_restrictions_at_its_own_boundary(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments, own_mode", [({}, "confirm"), ({"read_only": True}, "plan"), ({"mode": "plan"}, "plan")])
-async def test_teammate_keeps_own_mode_but_refreshes_inherited_restrictions(startup_case, monkeypatch, arguments, own_mode):
+@pytest.mark.parametrize("arguments, own_mode", [({}, "bypass"), ({"read_only": True}, "bypass"), ({"mode": "plan"}, "plan")])
+async def test_teammate_reapplies_the_live_parent_permission_ceiling(startup_case, monkeypatch, arguments, own_mode):
     from backend.agent.message import AgentEvent
     from backend.agent.query_engine import QueryEngine
     from backend.permissions.context import PermissionContext
@@ -88,14 +89,14 @@ async def test_teammate_keeps_own_mode_but_refreshes_inherited_restrictions(star
             filesystem_constraints={"deny_read": ["private/**"]}, allow_unsandboxed_commands=False,
         )
         refreshed = provider()
-        assert refreshed.mode == own_mode
+        assert refreshed.mode == "plan"
         assert "web_fetch" in refreshed.tool_deny_rules
         assert refreshed.session_overrides["read_file"] == PermissionLevel.ALWAYS_DENY
         assert refreshed.filesystem_constraints["deny_read"] == ["private/**"]
         assert not refreshed.allow_unsandboxed_commands
         current = PermissionContext(mode="confirm")
         await run.permission_mode_setter("bypass")
-        applied_mode = "plan" if arguments.get("read_only") else "confirm"
+        applied_mode = "confirm"
         assert provider().mode == applied_mode
         assert "web_fetch" not in provider().tool_deny_rules
         record = startup_case.runtime.get_subagent(submission.runtime.metadata["agent_id"])
@@ -165,6 +166,11 @@ def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         run_task_created=AsyncMock(return_value=HookResult()),
         run_subagent_start=AsyncMock(return_value=HookResult()),
         run_subagent_stop=AsyncMock(return_value=HookResult()),
+        run_pre_tool=AsyncMock(return_value=HookResult()),
+        run_post_tool=AsyncMock(return_value=HookResult()),
+        run_post_tool_failure=AsyncMock(return_value=HookResult()),
+        run_permission_denied=AsyncMock(return_value=HookResult()),
+        run_permission_request=AsyncMock(return_value=HookResult()),
         run_teammate_idle=AsyncMock(return_value=HookResult(
             prevent_continuation=True, stop_reason="audit finished"
         )),
@@ -225,6 +231,258 @@ async def _launch(case, delivery: str, **arguments):
         **arguments,
     }, context=case.context)
     return launch.runtime_metadata["subagent_id"], launch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["foreground", "background", "teammate"])
+@pytest.mark.parametrize("agent_type", ["general-purpose", "explore", "plan"])
+@pytest.mark.parametrize("denied_web", [False, True])
+async def test_read_only_weather_child_keeps_full_access_approval_and_write_boundary(
+    startup_case, delivery, agent_type, denied_web,
+):
+    import httpx
+    from backend.tools.web_tools import WebFetchTool
+    from backend.tools.write_file import WriteFileTool
+
+    requests = []
+
+    async def serve_weather(reader, writer):
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        body = (
+            b"<html><body><h1>Weather forecast</h1><p>Published 2026-10-08 at 18:00. "
+            b"Hangzhou: sunny today, low 15 C and high 27 C, northeast wind below level 3. "
+            b"Tomorrow will be sunny with temperatures from 17 C to 27 C. "
+            b"The following day will be sunny, low 18 C and high 26 C. "
+            b"No precipitation is forecast for these three dates.</p></body></html>"
+        )
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(serve_weather, "127.0.0.1", 0)
+    url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/weather"
+
+    class WeatherModel(_RecordingLLM):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
+                    ToolCallEvent(id="weather-read", name="web_fetch", arguments={"url": url, "prompt": "Extract the forecast."}),
+                    ToolCallEvent(id="readonly-write", name="write_file", arguments={"file_path": "weather.txt", "content": "Unauthorized write"}),
+                ])
+                yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+                return
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Read-only weather research completed.")
+            yield StreamEvent(type=StreamEventType.DONE)
+
+    model = WeatherModel()
+    startup_case.tool._llm_provider = model
+    registry = startup_case.context.tool_registry
+    web = WebFetchTool(startup_case.tool._artifact_store)
+    registry.register(web)
+    registry.register(WriteFileTool())
+    if denied_web:
+        startup_case.context.permission = replace(
+            startup_case.context.permission, tool_deny_rules=["web_fetch"],
+        )
+    startup_case.context.approval_handler = AsyncMock(return_value={"action": "reject"})
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            web._unrestricted_client = client
+            child_id, result = await _launch(
+                startup_case, delivery, agent_type=agent_type, read_only=True,
+            )
+            if delivery in {"background", "teammate"}:
+                assert await startup_case.runtime.wait_for_subagent(child_id, 3)
+            assert not result.is_error
+        startup_case.context.approval_handler.assert_not_awaited()
+        child = startup_case.runtime.get_subagent(child_id)
+        assert child.read_only and child.permission_mode == "bypass"
+        assert model.calls == 2
+        assert bool(requests) is not denied_web
+        assert not (startup_case.workspace / "weather.txt").exists()
+        journal = startup_case.runtime.execution_journal(child_id)
+        results = {
+            event.payload["tool_call_id"]: event.payload
+            for event in journal.read_events() if event.event_type == "tool_result"
+        }
+        assert results["readonly-write"]["status"] == "blocked"
+        assert "marked read_only" in results["readonly-write"]["content"]
+        if denied_web:
+            assert results["weather-read"]["status"] == "blocked"
+        else:
+            assert results["weather-read"]["status"] == "success"
+            assert results["weather-read"]["source_url"] == url
+            assert results["weather-read"]["extraction_status"] == "ok"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["foreground", "background"])
+@pytest.mark.parametrize("restriction", ["none", "parent-deny", "parent-read-only"])
+async def test_parallel_weather_without_optional_scopes_inherits_real_parent_permissions(startup_case, delivery, restriction):
+    import httpx
+    from backend.tools.web_tools import WebFetchTool
+    from backend.tools.write_file import WriteFileTool
+
+    requests = []
+    all_requested = asyncio.Event()
+
+    async def serve_weather(reader, writer):
+        request = await reader.readuntil(b"\r\n\r\n")
+        city = request.split(b" ")[1].decode().strip("/")
+        requests.append(city)
+        if len(requests) == 3:
+            all_requested.set()
+        try:
+            await asyncio.wait_for(all_requested.wait(), 5)
+            body = (f"Weather bulletin WEATHER_{city}: published 2026-10-08. "
+                    "Today's observed temperature is 22 C. The forecast is sunny with a low of 16 C "
+                    "and a high of 26 C. Wind is from the northeast at 8 km per hour. "
+                    "The following morning is expected to be clear with no precipitation.").encode()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                         + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve_weather, "127.0.0.1", 0)
+    cities = {"beijing": "北京", "shanghai": "上海", "guangzhou": "广州"}
+    urls = {city: f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/{city}" for city in cities}
+
+    class ParallelWeatherModel(_RecordingLLM):
+        def __init__(self):
+            super().__init__()
+            self.started = set()
+
+        async def side_query(self, messages, **kwargs):
+            return messages[0].content
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            self.calls += 1
+            text = "\n".join(str(message.content) for message in messages)
+            city = next(city for city, url in urls.items() if url in text)
+            if city not in self.started:
+                self.started.add(city)
+                calls = [ToolCallEvent(id=f"weather-{city}", name="web_fetch", arguments={
+                    "url": urls[city], "prompt": "Extract the bulletin.",
+                })]
+                if restriction != "none":
+                    calls.append(ToolCallEvent(id=f"write-{city}", name="write_file", arguments={
+                        "file_path": f"{city}.txt", "content": "This write must be blocked by the inherited restriction.",
+                    }))
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=calls)
+                yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+                return
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=f"Weather bulletin {city} reviewed.")
+            yield StreamEvent(type=StreamEventType.DONE)
+
+    model = ParallelWeatherModel()
+    startup_case.tool._llm_provider = model
+    web = WebFetchTool(startup_case.tool._artifact_store)
+    registry = startup_case.context.tool_registry
+    registry.register(web)
+    registry.register(WriteFileTool())
+    if restriction == "parent-deny":
+        startup_case.context.permission = replace(startup_case.context.permission, tool_deny_rules=["write_file"])
+    elif restriction == "parent-read-only":
+        startup_case.context.metadata["read_only"] = True
+    startup_case.context.approval_handler = AsyncMock(return_value={"action": "reject"})
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            web._unrestricted_client = client
+            result = await startup_case.tool.execute({
+                "parallel_tasks": [{"description": f"查询{label}今日天气", "prompt": f"Read the bulletin at {urls[city]} and report it."}
+                                   for city, label in cities.items()],
+                "run_in_background": delivery == "background",
+            }, startup_case.context)
+            assert not result.is_error, result.content
+            if delivery == "background":
+                await asyncio.gather(*list(startup_case.runtime._subagent_tasks.values()))
+        child_ids = [payload["subagent_id"] for kind, payload in startup_case.events if kind == "subagent.start"]
+        assert len(child_ids) == 3
+        assert set(requests) == set(cities)
+        assert model.calls == 6
+        startup_case.context.approval_handler.assert_not_awaited()
+        for child_id in child_ids:
+            child = startup_case.runtime.get_subagent(child_id)
+            assert child.permission_mode == "bypass"
+            # This record stores the child's declaration. The inherited
+            # restriction is checked against actual tool results below.
+            assert child.read_only is False
+            assert child.write_scope == []
+            journal = startup_case.runtime.execution_journal(child_id)
+            results = [event.payload for event in journal.read_events() if event.event_type == "tool_result"]
+            reads = [item for item in results if item.get("tool_name") == "web_fetch"]
+            assert len(reads) == 1 and reads[0]["status"] == "success"
+            assert reads[0]["source_url"] in urls.values()
+            if restriction != "none":
+                writes = [item for item in results if item.get("tool_name") == "write_file"]
+                assert len(writes) == 1 and writes[0]["status"] == "blocked"
+                if restriction == "parent-read-only":
+                    assert "marked read_only" in writes[0]["content"]
+        assert not any((startup_case.workspace / f"{city}.txt").exists() for city in cities)
+    finally:
+        server.close()
+        await server.wait_closed()
+        startup_case.tool._artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_hosted", [False, True])
+async def test_child_search_schema_uses_its_actual_model_without_inheriting_parent_source_absence(startup_case, monkeypatch, child_hosted):
+    import backend.vault.store as vault_module
+    from backend.agent.tool_schema_derivation import effective_toolset_policy
+    from backend.config import AppConfig, LLMSettings
+    from backend.tools.subagent_support import _SubagentLLMResolution
+    from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY
+    from backend.tools.web_tools import WebSearchTool
+
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(vault_module, "VAULT_FILE", startup_case.workspace.parent / "vault.json")
+    parent = startup_case.model
+    parent.supports_hosted_web_search = lambda: not child_hosted
+    search = WebSearchTool(parent)
+    registry = startup_case.context.tool_registry
+    registry.register(search)
+    parent_policy = effective_toolset_policy(
+        base_policy=ToolsetPolicy.default(), tool_registry=registry, disabled_tools=set(),
+        requires_explicit_workspace=False, workspace_root=startup_case.workspace,
+        permission_mode="bypass", hosted_web_search=not child_hosted,
+    )
+    startup_case.context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = parent_policy
+    startup_case.context.metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = ToolsetPolicy.default()
+
+    class ChildModel(_RecordingLLM):
+        def supports_hosted_web_search(self):
+            return child_hosted
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            names = {item["function"]["name"] for item in tools or []}
+            assert ("web_search" in names) is child_hosted
+            self.calls += 1
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Verified the child's search capability.")
+            yield StreamEvent(type=StreamEventType.DONE)
+
+    child = ChildModel()
+    config = AppConfig(llm=LLMSettings(api_key="", model="child-search-model"), agent=AgentSettings(max_iterations=2))
+    resolution = _SubagentLLMResolution(llm=child, config=config, provider="custom", model="child-search-model", effort="off")
+    result = await startup_case.tool._run_single_subtask_impl(
+        description="Child search capability", prompt="Inspect the search surface.", agent_type="general-purpose",
+        context=startup_case.context, llm_resolution=resolution,
+    )
+    assert not result.is_error, result.content
+    assert child.calls == 1 and parent.calls == 0
+    assert parent_policy.is_available(registry.get_tool_spec("web_search")) is not child_hosted
+    assert search._llm_provider is parent
 
 
 @pytest.mark.asyncio

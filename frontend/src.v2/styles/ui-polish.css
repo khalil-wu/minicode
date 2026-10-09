@@ -252,6 +252,10 @@
 }
 
 .mc-workspace-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-ui) !important;
   font-size: var(--text-sm) !important;
   font-weight: var(--fw-regular) !important;
@@ -470,8 +474,10 @@
 }
 
 .agent-loop-process-summary-wrap[data-position="top"] {
-  width: fit-content;
-  padding-bottom: 4px;
+  width: 100%;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 #root .agent-loop-process-summary,
@@ -531,6 +537,31 @@
   --mc-composer-border: var(--border-soft);
 }
 
+.composer-input-region {
+  display: contents;
+}
+
+.composer-input-region[hidden] {
+  display: none;
+}
+
+#root .chat-pane .composer-container[data-approval-replacement="true"],
+#root .workbench-home-composer .composer-container[data-approval-replacement="true"] {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.composer-container[data-approval-replacement="true"] > .inline-agent-prompt {
+  margin: 0;
+}
+
+.composer-container[data-approval-replacement="true"] > .inline-agent-prompt > .inline-approval-bar {
+  width: 100%;
+  margin: 0;
+}
+
 /* Command mode is an intentional transient surface; ordinary composing
    should visually belong to the chat canvas instead of becoming a second
    floating card. */
@@ -586,6 +617,7 @@
 }
 
 .chat-pane-message-transition {
+  position: relative;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -603,12 +635,10 @@
 }
 
 .chat-pane-switch-status {
-  display: flex;
-  align-items: center;
-  align-self: start;
-  gap: 8px;
-  width: min(var(--mc-chat-width), calc(100% - 48px));
-  margin: 24px auto 0;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
   color: var(--text-muted);
   font-size: var(--mc-font-body);
   line-height: 1.35;
@@ -694,7 +724,7 @@
 }
 
 .composer-footer[data-permission-mode="bypass"] .composer-permission-picker > .composer-permission-btn {
-  color: color-mix(in oklch, var(--state-warning) 65%, var(--text-secondary)) !important;
+  color: var(--state-warning) !important;
 }
 
 .composer-send-btn .anim-icon-swap,

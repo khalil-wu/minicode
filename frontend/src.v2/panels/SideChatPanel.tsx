@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, AtSign, LoaderCircle, MessageCirclePlus, Plus, Square, X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { attachmentRefFromPayload, sendChatMessage } from "../chat/sendChatMessage";
@@ -29,6 +29,7 @@ import { buildInterruptCommand } from "../lib/interrupt-command";
 import { releasePreviewScope } from "../chat/previewRequestScope";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { useReplyViewport } from "../chat/useReplyViewport";
 import "./SideChatPanel.css";
 
 const newSideChatId = (): string =>
@@ -72,6 +73,9 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const waitingForInput = useAppStore((s) => hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingAskUser, ...s.askUserQueue,
     s.pendingDiffReview, ...s.diffReviewQueue,
+  ], id));
+  const hasPendingApproval = useAppStore((s) => hasLocalPendingPromptForConversation([
+    s.pendingApproval, ...s.approvalQueue, s.pendingDiffReview, ...s.diffReviewQueue,
   ], id));
   const submittedContextRef = useRef<CodeSelectionContext>();
   const hasPendingContext = Boolean(thread?.selectedContext && thread.selectedContext !== submittedContextRef.current);
@@ -155,9 +159,10 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const listRef = useRef<HTMLDivElement>(null);
   const isFollowingRef = useRef(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const followLatest = () => {
-    if (isFollowingRef.current && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  };
+  const followLatest = useCallback(() => {
+    if (active && isFollowingRef.current && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [active]);
+  useReplyViewport(listRef, followLatest, Boolean(thread));
   useLayoutEffect(followLatest, [active, thread?.messages, thread?.isStreaming]);
 
   useEffect(() => {
@@ -190,7 +195,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
       const nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, id, workingDirectory);
       const prefix = await buildContextPayload(contextRefs);
       if (!mountedRef.current) return;
-      const sent = sendChatMessage({
+      const sent = await sendChatMessage({
         displayContent: content,
         backendContent: [selectedPrefix, inheritedPrefix, prefix, nativeContext.notes, content].filter(Boolean).join("\n\n"),
         conversationId: id,
@@ -201,6 +206,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         allowWhileStreaming: thread.isStreaming,
         busyBehavior: useAppStore.getState().followUpBehavior,
       });
+      if (!mountedRef.current) return;
       if (sent) {
         for (const attachment of attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
         submittedContextRef.current = thread.selectedContext;
@@ -291,7 +297,11 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
               <p>临时聊天。关闭此标签后会清除，主任务保持不变。</p>
             </div>
           ) : (
-            turns.map((turn) => <ChatTurn key={turn.id} turn={turn} conversationId={id} workspaceRoot={workingDirectory} />)
+            turns.map((turn, index) => <div key={turn.id}
+              data-reply-viewport={index === turns.length - 1 && turn.userCell ? "true" : "false"}
+              style={{ flex: "0 0 auto", minHeight: index === turns.length - 1 && turn.userCell ? "var(--reply-viewport-height)" : undefined }}>
+              <ChatTurn turn={turn} conversationId={id} workspaceRoot={workingDirectory} />
+            </div>)
           )}
         </div>
         {showScrollButton && <button type="button" className="side-chat-follow-latest" aria-label="回到侧边对话最新消息" onClick={() => {
@@ -300,10 +310,10 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
           listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
         }}><ArrowDown size={18} aria-hidden="true" /></button>}
       </div>
-      <div className="side-chat-composer-region">
+      <div className="side-chat-composer-region" data-approval-replacement={hasPendingApproval ? "true" : "false"}>
         <QueuedMessageList ownerId={id} minimal />
         <div className="side-chat-prompt-region"><InlineAgentPrompt conversationId={id} /></div>
-        <div ref={composerRef} className="side-chat-composer composer-container" data-command-mode="false">
+        <div ref={composerRef} className="side-chat-composer composer-container" data-command-mode="false" hidden={hasPendingApproval}>
           {creationError && <div role="alert" className="side-chat-creation-error">
             <span>{creationError}</span>
             <button type="button" disabled={!isConnected} onClick={() => setCreationAttempt((attempt) => attempt + 1)}>重试创建</button>
@@ -328,7 +338,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
             onSubmit={submit} menuOpen={mentionFilter !== null} onDropFiles={attachFiles}
             onEscape={() => { if (thread.isStreaming) { stop(); return true; } return false; }}
             placeholder={thread.isStreaming ? "补充要求，将加入队列…" : "描述任务或提出问题…"} />
-          <MenuOverlay open={mentionFilter !== null} kind="mention" filter={mentionFilter ?? ""} workspaceRoot={workingDirectory} onSelect={onMentionSelect} />
+          <MenuOverlay open={mentionFilter !== null && !hasPendingApproval} kind="mention" filter={mentionFilter ?? ""} workspaceRoot={workingDirectory} onSelect={onMentionSelect} />
           <div className="side-chat-composer-footer composer-footer">
             <input type="file" ref={fileInputRef} multiple hidden onChange={(event) => { attachFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
             <button type="button" className="composer-attach-btn" aria-label="添加附件" disabled={!serverReady} onClick={() => fileInputRef.current?.click()}><Plus size={17} /></button>

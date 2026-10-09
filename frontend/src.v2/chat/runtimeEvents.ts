@@ -37,6 +37,7 @@ import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydr
 import { LS, writeLS } from "../stores/shared-helpers";
 import { eventMessageId } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
+import { applyActiveStreamSnapshot } from "./sessionEvents";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -1011,8 +1012,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
 
       if ("session" in ev && ev.session) {
         s.setRuntimeSession(ev.partial ? { ...s.runtimeSession, ...ev.session } : ev.session);
+        applyActiveStreamSnapshot(ev.session);
         useAppStore.setState(runtimeModelSelectionPatch(ev.session, useAppStore.getState()));
-        if (ev.session.permission_mode) {
+        const permissionOwner = ev.session.active_conversation_id === undefined
+          ? (ev.partial ? s.runtimeSession?.active_conversation_id : conversationId)
+          : ev.session.active_conversation_id;
+        if (ev.session.permission_mode && permissionOwner !== undefined
+          && (permissionOwner || null) === (s.conversationId || null)
+          && (ev.session.workspace_root === undefined || workspaceRootsEqual(ev.session.workspace_root ?? "", s.workingDirectory))) {
           useAppStore.setState({ permissionMode: fromBackendPermissionMode(ev.session.permission_mode) });
         }
         return true;
@@ -1508,6 +1515,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     }
     case "permission.mode.updated": {
       const ev = e as unknown as { mode?: string };
+      if (e.conversation_id !== (s.conversationId || "")
+        || !workspaceRootsEqual(e.workspace_root ?? "", s.workingDirectory)) return true;
       if (ev.mode) {
         const permissionMode = fromBackendPermissionMode(ev.mode);
         writeLS(LS.permissionMode, permissionMode);

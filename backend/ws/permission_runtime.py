@@ -253,6 +253,8 @@ class SessionPermissionRuntimeMixin:
             {
                 "type": "permission.mode.updated",
                 "session_id": self.session_id,
+                "conversation_id": str(self.active_conversation_id or ""),
+                "workspace_root": str(self.session_lifecycle.workspace_root_for_conversation() or ""),
                 "mode": self.permission_context.mode,
                 "source": self.permission_context.source,
             },

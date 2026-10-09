@@ -72,6 +72,9 @@ const MANAGE_BACKEND = process.env.MINICODE_SKIP_BACKEND !== "1";
 const RUNTIME_TOKEN =
   process.env.MINICODE_RUNTIME_TOKEN ||
   crypto.randomBytes(32).toString("hex");
+// Embedded tool admission is a backend capability. The general API token is
+// visible to the main renderer, so it cannot attest backend-owned navigation.
+const EMBEDDED_BROWSER_TOKEN = crypto.randomBytes(32).toString("hex");
 
 function resolvePythonCommand() {
   if (process.env.MINICODE_PYTHON) return process.env.MINICODE_PYTHON;
@@ -910,7 +913,7 @@ embeddedBrowserManager.init({
 
 embeddedBrowserBridge.init({
   manager: embeddedBrowserManager,
-  token: RUNTIME_TOKEN,
+  token: EMBEDDED_BROWSER_TOKEN,
   appendDesktopLog,
 });
 
@@ -1081,7 +1084,7 @@ app.whenReady().then(async () => {
     appendDesktopLog("[desktop] continuing startup without the embedded browser bridge");
   }
   process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT = embeddedBrowserEndpoint;
-  process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = RUNTIME_TOKEN;
+  process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = EMBEDDED_BROWSER_TOKEN;
   appendDesktopLog("[desktop] app ready");
   const initialDeepLink = process.argv.find(
     (arg) => typeof arg === "string" && arg.startsWith("minicode://"),

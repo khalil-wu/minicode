@@ -1,9 +1,8 @@
 import type { ActivityCellState, HistoryCellState } from "./cellTypes";
 import { purifyToolErrorText } from "../errorMessages";
 import { readableToolLabel } from "../toolDisplayName";
-import { previewUrlsShareOrigin, type PreviewProjection } from "../../lib/preview-projection";
 import { safeJsonParse } from "../../lib/safe-parse";
-import { isCommandToolRecord } from "../../lib/tool-call-reducer";
+import { isCommandToolRecord, isToolCallExecuting } from "../../lib/tool-call-reducer";
 
 export interface ActivityDetail {
   label: string;
@@ -121,8 +120,7 @@ export function readableTimelineTitle(cell: ActivityCellState): string {
   if (records.length > 0 && records.every(isBrowserRecord)) {
     return [...new Set(records.map(readableRecordLabel))].join(" · ");
   }
-  const running = cell.status === "running"
-    && !records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
+  const running = records.length > 0 ? records.some(isToolCallExecuting) : cell.status === "running";
   // The projection owns classification; persisted render summaries must not
   // replace the operation with a success receipt or a shortened target.
   if (cell.activityKind === "fileRead") return running ? "正在读取" : "读取文件";
@@ -138,15 +136,16 @@ export function readableTimelineTitle(cell: ActivityCellState): string {
 }
 
 export function readableRecordLabel(record: ActivityToolRecord): string {
+  if (record.name === "task") return "启动子智能体";
+  if (record.name === "send_message") return "发送消息";
+  if (record.name === "task_stop") return "停止子智能体";
   if (record.name === "update_plan") return "更新计划";
   if (isBrowserRecord(record)) {
     const action = stringArg(record.args.action).toLowerCase();
     return BROWSER_ACTION_LABELS[action] || action || "Browser";
   }
-  if (isCodeModeRecord(record)) return ["failed", "blocked", "timeout", "cancelled"].includes(record.status)
-    ? "错误详情" : "操作结果";
-  const running = (record.status === "running" || record.status === "pending")
-    && record.transition !== "waiting_approval" && record.waitingOn !== "approval";
+  if (isCodeModeRecord(record)) return "运行";
+  const running = isToolCallExecuting(record);
   if (record.name.startsWith("mcp__") && record.displayHint) return record.displayHint;
   const operation = readableToolLabel(record.name, running);
   // Canonical built-ins win over old localized displayHint/displaySummary.
@@ -185,6 +184,11 @@ export function recordInputTarget(record: ActivityToolRecord): string {
   // Code cells compose operations; their scripts, polling ids and generated
   // input summaries are runtime instructions, not a user's work target.
   if (isCodeModeRecord(record)) return "";
+  if (name === "task") {
+    const tasks = Array.isArray(args.parallel_tasks) ? args.parallel_tasks : [args];
+    return tasks.flatMap((task) => task && typeof task === "object"
+      ? [firstString([task.name, task.description])] : []).filter(Boolean).join("、");
+  }
   if (["monitor", "task_status", "task_create", "task_get", "task_list", "task_update", "task_output"].includes(name)) return firstString([args.title, args.description]);
   if (name === "read_artifact") return firstString([args.name, args.path, record.sourceUrl]);
 
@@ -330,6 +334,20 @@ export function describeRecordDetails(
 
 export const isCodeModeRecord = (record: ActivityToolRecord): boolean =>
   record.name === "tool_exec" || record.name === "tool_wait";
+
+export const taskResultAgentIds = (record: ActivityToolRecord): string[] => {
+  const value = `${record.outputPreview || ""}\n${record.summary || ""}`;
+  return [...new Set([...value.matchAll(/\bsubagent-[a-z0-9]+\b/gi)].map((match) => match[0]))];
+};
+
+export const codeModeOwnError = (record: ActivityToolRecord): string => {
+  const raw = record.outputPreview || record.summary || record.stdoutPreview || record.contentPreview || "";
+  const report = safeJsonParse<Record<string, unknown> | null>(raw, null);
+  if (report && typeof report.cell_id === "string" && typeof report.status === "string") {
+    return typeof report.error === "string" ? report.error.trim() : "";
+  }
+  return ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status) ? raw.trim() : "";
+};
 
 /** Present results, never the execute/wait protocol envelope. The original
  * record remains untouched for routing, recovery, Inspector and export.
@@ -518,72 +536,6 @@ export function getRecordOutputPreview(record: ActivityToolRecord): string {
   // The backend has already bounded this evidence. An explicit disclosure
   // must not silently discard its first lines or a useful failure context.
   return output;
-}
-
-/** Prefer the backend's typed policy failure; retained error prose only
- * identifies older denials, never success or process liveness. */
-export function browserFailureGuidance(
-  record: ActivityToolRecord,
-  preview?: Pick<PreviewProjection, "previewLaunchProcesses" | "previewVerification">,
-): { reason: string; nextStep: string; previewState?: string; previewUrls?: string[] } {
-  if (record.transition === "waiting_approval" || record.waitingOn === "approval") {
-    return { reason: "此浏览器操作正在等待批准，尚未完成。", nextStep: "请在本次调用的权限请求中批准或拒绝该操作。" };
-  }
-  const statusReason = record.status === "partial" ? "浏览器操作仅部分完成"
-    : record.status === "cancelled" ? "浏览器操作已中断"
-    : record.status === "timeout" ? "浏览器操作超时，结果未确认"
-    : record.status === "blocked" ? "浏览器操作被阻止"
-    : "浏览器操作失败";
-  const diagnostics = [record.developerDetail, record.errorInfo?.developer_detail, getRecordOutputPreview(record), record.stderrPreview, record.userSummary, record.errorInfo?.user_summary].join("\n");
-  const isPolicyFailure = record.status === "blocked"
-    && (record.errorKind || record.errorInfo?.error_kind || record.errorInfo?.code) === "network_policy";
-  const denied = isPolicyFailure || /Browser navigation to a local, private, or unresolved network target is blocked unless it belongs to the active conversation preview|Preview access to a local, private, or unresolved network target is allowed only for a preview owned by the active conversation/i.test(diagnostics);
-  const policySummary = isPolicyFailure ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : undefined;
-  const reason = denied
-    ? `${statusReason}：${policySummary || "浏览器未能确认该地址属于本会话的运行中预览，因此拒绝访问。"}`
-    : `${statusReason}${record.userSummary || record.errorInfo?.user_summary ? `：${record.userSummary || record.errorInfo?.user_summary}` : "，具体原因请展开操作详情查看错误。"}`;
-  if (!denied) {
-    return { reason, nextStep: "展开操作详情查看错误，修正该操作后再执行；部分完成或中断的操作请先确认已执行的部分。" };
-  }
-  if (!preview) {
-    return { reason, nextStep: "回到发起调用的会话，查询预览状态（preview_server 的 status），确认进程归属和实际 URL 后再操作。" };
-  }
-  const targetUrl = stringArg(record.args.url) || record.sourceUrl || "";
-  const process = preview.previewLaunchProcesses.find((candidate) => previewUrlsShareOrigin(candidate.url, targetUrl));
-  if (!process) {
-    const activePreviews = preview.previewLaunchProcesses.filter((candidate) => ["starting", "running", "ready"].includes(candidate.status) && !candidate.cleanup_pending);
-    return {
-      reason,
-      previewState: activePreviews.length > 0
-        ? "本会话有其他地址的运行中或启动中预览记录，但与本次目标不匹配。"
-        : "当前尚无与本次目标同源的本会话受管预览记录；这不代表该地址没有服务运行。",
-      previewUrls: activePreviews.map((candidate) => candidate.url),
-      nextStep: activePreviews.length > 0
-        ? "查询本会话预览状态，对照下列实际 URL 验证就绪，再用该 URL 导航；不要反复尝试未匹配的旧地址。"
-        : "先在本会话查询预览状态（preview_server 的 status）；没有受管预览时用 start 启动，使用返回的实际 URL 验证就绪后再导航。",
-    };
-  }
-  const processState = {
-    starting: "启动中", running: "运行中，尚未确认就绪", ready: "已就绪",
-    stopping: "停止中", exited: "已退出", crashed: "已崩溃", unhealthy: "响应异常",
-  }[process.status];
-  const verification = preview.previewVerification;
-  const verificationState = verification && previewUrlsShareOrigin(verification.url, process.url)
-    ? verification.ok ? "最近一次验证通过" : "最近一次验证未通过"
-    : "尚无有效的验证记录";
-  const nextStep = process.cleanup_pending || process.status === "stopping"
-    ? "等待该预览进程停止并完成清理，再在本会话启动、验证预览后重试。"
-    : ["crashed", "exited", "unhealthy"].includes(process.status)
-      ? "查看预览服务输出，修复启动或响应问题，再在本会话重新启动并验证，之后重试浏览器操作。"
-      : process.status === "starting"
-        ? "等待预览就绪，再验证返回的实际 URL 后导航；仍被拒绝时检查进程与会话归属。"
-        : "查询本会话预览状态并验证实际 URL，确认就绪后再导航；若仍被拒绝，核对进程与会话归属，不要盲目重启或放开私网。";
-  return {
-    reason,
-    nextStep,
-    previewState: `当前目标的本会话预览记录：${processState}${process.cleanup_pending ? "，清理未完成" : ""}；${verificationState}。预览状态不改变本次浏览器调用的结果。`,
-    previewUrls: [process.url],
-  };
 }
 
 export function getOutputPreview(records?: NonNullable<ActivityCellState["toolCallRecords"]>): string {

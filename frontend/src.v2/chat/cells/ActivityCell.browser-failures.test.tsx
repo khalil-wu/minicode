@@ -5,7 +5,6 @@ import { useAppStore } from "../../stores";
 import { ActivityCell } from "./ActivityCell";
 import type { ActivityCellState } from "./cellTypes";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
-import { browserFailureGuidance } from "./activityCellHelpers";
 
 const target = "http://127.0.0.1:55494/preview-test/index.html";
 const raw = "Browser navigation to a local, private, or unresolved network target is blocked unless it belongs to the active conversation preview. Network target resolves to a local or private address";
@@ -15,47 +14,58 @@ const record: ToolCallRecord = {
   outputPreview: raw, startedAt: 1000, durationMs: 292,
   callSource: { kind: "code_mode", cell_id: "cell_fixture", parent_call_id: "call_parent_fixture", runtime_call_id: "2" },
 };
-const cell: ActivityCellState = {kind:"activity",id:"browser-fixture",activityKind:"browser",title:"Browser",status:"failed",collapsed:true,toolCallRecords:[record],startedAt:1000};
-beforeEach(() => useAppStore.setState({ conversationId:"owner-A", workingDirectory:"C:/projects/demo",previewLaunchProcesses:[],previewVerification:null,conversationWorkbenchStates:{} }));
+const cell: ActivityCellState = { kind: "activity", id: "browser-fixture", activityKind: "browser", title: "Browser", status: "failed", collapsed: true, toolCallRecords: [record], startedAt: 1000 };
+beforeEach(() => useAppStore.setState({ conversationId: "owner-A", workingDirectory: "C:/projects/demo", previewLaunchProcesses: [], previewVerification: null, conversationWorkbenchStates: {} }));
 afterEach(cleanup);
 
 describe("browser failure projection", () => {
-  it("shows the exact action and URL as ordinary UI text while retaining diagnostic lineage in the record", () => {
-    const view=render(<ActivityCell cell={cell} conversationId="owner-A" workspaceRoot="C:/projects/demo" />);
-    const row=view.container.querySelector(".activity-cell-main-button")!;
+  it("keeps one action row and discloses the original diagnostic without generating recovery instructions", () => {
+    const view = render(<ActivityCell cell={cell} conversationId="owner-A" workspaceRoot="C:/projects/demo" />);
+    const row = view.container.querySelector(".activity-cell-main-button")!;
     expect(row.textContent).toContain("Navigate");
     expect(row.textContent).toContain(target);
-    expect(row.textContent).not.toContain("Browser");
-    expect(row.textContent).not.toContain("code_browser-fixture");
-    expect(view.getByText(/目标未关联/)).toBeTruthy();
+    expect(row.textContent).toContain("已阻止");
+    expect(view.container.textContent).not.toContain("浏览器操作失败");
+    expect(view.container.textContent).not.toContain("下一步");
+    expect(view.container.querySelector(".activity-cell-error-detail")).toBeNull();
+    expect(view.container.textContent).not.toContain(raw);
     fireEvent.click(row);
-    const technical = view.container.querySelector(".activity-cell-tool-detail-card")!;
-    expect(technical.hasAttribute("open")).toBe(false);
-    expect(technical.textContent).not.toContain("cell_fixture");
-    expect(technical.textContent).not.toContain("call_parent_fixture");
-    const output = view.container.querySelector('[aria-label="操作结果"]')!;
+    const output = view.getByLabelText("操作结果");
     expect(output.textContent).toContain(raw);
-    expect(output.classList.contains("tool-result-text")).toBe(true);
     expect(output.tagName).toBe("DIV");
-    expect(output.textContent).not.toContain("cell_fixture");
-    expect(output.textContent).not.toContain("call_parent_fixture");
-    expect(record.callSource).toEqual({ kind: "code_mode", cell_id: "cell_fixture", parent_call_id: "call_parent_fixture", runtime_call_id: "2" });
+    expect(view.container.textContent).not.toContain("cell_fixture");
+    expect(view.container.textContent).not.toContain("call_parent_fixture");
+    expect(record.callSource?.cell_id).toBe("cell_fixture");
   });
-  it("does not borrow a different conversation's running preview", () => {
-    useAppStore.setState({previewLaunchProcesses:[{id:"p-A",name:"dev",command:"node",cwd:"C:/projects/demo",port:55494,url:target,pid:123,status:"ready"}]});
-    const view=render(<ActivityCell cell={cell} conversationId="owner-B" workspaceRoot="C:/projects/demo" />);
-    expect(view.container.textContent).toContain("回到发起调用的会话");
-    expect(view.container.textContent).not.toContain("本会话预览记录：已就绪");
+
+  it("does not turn another conversation's preview state into browser failure prose", () => {
+    useAppStore.setState({ previewLaunchProcesses: [{ id: "p-A", name: "dev", command: "node", cwd: "C:/projects/demo", port: 55494, url: target, pid: 123, status: "ready" }] });
+    const view = render(<ActivityCell cell={cell} conversationId="owner-B" />);
+    expect(view.container.textContent).not.toContain("本会话预览");
+    expect(view.container.textContent).not.toContain("下一步");
+    fireEvent.click(view.getByRole("button", { name: "展开活动详情" }));
+    expect(view.getByLabelText("操作结果").textContent).toContain(raw);
   });
-  it("does not infer process failure or success from a legacy policy message", () => {
-    const guidance=browserFailureGuidance({...record,status:"failed",errorKind:undefined,userSummary:undefined});
-    expect(guidance.reason).toContain("未能确认");
-    expect(guidance.reason).not.toContain("崩溃");
-    expect(guidance.reason).not.toContain("成功");
+
+  it("keeps a real aborted navigation failed and exposes its precise error on disclosure", () => {
+    const error = "ERR_ABORTED (-3) loading 'https://www.google.com.hk/'";
+    const failed = { ...record, status: "failed" as const, args: { action: "navigate", url: "https://www.google.com/" },
+      outputPreview: "工具执行失败。", userSummary: "工具执行失败。", developerDetail: error };
+    const view = render(<ActivityCell cell={{ ...cell, toolCallRecords: [failed] }} />);
+    expect(view.container.querySelector(".activity-cell-failed")).toBeTruthy();
+    expect(view.container.textContent).not.toContain(error);
+    expect(view.container.querySelector(".activity-cell-running")).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "展开活动详情" }));
+    expect(view.getByLabelText("错误详情").textContent).toBe(error);
   });
-  it("surfaces approval waits rather than claiming navigation occurred", () => {
-    const guidance=browserFailureGuidance({...record,status:"running",transition:"waiting_approval"});
-    expect(guidance.reason).toContain("尚未完成");
-    expect(guidance.nextStep).toContain("批准或拒绝");
+
+  it("keeps approval waiting static without claiming navigation started", () => {
+    const pending: ToolCallRecord = { id: "pending", name: "browser_control", args: { action: "navigate", url: target },
+      status: "pending", transition: "waiting_approval", waitingOn: "approval", startedAt: 1000 };
+    const view = render(<ActivityCell cell={{ ...cell, status: "pending_approval", toolCallRecords: [pending] }} />);
+    expect(view.container.textContent).toContain("等待批准");
+    expect(view.container.querySelector(".activity-cell-running")).toBeNull();
+    expect(view.container.querySelector('[data-running="true"]')).toBeNull();
+    expect(view.container.textContent).not.toContain("下一步");
   });
 });

@@ -1520,6 +1520,7 @@ export interface ComposerSlice {
   attachments: ComposerAttachment[];
   quotedMessage: ComposerQuote | null;
   permissionMode: PermissionMode;
+  pendingPermissionModeChanges: Record<string, { workspaceRoot: string; confirmation: Promise<boolean> }>;
   agentMode: AgentMode;
   effortLevel: EffortLevel;
   prMonitor: PRMonitorState | null;
@@ -1537,7 +1538,7 @@ export interface ComposerSlice {
   updateAttachment: (id: string, patch: Partial<ComposerAttachment>) => void;
   removeAttachment: (id: string) => void;
   clearAttachments: () => void;
-  setPermissionMode: (m: PermissionMode) => void;
+  setPermissionMode: (m: PermissionMode) => Promise<boolean>;
   setAgentMode: (m: AgentMode) => void;
   setEffortLevel: (e: EffortLevel) => Promise<boolean>;
   setPRMonitor: (pr: PRMonitorState | null) => void;

@@ -132,13 +132,13 @@
   --command-accent-strong: oklch(0.86 0 0);
   --command-border:        oklch(0.82 0 0 / 0.48);
 
-  /* Claude's interface uses Sans; Serif is reserved for Latin prose. */
+  /* One sans-serif stack for interface, transcript and mixed Latin/CJK prose. */
   --font-cjk:   "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-app:   "Anthropic Sans", var(--font-cjk);
   --font-ui:    var(--font-app);
   --font-mono:  "SFMono-Regular", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
   --editor-font-family: var(--font-mono);
-  --font-prose: "Anthropic Serif", var(--font-cjk);
+  --font-prose: var(--font-app);
   --app-text-scale: 1;
   --code-text-scale: 1;
   --code-font-size: calc(14px * var(--code-text-scale));

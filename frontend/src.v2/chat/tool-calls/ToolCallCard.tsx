@@ -11,7 +11,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useSharedSecondTick } from "../../lib/shared-tick";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
-import { toolCleanupNotice } from "../../lib/tool-call-reducer";
+import { isToolCallExecuting, toolCleanupNotice } from "../../lib/tool-call-reducer";
 import {
   extractToolFilePath,
   ToolGlyph,
@@ -23,7 +23,7 @@ import { openWebInBrowser } from "../openWebInBrowser";
 import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
-import { isUserQuestionRecord, ToolResultText, UserQuestionResult, usesCodeTypography } from "./renderers/ToolTextRenderer";
+import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "./renderers/ToolTextRenderer";
 import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
@@ -120,7 +120,7 @@ export const ToolCallCard = memo(({
   const [open, setOpen] = useState(() => shouldAutoOpen(viewMode) || hasFailure);
   const [outputExpanded, setOutputExpanded] = useState(false);
   const userToggled = useRef(false);
-  const isActive = record.status === "running" || record.status === "pending";
+  const isActive = isToolCallExecuting(record);
   // Shared 1s tick — one interval for all running tool cards, not N.
   const now = useSharedSecondTick(isActive);
   useEffect(() => {
@@ -137,7 +137,7 @@ export const ToolCallCard = memo(({
   const duration =
     record.finishedAt && record.startedAt
       ? `${((record.finishedAt - record.startedAt) / 1000).toFixed(1)}s`
-      : record.status === "running"
+      : isActive
         ? formatElapsed(now - (record.startedAt ?? now))
         : "";
   const filePath = extractToolFilePath(record.args);
@@ -195,7 +195,7 @@ export const ToolCallCard = memo(({
           <span className="text-[var(--text-secondary)] font-semibold">
             {toolLabel}
           </span>
-          {displayInput && <span style={{ ...summaryValueStyle, fontFamily: usesCodeTypography(record) ? "var(--font-mono)" : "var(--font-ui)" }}>{displayInput}</span>}
+          {displayInput && <span style={{ ...summaryValueStyle, fontFamily: "var(--font-ui)" }}>{displayInput}</span>}
           {showStatus && <span>{phase}</span>}
           {showStatus && duration && <span>{duration}</span>}
           {resultText && <SmallAction label="复制工具结果" onClick={copyResult}><Copy size={14} /></SmallAction>}
@@ -218,7 +218,7 @@ export const ToolCallCard = memo(({
         background: "transparent",
       }}
     >
-      {(record.status === "running" || record.status === "pending") && (
+      {isActive && (
         <div className="progress-bar h-0.5" />
       )}
       <div
@@ -258,13 +258,13 @@ export const ToolCallCard = memo(({
             textAlign: "left",
           }}
         >
-          {(record.status === "running" || record.status === "pending") ? <Spinner /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />}
+          {isActive ? <Spinner /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />}
           {showStatus && <span style={phaseBadgeStyle(record)}>{phase}</span>}
           <span className="text-[var(--accent-primary)] font-semibold">
             {toolLabel}
           </span>
           {displayInput && (
-            <span style={{ ...toolInputInlineStyle, fontFamily: usesCodeTypography(record) ? "var(--font-mono)" : "var(--font-ui)" }}>
+            <span style={{ ...toolInputInlineStyle, fontFamily: "var(--font-ui)" }}>
               {displayInput}
             </span>
           )}

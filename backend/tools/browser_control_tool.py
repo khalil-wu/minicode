@@ -41,6 +41,7 @@ from backend.tools.browser_support import (
     _json_list,
     _max_chars,
     _navigation_policy_error,
+    _owned_preview_navigation_authorization,
     _normalize_endpoint,
     _resolved_navigation_url,
     _runtime_evaluate,
@@ -544,10 +545,15 @@ class BrowserControlTool(BaseTool):
         conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
         if not conversation_id:
             return self._error_result("Embedded browser commands require a conversation owner")
-        payload = {key: value for key, value in args.items() if key != "cdp_endpoint"}
+        payload = {key: value for key, value in args.items() if key not in {"cdp_endpoint", "navigation_authorization"}}
+        payload["action"] = action
         payload["conversation_id"] = conversation_id
         operation_id = "browser_" + uuid4().hex
         payload["operation_id"] = operation_id
+        if action == "navigate":
+            authorization = _owned_preview_navigation_authorization(str(args["url"]), context)
+            if authorization is not None:
+                payload["navigation_authorization"] = {**authorization, "operation_id": operation_id}
         payload["operation_timeout_ms"] = max(1, int(browser_remaining_seconds() * 1000))
         headers = {"authorization": f"Bearer {token}"}
         async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
@@ -614,6 +620,7 @@ class BrowserControlTool(BaseTool):
             ]
             if artifact_id:
                 content.append(f"Artifact: {artifact_id}")
+                content.append(f"Markdown image: ![Browser screenshot](artifact://{artifact_id})")
             return ToolResult(
                 content="\n".join(content),
                 artifact_id=artifact_id,
@@ -775,6 +782,7 @@ class BrowserControlTool(BaseTool):
         ]
         if artifact_id:
             content.append(f"Artifact: {artifact_id}")
+            content.append(f"Markdown image: ![Browser screenshot](artifact://{artifact_id})")
         else:
             content.append(f"Base64 chars: {len(data)}")
         return ToolResult(

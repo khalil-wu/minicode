@@ -65,7 +65,7 @@ export function ExecCell({
       className={`exec-cell ${
         cell.status === "failed"
           ? "exec-cell-failed"
-          : cell.status === "pending_approval"
+          : cell.status === "pending_approval" || cell.status === "pending"
             ? "exec-cell-pending"
             : running
               ? "exec-cell-running"
@@ -143,6 +143,7 @@ export function ExecCell({
 
 function commandTitle(status: ExecCellState["status"], background: boolean, duration: string, expanded: boolean): string {
   if (status === "pending_approval") return "等待批准运行命令";
+  if (status === "pending") return "准备运行命令";
   if (status === "running") return "正在运行";
   if (background && status === "success") return "已在后台启动";
   if (status === "partial") return "命令未完整结束";

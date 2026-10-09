@@ -153,6 +153,10 @@ class TurnIterationRuntime:
             ),
             workspace_root=self.workspace_root,
             permission_mode=str(self.tool_context.permission.mode or ""),
+            hosted_web_search=(
+                callable(getattr(self.llm, "supports_hosted_web_search", None))
+                and self.llm.supports_hosted_web_search()
+            ),
             tool_mode=(
                 "code_mode"
                 if getattr(self.agent_session, "active_tool_names", None) is not None

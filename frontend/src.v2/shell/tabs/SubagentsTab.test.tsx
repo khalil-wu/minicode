@@ -250,15 +250,14 @@ describe("SubagentsTab", () => {
     expect(screen.queryByText("已找到主要问题")).toBeNull();
   });
 
-  it("uses the child's name and links only the actual owning parent turn", async () => {
+  it("uses the child's name without an extra parent-delegation button", async () => {
     useAppStore.setState({ focusedSubagentId: "source-child", subagents: [{ id: "source-child", role: "explore", status: "running",
       teammateName: "Layout audit", objective: "检查所有页面的细节", turnId: "source-turn" }],
       messages: [{ id: "parent-delegation", role: "assistant", turnId: "source-turn", content: "开始审计", artifacts: [], timestamp: 1 }],
     });
     render(<SubagentsTab />);
     expect(screen.getByText("Layout audit")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看主任务中的委派" }));
-    expect(useAppStore.getState().messageRevealTarget).toMatchObject({ conversationId: "conversation-1", messageId: "parent-delegation" });
+    expect(screen.queryByRole("button", { name: "查看主任务中的委派" })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
     await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
   });
@@ -631,7 +630,7 @@ describe("SubagentsTab", () => {
     const { container } = render(<SubagentsTab />);
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查并修复实现" }));
 
-    expect(await screen.findByText("用时 6秒")).toBeTruthy();
+    expect(await screen.findByText("已处理 6秒")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     container.querySelectorAll<HTMLButtonElement>("button.agent-loop-timeline-group-title[aria-expanded=\"false\"]").forEach((button) => fireEvent.click(button));
 

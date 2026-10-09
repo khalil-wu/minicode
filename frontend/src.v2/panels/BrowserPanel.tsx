@@ -573,6 +573,9 @@ export const BrowserPanel = () => {
     if (!isDesktop()) return;
     const unsubscribe = onEmbeddedBrowserEvent((event) => {
       if (event.conversationId !== ownerRef.current) return;
+      // The global desktop listener owns automatic presentation, including
+      // current-owner and user-dismissal checks while this panel is unmounted.
+      if (event.type === "presentation-requested") return;
       if (event.type === "closed") {
         removeClosedTab(event.id);
         return;
@@ -673,6 +676,20 @@ export const BrowserPanel = () => {
     return subscribeBrowserRequests((request) => {
       if (request.conversationId !== ownerRef.current) return;
       acknowledgeBrowserRequest(request.id);
+      if (request.kind === "present") {
+        const target = request.target;
+        createdIdsRef.current.add(target.id);
+        visibleIdsRef.current.add(target.id);
+        setTabs((current) => current.some((tab) => tab.id === target.id)
+          ? current
+          : [...current.filter((tab) => tab.url || createdIdsRef.current.has(tab.id)), updateTabFromEvent(blankTab(target.id), target)]);
+        activeIdRef.current = target.id;
+        setActiveId(target.id);
+        // Activation and real native bounds are sent by the existing layout
+        // effect after React commits this same target's browser surface.
+        window.requestAnimationFrame(syncBounds);
+        return;
+      }
       if (request.kind === "open") {
         openTab(request.url);
         return;
@@ -695,7 +712,7 @@ export const BrowserPanel = () => {
         }
       }
     });
-  }, [browserHydrated, conversationId, openTab, performNativeNavigation, runNavigationAction]);
+  }, [browserHydrated, conversationId, openTab, performNativeNavigation, runNavigationAction, setTabs, syncBounds]);
 
   const closeTab = async (tabId: string) => {
     const index = tabs.findIndex((tab) => tab.id === tabId);

@@ -60,7 +60,7 @@ export interface ActivityCellState {
   activityKind: TurnActivityKind;
   title: string;
   subtitle?: string;
-  status: "running" | "done" | "partial" | "failed" | "interrupted";
+  status: "pending" | "pending_approval" | "running" | "done" | "partial" | "failed" | "interrupted";
   collapsed: boolean;
   toolCallRecords?: ToolCallRecord[];
   progress?: {
@@ -96,7 +96,7 @@ export interface ExecCellState {
   callSource?: ToolCallRecord["callSource"];
   cwd?: string;
   background?: boolean;
-  status: "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
+  status: "pending" | "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
   exitCode?: number;
   stdoutPreview: string[];
   stderrPreview: string[];

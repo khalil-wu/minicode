@@ -4,10 +4,10 @@ import {
   isFinalAnswerBlock,
   isLegacyTextBlock,
 } from "./content-blocks";
-import type { ToolCallRecord } from "./tool-call-reducer";
+import { isTerminalToolCallStatus, isToolCallExecuting, type ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
 import { isProviderRequestProgress, providerProgressLabel } from "./provider-progress";
-import { getRecordOutputText } from "../chat/cells/activityCellHelpers";
+import { codeModeOwnError, getRecordOutputText, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
 import {
   isProviderReasoning,
   isProviderReasoningSummary,
@@ -115,12 +115,13 @@ const ACTIVITY_KINDS = new Set<TurnActivityKind>([
 
 const toolStatus = (record: ToolCallRecord): TurnActivityStatus => {
   if (record.status === "success") return "completed";
+  if (!isTerminalToolCallStatus(record.status)) return isToolCallExecuting(record) ? "running" : "pending";
   return record.status;
 };
 
 export const activityStatusFromToolRecords = (records: ToolCallRecord[]): TurnActivityStatus => {
-  if (records.some((record) => record.status === "running")) return "running";
-  if (records.some((record) => record.status === "pending")) return "pending";
+  if (records.some(isToolCallExecuting)) return "running";
+  if (records.some((record) => !isTerminalToolCallStatus(record.status))) return "pending";
   if (records.some((record) => record.status === "failed")) return "failed";
   if (records.some((record) => record.status === "timeout")) return "timeout";
   if (records.some((record) => record.status === "blocked")) return "blocked";
@@ -205,7 +206,7 @@ export const projectToolBlock = (
     finishedAt: record.finishedAt,
     durationMs: record.durationMs,
     hasFailure: ["failed", "blocked", "timeout"].includes(record.status),
-    hasPendingUserAction: false,
+    hasPendingUserAction: ["approval", "user", "user_input"].includes(record.waitingOn || "") || record.transition === "waiting_approval",
     segment,
     segmentClosed: false,
   };
@@ -362,13 +363,23 @@ export function projectTurn(
       ? [String(block.record.name || "").trim().toLowerCase()].filter(Boolean)
       : []),
   );
-  const composedParents = new Set<string>();
-  const composedCells = new Set<string>();
+  const composedParents = new Map<string, ToolCallRecord[]>();
+  const composedCells = new Map<string, ToolCallRecord[]>();
+  const delegatedAgentIds = new Set<string>();
   for (const block of blocks) {
+    if (block.type === "progress" && block.subagentId) delegatedAgentIds.add(block.subagentId);
+    if (block.type === "tool_call" && block.record.name === "task" && block.record.status === "success") {
+      taskResultAgentIds(block.record).forEach((id) => delegatedAgentIds.add(id));
+    }
     if (block.type !== "tool_call" || block.record.callSource?.kind !== "code_mode") continue;
     if (!isVisibleActivity(block, false)) continue;
-    composedParents.add(block.record.callSource.parent_call_id);
-    composedCells.add(block.record.callSource.cell_id);
+    const { parent_call_id, cell_id } = block.record.callSource;
+    const parentLeaves = composedParents.get(parent_call_id);
+    if (parentLeaves) parentLeaves.push(block.record);
+    else composedParents.set(parent_call_id, [block.record]);
+    const cellLeaves = composedCells.get(cell_id);
+    if (cellLeaves) cellLeaves.push(block.record);
+    else composedCells.set(cell_id, [block.record]);
   }
   const hasTypedActivity = blocks.some((block) => block.type === "tool_call" || block.type === "progress");
   const isProjectedFinalAnswer = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
@@ -400,15 +411,28 @@ export function projectTurn(
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
+      if (!options.includeHiddenActivity && block.record.name === "task_status"
+        && ["pending", "running", "success"].includes(block.record.status)
+        && !["approval", "user", "user_input"].includes(block.record.waitingOn || "")
+        && block.record.transition !== "waiting_approval") {
+        const targets = Array.isArray(block.record.args.subagent_ids)
+          ? block.record.args.subagent_ids : [block.record.args.subagent_id];
+        // Only polling of actual delegated identities is represented by the
+        // agent surface. Standalone results and failed observations remain.
+        if (targets.length > 0 && targets.every((id) => typeof id === "string" && delegatedAgentIds.has(id))) return;
+      }
       // Execute/wait are transport wrappers. Leaves own the visible action;
       // a standalone wrapper contributes only actual output or error evidence.
       if (!options.includeHiddenActivity && ["tool_exec", "tool_wait"].includes(block.record.name)) {
-        const hasLeaf = block.record.name === "tool_exec" ? composedParents.has(block.record.id)
-          : composedCells.has(String(block.record.args.cell_id || ""));
-        const failed = ["failed", "blocked", "timeout", "cancelled", "partial"].includes(block.record.status);
+        const leaves = (block.record.name === "tool_exec" ? composedParents.get(block.record.id)
+          : composedCells.get(String(block.record.args.cell_id || ""))) ?? [];
+        const ownError = codeModeOwnError(block.record);
+        const independentError = ownError && !leaves.some((leaf) => [
+          getRecordOutputText(leaf).trim(), leaf.userSummary?.trim(), leaf.errorInfo?.user_message?.trim(), leaf.errorInfo?.user_summary?.trim(),
+        ].includes(ownError));
         const evidence = getRecordOutputText(block.record).trim()
           || block.record.userSummary || block.record.errorInfo?.user_message || block.record.errorInfo?.user_summary;
-        if ((!failed && hasLeaf) || !evidence) return;
+        if ((leaves.length > 0 && !independentError) || !evidence) return;
       }
       if (!block.record.temporaryRemoved) activityItems.push(projectToolBlock(block, segment));
       return;
@@ -422,7 +446,7 @@ export function projectTurn(
       // typed tool activity (MCP/image) is not classified as this lifecycle.
       if (isProviderRequestProgress(block) || ["tool_exec", "tool_wait"].includes(block.toolName || "")) {
         if (block.status === "failed" && block.errorMessage?.trim()) {
-          activityItems.push({ ...progressItem(block, segment), title: "错误详情", summary: undefined });
+          activityItems.push({ ...progressItem(block, segment), title: isProviderRequestProgress(block) ? "错误详情" : "运行", summary: undefined });
         }
         return;
       }

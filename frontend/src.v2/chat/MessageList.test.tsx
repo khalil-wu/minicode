@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
@@ -451,8 +451,8 @@ describe("MessageList cell UI", () => {
 
     fireEvent.click(button);
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
     await waitFor(() => {
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
       expect(container.querySelector('[aria-label="回到底部"]')).toBeNull();
     });
   });
@@ -533,7 +533,7 @@ describe("MessageList cell UI", () => {
     expect(scroll.scrollTop).toBe(250);
   });
 
-  it("returns to the bottom when the user sends a new message after scrolling up", async () => {
+  it("anchors a new user's turn at the viewport start after the user was reading history", async () => {
     render(<MessageList />);
     const scroll = screen.getByTestId("message-list-scroll");
     Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 400 });
@@ -543,6 +543,8 @@ describe("MessageList cell UI", () => {
     fireEvent.wheel(scroll, { deltaY: -120 });
     scroll.scrollTop = 250;
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1480 });
+    scroll.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
+    screen.getByTestId("latest-turn-tail").getBoundingClientRect = () => ({ top: 930 } as DOMRect);
     useAppStore.setState((state) => ({
       messages: [
         ...state.messages,
@@ -567,8 +569,55 @@ describe("MessageList cell UI", () => {
     }));
 
     await waitFor(() => {
-      expect(scroll.scrollTop).toBe(1480);
+      expect(scroll.scrollTop).toBe(1080);
     });
+  });
+
+  it("reserves only the newest turn from the actual viewport and tracks composer resize without stealing reading", async () => {
+    const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element> }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      entry: { callback: ResizeObserverCallback; targets: Set<Element> };
+      constructor(callback: ResizeObserverCallback) { this.entry = { callback, targets: new Set() }; observers.push(this.entry); }
+      observe(target: Element) { this.entry.targets.add(target); }
+      disconnect() { this.entry.targets.clear(); }
+    });
+    const { container } = render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    scroll.style.paddingTop = "16px";
+    scroll.style.paddingBottom = "24px";
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 640 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1400 });
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 760 });
+    const resize = () => act(() => { observers.filter(observer => observer.targets.has(scroll))
+      .forEach(observer => observer.callback([], {} as ResizeObserver)); });
+    resize();
+    expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("600px");
+    expect(container.querySelectorAll('[data-reply-viewport="true"]')).toHaveLength(1);
+    expect(screen.getByTestId("latest-turn-tail").style.minHeight).toBe("var(--reply-viewport-height)");
+    await waitFor(() => expect(scroll.scrollTop).toBe(1400));
+
+    fireEvent.wheel(scroll, { deltaY: -120 });
+    scroll.scrollTop = 250;
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 440 });
+    resize();
+    expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("400px");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(scroll.scrollTop).toBe(250);
+  });
+
+  it("uses natural turn heights and keeps its position while transcript search is active", async () => {
+    const { rerender } = render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 600 });
+    rerender(<MessageList searchActive />);
+    expect(screen.getByTestId("latest-turn-tail").getAttribute("data-reply-viewport")).toBe("false");
+    expect(screen.getByTestId("latest-turn-tail").style.minHeight).toBe("");
+    act(() => useAppStore.setState(state => ({ messages: [...state.messages,
+      { id: "search-user", role: "user", content: "keep the search view", artifacts: [], timestamp: 10 }], isStreaming: true })));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(scroll.scrollTop).toBe(600);
   });
 
   it("keeps the reading position when a new assistant reply starts after scrolling up", async () => {

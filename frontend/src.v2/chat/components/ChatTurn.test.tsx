@@ -343,10 +343,10 @@ describe("ChatTurn", () => {
     };
     const { container, rerender } = render(<ChatTurn turn={turn} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
-    expect(screen.getAllByRole("status", { name: "处理中" })).toHaveLength(1);
+    expect(screen.getAllByRole("status", { name: /^已处理 / })).toHaveLength(1);
     rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
-    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
+    expect(screen.getAllByRole("status", { name: /^已处理 / })).toHaveLength(1);
   });
 
   it("opens a shortened file reference using the successful read in the owning turn", () => {
@@ -553,7 +553,7 @@ describe("ChatTurn", () => {
 
     expect(screen.getByText("Implementation complete.")).toBeTruthy();
     expect(screen.queryByText("运行 explicit tool")).toBeNull();
-    expect(screen.getByText("用时 2秒")).toBeTruthy();
+    expect(screen.getByText("已处理 2秒")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     expect(screen.getByText("运行 explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
@@ -587,7 +587,7 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText(`$ ${command}`, { selector: ".exec-cell-output-command" })).toBeTruthy();
-    expect(screen.getByText("用时 26秒")).toBeTruthy();
+    expect(screen.getByText("已处理 26秒")).toBeTruthy();
     expect(screen.queryByText("1 个工具")).toBeNull();
     expect(screen.queryByText("1 条命令")).toBeNull();
     expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
@@ -657,7 +657,7 @@ describe("ChatTurn", () => {
     expect(screen.queryByLabelText("Assistant response")).toBeNull();
   });
 
-  it("uses the running tool row instead of a duplicate processing status", () => {
+  it("keeps the elapsed heading above the running tool row", () => {
     const runningTurn: ChatTurnState = {
       id: "turn-lifecycle",
       userCell: null,
@@ -681,10 +681,11 @@ describe("ChatTurn", () => {
     expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
     expect(screen.getByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
-    const summary = workArea.querySelector('[data-position="bottom"]');
+    const summary = workArea.querySelector('[data-position="top"]');
     const timeline = workArea.querySelector(".agent-loop-timeline");
-    expect(summary).toBeNull();
+    expect(summary).toBeTruthy();
     expect(timeline).toBeTruthy();
+    expect(summary?.nextElementSibling).toBe(timeline);
 
     rerender(<ChatTurn turn={{
       ...runningTurn,
@@ -709,11 +710,11 @@ describe("ChatTurn", () => {
     }} />);
 
     expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("用时 2秒")).toBeTruthy();
+    expect(screen.getByText("已处理 2秒")).toBeTruthy();
     expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
   });
 
-  it("shows processing only after the tool completes and before the next output", () => {
+  it("keeps elapsed processing above settled tools while awaiting the next output", () => {
     const turn: ChatTurnState = {
       id: "turn-between-tool-and-output",
       userCell: null,
@@ -737,13 +738,13 @@ describe("ChatTurn", () => {
 
     const workArea = screen.getByLabelText("Agent 处理进度");
     const timeline = workArea.querySelector(".agent-loop-timeline");
-    const summary = workArea.querySelector('[data-position="bottom"]');
+    const summary = workArea.querySelector('[data-position="top"]');
     expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: "处理中" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: /^已处理 / })).toBeTruthy();
     expect(timeline).toBeTruthy();
     expect(summary).toBeTruthy();
-    expect(Array.from(workArea.children).indexOf(timeline as Element))
-      .toBeLessThan(Array.from(workArea.children).indexOf(summary as Element));
+    expect(Array.from(workArea.children).indexOf(summary as Element))
+      .toBeLessThan(Array.from(workArea.children).indexOf(timeline as Element));
   });
 
   it("applies transcript defaults until the user chooses a disclosure state", () => {

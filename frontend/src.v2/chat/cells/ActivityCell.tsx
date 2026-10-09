@@ -22,10 +22,9 @@ import {
   isWebFetchRecord,
   recordPresentationStatus,
   isBrowserRecord,
-  browserFailureGuidance,
   isCodeModeRecord,
 } from "./activityCellHelpers";
-import { getToolDiffStats, toolCleanupNotice } from "../../lib/tool-call-reducer";
+import { getToolDiffStats, isToolCallAwaitingApproval, isToolCallExecuting, toolCleanupNotice } from "../../lib/tool-call-reducer";
 import {
   activityCellStatus,
   formatCellDuration,
@@ -95,7 +94,7 @@ export const ActivityCell = memo(function ActivityCell({
     ? recordStatuses.every((status) => status === "failed") ? "failed" : "partial"
     : cell.status;
   const status = activityCellStatus(presentationStatus);
-  const isRunning = isRunningCellStatus(status);
+  const isRunning = hasRecords ? records.some(isToolCallExecuting) : isRunningCellStatus(status);
   const fileChangeStats = useMemo(() => {
     if (!isFileChange) return undefined;
     return records.reduce((stats, record) => {
@@ -122,7 +121,7 @@ export const ActivityCell = memo(function ActivityCell({
 
   const isFailed = presentationStatus === "failed" || presentationStatus === "interrupted";
   const isPartial = presentationStatus === "partial";
-  const needsApproval = records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
+  const needsApproval = records.some(isToolCallAwaitingApproval);
   const attentionLabel = needsApproval ? "等待批准"
     : presentationStatus === "interrupted" ? "已中断"
     : isPartial ? "部分完成"
@@ -188,7 +187,8 @@ export const ActivityCell = memo(function ActivityCell({
   const fetchBodyRecords = records.filter((record) => isWebFetchRecord(record) && record.artifactId);
   const browserDetails = browserRecords.flatMap((record) => {
     const output = getRecordOutputPreview(record);
-    const rawError = purifyToolErrorText(record.stderrPreview || (!output ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : "") || "");
+    const rawError = purifyToolErrorText(record.stderrPreview || record.developerDetail || record.errorInfo?.developer_detail
+      || (!output ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : "") || "");
     const error = rawError && !output.includes(rawError) ? rawError : "";
     const expression = record.args.action === "evaluate" && typeof record.args.expression === "string" ? record.args.expression : "";
     return expression.trim() || output.trim() || error.trim() ? [{ record, expression, output, error }] : [];
@@ -246,6 +246,8 @@ export const ActivityCell = memo(function ActivityCell({
 
   const cellStateClass = isRunning
     ? "activity-cell-running"
+    : needsApproval || presentationStatus === "pending" || presentationStatus === "pending_approval"
+      ? "activity-cell-pending"
     : isFailed
       ? "activity-cell-failed"
       : isPartial
@@ -260,6 +262,7 @@ export const ActivityCell = memo(function ActivityCell({
   return (
     <div
       className={`activity-cell ${cellStateClass}`}
+      data-status={needsApproval && !isRunning ? "pending_approval" : presentationStatus}
       data-activity-kind={cell.activityKind}
       data-web-action={isWebAction ? (isWebFetchAction ? "fetch" : "search") : undefined}
     >
@@ -297,7 +300,7 @@ export const ActivityCell = memo(function ActivityCell({
               data-running={isRunning}
               data-failed={isFailed}
               data-partial={isPartial}
-              data-completed={!isRunning && !isFailed && !isPartial}
+              data-completed={presentationStatus === "done"}
             >
               ●
             </span>
@@ -319,7 +322,7 @@ export const ActivityCell = memo(function ActivityCell({
               className="activity-cell-name"
               data-failed={isFailed}
             >
-              {progressError ? "错误详情" : name}
+              {progressError && isProviderRequest ? "错误详情" : name}
             </span>
           )}
 
@@ -351,10 +354,6 @@ export const ActivityCell = memo(function ActivityCell({
         const notice = toolCleanupNotice(record.cleanupReceipt);
         return notice ? <div key={`cleanup-${record.id}`} className="activity-cell-detail-meta" role="status">{notice}</div> : null;
       })}
-      {browserRecords.filter((record) => ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)
-        || record.transition === "waiting_approval" || record.waitingOn === "approval").map((record) => (
-        <BrowserRecordNotice key={`browser-notice-${record.id}`} record={record} conversationId={ownerConversationId} showAction={browserRecords.length > 1} />
-      ))}
 
       {/* Disclosure is task evidence, not runtime provenance. Canonical call
           ids, source, script and raw envelopes remain in Inspector/replay. */}
@@ -476,35 +475,6 @@ export const ActivityCell = memo(function ActivityCell({
     </div>
   );
 });
-
-function BrowserRecordNotice({ record, conversationId, showAction }: {
-  record: ActivityToolRecord;
-  conversationId: string;
-  showAction: boolean;
-}) {
-  // Historical and child cells must not borrow the active task's preview.
-  const workbench = useAppStore((state) => conversationId ? state.conversationWorkbenchStates[conversationId] : undefined);
-  const activeProcesses = useAppStore((state) => conversationId && conversationId === state.conversationId ? state.previewLaunchProcesses : undefined);
-  const activeVerification = useAppStore((state) => conversationId && conversationId === state.conversationId ? state.previewVerification : undefined);
-  const guidance = browserFailureGuidance(record, workbench || (activeProcesses && {
-    previewLaunchProcesses: activeProcesses,
-    previewVerification: activeVerification ?? null,
-  }));
-  return (
-    <div className="activity-cell-error-detail browser-record-notice" role="status" data-browser-call-id={record.id}>
-      <div className="activity-cell-error-item">
-        {showAction && <div className="activity-cell-error-label">{readableRecordLabel(record)}</div>}
-        <div className="error-cell-message">{guidance.reason}</div>
-        {guidance.previewState && <div className="error-cell-message">{guidance.previewState}</div>}
-        {guidance.previewUrls?.map((url) => <div key={url} className="activity-cell-detail-row">
-          <span className="activity-cell-detail-meta">本会话预览 URL</span>
-          <span className="activity-cell-detail-path" title={url}>{url}</span>
-        </div>)}
-        <div className="error-cell-suggestion"><span>下一步：{guidance.nextStep}</span></div>
-      </div>
-    </div>
-  );
-}
 
 /**
  * A few durable transcripts predate artifact_kind and only retain the MIME

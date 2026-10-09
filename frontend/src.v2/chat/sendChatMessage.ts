@@ -8,6 +8,7 @@ import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { normalizeAgentErrorMessage } from "./errorMessages";
 import { uniqueMessageId } from "../stores/shared-helpers";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 interface SendChatMessageOptions {
   displayContent?: string;
@@ -261,7 +262,16 @@ const omitConversationTurnDiff = <T,>(items: Record<string, T>, conversationId: 
   return next;
 };
 
+const conversationSwitchBlockReason = (conversationId?: string): string | null => {
+  const state = useAppStore.getState();
+  return state.pendingConversationSwitchId && (!conversationId || conversationId === state.conversationId)
+    ? "正在切换会话，请等待加载完成后发送。"
+    : null;
+};
+
 export const getChatSendBlockReason = (conversationId?: string): string | null => {
+  const switchReason = conversationSwitchBlockReason(conversationId);
+  if (switchReason) return switchReason;
   const state = useAppStore.getState();
   const targetConversationId = conversationId ?? state.conversationId ?? state.runtimeSession?.active_conversation_id ?? undefined;
   if (
@@ -313,7 +323,43 @@ const recoverStaleStreamingState = (conversationId?: string): boolean => {
   return true;
 };
 
-export const sendChatMessage = ({
+export const sendChatMessage = (options: SendChatMessageOptions): boolean | Promise<boolean> => {
+  const switchReason = conversationSwitchBlockReason(options.conversationId);
+  if (switchReason) {
+    pushToast(switchReason, "warning");
+    return false;
+  }
+  const before = useAppStore.getState();
+  const conversationId = options.conversationId || before.conversationId || "";
+  const change = before.pendingPermissionModeChanges[conversationId];
+  if (!change) return sendConfirmedChatMessage(options);
+  const conversation = before.conversations.find((item) => item.id === conversationId);
+  const workspaceRoot = conversationId === (before.conversationId || "")
+    ? before.workingDirectory
+    : before.sideChats[conversationId]?.workspaceRoot || conversation?.worktreePath || conversation?.workspaceRoot || "";
+  if (!workspaceRootsEqual(change.workspaceRoot, workspaceRoot)) return false;
+
+  return (async () => {
+    let pending = change;
+    while (pending) {
+      if (!await pending.confirmation) return false;
+      pending = useAppStore.getState().pendingPermissionModeChanges[conversationId];
+      if (pending && !workspaceRootsEqual(pending.workspaceRoot, workspaceRoot)) return false;
+    }
+    const current = useAppStore.getState();
+    const owner = current.conversations.find((item) => item.id === conversationId);
+    const sideOwner = current.sideChats[conversationId];
+    if (conversationId === (current.conversationId || "")) {
+      if (!workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return false;
+    } else if ((!owner && !sideOwner)
+      || !workspaceRootsEqual(sideOwner?.workspaceRoot || owner?.worktreePath || owner?.workspaceRoot || "", workspaceRoot)) {
+      return false;
+    }
+    return sendConfirmedChatMessage({ ...options, conversationId: conversationId || undefined });
+  })();
+};
+
+const sendConfirmedChatMessage = ({
   displayContent,
   backendContent,
   attachments = [],
@@ -330,6 +376,12 @@ export const sendChatMessage = ({
   userMessageId: requestedUserMessageId,
   retryFromMessageId,
 }: SendChatMessageOptions): boolean => {
+  // Permission confirmation can outlive a later navigation request.
+  const switchReason = conversationSwitchBlockReason(conversationId);
+  if (switchReason) {
+    pushToast(switchReason, "warning");
+    return false;
+  }
   const contentForBackend = (backendContent ?? displayContent ?? "").trim();
   const contentForDisplay = (displayContent ?? backendContent ?? "").trim();
   if (!contentForBackend && attachments.length === 0) return false;
@@ -351,7 +403,7 @@ export const sendChatMessage = ({
   const transportAttachments = attachments.map(attachmentTransportRef);
   if (!allowWhileStreaming && !isRetry) {
     if (recoverStaleStreamingState(conversationId)) {
-      return sendChatMessage({
+      return sendConfirmedChatMessage({
         displayContent,
         backendContent,
         attachments,
@@ -390,7 +442,7 @@ export const sendChatMessage = ({
   const isMainConversation = !targetConversationId || targetConversationId === state.conversationId;
   const targetWorkspaceRoot = state.sideChats[targetConversationId]?.workspaceRoot || targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
   const targetPrimaryFile = primaryFile || (isMainConversation && targetWorkspaceRoot ? state.activeTabPath : undefined);
-  const targetPermissionMode = isMainConversation
+  const targetPermissionMode = !targetConversationId
     ? state.permissionMode
     : undefined;
   const targetAgentMode = agentMode ?? state.agentMode;

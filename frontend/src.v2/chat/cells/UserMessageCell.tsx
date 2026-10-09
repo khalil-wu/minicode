@@ -1,6 +1,6 @@
 import { Clock3, Copy, CornerDownLeft, RotateCcw, X } from "lucide-react";
 import { fileIcon } from "../../lib/file-icons";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import type { UserMessageCellState } from "./cellTypes";
 import {
@@ -9,6 +9,8 @@ import {
   sendClientCommandAwaitResult,
 } from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
+import { getWebSocket } from "../../hooks/useWebSocket";
+import { artifactResourceUrl } from "../../lib/artifact-resource";
 import { openAttachmentPreview, openLocalFilePreview } from "../openAttachmentPreview";
 import { buildInterruptCommand } from "../../lib/interrupt-command";
 import { pushToast } from "../../overlays/ToastContainer";
@@ -29,6 +31,7 @@ export function UserMessageCell({
   isTranscriptMode?: boolean;
   conversationId?: string;
 }) {
+  const isConnected = useAppStore((s) => s.isConnected);
   const [copied, setCopied] = useState(false);
   const [expansionPreference, setExpanded] = useState(false);
   const expanded = useTranscriptSearch() || expansionPreference;
@@ -139,7 +142,48 @@ export function UserMessageCell({
           <span>定时任务</span>
         </div>
       ) : null}
-      <div className="edit-bubble-wrap">
+      {Boolean(cell.contextRefs?.length) && (
+        <div className="user-cell-attachments" aria-label="消息上下文">
+          {cell.contextRefs?.map((ref, index) => (
+            <button type="button" key={ref.kind + ":" + ref.path + ":" + index} className="user-cell-attachment-chip"
+              onClick={() => openContextReference(ref, ownerConversationId)}
+              disabled={!["file", "url", "browser_annotation"].includes(ref.kind)}
+              aria-label={`打开引用 ${contextReferenceLabel(ref)}`}
+              title={ref.kind === "browser_annotation" ? ref.url + "\n" + ref.note : ref.path}>
+              {fileIcon(ref.kind === "skill" ? "SKILL.md" : ref.name, { size: 15, className: "user-cell-attachment-file-icon" })}
+              <span>{(ref.kind === "skill" ? "$" : "@") + contextReferenceLabel(ref)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {cell.attachments && cell.attachments.length > 0 && (
+        <div className={`user-cell-attachments${visibleContent ? "" : " user-cell-attachments-only"}`}>
+          {cell.attachments.map((attachment, index) => {
+            const previewable = Boolean(attachment.artifactId || attachment.dataUrl);
+                const isImage = attachment.type.startsWith("image/");
+            return previewable ? (
+              <button
+                key={attachmentKey(attachment, index)}
+                type="button"
+                    className={isImage ? "user-cell-attachment-image" : "user-cell-attachment-chip user-cell-attachment-chip-button"}
+                aria-label={attachment.name}
+                onClick={() => openFilePreview(attachment, index)}
+                title={`预览 ${attachment.name}`}
+              >
+                    {isImage ? <UserAttachmentImage artifactId={attachment.artifactId} dataUrl={attachment.dataUrl}
+                      name={attachment.name} conversationId={ownerConversationId} sessionId={getWebSocket()?.sessionId} isConnected={isConnected} />
+                  : <>{fileIcon(attachment.name, { size: 18, className: "user-cell-attachment-file-icon" })}<span>{attachment.name}</span></>}
+              </button>
+            ) : (
+              <span key={attachmentKey(attachment, index)} className="user-cell-attachment-chip">
+                {fileIcon(attachment.name, { size: 15, className: "user-cell-attachment-file-icon" })}
+                <span>{attachment.name}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      {(visibleContent || cell.quotedMessage || cell.queueState || cell.steeredIntoMessageId) && <div className="edit-bubble-wrap">
         <div className="user-cell-bubble md-prose">
           {cell.quotedMessage && <MessageQuote message={cell.quotedMessage} />}
           {visibleContent ? (
@@ -178,46 +222,9 @@ export function UserMessageCell({
               <span>已引导当前任务</span>
             </div>
           ) : null}
-          {Boolean(cell.contextRefs?.length) && (
-            <div className="user-cell-attachments" aria-label="消息上下文">
-              {cell.contextRefs?.map((ref, index) => (
-                <button type="button" key={ref.kind + ":" + ref.path + ":" + index} className="user-cell-attachment-chip"
-                  onClick={() => openContextReference(ref, ownerConversationId)}
-                  disabled={!["file", "url", "browser_annotation"].includes(ref.kind)}
-                  aria-label={`打开引用 ${contextReferenceLabel(ref)}`}
-                  title={ref.kind === "browser_annotation" ? ref.url + "\n" + ref.note : ref.path}>
-                  {fileIcon(ref.kind === "skill" ? "SKILL.md" : ref.name, { size: 15, className: "user-cell-attachment-file-icon" })}
-                  <span>{(ref.kind === "skill" ? "$" : "@") + contextReferenceLabel(ref)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {cell.attachments && cell.attachments.length > 0 && (
-            <div className={`user-cell-attachments${visibleContent ? "" : " user-cell-attachments-only"}`}>
-              {cell.attachments.map((attachment, index) => {
-                const previewable = Boolean(attachment.artifactId || attachment.dataUrl);
-                return previewable ? (
-                  <button
-                    key={attachmentKey(attachment, index)}
-                    type="button"
-                    className="user-cell-attachment-chip user-cell-attachment-chip-button"
-                    onClick={() => openFilePreview(attachment, index)}
-                    title={`预览 ${attachment.name}`}
-                  >
-                    {fileIcon(attachment.name, { size: 15, className: "user-cell-attachment-file-icon" })}
-                    <span>{attachment.name}</span>
-                  </button>
-                ) : (
-                  <span key={attachmentKey(attachment, index)} className="user-cell-attachment-chip">
-                    {fileIcon(attachment.name, { size: 15, className: "user-cell-attachment-file-icon" })}
-                    <span>{attachment.name}</span>
-                  </span>
-                );
-              })}
-            </div>
-          )}
+
         </div>
-      </div>
+      </div>}
       {!isTranscriptMode && <div className="user-cell-actions">
         <button type="button" onClick={copy} title={copied ? "已复制" : "复制消息"} aria-label={copied ? "已复制" : "复制消息"} className="cell-action-btn">
           <Copy size={14} />
@@ -235,6 +242,16 @@ export function UserMessageCell({
       </div>}
     </div>
   );
+}
+
+function UserAttachmentImage({ artifactId, dataUrl, name, conversationId, sessionId, isConnected }: {
+  artifactId?: string; dataUrl?: string; name: string; conversationId: string; sessionId?: string; isConnected: boolean;
+}) {
+  const imageUrl = useMemo(() => artifactResourceUrl({ artifactId, conversationId, sessionId,
+    source: "attachment", originalUrl: dataUrl, isConnected,
+  }), [artifactId, dataUrl, conversationId, sessionId, isConnected]);
+  return imageUrl ? <img src={imageUrl} alt={name} loading="lazy" />
+    : <>{fileIcon(name, { size: 18, className: "user-cell-attachment-file-icon" })}<span>{name}</span></>;
 }
 
 function attachmentKey(

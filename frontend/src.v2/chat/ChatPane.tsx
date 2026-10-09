@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
@@ -15,6 +15,7 @@ export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const messageContainerRef = useRef<HTMLDivElement>(null);
+  const composerContainerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
   const floating = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
@@ -22,6 +23,11 @@ export const ChatPane = () => {
   const isHydrating = useAppStore((state) => Boolean(
     conversationId && state.conversationHydration[conversationId]?.isHydrating,
   ));
+  const hasMessages = useAppStore((state) => state.messages.length > 0);
+  const showLoading = Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages);
+  useLayoutEffect(() => {
+    if (composerContainerRef.current) composerContainerRef.current.inert = Boolean(pendingConversationSwitchId);
+  }, [pendingConversationSwitchId]);
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
@@ -78,18 +84,12 @@ export const ChatPane = () => {
         background: "var(--surface-base)",
       }}
     >
-      {pendingConversationSwitchId ? (
-        <div role="status" aria-live="polite" className="chat-pane-switch-status">
-          <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
-          <span>正在打开会话…</span>
-        </div>
-      ) : (
         <div className="chat-pane-layout">
         <div className="chat-pane-main">
           {showSearch && (
             <ChatSearch onClose={handleCloseSearch} containerRef={messageContainerRef} />
           )}
-          {isHydrating && (
+          {isHydrating && hasMessages && !pendingConversationSwitchId && (
             <div
               className="chat-pane-hydration-status"
               role="status"
@@ -111,13 +111,20 @@ export const ChatPane = () => {
             </div>
           )}
           <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
+            {showLoading ? (
+              <div role="status" aria-live="polite" className="chat-pane-switch-status">
+                <LoaderCircle size={20} className="animate-spin" aria-hidden="true" />
+                <span className="sr-only">正在打开会话…</span>
+              </div>
+            ) : (
             <SafeBoundary fallback={<ChatErrorFallback />}>
               <TranscriptSearchContext.Provider value={showSearch}>
               <MessageList searchActive={showSearch} />
               </TranscriptSearchContext.Provider>
             </SafeBoundary>
+            )}
           </div>
-          <div className="chat-pane-composer-region">
+          <div ref={composerContainerRef} className="chat-pane-composer-region" aria-disabled={Boolean(pendingConversationSwitchId)}>
             <TurnChangeSummary />
             <SafeBoundary fallback={<ComposerErrorFallback />}>
               <Composer />
@@ -126,7 +133,6 @@ export const ChatPane = () => {
         </div>
         <ChatContextCard />
         </div>
-      )}
     </div>
   );
 };

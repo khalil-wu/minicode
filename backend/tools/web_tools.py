@@ -669,6 +669,26 @@ class WebSearchTool(BaseTool):
         self._llm_provider = llm_provider
         self._client = None
         self._proxy_url: str | None = None
+        self._search_credential_stamp: tuple[Any, ...] | None = None
+        self._direct_search_configured = False
+
+    def source_available(self, *, hosted_search: bool) -> bool:
+        if hosted_search or os.getenv("TAVILY_API_KEY", "").strip():
+            return True
+        from backend.vault.store import VAULT_FILE
+
+        if VAULT_FILE.exists():
+            stat = VAULT_FILE.stat()
+            stamp = (True, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+        else:
+            stamp = (False,)
+        if stamp != self._search_credential_stamp:
+            # Policy derivation shares this bool across registry forks. Read
+            # the key once per vault index version, never per schema or tool
+            # catalog entry. VaultReadError remains a configuration failure.
+            self._direct_search_configured = bool(self._search_api_key())
+            self._search_credential_stamp = stamp
+        return self._direct_search_configured
 
     def _get_client(self) -> Any:
         if self._client is not None:

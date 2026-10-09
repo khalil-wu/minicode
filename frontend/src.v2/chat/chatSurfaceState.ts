@@ -29,9 +29,9 @@ import type {
   UserMessageCellState,
   CollaborationCellState,
 } from "./cells/cellTypes";
-import type { ToolCallRecord } from "../lib/tool-call-reducer";
+import { isToolCallAwaitingApproval, isToolCallExecuting, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { shallow } from "zustand/shallow";
-import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
+import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOutcomeMeta, taskResultAgentIds } from "./cells/activityCellHelpers";
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
@@ -44,7 +44,11 @@ type CommittedCellState = Exclude<
 >;
 
 const statusForActivity = (item: TurnActivityItem): ActivityCellState["status"] => {
-  if (item.status === "running" || item.status === "pending") return "running";
+  if (item.status === "running" || item.status === "pending") {
+    if (item.records?.some(isToolCallExecuting)) return "running";
+    if (item.records?.some(isToolCallAwaitingApproval)) return "pending_approval";
+    return item.records?.length ? "pending" : item.status;
+  }
   if (item.status === "failed" || item.status === "blocked" || item.status === "timeout") return "failed";
   if (item.status === "partial") return "partial";
   if (item.status === "cancelled") return "interrupted";
@@ -141,7 +145,7 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     cwd: typeof record.args?.cwd === "string" ? record.args.cwd : undefined,
     background: record.args?.run_in_background === true,
     status: record.status === "running" || record.status === "pending"
-      ? "running"
+      ? isToolCallAwaitingApproval(record) ? "pending_approval" : isToolCallExecuting(record) ? "running" : "pending"
       : record.status === "success"
         ? "success"
         : record.status === "partial"
@@ -428,6 +432,10 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
   }
   for (const record of item.records ?? []) {
     const name = String(record.name || "").trim();
+    // An unsuccessful coordination request is an actual failed tool action,
+    // not a child identity or a successful start. ActivityCell retains its
+    // original result in the same expandable action row.
+    if (["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)) continue;
     if (name === "send_message") {
       const recipient = stringArg(record.args?.recipient) || "子智能体";
       const content = (record.args.message as string | undefined) ?? "";
@@ -495,11 +503,6 @@ const collaborationCell = (
 });
 
 const stringArg = (value: unknown): string => typeof value === "string" ? value.trim() : "";
-
-const taskResultAgentIds = (record: ToolCallRecord): string[] => {
-  const value = `${record.outputPreview || ""}\n${record.summary || ""}`;
-  return [...new Set([...value.matchAll(/\bsubagent-[a-z0-9]+\b/gi)].map((match) => match[0]))];
-};
 
 const collaborationAgentLabel = (value: string): string => {
   const label = value.trim();

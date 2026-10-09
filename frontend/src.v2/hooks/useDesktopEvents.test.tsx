@@ -25,6 +25,7 @@ vi.hoisted(() => {
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => true,
   desktop: () => null,
+  onEmbeddedBrowserEvent: () => () => {},
 }));
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({

@@ -196,9 +196,8 @@ describe("session gate replay", () => {
     const pendingResults: Promise<unknown>[] = [];
     let interruptCommand: ClientCommand | null = null;
 
-    // The capture ran the conversations in bypass mode; the renderer reads the
-    // mode from its store when it builds user_message.
-    useAppStore.setState({ permissionMode: "bypass" });
+    const usesLegacyPermissionOverride = !process.env.MINICODE_SESSION_GATE_FIXTURE
+      && ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"].includes(name);
 
     const drive = async (captured: CapturedCommand): Promise<void> => {
       const command = captured.command;
@@ -214,7 +213,15 @@ describe("session gate replay", () => {
           );
           return;
         case "user_message":
-          useAppStore.setState({ permissionMode: command.permission_mode as "bypass" | "confirm" });
+          if (usesLegacyPermissionOverride) {
+            // The recorded backend snapshots already establish this owner's
+            // mode before each send. Current clients inherit that stored mode
+            // instead of repeating the capture's redundant message override.
+            expect(useAppStore.getState().runtimeSession).toMatchObject({
+              active_conversation_id: command.conversation_id,
+              permission_mode: command.permission_mode,
+            });
+          }
           expect(sendChatMessage({
             displayContent: String(command.content),
             conversationId: String(command.conversation_id),
@@ -238,9 +245,7 @@ describe("session gate replay", () => {
           if (response.action === "approve") {
             await step(() => { fireEvent.click(screen.getByRole("button", { name: "允许使用工具" })); });
           } else {
-            await step(() => { fireEvent.click(screen.getByRole("button", { name: "补充说明" })); });
-            await step(() => { fireEvent.change(screen.getByRole("textbox", { name: "给 Agent 补充说明" }), { target: { value: response.feedback } }); });
-            await step(() => { fireEvent.click(screen.getByRole("button", { name: "拒绝并发送说明" })); });
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "拒绝使用工具" })); });
           }
           // These captures predate correlated control command results. Sending
           // the decision is not semantic acceptance: keep the card until the
@@ -317,6 +322,10 @@ describe("session gate replay", () => {
     rendererUserMessages.forEach((sent, i) => {
       const { client_command_id: _sentId, ...sentRest } = sent;
       const { client_command_id: _capturedId, ...capturedRest } = capturedUserMessages[i];
+      if (usesLegacyPermissionOverride) {
+        expect(sentRest).not.toHaveProperty("permission_mode");
+        delete capturedRest.permission_mode;
+      }
       expect(sentRest).toEqual(capturedRest);
     });
 
@@ -408,6 +417,16 @@ describe("session gate replay", () => {
     responses.forEach((response, index) => {
       const { client_command_id: _sent, ...sent } = response;
       const { client_command_id: _captured, ...captured } = expected[index].command;
+      if (name === "__fixtures__approval_gate.json") {
+        // This capture used the removed generic rejection-feedback field.
+        // The current UI still rejects the identical request/turn/owner; only
+        // that obsolete optional text is excluded from exact wire equality.
+        const envelope = captured.response as { subtype: string; response: { action: string; feedback?: string } };
+        if (envelope.response.action === "reject") {
+          const { feedback: _feedback, ...decision } = envelope.response;
+          captured.response = { ...envelope, response: decision };
+        }
+      }
       expect(sent).toEqual(captured);
     });
     const final = useAppStore.getState();

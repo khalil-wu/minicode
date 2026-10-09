@@ -63,6 +63,30 @@ function command(endpoint, payload, path = "command") {
   }).then((response) => response.json());
 }
 
+test("owned-preview authority is bound to its exact operation, owner, and preview origin", async () => {
+  let calls = 0;
+  bridge.init({ token: "bridge-test-token", manager: { async executeControlCommand() { calls++; return { ok: true }; } } });
+  const endpoint = await bridge.start();
+  const url = "http://127.0.0.1:5173/preview-token/index.html";
+  const base = {
+    kind: "owned_preview", url, preview_url: url, preview_id: "preview", session_id: "session",
+    conversation_id: "owner", permission_mode: "bypass", operation_id: "bound-preview",
+  };
+  try {
+    for (const patch of [{ conversation_id: "other" }, { operation_id: "other" },
+      { url: "http://127.0.0.1:8000/admin" }, { preview_url: "http://127.0.0.1:8000/admin" },
+      { kind: "bypass" }, { session_id: "" }, { preview_id: "" }]) {
+      const result = await command(endpoint, { action: "navigate", url, conversation_id: "owner", operation_id: "bound-preview",
+        navigation_authorization: { ...base, ...patch } });
+      assert.equal(result.ok, false);
+    }
+    const missingOperation = await command(endpoint, { action: "navigate", url, conversation_id: "owner",
+      navigation_authorization: { ...base, operation_id: undefined } });
+    assert.equal(missingOperation.ok, false);
+    assert.equal(calls, 0);
+  } finally { await bridge.stop(); }
+});
+
 test("cancelled operation ids cannot start later or be reused under another owner", async () => {
   let calls = 0;
   bridge.init({ token: "bridge-test-token", manager: { async executeControlCommand() { calls++; return { ok: true }; } } });

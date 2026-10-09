@@ -119,6 +119,9 @@ const timelineGroupTitle = (group: TimelineGroup, live = false): string => {
     .map(workLabel));
   const failed = failedLabels.size > 0;
   const interrupted = group.cells.some((cell) => "status" in cell && ["partial", "cancelled", "interrupted"].includes(cell.status));
+  if (!live && group.cells.some((cell) => "status" in cell && ["pending", "pending_approval"].includes(cell.status))) {
+    return labels.map((label) => `${WORK_LABEL_CHROME[label]}${failedLabels.has(label) ? "失败" : ""}`).join(" · ");
+  }
   if (labels.every((label) => ["Read", "List", "Search"].includes(label)) && !failedLabels.has(undefined)) {
     return live ? "正在查看" : failed ? "查看失败" : interrupted ? "查看已中断" : "已查看";
   }
@@ -167,8 +170,8 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
   useEffect(() => {
     if (!userToggled.current) setExpanded(defaultExpanded);
   }, [defaultExpanded]);
-  const latest = group.cells.at(-1);
-  const liveGroup = isRunning && !group.closed;
+  const latestRunning = group.cells.filter((cell) => "status" in cell && cell.status === "running").at(-1);
+  const liveGroup = isRunning && Boolean(latestRunning);
   const title = timelineGroupTitle(group, liveGroup);
   const labels = group.cells.map(workLabel);
   const groupGlyph = labels.includes("Edit")
@@ -193,7 +196,7 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
         onUserDisclosure?.();
         setExpanded((value) => !value);
       }}>
-        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{liveGroup ? latestWorkGlyph(latest) : groupGlyph}</span>
+        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{liveGroup ? latestWorkGlyph(latestRunning) : groupGlyph}</span>
         <span className={liveGroup ? "agent-loop-timeline-group-live-title" : "agent-loop-timeline-group-label"} title={title}>{title}</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
           <ChevronRight size={14} className="mc-process-disclosure" data-expanded={expanded} />

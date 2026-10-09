@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   awaitResult: vi.fn(),
   deleteConversation: vi.fn(async () => true),
   sendCommand: vi.fn((_command: unknown) => true),
-  sendChatMessage: vi.fn(() => true),
+  sendChatMessage: vi.fn((): boolean | Promise<boolean> => true),
   promptResponse: vi.fn(async () => ({ type: "command.result", level: "success", message: "", data: {} })),
 }));
 
@@ -44,6 +44,41 @@ const successfulCreate = {
 };
 
 describe("SideChatPanel server lifecycle", () => {
+  it("reserves the newest side turn in its own reply viewport and preserves upstream reading on composer resize", () => {
+    const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element> }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      entry: { callback: ResizeObserverCallback; targets: Set<Element> };
+      constructor(callback: ResizeObserverCallback) { this.entry = { callback, targets: new Set() }; observers.push(this.entry); }
+      observe(target: Element) { this.entry.targets.add(target); }
+      disconnect() { this.entry.targets.clear(); }
+    });
+    const { container } = render(<SideChatPanel />);
+    const id = Object.keys(useAppStore.getState().sideChats)[0];
+    act(() => useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], messages: [
+      { id: "old-side-user", role: "user", content: "Earlier task", timestamp: 1, artifacts: [] },
+      { id: "old-side-answer", role: "assistant", content: "Earlier reply", timestamp: 2, artifacts: [] },
+      { id: "new-side-user", role: "user", content: "New task", timestamp: 3, artifacts: [] },
+      { id: "new-side-answer", role: "assistant", content: "", timestamp: 4, artifacts: [], isStreaming: true },
+    ], isStreaming: true } } })));
+    const scroll = screen.getByRole("log", { name: "侧边对话历史" });
+    scroll.style.padding = "20px";
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1300 });
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 800 });
+    const resize = () => act(() => { observers.filter(observer => observer.targets.has(scroll))
+      .forEach(observer => observer.callback([], {} as ResizeObserver)); });
+    resize();
+    expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("460px");
+    expect(container.querySelectorAll('[data-reply-viewport="true"]')).toHaveLength(1);
+    expect(container.querySelector('[data-reply-viewport="false"]')?.getAttribute("style")).not.toContain("min-height");
+    expect(scroll.scrollTop).toBe(1300);
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 400 });
+    resize();
+    expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("360px");
+    expect(scroll.scrollTop).toBe(100);
+  });
   it("submits side-owned attachments and a precise selection as a follow-up without touching the main composer", async () => {
     useAppStore.setState({ isConnected: true, draft: "main draft" });
     render(<SideChatPanel />);
@@ -62,6 +97,23 @@ describe("SideChatPanel server lifecycle", () => {
     expect(useAppStore.getState().draft).toBe("main draft");
     expect(useAppStore.getState().attachments).toEqual([]);
     expect(useAppStore.getState().sideChats[sideId].attachments).toEqual([]);
+  });
+
+  it.each([true, false])("keeps the side draft until a delayed submission returns %s", async (accepted) => {
+    let finishSend!: (value: boolean) => void;
+    mocks.sendChatMessage.mockReturnValueOnce(new Promise((resolve) => { finishSend = resolve; }));
+    useAppStore.setState({ isConnected: true, draft: "main unsent draft" });
+    render(<SideChatPanel />);
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalled());
+    const id = Object.keys(useAppStore.getState().sideChats)[0];
+    act(() => useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], draft: "side requested task" } } })));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalled());
+    expect(useAppStore.getState().sideChats[id].draft).toBe("side requested task");
+    await act(async () => { finishSend(accepted); });
+
+    expect(useAppStore.getState().sideChats[id].draft).toBe(accepted ? "" : "side requested task");
+    expect(useAppStore.getState().draft).toBe("main unsent draft");
   });
   beforeEach(() => {
     vi.clearAllMocks();
@@ -261,18 +313,38 @@ describe("SideChatPanel server lifecycle", () => {
   });
 
   it("submits the side owner's approval without clearing the main approval", async () => {
-    render(<SideChatPanel />);
+    const { container } = render(<SideChatPanel />);
     const sideId = Object.keys(useAppStore.getState().sideChats)[0];
+    const input = screen.getByRole("textbox", { name: "侧边对话消息" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "side draft" } });
+    input.setSelectionRange(2, 5);
+    const attachment = { id: "side-draft-file", name: "notes.txt", type: "text/plain", size: 4, status: "ready" as const };
+    act(() => useAppStore.setState(state => ({ sideChats: { ...state.sideChats,
+      [sideId]: { ...state.sideChats[sideId], attachments: [attachment] },
+    } })));
     act(() => useAppStore.setState({
       pendingApproval: { requestId: "main-approval", conversationId: "main-conversation", toolName: "write_file", args: {} },
       approvalQueue: [{ requestId: "side-approval", conversationId: sideId, turnId: "side-turn", messageId: "side-answer",
         toolName: "read_file", args: { path: "src/app.ts" } }],
     }));
+    expect(screen.queryByRole("textbox", { name: "侧边对话消息" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+    expect(input.closest(".side-chat-composer")?.hasAttribute("hidden")).toBe(true);
+    expect(container.querySelector(".side-chat-composer-region")?.getAttribute("data-approval-replacement")).toBe("true");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => Promise.resolve());
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(mocks.promptResponse).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "允许使用工具" }));
     await waitFor(() => expect(mocks.promptResponse).toHaveBeenCalledWith(expect.objectContaining({
       conversation_id: sideId, turn_id: "side-turn", message_id: "side-answer", request_id: "side-approval",
     })));
     expect(useAppStore.getState().pendingApproval?.requestId).toBe("main-approval");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "侧边对话消息" })).toBe(input));
+    expect(input.value).toBe("side draft");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(useAppStore.getState().sideChats[sideId].attachments).toEqual([attachment]);
+    expect(container.querySelector(".side-chat-composer-region")?.getAttribute("data-approval-replacement")).toBe("false");
   });
 
   it("interrupts only the side turn through the command, composer and Escape actions", () => {

@@ -310,9 +310,19 @@ async function assessNavigationTargetForRequest(value, conversationId = "", entr
 function requestApprovedNavigation(entry, url) {
   const origin = normalizeOrigin(url) || url;
   if (entry.pendingNavigationApprovals.has(origin)) return;
+  const request = pendingNavigations.get(entry.id);
+  const control = request?.control || {};
   entry.pendingNavigationApprovals.add(origin);
-  void confirmNavigationUrl(url, entry.conversationId, entry)
-    .then(() => entry.view.webContents.loadURL(url))
+  void confirmNavigationUrl(url, entry.conversationId, entry, control)
+    .then((navigation) => {
+      control.signal?.throwIfAborted();
+      if (views.get(entry.id) !== entry || entry.view.webContents.isDestroyed()
+        || (request && pendingNavigations.get(entry.id) !== request)) {
+        throw new Error("Browser navigation was cancelled.");
+      }
+      if (navigation.privateNetworkApproved) entry.approvedPrivateOrigins.add(origin);
+      return entry.view.webContents.loadURL(navigation.url);
+    })
     .catch((error) => {
       emit(entry, "error", {
         error: error instanceof Error ? error.message : "Local or private navigation was cancelled.",
@@ -335,7 +345,7 @@ function actualPeerNavigationError(entry, url, peerIp, proxyResolution = "DIRECT
   return `Navigation to ${new URL(url).hostname} connected to a local or private peer (${peer}).`;
 }
 
-async function confirmNavigationUrl(value, conversationId = "", entry = null) {
+async function confirmNavigationUrl(value, conversationId = "", entry = null, control = {}) {
   const url = typeof value === "string" ? value.trim() : "";
   const decision = await assessNavigationTargetForRequest(url, conversationId, entry);
   if (decision.allowed) {
@@ -345,6 +355,14 @@ async function confirmNavigationUrl(value, conversationId = "", entry = null) {
     };
   }
   if (!decision.requiresPrivateNetworkApproval) throw new Error(decision.reason);
+  const authorization = control.navigationAuthorization;
+  if (authorization?.kind === "owned_preview" && authorization.url === url
+    && authorization.conversation_id === conversationId) {
+    // Backend tool admission already established the live preview's owner.
+    // This exact origin grant also covers Chromium redirects/peer checks for
+    // that preview; another local/private target still needs its own decision.
+    return { url, privateNetworkApproved: true };
+  }
   const owner = getMainWindow();
   const result = await dialog.showMessageBox(owner && !owner.isDestroyed() ? owner : undefined, {
     type: "warning",
@@ -356,9 +374,8 @@ async function confirmNavigationUrl(value, conversationId = "", entry = null) {
     detail: `${new URL(url).hostname} may expose sensitive local services. Continue only if you trust this target.`,
     noLink: true,
   });
+  control.signal?.throwIfAborted();
   if (result.response !== 1) throw new Error("Local or private browser navigation was cancelled.");
-  const approvedOrigin = normalizeOrigin(url);
-  if (approvedOrigin && entry?.approvedPrivateOrigins instanceof Set) entry.approvedPrivateOrigins.add(approvedOrigin);
   return { url, privateNetworkApproved: true };
 }
 
@@ -757,11 +774,51 @@ function activate(id, conversationId) {
   const entry = selectEntry(id, conversationId);
   const requestedId = entry.id;
   activeViewId = requestedId;
-  for (const [entryId, entry] of views) {
-    const bounds = entry.view.getBounds();
-    entry.view.setVisible(entryId === requestedId && bounds.width > 0 && bounds.height > 0);
-  }
+  for (const entry of views.values()) syncViewPresentation(entry);
   return true;
+}
+
+function syncFrameCapture(entry) {
+  const contents = entry.view.webContents;
+  if (!entry.presented || entry.captureWaiters.size === 0 || entry.captureInFlight) return;
+  entry.captureInFlight = true;
+  // Resize and visibility reach Chromium asynchronously. Two actual animation
+  // frames let the presented viewport paint before requesting its compositor
+  // image; this does not poll or substitute another page's rendering.
+  void contents.executeJavaScript("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))")
+    .then(async () => {
+      if (!entry.presented || entry.captureWaiters.size === 0) return;
+      const image = await contents.capturePage();
+      const error = image.isEmpty() ? new Error("Browser compositor returned an empty frame.") : null;
+      for (const complete of Array.from(entry.captureWaiters)) complete(image, error);
+    })
+    .catch((error) => {
+      for (const complete of Array.from(entry.captureWaiters)) complete(null, error);
+    })
+    .finally(() => { entry.captureInFlight = false; syncFrameCapture(entry); });
+}
+
+function syncViewPresentation(entry) {
+  const bounds = entry.view.getBounds();
+  entry.presented = entry.layoutBound && activeViewId === entry.id && bounds.width > 0 && bounds.height > 0;
+  entry.view.setVisible(entry.presented);
+  syncFrameCapture(entry);
+}
+
+function capturePresentedPage(entry, control) {
+  control.signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const complete = (image, error) => {
+      entry.captureWaiters.delete(complete);
+      control.signal?.removeEventListener("abort", cancelled);
+      syncFrameCapture(entry);
+      if (error) reject(error); else resolve(image);
+    };
+    const cancelled = () => complete(null, control.signal.reason);
+    entry.captureWaiters.add(complete);
+    control.signal?.addEventListener("abort", cancelled, { once: true });
+    syncFrameCapture(entry);
+  });
 }
 
 function attachViewEvents(entry) {
@@ -860,13 +917,13 @@ async function create(payload = {}, control = {}) {
   if (claimedOwner && claimedOwner !== conversationId) {
     throw new Error("Embedded browser tab id belongs to another conversation.");
   }
-  const request = { conversationId };
+  const request = { conversationId, control };
   pendingNavigations.set(requestedId, request);
   const assertCurrent = () => {
     if (pendingNavigations.get(requestedId) !== request) throw new Error("Browser navigation was cancelled.");
   };
   try {
-    const navigation = await confirmNavigationUrl(url, conversationId, entry);
+    const navigation = await confirmNavigationUrl(url, conversationId, entry, control);
     control.signal?.throwIfAborted();
     assertCurrent();
     const requestedUrl = navigation.url;
@@ -896,12 +953,22 @@ async function create(payload = {}, control = {}) {
         networkLogs: [],
         approvedPrivateOrigins,
         pendingNavigationApprovals: new Set(),
+        layoutBound: false,
+        presented: false,
+        captureWaiters: new Set(),
+        captureInFlight: false,
       };
       views.set(requestedId, entry);
       entriesByWebContentsId.set(view.webContents.id, entry);
       configureGuestSession(view.webContents.session);
       attachViewEvents(entry);
       mainWindow.contentView.addChildView(view);
+      // Attaching a native view initializes its bounds. Set the agent's
+      // layout viewport afterwards, before navigation; the panel takes over
+      // the bounds only when this owner is actually presented.
+      const { width, height } = mainWindow.getContentBounds();
+      view.setBounds({ x: 0, y: 0, width, height });
+      view.setVisible(false);
     }
     if (navigation.privateNetworkApproved) {
       entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
@@ -928,6 +995,7 @@ function setBounds(payload = {}) {
   const zoomFactor = Number(mainWindow.webContents.getZoomFactor?.()) || 1;
   const bounds = normalizeViewBounds({ x, y, width, height }, content, zoomFactor);
   entry.view.setBounds(bounds);
+  entry.layoutBound = bounds.width > 0 && bounds.height > 0;
   if ("viewport" in payload && bounds.width > 0 && bounds.height > 0) {
     const viewport = payload.viewport;
     if (viewport === null) {
@@ -951,7 +1019,7 @@ function setBounds(payload = {}) {
       }
     }
   }
-  entry.view.setVisible(activeViewId === entry.id && bounds.width > 0 && bounds.height > 0);
+  syncViewPresentation(entry);
   return true;
 }
 
@@ -997,6 +1065,7 @@ async function executeControlCommand(payload = {}, control = {}) {
       alreadyNavigated = true;
     }
     if (!alreadyNavigated) await navigate({ id: entry.id, url, conversation_id: conversationId }, control);
+    if (control.requestPresentation) emit(entry, "presentation-requested");
     const waitMs = Math.max(0, Math.min(Number(payload.wait_ms) || 0, 5000));
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
     return { ok: true, action, target: targetState(entry) };
@@ -1005,7 +1074,8 @@ async function executeControlCommand(payload = {}, control = {}) {
   const webContents = entry.view.webContents;
   if (action === "screenshot") {
     submit();
-    const image = await webContents.capturePage();
+    if (control.requestPresentation) emit(entry, "presentation-requested");
+    const image = await capturePresentedPage(entry, control);
     const size = image.getSize();
     const png = image.toPNG();
     const base64Size = 4 * Math.ceil(png.length / 3);
@@ -1096,6 +1166,9 @@ function runNavigationAction(payload = {}) {
 
 function closeEntry(entry) {
   const requestedId = entry.id;
+  for (const complete of Array.from(entry.captureWaiters)) {
+    complete(null, new Error("Browser tab closed before screenshot presentation completed."));
+  }
   pendingNavigations.delete(requestedId);
   const mainWindow = getMainWindow();
   if (mainWindow && !mainWindow.isDestroyed()) {

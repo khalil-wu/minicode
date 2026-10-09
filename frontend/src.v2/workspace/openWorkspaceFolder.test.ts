@@ -130,6 +130,9 @@ describe("openWorkspaceFolder", () => {
     expect(confirmedState.conversationMessages["conv-project"]).toEqual([original]);
     expect(confirmedState.conversations[0].workspaceRoot).toBe("C:/Alpha");
 
+    // workspace.set established confirm on conv-new-project. A stale visible
+    // picker value must not replace that stored mode on the first user turn.
+    useAppStore.setState({ permissionMode: "bypass" });
     expect(sendChatMessage({
       displayContent: "change the app title",
       backendContent: "change the app title",
@@ -139,9 +142,9 @@ describe("openWorkspaceFolder", () => {
       type: "user_message",
       content: "change the app title",
       workspace_root: "C:\\Desktop\\MiniCode",
-      permission_mode: "confirm",
       conversation_id: "conv-new-project",
     });
+    expect(sent[0]).not.toHaveProperty("permission_mode");
   });
 
   it("does not overwrite a newer selection when an open-folder result arrives late", async () => {

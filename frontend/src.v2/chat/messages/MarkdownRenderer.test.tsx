@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { findStableSplitPoint, MarkdownRenderer } from "./MarkdownRenderer";
 import { useAppStore } from "../../stores";
@@ -12,7 +12,7 @@ import {
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import mermaid from "mermaid";
 
-const { sendMock, openPathMock, revealPathMock } = vi.hoisted(() => {
+const { sendMock, openPathMock, revealPathMock, socketState } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
     configurable: true,
     writable: true,
@@ -27,11 +27,11 @@ const { sendMock, openPathMock, revealPathMock } = vi.hoisted(() => {
       dispatchEvent: () => false,
     }),
   });
-  return { sendMock: vi.fn(), openPathMock: vi.fn(), revealPathMock: vi.fn() };
+  return { sendMock: vi.fn(), openPathMock: vi.fn(), revealPathMock: vi.fn(), socketState: { sessionId: "session-markdown" } };
 });
 
 vi.mock("../../hooks/useWebSocket", () => ({
-  getWebSocket: () => ({ send: sendMock }),
+  getWebSocket: () => ({ send: sendMock, sessionId: socketState.sessionId }),
 }));
 
 vi.mock("../../desktop/runtime", () => ({
@@ -58,7 +58,9 @@ afterEach(() => {
   openPathMock.mockClear();
   revealPathMock.mockClear();
   __resetOpenWebInBrowserForTests();
+  socketState.sessionId = "session-markdown";
   useAppStore.setState({
+    isConnected: false,
     conversationId: null,
     remoteImagePolicy: "ask",
     allowedRemoteImageDomains: [],
@@ -67,6 +69,33 @@ afterEach(() => {
 });
 
 describe("MarkdownRenderer", () => {
+  it("passes supported colors to Mermaid in both themes and retains a scrollable full-size diagram", async () => {
+    const style = document.documentElement.style;
+    style.setProperty("--text-primary", "oklch(93% .002 250)");
+    style.setProperty("--text-secondary", "oklch(80% .003 250)");
+    const chart = "```mermaid\nflowchart TD\n A[读取订单] --> B[按 id 去重]\n```";
+    const svg = '<svg viewBox="-8 -8 900 1200" width="100%"><text>订单</text></svg>';
+    vi.mocked(mermaid.render).mockResolvedValueOnce({ svg });
+    useAppStore.setState({ resolvedTheme: "dark" });
+    const view = render(<MarkdownRenderer content={chart} />);
+    await waitFor(() => expect(view.container.querySelector('.md-mermaid svg')?.getAttribute('width')).toBe('900'));
+    expect(view.container.querySelector('.md-mermaid svg')?.getAttribute('height')).toBe('1200');
+    expect(screen.getByRole('region', { name: 'Mermaid 图表，可上下和左右滚动' }).tabIndex).toBe(0);
+    for (const key of ['textColor', 'primaryTextColor', 'lineColor']) {
+      expect(vi.mocked(mermaid.initialize).mock.calls.at(-1)![0]!.themeVariables![key]).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+    style.setProperty("--text-primary", "oklch(26% .004 250)");
+    style.setProperty("--text-secondary", "oklch(43% .006 250)");
+    vi.mocked(mermaid.render).mockResolvedValueOnce({ svg });
+    const previousRenders = vi.mocked(mermaid.render).mock.calls.length;
+    useAppStore.setState({ resolvedTheme: "light" });
+    await waitFor(() => expect(vi.mocked(mermaid.render).mock.calls.length).toBeGreaterThan(previousRenders));
+    for (const key of ['textColor', 'primaryTextColor', 'lineColor']) {
+      expect(vi.mocked(mermaid.initialize).mock.calls.at(-1)![0]!.themeVariables![key]).toMatch(/^#[0-9a-f]{6}$/i);
+    }
+    style.removeProperty("--text-primary");
+    style.removeProperty("--text-secondary");
+  });
   it("does not guess ambiguous bare names or rewrite explicit link targets", () => {
     const root = "E:/记得日记";
     const knownFilePaths = [`${root}/one/backup.ts`, `${root}/two/backup.ts`];
@@ -901,6 +930,52 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByText("设置中已禁止加载远程图片。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "加载图片" })).toBeNull();
   });
+
+  it("renders a generated artifact reference with the message owner and opens its shared preview", () => {
+    useAppStore.setState({ conversationId: "other-owner", isConnected: true, remoteImagePolicy: "block" });
+    render(<MarkdownRenderer content="![Browser screenshot](artifact://art_screenshot)" conversationId="image-owner" />);
+    const img = screen.getByRole("img", { name: "Browser screenshot" });
+    const resource = new URL(img.getAttribute("src")!);
+    expect(resource.pathname).toBe("/api/artifacts/raw");
+    expect(resource.searchParams.get("artifact_id")).toBe("art_screenshot");
+    expect(resource.searchParams.get("conversation_id")).toBe("image-owner");
+    expect(resource.searchParams.get("session_id")).toBe("session-markdown");
+    expect(screen.queryByText("本地图片不可用")).toBeNull();
+    expect(screen.queryByRole("button", { name: "加载图片" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "在预览中打开 Browser screenshot" }));
+    expect(useAppStore.getState().previewOwnerConversationId).toBe("image-owner");
+    expect(useAppStore.getState().conversationWorkbenchStates["image-owner"].previewArtifact).toMatchObject({
+      artifactId: "art_screenshot", source: "artifact", kind: "image", loading: false,
+    });
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds artifact image resources after reconnect without using a stale session", () => {
+    useAppStore.setState({ isConnected: true });
+    render(<MarkdownRenderer content="![capture](artifact://art_capture)" conversationId="owner" />);
+    expect(new URL(screen.getByRole("img", { name: "capture" }).getAttribute("src")!).searchParams.get("session_id")).toBe("session-markdown");
+    act(() => useAppStore.setState({ isConnected: false }));
+    expect(screen.getByText("连接恢复后可预览图片。")).toBeTruthy();
+    socketState.sessionId = "reconnected-session";
+    act(() => useAppStore.setState({ isConnected: true }));
+    expect(new URL(screen.getByRole("img", { name: "capture" }).getAttribute("src")!).searchParams.get("session_id")).toBe("reconnected-session");
+  });
+
+  it("does not borrow the active conversation for an artifact image lacking a message owner", () => {
+    useAppStore.setState({ conversationId: "unrelated-conversation", isConnected: true });
+    render(<MarkdownRenderer content="![unowned](artifact://art_screenshot)" />);
+    expect(screen.getByText("图片未关联到会话，暂时无法预览。")).toBeTruthy();
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it.each(["artifact://art_image/../secret", "artifact://user@host", "artifact://art_image?conversation_id=other", "artifact://art_image#other"])(
+    "rejects noncanonical artifact image reference %s", (reference) => {
+      useAppStore.setState({ isConnected: true, remoteImagePolicy: "allow" });
+      render(<MarkdownRenderer content={`![invalid](${reference})`} conversationId="owner" />);
+      expect(document.querySelector("img")).toBeNull();
+      expect(screen.queryByRole("button", { name: "在预览中打开 invalid" })).toBeNull();
+    },
+  );
 
   it("opens data images in the shared file preview", () => {
     render(<MarkdownRenderer content={"![inline](data:image/png;base64,AAAA)"} />);

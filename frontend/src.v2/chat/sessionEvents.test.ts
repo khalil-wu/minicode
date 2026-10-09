@@ -1627,6 +1627,7 @@ describe("handleSessionEvent", () => {
     ];
     useAppStore.setState({
       conversationId: "conv-current",
+      permissionMode: "bypass",
       conversations: [
         { id: "conv-current", title: "Current", updatedAt: "2026-08-16T02:00:00Z" },
         { id: "conv-backend-old", title: "Backend old", updatedAt: "2026-08-15T02:00:00Z" },
@@ -1652,6 +1653,7 @@ describe("handleSessionEvent", () => {
     expect(handleSessionEvent({
       type: "conversation.list",
       active_conversation_id: "conv-backend-old",
+      session: { active_conversation_id: "conv-backend-old", permission_mode: "plan" },
       snapshot_at: "2026-08-16T03:00:00Z",
       conversations: [
         { id: "conv-current", title: "Current", updated_at: "2026-08-16T02:00:00Z" },
@@ -1667,6 +1669,7 @@ describe("handleSessionEvent", () => {
 
     const state = useAppStore.getState();
     expect(state.conversationId).toBe("conv-current");
+    expect(state.permissionMode).toBe("bypass");
     expect(state.messages.map((message) => message.id)).toEqual(["current-user", "current-assistant"]);
     expect(sendClientCommand).not.toHaveBeenCalledWith({
       type: "conversation.switch",

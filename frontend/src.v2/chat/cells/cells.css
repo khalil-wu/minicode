@@ -254,8 +254,40 @@
 .user-cell-attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--spacing-2);
-  margin-top: var(--spacing-3);
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 10px;
+  max-width: 100%;
+  margin: 0 0 8px;
+}
+
+.user-cell-attachment-image {
+  flex: 0 0 104px;
+  width: 104px;
+  height: 104px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+
+.user-cell-attachment-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.user-cell-attachment-image:hover {
+  border-color: var(--border-strong);
+}
+
+.user-cell-attachment-image:focus-visible,
+.user-cell-attachment-chip:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
 }
 
 .user-cell-attachment-chip {
@@ -2569,11 +2601,7 @@ html[data-theme="dark"] .error-cell-raw-error {
   }
 
 }
-.chat-message-reveal-target {
-  outline: 2px solid color-mix(in srgb, var(--accent-primary) 45%, transparent);
-  outline-offset: 8px;
-  border-radius: var(--radius-sm);
-}
+
 
 .chat-reveal-status {
   flex: 0 0 auto;

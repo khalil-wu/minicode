@@ -594,22 +594,10 @@ def build_subagent_permission_context(
         )
 
     forced_read_only = bool(read_only or agent_type in {"explore", "plan"})
-    if team_mode:
-        # A teammate is an independent worker and carries its own permission
-        # mode rather than inheriting the leader's, so a leader in Plan mode
-        # still spawns a write-capable teammate. An explicitly requested mode is
-        # clamped to the parent above, and required Plan mode or a read-only
-        # contract still overrides everything.
-        if plan_mode_required or forced_read_only:
-            mode = "plan"
-        else:
-            mode = normalized_requested_mode or "confirm"
-    elif parent_permission.mode == "plan" or forced_read_only:
-        # Ordinary subagents are stricter: they are bounded helpers of the
-        # current turn, not independent workers, so they do inherit Plan mode.
-        mode = "plan"
-    else:
-        mode = normalized_requested_mode or parent_permission.mode
+    # Roles and read-only task contracts restrict tool execution, not the
+    # parent's approval/network profile. Only an explicit required-plan gate
+    # or a requested narrower permission mode replaces that live snapshot.
+    mode = "plan" if team_mode and plan_mode_required else normalized_requested_mode or parent_permission.mode
 
     child_denied_tools = _child_denied_tools(
         execution_profile=profile,
@@ -635,35 +623,24 @@ def build_subagent_permission_context(
             if plan_mode_required
             else f"teammate:{agent_type}"
         )
-        approval_policy = (
-            "never" if mode == "bypass" else "on-request"
-        )
-        sandbox_mode = (
-            "danger-full-access"
-            if mode == "bypass"
-            else "read-only"
-            if mode == "plan"
-            else "workspace-write"
-        )
-        pre_plan_mode = None
     else:
         source = f"subagent:{agent_type}"
-        from backend.config_requirements import permission_mode_requirements
+    from backend.config_requirements import permission_mode_requirements
 
-        mode_approval_policy, mode_sandbox = permission_mode_requirements(mode)
-        approval_policy = parent_permission.approval_policy if mode == parent_permission.mode else mode_approval_policy
-        sandbox_mode = (
-            "read-only" if mode == "plan" or parent_permission.sandbox_mode == "read-only"
-            else mode_sandbox if mode != parent_permission.mode
-            else parent_permission.sandbox_mode
-        )
-        pre_plan_mode = (
-            parent_permission.pre_plan_mode
-            if parent_permission.mode == "plan"
-            else parent_permission.mode
-            if mode == "plan"
-            else None
-        )
+    mode_approval_policy, mode_sandbox = permission_mode_requirements(mode)
+    approval_policy = parent_permission.approval_policy if mode == parent_permission.mode else mode_approval_policy
+    sandbox_mode = (
+        "read-only" if mode == "plan" or parent_permission.sandbox_mode == "read-only"
+        else mode_sandbox if mode != parent_permission.mode
+        else parent_permission.sandbox_mode
+    )
+    pre_plan_mode = (
+        parent_permission.pre_plan_mode
+        if parent_permission.mode == "plan"
+        else parent_permission.mode
+        if mode == "plan"
+        else None
+    )
 
     if parent_permission.sandbox_mode == "external-sandbox":
         sandbox_mode = "external-sandbox"

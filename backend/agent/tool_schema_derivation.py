@@ -105,10 +105,16 @@ def effective_toolset_policy(
     workspace_root: Any | None,
     permission_mode: str,
     tool_mode: str = "code_mode",
+    hosted_web_search: bool = False,
 ) -> ToolsetPolicy:
     """Build the one policy used by schema, discovery, and execution."""
 
     denied = set(disabled_tools)
+    from backend.tools.web_tools import WebSearchTool
+
+    search_tool = tool_registry.get_tool("web_search")
+    if isinstance(search_tool, WebSearchTool) and not search_tool.source_available(hosted_search=hosted_web_search):
+        denied.add("web_search")
     if (
         requires_explicit_workspace
         and workspace_root is None

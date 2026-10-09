@@ -347,9 +347,6 @@
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.subagents-source-link { display: inline-flex; justify-self: start; align-items: center; gap: 5px; min-height: 24px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; cursor: pointer; }
-.subagents-source-link:hover { color: var(--text-secondary); }
-.subagents-source-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .subagents-relation,
 .subagents-identity-row,
 .subagents-message-heading {

@@ -761,7 +761,7 @@ const applyPendingTurnInputSnapshot = (
   });
 };
 
-const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
+export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
   // The backend always emits this field as the authoritative set of live
   // conversation runs.  An empty array is therefore meaningful: it seals any
   // stale renderer-side stream left behind when the socket disconnected near
@@ -1091,7 +1091,7 @@ const clearActiveConversationView = () => {
   });
 };
 
-const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null) => {
+const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null, eventOwner: string | null) => {
   if (!session) return;
   const state = useAppStore.getState();
   state.setRuntimeSession(session);
@@ -1102,7 +1102,9 @@ const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined
   applyQueuedUserMessageSnapshot(session.queued_user_messages);
   applyPendingTurnInputSnapshot(session.pending_turn_inputs);
   applyActiveStreamSnapshot(session);
-  if (session.permission_mode) {
+  const permissionOwner = session.active_conversation_id === undefined ? eventOwner : session.active_conversation_id;
+  if (session.permission_mode && (permissionOwner || null) === (state.conversationId || null)
+    && (session.workspace_root === undefined || workspaceRootsEqual(session.workspace_root ?? "", useAppStore.getState().workingDirectory))) {
     useAppStore.setState({ permissionMode: fromBackendPermissionMode(session.permission_mode) });
   }
   if (session.capabilities && session.active_conversation_id === state.conversationId
@@ -1310,7 +1312,7 @@ export const handleSessionEvent = (
       } else {
         clearActiveConversationView();
       }
-      applyRuntimeSessionSnapshot(ev.session);
+      applyRuntimeSessionSnapshot(ev.session, activeConversationId);
       if (ev.type === "session.restored" && ev.error) {
       pushToast(`恢复会话时出现警告：${ev.error}`, "warning", 5000);
       }
@@ -1512,7 +1514,7 @@ export const handleSessionEvent = (
             sendClientCommand({ type: "conversation.switch", conversation_id: fallbackActiveConversationId });
           }
         }
-        applyRuntimeSessionSnapshot(ev.session);
+        applyRuntimeSessionSnapshot(ev.session, requestedActiveConversationId ?? null);
       }
       return true;
     }
@@ -1583,7 +1585,7 @@ export const handleSessionEvent = (
           forceAuthoritative,
         });
       }
-      applyRuntimeSessionSnapshot(ev.session);
+      applyRuntimeSessionSnapshot(ev.session, switchedConversationId ?? null);
       if (!isReplayedEvent(e) && !ev.context_pending) {
         // Extension/project commands are conversation-scoped. A switch must
         // replace the palette even when the transport itself did not reconnect.

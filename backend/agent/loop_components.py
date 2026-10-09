@@ -150,6 +150,10 @@ def build_agent_loop_components(
         requires_explicit_workspace=bootstrap.run_context.requires_explicit_workspace,
         workspace_root=bootstrap.workspace_root,
         permission_mode=str(tool_context.permission.mode or ""),
+        hosted_web_search=(
+            callable(getattr(tool_context.llm, "supports_hosted_web_search", None))
+            and tool_context.llm.supports_hosted_web_search()
+        ),
         tool_mode=(
             "code_mode"
             if getattr(bootstrap.agent_session, "active_tool_names", None) is not None

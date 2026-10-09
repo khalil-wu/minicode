@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useAppStore } from "../stores";
-import { isDesktop } from "../desktop/runtime";
+import { isDesktop, onEmbeddedBrowserEvent } from "../desktop/runtime";
+import { discardClosedBrowserPresentation, discardInactiveBrowserPresentation, presentExistingBrowserPage } from "../chat/openWebInBrowser";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openSettings } from "../lib/settings-navigation";
 import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
@@ -44,6 +45,11 @@ export const useDesktopEvents = () => {
       window.addEventListener(event, listener);
     }
     const desktopRuntime = window.__MINICODE_RUNTIME__?.desktop;
+    const removeBrowserListener = onEmbeddedBrowserEvent((event) => {
+      if (event.type === "presentation-requested") presentExistingBrowserPage(event);
+      if (event.type === "closed") discardClosedBrowserPresentation(event);
+    });
+    const removeBrowserPresentationState = useAppStore.subscribe(discardInactiveBrowserPresentation);
     const removeDeepLinkListener = desktopRuntime?.onDeepLink(async (payload) => {
       if (!payload?.id || !payload.target) return;
       if (payload.target.kind === "conversation" && payload.target.conversationId) {
@@ -59,6 +65,8 @@ export const useDesktopEvents = () => {
         window.removeEventListener(event, listener);
       }
       removeDeepLinkListener?.();
+      removeBrowserListener?.();
+      removeBrowserPresentationState();
     };
   }, []);
 };

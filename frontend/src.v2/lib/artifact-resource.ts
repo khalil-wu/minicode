@@ -18,6 +18,10 @@ export interface ArtifactResourceInput {
 
 const INLINE_IMAGE_URL = /^(?:data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+|blob:)/i;
 
+/** A persisted artifact reference contains only its id, never a path or credentials. */
+export const artifactIdFromReference = (url: string): string | null =>
+  /^artifact:\/\/([a-zA-Z0-9][a-zA-Z0-9_-]*)$/.exec(url)?.[1] ?? null;
+
 export const normalizeArtifactMediaType = (value?: unknown): string =>
   String(value || "").split(";", 1)[0].trim().toLowerCase();
 

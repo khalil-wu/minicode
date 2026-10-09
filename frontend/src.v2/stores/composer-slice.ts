@@ -3,7 +3,7 @@ import type { AppStore, ComposerSlice } from "./types";
 import { initialUiPermissionMode, toBackendPermissionMode } from "../protocol/permissions";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
-import { workspaceFilePathsEqual } from "../lib/workspace-path";
+import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { LS, readLS, writeLS } from "./shared-helpers";
 
 /**
@@ -67,6 +67,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   attachments: [],
   quotedMessage: null,
   permissionMode: initialPermissionMode(),
+  pendingPermissionModeChanges: {},
   agentMode: initialAgentMode(),
   // Match MiniCode's balanced default; model/runtime capabilities still decide
   // which effort levels are actually exposed and accepted.
@@ -134,15 +135,37 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   setPermissionMode: (m) => {
     const before = get();
     const conversationId = String(before.conversationId || "").trim();
-    void reportCommandOutcome(
-      sendClientCommandAwaitResult({
-        type: "conversation.permission_mode.set",
-        mode: toBackendPermissionMode(m),
-        source: "frontend.ui",
-        ...(conversationId ? { conversation_id: conversationId } : {}),
-      }, "conversation.permission_mode.set"),
-      "切换权限模式失败",
-    );
+    const workspaceRoot = before.workingDirectory;
+    const previous = before.pendingPermissionModeChanges[conversationId];
+    const confirmation = (async () => {
+      if (previous) await previous.confirmation;
+      if (!conversationId && (get().conversationId
+        || !workspaceRootsEqual(get().workingDirectory, workspaceRoot))) return false;
+      const accepted = await reportCommandOutcome(
+        sendClientCommandAwaitResult({
+          type: "conversation.permission_mode.set",
+          mode: toBackendPermissionMode(m),
+          source: "frontend.ui",
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        }, "conversation.permission_mode.set"),
+        "切换权限模式失败",
+      );
+      const current = get();
+      if (accepted && String(current.conversationId || "").trim() === conversationId
+        && workspaceRootsEqual(current.workingDirectory, workspaceRoot)) set({ permissionMode: m });
+      return accepted;
+    })().finally(() => {
+      set((state) => {
+        if (state.pendingPermissionModeChanges[conversationId]?.confirmation !== confirmation) return state;
+        const pendingPermissionModeChanges = { ...state.pendingPermissionModeChanges };
+        delete pendingPermissionModeChanges[conversationId];
+        return { pendingPermissionModeChanges };
+      });
+    });
+    set((state) => ({ pendingPermissionModeChanges: {
+      ...state.pendingPermissionModeChanges, [conversationId]: { workspaceRoot, confirmation },
+    } }));
+    return confirmation;
   },
   setAgentMode: (m) => {
     writeLS(LS.agentMode, m);

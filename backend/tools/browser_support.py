@@ -346,6 +346,24 @@ def _is_owned_preview_origin(
     )
 
 
+def _owned_preview_navigation_authorization(url: str, context: ToolExecutionContext | None) -> dict[str, str] | None:
+    from backend.preview.launcher import find_preview_process
+
+    if context is None or not context.session_id or not context.conversation_id or not context.workspace_root:
+        return None
+    preview = find_preview_process(
+        url, session_id=context.session_id, conversation_id=context.conversation_id,
+        workspace_root=context.workspace_root,
+    )
+    if preview is None:
+        return None
+    return {
+        "kind": "owned_preview", "url": url, "preview_url": preview.effective_url,
+        "preview_id": preview.id, "session_id": preview.session_id,
+        "conversation_id": preview.conversation_id, "permission_mode": context.permission.mode,
+    }
+
+
 def _normalize_endpoint(raw: str) -> str:
     value = (raw or DEFAULT_CDP_ENDPOINT).strip()
     if "://" not in value:

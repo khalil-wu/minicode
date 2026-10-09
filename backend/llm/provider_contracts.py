@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 import math
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 
 TokenNumber = int | float
@@ -20,6 +21,17 @@ TOOL_MODES = frozenset({"direct", "code_mode", "code_mode_only"})
 def normalize_tool_mode(value: Any) -> str:
     mode = str(value or "").strip().lower()
     return mode if mode in TOOL_MODES else ""
+
+
+def hosted_web_search_supported(*, wire_api: str, base_url: str, declared: bool | None) -> bool:
+    """Resolve the same hosted-search wire contract for runtime and idle catalogs."""
+    if wire_api not in {"responses", "anthropic"}:
+        return False
+    if declared is not None:
+        return declared
+    if wire_api == "anthropic":
+        return urlparse(base_url or "https://api.anthropic.com").hostname == "api.anthropic.com"
+    return urlparse(base_url or "https://api.openai.com/v1").hostname in {"api.openai.com", "chatgpt.com"}
 
 
 def normalize_model_limit(value: Any) -> int:

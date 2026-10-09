@@ -32,6 +32,7 @@ import {
   isDisplayableImageMediaType,
   withPreviewCacheBust,
 } from "../../lib/artifact-resource";
+import { markdownArtifactImageIds } from "../../lib/markdown-artifact-images";
 import { extractInlineCitationIndexes } from "../../lib/markdown";
 import "./cells.css";
 
@@ -91,9 +92,20 @@ export function AssistantMarkdownCell({
     () => (cell.artifacts ?? []).map(normalizeArtifactPreview),
     [cell.artifacts],
   );
-  const imageArtifacts = useMemo(
+  const embeddedImageIds = useMemo(() => {
+    if (!normalizedArtifacts.some((artifact) => artifact.kind === "image")) return new Set<string>();
+    return new Set([
+      ...markdownArtifactImageIds(cell.markdownBeforeArtifacts ?? rawMarkdown),
+      ...markdownArtifactImageIds(cell.markdownAfterArtifacts ?? ""),
+    ]);
+  }, [cell.markdownBeforeArtifacts, cell.markdownAfterArtifacts, rawMarkdown, normalizedArtifacts]);
+  const allImageArtifacts = useMemo(
     () => normalizedArtifacts.filter((artifact) => artifact.kind === "image"),
     [normalizedArtifacts],
+  );
+  const imageArtifacts = useMemo(
+    () => allImageArtifacts.filter((artifact) => !embeddedImageIds.has(artifact.artifactId)),
+    [allImageArtifacts, embeddedImageIds],
   );
   const otherArtifacts = useMemo(
     () => normalizedArtifacts.filter((artifact) => artifact.kind !== "image"),
@@ -101,13 +113,13 @@ export function AssistantMarkdownCell({
   );
   const visibleImageProgress = useMemo(() => {
     const progress = cell.imageProgress ?? [];
-    if (imageArtifacts.length === 0) return progress;
+    if (allImageArtifacts.length === 0) return progress;
     // The validated Artifact is the completed state. Keep only a genuine
     // failure or incomplete result alongside it; live/completed placeholders must be replaced
     // rather than rendered as a second image-generation row.
     return progress.filter((item) => item.status === "failed" || item.status === "partial");
-  }, [cell.imageProgress, imageArtifacts.length]);
-  const hasPendingImage = imageArtifacts.length === 0
+  }, [cell.imageProgress, allImageArtifacts.length]);
+  const hasPendingImage = allImageArtifacts.length === 0
     && (cell.imageProgress ?? []).some((progress) => progress.status !== "failed" && progress.status !== "partial");
   const isSettled = !cell.isStreaming && !hasPendingImage;
 
@@ -585,12 +597,12 @@ function GeneratedArtifactCard({
             onClick={() => {
               if (imageLoaded) openImageLightbox();
             }}
-            aria-label="查看生成图片大图"
+            aria-label="查看图片大图"
           >
             <img
               className="assistant-cell-generated-image"
               src={imageUrl}
-              alt="模型生成的图片"
+              alt="图片"
               loading="lazy"
               decoding="async"
               onLoad={() => {
@@ -600,9 +612,9 @@ function GeneratedArtifactCard({
               onError={() => setFailedImageUrl(imageUrl)}
             />
             {!imageLoaded && (
-              <span className="assistant-cell-image-load-mask" role="status" aria-label="正在载入生成图片">
+              <span className="assistant-cell-image-load-mask" role="status" aria-label="正在载入图片">
                 <span aria-hidden="true"><ImageIcon size={24} /></span>
-                <strong>正在载入生成图片</strong>
+                <strong>正在载入图片</strong>
               </span>
             )}
           </button>
@@ -622,7 +634,7 @@ function GeneratedArtifactCard({
                 : isConnected
                 ? imageFailed
                   ? "图片载入失败，点击重试"
-                  : "正在准备生成图片"
+                  : "正在准备图片"
                 : "连接恢复后将自动载入图片"}
             </span>
           </button>
@@ -647,11 +659,11 @@ function GeneratedArtifactCard({
               className="assistant-cell-image-lightbox"
               role="dialog"
               aria-modal="true"
-              aria-label="生成图片大图"
+              aria-label="图片大图"
               onClick={() => setLightboxOpen(false)}
             >
               <div className="assistant-cell-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
-                <img src={lightboxUrl} alt="模型生成的图片" />
+                <img src={lightboxUrl} alt="图片" />
                 <button
                   type="button"
                   className="assistant-cell-image-lightbox-close"

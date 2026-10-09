@@ -182,11 +182,13 @@ class AnthropicAdapter(LLMAdapter):
         self._tool_schema_cache = {}
 
     def supports_hosted_web_search(self) -> bool:
-        if self._declared_hosted_web_search_support is not None:
-            return self._declared_hosted_web_search_support
-        from urllib.parse import urlparse
+        from backend.llm.provider_contracts import hosted_web_search_supported
 
-        return urlparse(self._base_url or "https://api.anthropic.com").hostname == "api.anthropic.com"
+        return hosted_web_search_supported(
+            wire_api="anthropic",
+            base_url=self._base_url,
+            declared=self._declared_hosted_web_search_support,
+        )
 
     def hosted_web_search_supports_blocked_domains(self) -> bool:
         return self.supports_hosted_web_search()

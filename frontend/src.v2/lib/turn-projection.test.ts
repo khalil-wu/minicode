@@ -27,6 +27,43 @@ const streamingAssistantMessage = (id: string, blocks: ContentBlock[]): ChatMess
 });
 
 describe("projectTurn explicit event contract", () => {
+  it("projects real delegated identities instead of routine agent polling, while retaining standalone task output", () => {
+    const blocks = [
+      toolBlock({ id: "spawn", name: "task", resultKind: "subagent", summary: "Background subagent subagent-a1b2 started." }),
+      toolBlock({ id: "exec-poll", name: "tool_exec", outputPreview: '{"cell_id":"poll-cell","status":"completed","output":["Agent is running"]}' }),
+      toolBlock({ id: "poll", name: "task_status", resultKind: "subagent", args: { subagent_id: "subagent-a1b2", wait_seconds: 45 },
+        callSource: { kind: "code_mode", parent_call_id: "exec-poll", cell_id: "poll-cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "failed-poll", name: "task_status", args: { subagent_id: "subagent-a1b2" }, status: "failed", summary: "Child snapshot is unavailable" }),
+      toolBlock({ id: "standalone-poll", name: "task_status", args: { subagent_id: "subagent-ffff" }, summary: "Only recorded result" }),
+      toolBlock({ id: "shared-output", name: "task_output", resultKind: "subagent", args: { task_id: "task-real", content: "Actual finding" }, summary: "Saved actual finding" }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["spawn", "failed-poll", "standalone-poll", "shared-output"]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(6);
+    expect((blocks[2] as Extract<ContentBlock, { type: "tool_call" }>).record.name).toBe("task_status");
+  });
+
+  it.each(["failed", "blocked", "timeout"])("keeps one actual %s leaf instead of duplicate execute/wait errors", (status) => {
+    const failure = "Permission denied by the tool";
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", error: failure }) }),
+      toolBlock({ id: "leaf", name: "read_file", status, summary: failure,
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" }, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", output: [failure] }) }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf"]);
+    expect(projectTurn(blocks).hasFailure).toBe(true);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(3);
+  });
+
+  it("retains an independent script failure after a successful nested read", () => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"cell","status":"failed","error":"TypeError: report is undefined"}' }),
+      toolBlock({ id: "leaf", name: "read_file", summary: "Read actual data",
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["exec", "leaf"]);
+    expect(projectTurn(blocks).hasFailure).toBe(true);
+  });
   it("shows composed leaf evidence without repeating successful script receipts", () => {
     const blocks = [
       toolBlock({ id: "exec", name: "tool_exec" }),

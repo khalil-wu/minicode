@@ -125,7 +125,6 @@ from backend.tools.subagent_support import (
     _nonempty_subagent_metadata,
     _normalize_child_task_name,
     _normalize_fork_turns,
-    _parallel_undeclared_writers,
     _persisted_session_toolset_policy,
     _primary_llm_adapter,
     _prompt_scope_summary,
@@ -159,9 +158,8 @@ def _task_tool_parameters(
 ) -> dict[str, Any]:
     """Build the one canonical Task input contract used by every projection.
 
-    The registry may expose a concise model description, but it must not hide
-    runtime-required coordination fields. In particular, parallel writers are
-    rejected unless each item declares a disjoint ``write_scope``.
+    Optional execution restrictions narrow the inherited parent permissions;
+    ordinary parallel tasks do not need to declare a write scope.
     """
 
     def delegation_properties(*, parallel_item: bool) -> dict[str, Any]:
@@ -205,17 +203,12 @@ def _task_tool_parameters(
             },
             "read_only": {
                 "type": "boolean",
-                "description": f"Whether this {subject} must avoid workspace writes.",
+                "description": "Optional additional read-only restriction; omission preserves the parent task's permissions.",
             },
             "write_scope": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "File or directory scopes this subtask may modify. Required and disjoint for "
-                    "write-capable parallel tasks."
-                    if parallel_item
-                    else "Optional file or directory scopes this subagent may modify."
-                ),
+                "description": f"Optional file or directory restriction on what this {subject} may modify. Omit to inherit the parent's allowed scope.",
             },
             "isolation": {
                 "type": "string",
@@ -258,8 +251,8 @@ def _task_tool_parameters(
             "description": (
                 "Run 2-8 ordinary independent subtasks in one call; at most four run concurrently. "
                 "Each item's description is its task title. Named team members use single task calls. "
-                "Read-only scopes may overlap. Every write-capable item must declare an "
-                "explicit write_scope disjoint from its siblings."
+                "Children inherit the parent's current permissions. Read-only scopes may overlap; "
+                "explicit write_scope restrictions for shared-workspace writers must be disjoint."
             ),
             "items": {
                 "type": "object",
@@ -589,8 +582,6 @@ class TaskTool(BaseTool):
                     except ValueError as exc:
                         return self._error_result(str(exc))
                     tasks.append(task_payload)
-                    if tasks[-1]["agent_type"] in {"explore", "plan"}:
-                        tasks[-1]["read_only"] = True
             # A single-item batch follows the same batch path; a len>=2 gate
             # used to fall through to the single-execution
             # path, which reads a top-level prompt that parallel calls lack.
@@ -617,18 +608,6 @@ class TaskTool(BaseTool):
                         "Parallel write-capable tasks have overlapping explicit write_scope paths. "
                         "Give each worker a disjoint write_scope or run those mutations sequentially."
                     )
-                undeclared_writers = _parallel_undeclared_writers(tasks)
-                if undeclared_writers:
-                    names = ", ".join(
-                        f"'{task.get('description') or task.get('prompt', '')[:40]}'"
-                        for task in undeclared_writers
-                    )
-                    return self._error_result(
-                        "Parallel write-capable task(s) declare no write_scope: "
-                        f"{names}. Two writers without disjoint write_scope would race on "
-                        "the same file (last-writer-wins). Give each write-capable task an "
-                        "explicit disjoint write_scope, or run the writes sequentially."
-                    )
                 if bool(args.get("run_in_background")):
                     return await self._start_background_subtasks(
                         tasks=tasks,
@@ -652,8 +631,6 @@ class TaskTool(BaseTool):
             )
         except ValueError as exc:
             return self._error_result(str(exc))
-        if agent_type in {"explore", "plan"} and not bool(args.get("read_only")):
-            args = {**args, "read_only": True}
         if not description:
             return self._error_result("Missing description argument")
         if not prompt:
@@ -769,6 +746,8 @@ class TaskTool(BaseTool):
 
     @staticmethod
     def _apply_definition_execution_defaults(args: dict[str, Any], workspace_root: Path | None) -> dict[str, Any]:
+        if args.get("agent_type") in {"explore", "plan"}:
+            args = {**args, "read_only": True}
         definition = get_custom_agent(str(args.get("agent_type") or "general-purpose").strip(), workspace_root)
         if definition is None:
             return args
@@ -2602,11 +2581,8 @@ class TaskTool(BaseTool):
 
                 def _teammate_permission_context_provider() -> PermissionContext:
                     parent = _live_parent_context()
-                    # A teammate keeps its own mode across leader turns, while
-                    # inherited denials, filesystem constraints and grants must
-                    # follow the live owner. Only explicit transitions use the
-                    # leader's mode as a ceiling.
-                    parent = replace(parent, permission=replace(parent.permission, mode=sub_context.mode))
+                    # Reapply the actual live parent snapshot to every role.
+                    # A retained child mode cannot widen a newly narrowed parent.
                     refreshed = transition_subagent_permission_mode(
                         agent_type, parent, sub_context, sub_context.mode,
                         read_only=bool(subagent_config.get("read_only")),

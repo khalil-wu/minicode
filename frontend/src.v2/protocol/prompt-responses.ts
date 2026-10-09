@@ -10,6 +10,7 @@ export interface PromptOwner {
 export interface ApprovalResponseOptions {
   decisions?: Record<string, "approved" | "rejected">;
   feedback?: string;
+  rememberForSession?: boolean;
   plan?: string;
   commandPrompts?: Array<{ tool: "run_command"; prompt: string }>;
   owner?: PromptOwner;
@@ -33,6 +34,7 @@ export const buildApprovalResponseCommand = (
     return item?.tool === "run_command" && prompt ? [{ tool: "run_command" as const, prompt }] : [];
   });
   const response: Record<string, unknown> = { action };
+  if (action === "approve" && options?.rememberForSession) response.remember_for_session = true;
   if (options?.decisions) response.decisions = options.decisions;
   if (trimmedFeedback) response.feedback = trimmedFeedback;
   if (plan !== undefined) response.plan = plan;

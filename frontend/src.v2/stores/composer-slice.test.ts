@@ -22,6 +22,7 @@ vi.mock("../overlays/ToastContainer", () => ({
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "./index";
+import type { CommandResultEvent } from "../protocol/events";
 
 describe("composer permission mode", () => {
   beforeEach(() => {
@@ -29,6 +30,7 @@ describe("composer permission mode", () => {
     useAppStore.setState({
       conversationId: "conv-active",
       permissionMode: "auto",
+      pendingPermissionModeChanges: {},
       pendingApproval: {
         requestId: "approval-1",
         protocol: "control",
@@ -52,8 +54,8 @@ describe("composer permission mode", () => {
 
   it.each(["bypass", "auto", "plan"] as const)(
     "syncs %s without deciding pending approvals in the frontend",
-    (mode) => {
-      useAppStore.getState().setPermissionMode(mode);
+    async (mode) => {
+      const confirmation = useAppStore.getState().setPermissionMode(mode);
 
       expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
       expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
@@ -68,8 +70,29 @@ describe("composer permission mode", () => {
       expect(state.approvalQueue.map((approval) => approval.requestId)).toEqual(["approval-2"]);
       expect(state.pendingDiffReview?.requestId).toBe("diff-1");
       expect(state.diffReview?.requestId).toBe("diff-1");
+      expect(await confirmation).toBe(true);
     },
   );
+
+  it("serializes consecutive permission changes and keeps the latest pending until its semantic ACK", async () => {
+    let firstAck!: (result: CommandResultEvent) => void;
+    let secondAck!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult)
+      .mockReturnValueOnce(new Promise((resolve) => { firstAck = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { secondAck = resolve; }));
+    const first = useAppStore.getState().setPermissionMode("bypass");
+    const second = useAppStore.getState().setPermissionMode("confirm");
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+    firstAck({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await first).toBe(true);
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().pendingPermissionModeChanges["conv-active"].confirmation).toBe(second);
+    expect(useAppStore.getState().permissionMode).toBe("bypass");
+    secondAck({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await second).toBe(true);
+    expect(useAppStore.getState().permissionMode).toBe("confirm");
+    expect(useAppStore.getState().pendingPermissionModeChanges).toEqual({});
+  });
 
   // Regression: `sendClientCommandAwaitResult` *resolves* with an error-level
   // command.result instead of rejecting, so the old `.catch(() => undefined)`

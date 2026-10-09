@@ -74,7 +74,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       set((s) => {
         const rightPanelOpen = !s.rightPanelOpen;
         writeLS(LS.layout.rightOpen, rightPanelOpen ? "1" : "0");
-        return { rightPanelOpen, rightPanelExpanded: false };
+        return { rightPanelOpen, rightPanelExpanded: false, ...(!rightPanelOpen ? { rightStackTabLocked: true } : {}) };
       }),
     setRightPanelExpanded: (expanded) => set({ rightPanelExpanded: expanded }),
     openGitReview: (request) => {

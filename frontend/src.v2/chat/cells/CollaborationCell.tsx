@@ -66,7 +66,7 @@ export const CollaborationCell = memo(function CollaborationCell({
           : <div key={entry.agentId} className="collaboration-delegated-row" data-agent-status={agent?.effectiveStatus || entry.agentStatus} data-started={hasStarted}>{content}</div>;
       })}
       {cell.error && <details className="collaboration-delegated-error">
-        <summary>错误详情</summary>
+        <summary>{cell.action === "delegated" ? "启动子智能体" : cell.action === "sent_message" ? "发送消息" : "停止子智能体"} · {cell.status === "cancelled" ? "已停止" : cell.status === "partial" ? "部分完成" : "失败"}</summary>
         <div role="alert">{cell.error}</div>
       </details>}
     </div>;

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
+import { getChatSendBlockReason, resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
 import { useAppStore } from "../stores";
+import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import type { CommandResultEvent } from "../protocol/events";
 
 const wsMock = vi.hoisted(() => ({
   sent: [] as unknown[],
@@ -34,10 +36,10 @@ vi.mock("../protocol/ws-outbox", () => ({
     clientCommands.push(command);
     return true;
   },
-  sendClientCommandAwaitResult: async (command: unknown, expectedCommand: string) => {
+  sendClientCommandAwaitResult: vi.fn(async (command: unknown, expectedCommand: string) => {
     clientCommands.push(command);
     return { type: "command.result", command: expectedCommand, level: "success", message: "", data: {} };
-  },
+  }),
   commandResultSucceeded: (event: { level?: string }) => !["error", "failed"].includes(String(event.level || "")),
 }));
 
@@ -61,6 +63,7 @@ describe("sendChatMessage attachment feedback", () => {
     wsMock.acceptSend = true;
     useAppStore.setState({
       conversationId: "conv-test",
+      pendingConversationSwitchId: null,
       messages: [],
       conversationMessages: {},
       conversationStreaming: {},
@@ -70,6 +73,7 @@ describe("sendChatMessage attachment feedback", () => {
       pendingApproval: null,
       pendingDiffReview: null,
       pendingAskUser: null,
+      pendingPermissionModeChanges: {},
       runtimeSession: null,
       agentMode: "build",
       activeTabPath: null,
@@ -79,6 +83,162 @@ describe("sendChatMessage attachment feedback", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([
+    [undefined, false], ["conv-test", false], [undefined, true], ["conv-test", true],
+  ] as const)("blocks current composer %s queue=%s during navigation without touching its draft", (conversationId, allowWhileStreaming) => {
+    const attachment = { id: "keep", name: "note.txt", type: "text/plain", size: 4, status: "ready" as const };
+    const messages = allowWhileStreaming
+      ? [{ id: "running", role: "assistant" as const, content: "working", timestamp: 1, isStreaming: true }]
+      : [];
+    useAppStore.setState({ pendingConversationSwitchId: "new-owner", draft: "old owner draft", attachments: [attachment],
+      isStreaming: allowWhileStreaming, messages });
+    expect(getChatSendBlockReason(conversationId)).toBe("正在切换会话，请等待加载完成后发送。");
+    expect(sendChatMessage({ conversationId, displayContent: "old owner draft", allowWhileStreaming })).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState()).toMatchObject({ draft: "old owner draft", attachments: [attachment], messages, isStreaming: allowWhileStreaming });
+
+    useAppStore.setState({ conversationId: "new-owner", pendingConversationSwitchId: null, draft: "new owner draft", messages: [], isStreaming: false });
+    expect(sendChatMessage({ displayContent: "new owner draft" })).toBe(true);
+    expect(sent[0]).toMatchObject({ conversation_id: "new-owner", content: "new owner draft" });
+  });
+
+  it("allows an explicitly owned side chat while the main conversation switches", () => {
+    useAppStore.setState({ pendingConversationSwitchId: "new-owner", draft: "main draft", sideChats: {
+      side: { id: "side", draft: "side draft", messages: [], isStreaming: false, workspaceRoot: "C:/side" },
+    } });
+    expect(sendChatMessage({ conversationId: "side", displayContent: "side draft" })).toBe(true);
+    expect(sent[0]).toMatchObject({ conversation_id: "side", workspace_root: "C:/side" });
+    expect(useAppStore.getState().draft).toBe("main draft");
+  });
+
+  it("keeps a pending-ACK submission unsent when navigation starts before confirmation", async () => {
+    let confirm!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
+    useAppStore.setState({ workingDirectory: "C:/owner", draft: "keep draft",
+      conversations: [{ id: "conv-test", title: "Owner", workspaceRoot: "C:/owner" }] });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "keep draft", allowWhileStreaming: true });
+    useAppStore.setState({ pendingConversationSwitchId: "new-owner" });
+    confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await modeChange).toBe(true);
+    expect(await submission).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().draft).toBe("keep draft");
+  });
+
+  it("waits for the owner permission ACK before sending without overriding the stored mode", async () => {
+    let confirm!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
+    useAppStore.setState({ permissionMode: "confirm", workingDirectory: "C:/owner", draft: "weather research",
+      conversations: [{ id: "conv-test", title: "Owner", workspaceRoot: "C:/owner" }] });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "weather research" });
+
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    expect(useAppStore.getState().permissionMode).toBe("confirm");
+    confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "",
+      data: { mode: "bypass", conversation_id: "conv-test", revision: 2 } });
+
+    expect(await modeChange).toBe(true);
+    expect(await submission).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ conversation_id: "conv-test", workspace_root: "C:/owner" });
+    expect(sent[0]).not.toHaveProperty("permission_mode");
+    expect(useAppStore.getState().permissionMode).toBe("bypass");
+    expect(useAppStore.getState().pendingPermissionModeChanges).toEqual({});
+  });
+
+  it.each(["refused", "disconnected"] as const)("preserves draft and attachments when the permission change is %s", async (failure) => {
+    let confirm!: (result: CommandResultEvent) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve, rejectPromise) => { confirm = resolve; reject = rejectPromise; }));
+    const attachment = { id: "keep", name: "note.txt", type: "text/plain", size: 4, status: "ready" as const };
+    useAppStore.setState({ permissionMode: "confirm", workingDirectory: "C:/owner", draft: "keep this draft", attachments: [attachment] });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "keep this draft" });
+    if (failure === "refused") confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "error", message: "Permission change rejected", data: {} });
+    else reject(new Error("Connection closed"));
+
+    expect(await modeChange).toBe(false);
+    expect(await submission).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    expect(useAppStore.getState()).toMatchObject({ draft: "keep this draft", attachments: [attachment], permissionMode: "confirm" });
+  });
+
+  it("keeps a delayed permission ACK and submission bound to the original conversation", async () => {
+    let confirm!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
+    useAppStore.setState({ permissionMode: "confirm", workingDirectory: "C:/owner-a", draft: "A request", attachments: [],
+      conversations: [{ id: "conv-test", title: "A", workspaceRoot: "C:/owner-a" }, { id: "owner-b", title: "B", workspaceRoot: "C:/owner-b" }] });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "A request" });
+    useAppStore.getState().snapshotWorkbenchState("conv-test");
+    const newerAttachment = { id: "new-b", name: "B.txt", type: "text/plain", size: 1, status: "ready" as const };
+    useAppStore.setState({ conversationId: "owner-b", workingDirectory: "C:/owner-b", permissionMode: "auto", draft: "B unsent draft", attachments: [newerAttachment], messages: [] });
+    confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: { mode: "bypass", conversation_id: "conv-test" } });
+
+    expect(await modeChange).toBe(true);
+    expect(await submission).toBe(true);
+    expect(sent[0]).toMatchObject({ conversation_id: "conv-test", content: "A request", workspace_root: "C:/owner-a" });
+    expect(sent[0]).not.toHaveProperty("permission_mode");
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "owner-b", permissionMode: "auto", draft: "B unsent draft", attachments: [newerAttachment], messages: [] });
+    expect(useAppStore.getState().conversationWorkbenchStates["conv-test"].draft).toBe("A request");
+  });
+
+  it("does not submit an old workspace draft after its owner workspace changes during permission confirmation", async () => {
+    let confirm!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
+    useAppStore.setState({ permissionMode: "confirm", workingDirectory: "C:/old-owner", draft: "old workspace request" });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "old workspace request" });
+    useAppStore.setState({ workingDirectory: "C:/new-owner", draft: "new workspace draft", permissionMode: "auto" });
+    confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+
+    expect(await modeChange).toBe(true);
+    expect(await submission).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState()).toMatchObject({ workingDirectory: "C:/new-owner", draft: "new workspace draft", permissionMode: "auto" });
+  });
+
+  it("waits for a newer permission selection made while its original ACK is pending", async () => {
+    let firstAck!: (result: CommandResultEvent) => void;
+    let secondAck!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult)
+      .mockReturnValueOnce(new Promise((resolve) => { firstAck = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { secondAck = resolve; }));
+    useAppStore.setState({ permissionMode: "confirm", workingDirectory: "C:/owner",
+      conversations: [{ id: "conv-test", title: "Owner", workspaceRoot: "C:/owner" }] });
+    const first = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "Read the files" });
+    const second = useAppStore.getState().setPermissionMode("auto");
+    firstAck({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await first).toBe(true);
+    expect(sent).toHaveLength(0);
+    secondAck({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await second).toBe(true);
+    expect(await submission).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty("permission_mode");
+    expect(useAppStore.getState().permissionMode).toBe("auto");
+  });
+
+  it("does not send after the original owner is removed while permission is pending", async () => {
+    let confirm!: (result: CommandResultEvent) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
+    useAppStore.setState({ workingDirectory: "C:/owner", sideChats: {},
+      conversations: [{ id: "conv-test", title: "Owner", workspaceRoot: "C:/owner" }] });
+    const modeChange = useAppStore.getState().setPermissionMode("bypass");
+    const submission = sendChatMessage({ displayContent: "Read the files" });
+    useAppStore.setState({ conversationId: "other", conversations: [], workingDirectory: "C:/other", draft: "keep" });
+    confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
+    expect(await modeChange).toBe(true);
+    expect(await submission).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().draft).toBe("keep");
   });
 
   it("keeps a live side-chat turn live when another message is rejected", () => {
@@ -1131,7 +1291,7 @@ describe("sendChatMessage attachment feedback", () => {
     expect(sent.filter((command) => (command as { content?: string }).content === "继续")).toHaveLength(2);
   });
 
-  it("sends the current permission and agent modes", () => {
+  it("uses stored conversation permissions and sends the current agent mode", () => {
     useAppStore.setState({
       conversationId: "conv-test",
       conversations: [{ id: "conv-test", title: "Project", updatedAt: "2026-06-06T00:00:00.000Z", workspaceRoot: "C:\\Desktop\\PDFTranslate" }],
@@ -1154,10 +1314,10 @@ describe("sendChatMessage attachment feedback", () => {
     expect(sent[0]).toMatchObject({
       type: "user_message",
       content: "write the README",
-      permission_mode: "bypass",
       agent_mode: "review",
       workspace_root: "C:\\Desktop\\PDFTranslate",
     });
+    expect(sent[0]).not.toHaveProperty("permission_mode");
   });
 
   it("sends the active editor file as primary workspace grounding", () => {

@@ -26,15 +26,16 @@
     });
   }
   function image(value) {
+    const artifact = typeof value?.artifact_id === "string" ? { artifact_id: value.artifact_id } : {};
     const raw = typeof value === "string" ? value : value?.image_url;
     if (raw !== undefined) {
       const match = /^data:(image\/[^;,]+);base64,([\s\S]+)$/.exec(raw);
       if (!match) throw new TypeError("image() requires an image data URL");
-      emit({ kind: "image", media_type: match[1], data: match[2] });
+      emit({ kind: "image", media_type: match[1], data: match[2], ...artifact });
     } else {
       const mediaType = value?.media_type ?? value?.mimeType;
       if (typeof value?.data !== "string" || !mediaType?.startsWith("image/")) throw new TypeError("image() requires {data, media_type} or an MCP image block");
-      emit({ kind: "image", media_type: mediaType, data: value.data });
+      emit({ kind: "image", media_type: mediaType, data: value.data, ...artifact });
     }
   }
   function audio(value) {

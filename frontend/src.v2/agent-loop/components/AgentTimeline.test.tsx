@@ -198,7 +198,7 @@ describe("AgentTimeline", () => {
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(3);
   });
 
-  it("uses the latest List action as the title while keeping Read and Search rows visible", () => {
+  it("keeps completed Read, Search and List rows static while the turn is still running", () => {
     const { container } = render(
       <AgentTimeline
         isRunning
@@ -213,10 +213,10 @@ describe("AgentTimeline", () => {
       />,
     );
 
-    expect(screen.getByRole("region", { name: "正在查看" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "已查看" })).toBeTruthy();
     expect(screen.getByText("read")).toBeTruthy();
     expect(screen.getByText("search")).toBeTruthy();
-    expect(container.querySelector(".agent-loop-timeline-group-live-title")?.textContent).toBe("正在查看");
+    expect(container.querySelector(".agent-loop-timeline-group-live-title")).toBeNull();
   });
 
   it("keeps the live title separate from the ordered tool rows and lets the group collapse", () => {

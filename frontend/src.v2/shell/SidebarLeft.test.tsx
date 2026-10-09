@@ -181,10 +181,15 @@ describe("SidebarLeft session status", () => {
     const now = new Date();
     useAppStore.setState({ rightStackTab: "tasks", draft: "unfinished activity draft", currentModel: "selected-model",
       currentProvider: "selected-provider", effortLevel: "high",
+      runtimeSession: {
+        active_conversation_id: "conv-restored",
+        pending_approval_count: 1,
+        pending_approvals: [{ request_id: "activity-input", type: "control_request", subtype: "elicitation", conversation_id: "conv-waiting" }],
+      },
       recentWorkspaces: [{ path: "C:\\Desktop\\MiniCode", name: "MiniCode", projectType: "node", lastOpened: 1 }],
       conversations: [
         { id: "conv-restored", title: "Main task", updatedAt: now.toISOString(), workspaceRoot: "C:\\Desktop\\MiniCode", summary: "Recorded task summary" },
-        { id: "conv-waiting", title: "Waiting task", updatedAt: "2026-01-01T00:00:00Z", sessionStatus: "waiting" },
+        { id: "conv-waiting", title: "Waiting task", updatedAt: "2026-01-01T00:00:00Z" },
       ],
     });
     const before = useAppStore.getState();
@@ -193,6 +198,7 @@ describe("SidebarLeft session status", () => {
     expect(screen.getByRole("region", { name: "工作区 MiniCode" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "查看任务状态" }));
     expect(within(screen.getByRole("region", { name: "优先级" })).getByText("Waiting task")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "优先级" })).getByLabelText("等待回复")).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "今天" })).getByText("Main task")).toBeTruthy();
     expect(screen.getByText("Recorded task summary")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "工作区 MiniCode" })).toBeNull();

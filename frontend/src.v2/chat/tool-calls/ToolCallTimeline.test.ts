@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentProgressEntry } from "../../stores/types";
 import type { ChatMessage } from "../../stores/types";
+import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import {
   buildRunReplayEvents,
+  buildRunReplaySummary,
   buildRunTimelineItems,
   runTimelineExportJsonl,
 } from "./ToolCallTimeline";
@@ -86,7 +88,7 @@ describe("ToolCallTimeline helpers", () => {
     });
   });
 
-  it("keeps pending tools active and timeout tools failed in the timeline", () => {
+  it("preserves pending and timeout in timeline and replay", () => {
     const message = {
       id: "assistant-statuses",
       role: "assistant",
@@ -100,9 +102,35 @@ describe("ToolCallTimeline helpers", () => {
     } as ChatMessage;
 
     expect(buildRunTimelineItems([message], []).map((item) => item.status)).toEqual([
-      "running",
-      "failed",
+      "pending",
+      "timeout",
     ]);
+    const replay = buildRunReplayEvents([message], []);
+    expect(replay.map((event) => event.event)).toEqual(["tool.pending", "tool.timeout"]);
+    expect(buildRunReplaySummary(replay)).toMatchObject({ outcome: "needs_attention", pending: 1, running: 0, failedOrBlocked: 1 });
+  });
+
+  it.each([
+    [{ status: "pending" }, "pending"],
+    [{ status: "running", transition: "queued" }, "pending"],
+    [{ status: "running", transition: "prepared" }, "pending"],
+    [{ status: "running", transition: "waiting_approval" }, "pending_approval"],
+    [{ status: "pending", waitingOn: "approval" }, "pending_approval"],
+    [{ status: "running", transition: "streaming_output" }, "running"],
+    [{ status: "success", waitingOn: "approval", transition: "waiting_approval" }, "completed"],
+  ] as const)("projects actual execution and approval state %j", (patch, expected) => {
+    const record: ToolCallRecord = { id: "tool-state", name: "web_fetch", args: {}, startedAt: 100, ...patch };
+    const message = { id: "assistant-state", role: "assistant", content: "", artifacts: [], timestamp: 100, toolCalls: [record] } as ChatMessage;
+    const replay = buildRunReplayEvents([message], []);
+
+    expect(buildRunTimelineItems([message], [])[0].status).toBe(expected);
+    expect(replay[0]).toMatchObject({ status: expected, event: `tool.${expected}` });
+    const pending = expected === "pending" || expected === "pending_approval";
+    expect(buildRunReplaySummary(replay)).toMatchObject({
+      outcome: pending ? "pending" : expected === "running" ? "running" : "completed",
+      pending: pending ? 1 : 0,
+      running: expected === "running" ? 1 : 0,
+    });
   });
 
   it("does not use model-facing tool result markup as inspector summary", () => {

@@ -301,6 +301,7 @@ def test_embedded_screenshot_persists_owner_scoped_typed_image_artifact(monkeypa
 
     assert not result.is_error
     assert result.artifact_id == "art_screen"
+    assert "![Browser screenshot](artifact://art_screen)" in result.content
     assert result.artifact_kind == "image"
     assert result.artifact_media_type == "image/png"
     assert result.artifact_bytes == 68
@@ -349,6 +350,7 @@ def test_cdp_screenshot_persists_pure_base64_image_artifact(monkeypatch) -> None
 
     assert not result.is_error
     assert result.artifact_id == "art_cdp"
+    assert "![Browser screenshot](artifact://art_cdp)" in result.content
     assert captured["content"] == _ONE_PIXEL_PNG_B64
     assert captured["type"] == "image"
     assert captured["media_type"] == "image/png"

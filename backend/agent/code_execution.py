@@ -46,6 +46,7 @@ class CodeCell:
     error: str = ""
     discarded_calls: int = 0
     pending_tools: dict[str, str] = field(default_factory=dict)
+    image_artifacts: set[tuple[str, str, str]] = field(default_factory=set)
 
 
 class CodeExecutionRuntime:
@@ -125,7 +126,9 @@ class CodeExecutionRuntime:
         cell.output.clear()
         contexts = list(cell.hook_context)
         cell.hook_context.clear()
-        images = [{"media_type": item["media_type"], "data": item["data"]} for item in output if item["kind"] == "image"]
+        images = [{"media_type": item["media_type"], "data": item["data"],
+                   **({"artifact_id": item["artifact_id"]} if item.get("artifact_id") else {})}
+                  for item in output if item["kind"] == "image"]
         audios = [{"media_type": item["media_type"], "data": item["data"]} for item in output if item["kind"] == "audio"]
         text = [item["text"] for item in output if item["kind"] == "text"]
         report = {"cell_id": cell.id, "status": cell.status, "output": text,
@@ -182,6 +185,13 @@ class CodeExecutionRuntime:
                         cell.pending_tools.pop(call_id)
                         result = results.pop(call_id)
                         value = {item.name: getattr(result, item.name) for item in fields(result) if item.name != "runtime_metadata"}
+                        if result.images:
+                            value["images"] = []
+                            for image in result.images:
+                                artifact_id = image.get("artifact_id") or (result.artifact_id if len(result.images) == 1 else None)
+                                value["images"].append({**image, **({"artifact_id": artifact_id} if artifact_id else {})})
+                                if artifact_id:
+                                    cell.image_artifacts.add((artifact_id, image["media_type"], image["data"]))
                         mcp = result.runtime_metadata.get("mcp")
                         if isinstance(mcp, dict):
                             value["structured_content"] = mcp.get("structuredContent")
@@ -199,6 +209,12 @@ class CodeExecutionRuntime:
             vm = CodeVM()
             packet = await vm.step("start", {"code": cell.code, "tools": cell.catalog, "storage": dict(self.store.values)})
             while True:
+                # image() can forward a leaf artifact, but script-created IDs
+                # are not provenance. Retain only this cell's original bytes.
+                for item in packet["output"]:
+                    if item["kind"] == "image" and item.get("artifact_id"):
+                        if (item["artifact_id"], item["media_type"], item["data"]) not in cell.image_artifacts:
+                            item.pop("artifact_id")
                 cell.output.extend(packet["output"])
                 if packet["yielded"]:
                     cell.changed.set()
@@ -269,6 +285,7 @@ class CodeExecutionRuntime:
             finally:
                 if vm is not None:
                     vm.close()
+                cell.image_artifacts.clear()
                 cell.status = terminal_status
                 self.store.receipts[cell.id] = CodeCellReceipt(cell.id, cell.status, cell.error, cell.output, cell.hook_context, cell.discarded_calls)
                 cell.changed.set()

@@ -324,6 +324,52 @@ describe("AssistantMarkdownCell image generation", () => {
     expect(container.querySelector(".assistant-cell-image-spinner")).toBeNull();
   });
 
+  it("renders an embedded artifact once while preserving another unreferenced image", () => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({
+      markdownSource: "实际截图：\n\n![订单页面](artifact://art_embedded)",
+      artifacts: [
+        { artifactId: "art_embedded", kind: "image", summary: "浏览器截图", mediaType: "image/png" },
+        { artifactId: "art_other", kind: "image", summary: "另一个产物", mediaType: "image/png" },
+      ],
+    })} />);
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+    expect(new URL(screen.getByRole("img", { name: "订单页面" }).getAttribute("src")!).searchParams.get("artifact_id")).toBe("art_embedded");
+    expect(container.querySelector('[data-artifact-id="art_embedded"]')).toBeNull();
+    expect(container.querySelector('[data-artifact-id="art_other"]')).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "模型生成的图片" })).toBeNull();
+  });
+
+  it("deduplicates reference-style images in the rendered completion without reviving generation progress", () => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({
+      markdownSource: "intro\n\n![截图][capture]\n\n[capture]: artifact://art_ref",
+      markdownBeforeArtifacts: "intro", markdownAfterArtifacts: "![截图][capture]\n\n[capture]: artifact://art_ref",
+      imageProgress: [{ ...imageProgress, status: "completed", message: "图像生成完成" }],
+      artifacts: [{ artifactId: "art_ref", kind: "image", summary: "浏览器截图", mediaType: "image/png" }],
+    })} />);
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "截图" })).toBeTruthy();
+    expect(container.querySelector('.assistant-cell-image-progress')).toBeNull();
+    expect(container.querySelector('.assistant-cell-generated')).toBeNull();
+  });
+
+  it.each([
+    "`![sample](artifact://art_image)`",
+    "```md\n![sample](artifact://art_image)\n```",
+    "[ordinary link](artifact://art_image)",
+    "![incomplete](artifact://art_image",
+    "![unresolved][capture]",
+    "![invalid](artifact://art_image?owner=other)",
+  ])("preserves the automatic artifact when Markdown does not render its image: %s", (markdownSource) => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({ markdownSource,
+      artifacts: [{ artifactId: "art_image", kind: "image", summary: "浏览器截图", mediaType: "image/png" }],
+    })} />);
+    expect(container.querySelector('[data-artifact-id="art_image"]')).toBeTruthy();
+    expect(screen.getByRole("img", { name: "图片" })).toBeTruthy();
+  });
+
   it("replaces the mask with the complete live image artifact", () => {
     const dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     render(
@@ -342,22 +388,22 @@ describe("AssistantMarkdownCell image generation", () => {
       />,
     );
 
-    const image = screen.getByRole("img", { name: "模型生成的图片" });
+    const image = screen.getByRole("img", { name: "图片" });
     expect(image.getAttribute("src")).toBe(dataUrl);
     expect(document.body.textContent).not.toContain("Generated PNG image");
     expect(screen.queryByText("正在生成图像")).toBeNull();
-    expect(screen.getByRole("status", { name: "正在载入生成图片" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "正在载入图片" })).toBeTruthy();
     fireEvent.load(image);
-    expect(screen.queryByRole("status", { name: "正在载入生成图片" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "正在载入图片" })).toBeNull();
     expect(screen.getByRole("button", { name: "查看大图" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制图片" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "保存图片" })).toBeTruthy();
     expect(openArtifactPreviewMock).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看生成图片大图" }));
-    expect(screen.getByRole("dialog", { name: "生成图片大图" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
-    expect(screen.queryByRole("dialog", { name: "生成图片大图" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
   });
 
   it("loads a cold-history generated image inline through the owner-scoped HTTP resource", () => {
@@ -376,7 +422,7 @@ describe("AssistantMarkdownCell image generation", () => {
       />,
     );
 
-    const image = screen.getByRole("img", { name: "模型生成的图片" });
+    const image = screen.getByRole("img", { name: "图片" });
     const src = image.getAttribute("src") || "";
     expect(src).toContain("/api/artifacts/raw");
     expect(src).toContain("artifact_id=artifact-history-image");
@@ -386,8 +432,8 @@ describe("AssistantMarkdownCell image generation", () => {
 
     fireEvent.load(image);
     expect(screen.getByRole("button", { name: "查看大图" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看生成图片大图" }));
-    expect(screen.getByRole("dialog", { name: "生成图片大图" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" })).toBeTruthy();
   });
 
   it("renders the generated image between the provider intro and completion text", () => {
@@ -411,7 +457,7 @@ describe("AssistantMarkdownCell image generation", () => {
     );
 
     const intro = screen.getByText("好的，我来生成这张图片。");
-    const image = screen.getByRole("img", { name: "模型生成的图片" });
+    const image = screen.getByRole("img", { name: "图片" });
     const completion = screen.getByText("图像已经为你生成好了。");
     expect(intro.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(image.compareDocumentPosition(completion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

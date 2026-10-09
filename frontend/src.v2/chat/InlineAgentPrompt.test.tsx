@@ -246,34 +246,39 @@ describe("InlineAgentPrompt control protocol responses", () => {
     expect(screen.queryByRole("button", { name: "允许所有未提升权限的待处理工具请求" })).toBeNull();
   });
 
-  it("persists always-allow command rules with explicit global scope", async () => {
-    mocks.sendClientCommandAwaitResult.mockResolvedValueOnce({
-      type: "command.result",
-      command: "permissions.content_rule.add",
-      level: "success",
-      message: "",
-      data: { rule: "run_command(git status:*)", deny: false, scope: "global" },
-    });
-    useAppStore.setState({
-      pendingApproval: {
-        requestId: "global-rule-approval",
-        conversationId: "conv-inline",
-        toolName: "run_command",
-        args: { command: "git status" },
-        protocol: "control",
-      },
-    });
-
+  it("offers once or conversation approval and keeps owner-scoped requests pending until acknowledged", async () => {
+    let accept!: (result: { type: "command.result"; command: string; level: string; message: string; data: {} }) => void;
+    mocks.sendPromptResponseCommand.mockImplementationOnce(() => new Promise((resolve) => { accept = resolve; }));
+    useAppStore.setState({ pendingApproval: {
+      requestId: "conversation-approval", conversationId: "conv-inline", turnId: "turn-approval", messageId: "message-approval",
+      toolName: "run_command", args: { command: "git status" },
+    } });
     render(<InlineAgentPrompt />);
-    fireEvent.click(screen.getByRole("button", { name: "全局始终允许 git status 命令" }));
+    expect(screen.getByText("权限")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /全局|补充说明|全部允许/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /选择允许范围/ }));
+    fireEvent.click(screen.getByRole("option", { name: "允许此次对话" }));
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
+      type: "control_response", request_id: "conversation-approval", conversation_id: "conv-inline",
+      turn_id: "turn-approval", message_id: "message-approval",
+      response: { subtype: "success", response: { action: "approve", remember_for_session: true } },
+    });
+    expect(useAppStore.getState().pendingApproval?.requestId).toBe("conversation-approval");
+    expect(mocks.sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    await act(async () => accept({ type: "command.result", command: "control_response", level: "success", message: "", data: {} }));
+    expect(useAppStore.getState().pendingApproval).toBeNull();
+  });
 
-    await waitFor(() => expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
-      type: "permissions.content_rule.add",
-      rule: "run_command(git status:*)",
-      deny: false,
-      scope: "global",
-      source: "approval.always_allow_prefix",
-    }, "permissions.content_rule.add"));
+  it("uses permission shortcuts only outside editable text", () => {
+    useAppStore.setState({ pendingApproval: { requestId: "keyboard-approval", conversationId: "conv-inline",
+      toolName: "read_file", args: { path: "index.html" } } });
+    render(<><InlineAgentPrompt /><textarea aria-label="Draft" /></>);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Draft" }), { key: "Enter" });
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({
+      response: { subtype: "success", response: { action: "reject" } },
+    }));
   });
 
   it("sends rejection feedback when rejecting a completed plan", async () => {

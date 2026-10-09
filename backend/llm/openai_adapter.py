@@ -2546,12 +2546,13 @@ class OpenAIAdapter(LLMAdapter):
             )
 
     def supports_hosted_web_search(self) -> bool:
-        if self._settings.wire_api != "responses":
-            return False
-        declared = self._settings.supports_hosted_web_search
-        if declared is not None:
-            return declared
-        return urlparse(self._settings.base_url or "https://api.openai.com/v1").hostname in {"api.openai.com", "chatgpt.com"}
+        from backend.llm.provider_contracts import hosted_web_search_supported
+
+        return hosted_web_search_supported(
+            wire_api=self._settings.wire_api,
+            base_url=self._settings.base_url,
+            declared=self._settings.supports_hosted_web_search,
+        )
 
     async def _create_responses_request(
         self,

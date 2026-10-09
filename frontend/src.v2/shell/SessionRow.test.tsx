@@ -28,7 +28,24 @@ describe("SessionRow hydration status", () => {
     vi.clearAllMocks();
   });
 
-  it("distinguishes conversation hydration from an executing Agent run", () => {
+  it.each([false, true])("animates a real running row with active=%s", (active) => {
+    render(<SessionRow
+      conversation={{ id: "live", title: "Live task", updatedAt: "2026-10-08T00:00:00Z" }}
+      sessionStatus="running"
+      active={active}
+      menuOpen={false}
+      renaming={false}
+      renameValue=""
+      waitingLabel={null}
+      {...callbacks}
+    />);
+
+    const indicator = screen.getByLabelText("任务运行中");
+    expect(indicator.classList.contains("session-status-spinner")).toBe(true);
+    expect(indicator.classList.contains("mc-session-status-active")).toBe(false);
+  });
+
+  it("does not add a running indicator to an idle conversation", () => {
     render(
       <SessionRow
         conversation={{
@@ -36,8 +53,7 @@ describe("SessionRow hydration status", () => {
           title: "Audit",
           updatedAt: "2026-08-15T00:00:00Z",
         }}
-        sessionStatus="running"
-        isHydrating
+        sessionStatus="idle"
         active
         deleting={false}
         menuOpen={false}
@@ -48,7 +64,7 @@ describe("SessionRow hydration status", () => {
       />,
     );
 
-    expect(screen.getByLabelText("正在恢复会话上下文")).toBeTruthy();
+    expect(screen.queryByLabelText("正在恢复会话上下文")).toBeNull();
     expect(screen.queryByLabelText("任务运行中")).toBeNull();
   });
 
@@ -62,7 +78,6 @@ describe("SessionRow hydration status", () => {
           summary: "User: audit all agents | Assistant: event contracts aligned",
         }}
         sessionStatus="idle"
-        isHydrating={false}
         active={false}
         deleting={false}
         menuOpen={false}
@@ -87,7 +102,6 @@ describe("SessionRow hydration status", () => {
           updatedAt: "2026-08-15T00:00:00Z",
         }}
         sessionStatus="running"
-        isHydrating={false}
         active={false}
         deleting
         menuOpen={false}
@@ -109,7 +123,6 @@ describe("SessionRow hydration status", () => {
       <SessionRow
         conversation={{ id: "conv-b", title: "Task B", updatedAt: "2026-08-15T00:00:00Z" }}
         sessionStatus="idle"
-        isHydrating={false}
         active={false}
         menuOpen={false}
         renaming={false}
@@ -147,7 +160,6 @@ describe("SessionRow hydration status", () => {
         <SessionRow
           conversation={firstConversation}
           sessionStatus="idle"
-          isHydrating={false}
           active={false}
           deleting={false}
           menuOpen={firstMenuOpen}
@@ -159,7 +171,6 @@ describe("SessionRow hydration status", () => {
         <SessionRow
           conversation={unchangedConversation}
           sessionStatus="idle"
-          isHydrating={false}
           active={false}
           deleting={false}
           menuOpen={false}

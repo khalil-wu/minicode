@@ -20,6 +20,7 @@ export interface AgentLoopTurnProjection {
   hasCompleteFinalAnswer: boolean;
   hasProcessContent: boolean;
   durationMs: number | null;
+  startedAt?: number;
   failureMessage?: string;
   processDetailMode: ViewMode;
   initialProcessExpanded: boolean;
@@ -75,6 +76,7 @@ export function projectChatTurnToAgentLoop(
       || turn.status === "interrupted"
       || (turn.status === "streaming" && !answerCell),
     durationMs,
+    startedAt: turn.startedAt,
     failureMessage: turn.finalAnswerCell?.failureMessage
       || turn.committedCells.find((cell) => cell.kind === "error")?.message,
     processDetailMode,

@@ -24,6 +24,7 @@ import { useAppStore } from '../stores'
 import { ConversationsTab } from './ConversationsTab'
 import { sendClientCommandAwaitResult, sendConversationDeleteCommand } from '../protocol/ws-outbox'
 import { pushToast } from '../overlays/ToastContainer'
+import { handleRuntimeEvent } from '../chat/runtimeEvents'
 
 describe('ConversationsTab project navigation', () => {
   beforeEach(() => {
@@ -68,6 +69,40 @@ describe('ConversationsTab project navigation', () => {
     act(() => useAppStore.setState({ pendingConversationSwitchId: 'conv-next' }))
     expect(previous?.hasAttribute('aria-current')).toBe(false)
     expect(next?.getAttribute('aria-current')).toBe('page')
+    act(() => useAppStore.setState({ conversationHydration: { 'conv-next': { isHydrating: true } } }))
+    expect(next?.closest('[data-session-row]')?.querySelector('.session-status-spinner')).toBeNull()
+    expect(screen.queryByLabelText('正在恢复会话上下文')).toBeNull()
+  })
+
+  it('drives busy indicators from live ownership and settles old metadata after a runtime snapshot', () => {
+    useAppStore.setState({
+      conversations: [
+        { id: 'conv-represented', title: 'Completed EEG', updatedAt: '2026-10-08T00:00:00Z', sessionStatus: 'running' },
+        { id: 'live', title: 'Live model question', updatedAt: '2026-10-08T00:00:01Z' },
+        { id: 'old-wait', title: 'Old waiting metadata', updatedAt: '2026-10-08T00:00:02Z', sessionStatus: 'waiting' },
+      ],
+      conversationStreaming: { 'conv-represented': false, live: true, 'old-wait': false },
+    })
+    const { container } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    const row = (title: string) => screen.getAllByText(title)[0].closest('[data-session-row="true"]')!
+    expect(row('Completed EEG').querySelector('[aria-label="任务运行中"]')).toBeNull()
+    expect(row('Old waiting metadata').querySelector('.mc-session-status-icon')).toBeNull()
+    expect(row('Live model question').querySelector('.session-status-spinner')).toBeTruthy()
+
+    act(() => {
+      handleRuntimeEvent({ type: 'task.update', partial: true,
+        session: { active_stream_conversation_ids: [] } }, 'conv-represented')
+    })
+    expect(container.querySelectorAll('.session-status-spinner')).toHaveLength(0)
+    expect(useAppStore.getState().conversationStreaming.live).toBe(false)
+    act(() => {
+      handleRuntimeEvent({ type: 'session.state_changed', conversation_id: 'conv-represented', state: 'working' })
+    })
+    expect(row('Completed EEG').querySelector('.session-status-spinner')).toBeTruthy()
+    act(() => {
+      handleRuntimeEvent({ type: 'session.state_changed', conversation_id: 'conv-represented', state: 'idle' })
+    })
+    expect(row('Completed EEG').querySelector('.session-status-spinner')).toBeNull()
   })
 
   it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
@@ -273,7 +308,9 @@ describe('ConversationsTab project navigation', () => {
     const now = new Date(2026, 9, 5, 12)
     vi.setSystemTime(now)
     const localDate = (day: number) => new Date(2026, 9, day, 10).toISOString()
-    useAppStore.setState({ conversations: [
+    useAppStore.setState({ conversationStreaming: { running: true, waiting: true }, runtimeSession: {
+      pending_approvals: [{ request_id: 'waiting-request', type: 'control_request', subtype: 'elicitation', conversation_id: 'waiting' }],
+    }, conversations: [
       { id: 'running', title: 'Running earlier', updatedAt: localDate(1), sessionStatus: 'running' },
       { id: 'waiting', title: 'Waiting earlier', updatedAt: localDate(2), sessionStatus: 'waiting' },
       { id: 'today', title: 'Today task', updatedAt: localDate(5), summary: 'Recorded summary only' },
@@ -285,6 +322,8 @@ describe('ConversationsTab project navigation', () => {
     const priority = screen.getByRole('region', { name: '优先级' })
     expect(within(priority).getByText('Running earlier')).toBeTruthy()
     expect(within(priority).getByText('Waiting earlier')).toBeTruthy()
+    expect(within(priority).getByLabelText('等待回复')).toBeTruthy()
+    expect(within(priority).getAllByLabelText('任务运行中')).toHaveLength(1)
     expect(within(screen.getByRole('region', { name: '今天' })).getByText('Today task')).toBeTruthy()
     expect(within(screen.getByRole('region', { name: '昨天' })).getByText('Yesterday task')).toBeTruthy()
     expect(within(screen.getByRole('region', { name: '更早' })).getByText('Earlier task')).toBeTruthy()

@@ -106,25 +106,10 @@ export const AgentTurn = memo(function AgentTurn({
     ? timelineCells
     : [], [processExpanded, timelineCells]);
   const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
-  const hasActiveTimelineItem = timelineCells.some((cell) => {
-    if (cell.kind === "activity") return cell.status === "running";
-    if (cell.kind === "exec") {
-      return cell.status === "running" || cell.status === "pending_approval";
-    }
-    if (cell.kind === "thinking") return Boolean(cell.isStreaming);
-    if (cell.kind === "collaboration") return cell.status === "running";
-    return false;
-  });
-  const showIdleProcessingStatus =
-    turn.status === "running"
-    && !turn.hasCompleteFinalAnswer
-    && !turn.answerIsStreaming
-    && !hasActiveTimelineItem;
   const failureIsTimelineEvidence = turn.processCells.some((cell) => cell.kind === "error");
   const showProcessStack =
     turn.hasProcessContent &&
     visibleTimelineCells.length > 0;
-  const summaryPosition = turn.status === "running" && !turn.hasCompleteFinalAnswer ? "bottom" : "top";
   const standaloneNotice = !turn.userCell && turn.status === "completed"
     && turn.processCells.length > 0
     && turn.processCells.every((cell) => cell.kind === "status_notice");
@@ -134,10 +119,11 @@ export const AgentTurn = memo(function AgentTurn({
       processExpanded={processExpanded}
       hasTimelineItems={hasTimelineItems}
       durationMs={turn.durationMs}
+      startedAt={turn.startedAt}
       failureMessage={failureIsTimelineEvidence && processExpanded ? undefined : turn.failureMessage}
       canCollapse={turn.hasCompleteFinalAnswer}
       canExpand={userToggled.current && !processExpanded}
-      position={summaryPosition}
+      position="top"
       onToggle={() => {
         userToggled.current = true;
         setProcessExpanded((value) => !value);
@@ -172,7 +158,7 @@ export const AgentTurn = memo(function AgentTurn({
             if ((event.target as Element).closest("button[aria-expanded], summary")) userToggled.current = true;
           }}
         >
-          {(turn.status !== "running" || turn.hasCompleteFinalAnswer) && processSummary}
+          {processSummary}
           {processExpanded && historyControl}
 
           {showProcessStack && (
@@ -186,8 +172,6 @@ export const AgentTurn = memo(function AgentTurn({
               onUserDisclosure={() => { userToggled.current = true; }}
             />
           )}
-
-          {showIdleProcessingStatus && processSummary}
 
         </section>
       )}

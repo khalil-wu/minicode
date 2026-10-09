@@ -1,5 +1,5 @@
 import { memo, useRef } from "react";
-import { Circle, Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
+import { Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
 import { isDesktop } from "../desktop/runtime";
 import type { ConversationMeta } from "../stores/types";
 import { IconAction, ConversationMenu } from "./sidebarComponents";
@@ -14,7 +14,6 @@ export type SessionRowProps = {
   conversation: ConversationMeta;
   rowId?: string;
   sessionStatus: "running" | "waiting" | "idle";
-  isHydrating: boolean;
   active: boolean;
   deleting?: boolean;
   menuOpen: boolean;
@@ -42,7 +41,6 @@ const SessionRowComponent = ({
   conversation,
   rowId,
   sessionStatus,
-  isHydrating,
   active,
   deleting,
   menuOpen,
@@ -145,15 +143,12 @@ const SessionRowComponent = ({
         </button>
       )}
 
-      {!deleting && sessionStatus === "running" && !active && (
+      {!deleting && sessionStatus === "running" && (
         <LoaderCircle
           size={14}
           className="session-status-spinner mc-session-status-icon"
-          aria-label={isHydrating ? "正在恢复会话上下文" : "任务运行中"}
+          aria-label="任务运行中"
         />
-      )}
-      {!deleting && sessionStatus === "running" && active && (
-        <Circle size={8} fill="currentColor" className="mc-session-status-icon mc-session-status-active" aria-label={isHydrating ? "正在恢复会话上下文" : "任务运行中"} />
       )}
       {!deleting && sessionStatus === "waiting" && (
         <>

@@ -332,6 +332,28 @@ async def test_fast_approval_paths_clear_replay_state(cached):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action,remember,expected_cached", [
+    ("approve", True, True), ("approve", False, False), ("reject", True, False),
+])
+async def test_conversation_approval_scope_from_control_response(action, remember, expected_cached):
+    session = ApprovalSession()
+    payload = approval_payload()
+    session.turn_wait_state.pending_approval_payloads["tool1"] = payload
+    request_id, response = session._normalize_control_response({
+        "request_id": "tool1", "conversation_id": "conv_probe", "turn_id": "r1", "message_id": "a1",
+        "response": {"subtype": "success", "response": {"action": action, "remember_for_session": remember}},
+    })
+    assert session._resolve_pending_approval(request_id, response)
+    assert (await session.approval_handler(request_id))["action"] == action
+    args = payload["request"]["input"]
+    assert session._is_session_approved("run_command", args, payload=payload) is expected_cached
+    assert not session._is_session_approved("run_command", args, payload={**payload, "conversation_id": "other"})
+    assert not session._is_session_approved("run_command", {"command": "echo other"}, payload=payload)
+    assert not ApprovalSession()._is_session_approved("run_command", args, payload=payload)
+    assert session.turn_wait_state.waiter_ids() == set()
+
+
+@pytest.mark.asyncio
 async def test_error_control_response_retains_its_owner():
     session = ApprovalSession()
     payload = approval_payload()

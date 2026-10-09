@@ -525,6 +525,70 @@ def test_only_selected_images_enter_model_context_and_artifacts_keep_the_owner(t
     asyncio.run(scenario())
 
 
+def test_forwarded_leaf_images_keep_each_original_artifact_even_when_the_pixels_match(tmp_path):
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jVZkAAAAASUVORK5CYII="
+    original_ids = []
+
+    class SavedImageTool(FixtureTool):
+        async def execute(self, args, context=None):
+            artifact_id = context.artifact_store.save(png, source="fixture.browser", type="image", media_type="image/png",
+                conversation_id=context.conversation_id, workspace_root=context.workspace_root)
+            original_ids.append(artifact_id)
+            return ToolResult("original screenshot", artifact_id=artifact_id, artifact_kind="image", artifact_media_type="image/png",
+                images=[{"media_type": "image/png", "data": png}])
+
+    async def scenario():
+        model = ScriptModel('const a=await tools.picture({}); const b=await tools.picture({}); image(a.images[0]); image(b.images[0]); text("forwarded");')
+        state, builder, _, events, _ = await run_model(tmp_path, model, [SavedImageTool("picture")])
+        assert state.terminal_status == "completed", model.reports
+        assert len(original_ids) == len(set(original_ids)) == 2
+        ids = {event.data["artifact_id"] for event in events if event.type == "artifact.preview"}
+        assert ids == set(original_ids)
+        emitted = [image for message in builder._history for image in message.images]
+        assert [image["artifact_id"] for image in emitted] == original_ids
+        assert len(list((tmp_path / "artifacts").glob("art_*.meta.json"))) == 2
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mismatch", ["conversation", "workspace", "bytes", "script-created-id"])
+def test_code_image_does_not_reuse_a_foreign_or_changed_artifact(tmp_path, mismatch):
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jVZkAAAAASUVORK5CYII="
+    original_ids = []
+
+    class SavedImageTool(FixtureTool):
+        async def execute(self, args, context=None):
+            artifact_id = context.artifact_store.save(png, source="fixture.original", type="image", media_type="image/png",
+                conversation_id="another-owner" if mismatch == "conversation" else context.conversation_id,
+                workspace_root=tmp_path / "other" if mismatch == "workspace" else context.workspace_root)
+            original_ids.append(artifact_id)
+            return ToolResult(artifact_id, artifact_id=None if mismatch == "script-created-id" else artifact_id,
+                images=[{"media_type": "image/png", "data": png}])
+
+    async def scenario():
+        code = 'const r=await tools.picture({});'
+        if mismatch == "bytes":
+            code += 'r.images[0].data="aW1hZ2UtZWRpdA==";'
+        if mismatch == "script-created-id":
+            code += 'r.images[0].artifact_id=r.content;'
+        code += 'image(r.images[0]); text("selected");'
+        model = ScriptModel(code)
+        state, builder, _, events, _ = await run_model(tmp_path, model, [SavedImageTool("picture")])
+        assert state.terminal_status == "completed", model.reports
+        emitted = [image for message in builder._history for image in message.images]
+        assert len(emitted) == 1
+        selected = emitted[0]["artifact_id"]
+        assert selected not in original_ids
+        store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+        try:
+            expected = "aW1hZ2UtZWRpdA==" if mismatch == "bytes" else png
+            assert store.get(selected, conversation_id="code-conv", workspace_root=tmp_path) == expected
+            assert store.get_meta(selected, conversation_id="another-owner", workspace_root=tmp_path) is None
+            assert any(event.type == "artifact.preview" and event.data["artifact_id"] == selected for event in events)
+        finally:
+            store.shutdown()
+    asyncio.run(scenario())
+
+
 def test_nested_source_survives_the_backend_public_transcript_projection():
     source = {"kind": "code_mode", "parent_call_id": "parent", "cell_id": "cell-1", "runtime_call_id": "1"}
     turn = AgentTurnState(now_ms=lambda: 1)

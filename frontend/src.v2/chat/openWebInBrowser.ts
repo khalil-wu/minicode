@@ -1,5 +1,6 @@
 import { useAppStore } from "../stores";
 import { parseHttpUrl } from "../lib/network-target";
+import type { EmbeddedBrowserState } from "../desktop/runtime";
 
 interface BrowserRequestBase {
   id: number;
@@ -10,6 +11,7 @@ interface BrowserRequestBase {
 type BrowserRequest = BrowserRequestBase & (
   | { kind: "open" }
   | { kind: "resume"; targetId: string }
+  | { kind: "present"; target: EmbeddedBrowserState }
   | { kind: "refresh"; workspaceRoot: string }
 );
 
@@ -67,6 +69,32 @@ export function returnToBrowserPage(target: { conversationId: string; targetId: 
   const request: BrowserRequest = { ...target, kind: "resume", id: ++requestSequence };
   pendingRequests.set("resume", request);
   listeners.forEach((listener) => listener(request));
+}
+
+/** Present the exact native target that an authorized browser tool navigated. */
+export function presentExistingBrowserPage(target: EmbeddedBrowserState): void {
+  const state = useAppStore.getState();
+  if (target.conversationId !== state.conversationId || state.pendingConversationSwitchId
+    || (state.rightStackTabLocked && (!state.rightPanelOpen || state.rightStackTab !== "browser"))) return;
+  const request: BrowserRequest = { kind: "present", id: ++requestSequence,
+    conversationId: target.conversationId, url: target.url, target };
+  pendingRequests.set("present", request);
+  state.setRightStackTab("browser", { automatic: true });
+  listeners.forEach((listener) => listener(request));
+}
+
+export function discardInactiveBrowserPresentation(): void {
+  const request = pendingRequests.get("present");
+  if (!request) return;
+  const state = useAppStore.getState();
+  if (request.conversationId !== state.conversationId || state.pendingConversationSwitchId
+    || !state.rightPanelOpen || state.rightStackTab !== "browser") pendingRequests.delete("present");
+}
+
+export function discardClosedBrowserPresentation(target: EmbeddedBrowserState): void {
+  const request = pendingRequests.get("present");
+  if (request?.kind === "present" && request.target.id === target.id
+    && request.conversationId === target.conversationId) pendingRequests.delete("present");
 }
 
 export function subscribeBrowserRequests(listener: BrowserRequestListener): () => void {

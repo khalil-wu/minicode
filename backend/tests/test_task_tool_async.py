@@ -436,11 +436,12 @@ def test_read_only_subagent_does_not_inherit_parent_live_permission_provider(
     tmp_path,
 ):
     async def run() -> None:
-        parent_live_permission = {"value": PermissionContext(mode="bypass")}
+        parent_live_permission = {"value": PermissionContext(mode="bypass", approval_policy="never", sandbox_mode="danger-full-access")}
 
         async def fake_run_agent_loop(**kwargs):
-            assert kwargs["permission_context"].mode == "plan"
-            assert kwargs["permission_context"].sandbox_mode == "read-only"
+            assert kwargs["permission_context"].mode == "bypass"
+            assert kwargs["permission_context"].sandbox_mode == "danger-full-access"
+            assert kwargs["metadata"]["read_only"] is True
             assert "permission_context_provider" not in kwargs["metadata"]
             assert "permission_mode_setter" not in kwargs["metadata"]
             assert "command_prompt_allow_rules_setter" not in kwargs["metadata"]

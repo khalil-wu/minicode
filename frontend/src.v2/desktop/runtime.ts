@@ -122,7 +122,7 @@ export interface EmbeddedBrowserState {
   id: string;
   conversationId: string;
   conversation_id?: string;
-  type: "page" | "loading" | "updated" | "error" | "new-tab-request" | "closed";
+  type: "page" | "loading" | "updated" | "error" | "new-tab-request" | "closed" | "presentation-requested";
   url: string;
   title: string;
   faviconUrl?: string;

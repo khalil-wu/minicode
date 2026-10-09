@@ -2,6 +2,7 @@ import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, 
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { decodeString } from "micromark-util-decode-string";
+import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -14,7 +15,9 @@ import { pushToast } from "../../overlays/ToastContainer";
 import { isPreviewableHttpUrl } from "../openWebInBrowser";
 import { openWebInBrowser } from "../openWebInBrowser";
 import { openWebTarget } from "../openWebTarget";
-import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { openArtifactPreview, openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { artifactIdFromReference, artifactResourceUrl } from "../../lib/artifact-resource";
+import { getWebSocket } from "../../hooks/useWebSocket";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
@@ -471,6 +474,12 @@ const sanitizeMermaidSvg = (rawSvg: string): string => {
         }
       }
     });
+    const viewBox = doc.documentElement.getAttribute("viewBox");
+    if (viewBox) {
+      const [, , width, height] = viewBox.trim().split(/[\s,]+/);
+      doc.documentElement.setAttribute("width", width);
+      doc.documentElement.setAttribute("height", height);
+    }
     return new XMLSerializer().serializeToString(doc.documentElement);
   } catch {
     return "";
@@ -664,16 +673,19 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
       .then(async (module) => {
         const mermaid = module.default;
       const rootStyle = getComputedStyle(document.documentElement);
+      // Mermaid's color parser does not accept the OKLCH tokens used by the UI.
       const tokenColor = (name: string, fallbackLight: string, fallbackDark: string) =>
-        rootStyle.getPropertyValue(name).trim()
-        || (resolvedTheme === "light" ? fallbackLight : fallbackDark);
+        formatHex(rootStyle.getPropertyValue(name).trim()
+          || (resolvedTheme === "light" ? fallbackLight : fallbackDark));
       mermaid.initialize({
         startOnLoad: false,
         securityLevel: "strict",
         htmlLabels: false,
+        fontFamily: getComputedStyle(document.body).fontFamily,
         theme: resolvedTheme === "light" ? "default" : "dark",
         flowchart: { htmlLabels: false },
         themeVariables: {
+          fontFamily: getComputedStyle(document.body).fontFamily,
           textColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
           primaryTextColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
           lineColor: tokenColor("--text-secondary", "#4b5563", "#d1d5db"),
@@ -712,8 +724,11 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
 
   return (
     <div
-      className="md-mermaid overflow-x-auto p-3 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-b-[var(--radius-sm,6px)] [&_svg]:max-w-full [&_svg]:h-auto [&_svg_text]:fill-[var(--text-primary)] [&_svg_text]:opacity-100"
+      className="md-mermaid"
       data-testid="md-mermaid"
+      role="region"
+      aria-label="Mermaid 图表，可上下和左右滚动"
+      tabIndex={0}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
@@ -1184,10 +1199,14 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
   const alt = typeof props.alt === "string" ? props.alt : "image";
-  const workspaceLocalImage = localImageWithinWorkspace(rawSrc, workspaceRoot);
-  const blockedLocalImage = Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
-  const src = workspaceLocalImage?.src ?? rawSrc;
-  const remoteSrc = !workspaceLocalImage && isPreviewableHttpUrl(src) ? src : "";
+  const artifactId = artifactIdFromReference(rawSrc);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const sessionId = getWebSocket()?.sessionId;
+  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot);
+  const blockedLocalImage = !artifactId && Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
+  const src = artifactId ? artifactResourceUrl({ artifactId, conversationId, sessionId, source: "artifact", isConnected })
+    : workspaceLocalImage?.src ?? rawSrc;
+  const remoteSrc = !artifactId && !workspaceLocalImage && isPreviewableHttpUrl(src) ? src : "";
   const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
   const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
   const allowRemoteImageDomain = useAppStore((s) => s.allowRemoteImageDomain);
@@ -1209,9 +1228,9 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
         role="img"
         aria-label={alt}
         className="my-2 inline-flex max-w-full items-center rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
-        title="本地图片位于当前工作区之外"
+        title={artifactId ? undefined : "本地图片位于当前工作区之外"}
       >
-        本地图片不可用
+        {artifactId ? (conversationId ? "连接恢复后可预览图片。" : "图片未关联到会话，暂时无法预览。") : "本地图片不可用"}
       </span>
     );
   }
@@ -1241,6 +1260,10 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   }
 
   const openPreview = () => {
+    if (artifactId) {
+      openArtifactPreview({ artifactId, conversationId, name: alt, kind: "image" });
+      return;
+    }
     if (workspaceLocalImage) {
       openWorkspaceFilePreview({
         path: workspaceLocalImage.path,
@@ -1515,7 +1538,8 @@ const rehypePlugins: MarkdownRehypePlugins = [
   [rehypeKatex, { strict: false, throwOnError: false }],
 ];
 
-const markdownUrlTransform = (url: string) => {
+const markdownUrlTransform = (url: string, key: string) => {
+  if (key === "src" && artifactIdFromReference(url)) return url;
   if (url.startsWith("minicode-file-ref:") || url.startsWith("minicode-local-file:") || isInlineImageDataUrl(url) || isExplicitLocalImageUrl(url)) return url;
   const fileTarget = workspaceFileTargetFromHref(url);
   // A basename followed by :line is a file location, not a URL protocol.

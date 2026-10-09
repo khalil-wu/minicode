@@ -49,6 +49,47 @@ describe("runtime compaction events", () => {
     });
   });
 
+  it("reconciles active, cached, and side-chat busy flags from a runtime task snapshot", () => {
+    const assistant = (id: string) => ({
+      id, role: "assistant" as const, content: "preserved partial result", timestamp: 1, isStreaming: true,
+    });
+    useAppStore.setState({
+      isStreaming: true,
+      messages: [assistant("active-assistant")],
+      conversationMessages: { cached: [assistant("cached-assistant")], live: [assistant("live-assistant")] },
+      conversationStreaming: { "conv-runtime": true, cached: true, live: false, side: true },
+      sideChats: { side: { id: "side", draft: "keep this draft", messages: [assistant("side-assistant")], isStreaming: true } },
+      runtimeSession: { selected_model: "preserved-model", active_stream_conversation_ids: ["conv-runtime", "cached", "side"] },
+    });
+
+    handleRuntimeEvent({ type: "task.update", partial: true,
+      session: { active_stream_conversation_ids: ["live"] } } as ServerEvent);
+    const state = useAppStore.getState();
+    expect(state.conversationStreaming).toEqual({ "conv-runtime": false, cached: false, side: false, live: true });
+    expect(state.isStreaming).toBe(false);
+    expect(state.messages[0]).toMatchObject({ content: "preserved partial result", isStreaming: false });
+    expect(state.conversationMessages.cached[0].isStreaming).toBe(false);
+    expect(state.sideChats.side.isStreaming).toBe(false);
+    expect(state.sideChats.side.messages[0].isStreaming).toBe(false);
+    expect(state.sideChats.side.draft).toBe("keep this draft");
+    expect(state.conversationMessages.live[0].isStreaming).toBe(true);
+    expect(state.runtimeSession?.selected_model).toBe("preserved-model");
+    expect(state.messages[0].terminalStatus).toBeUndefined();
+
+    handleRuntimeEvent({ type: "task.update", session: { active_stream_conversation_ids: [] } } as ServerEvent);
+    expect(Object.values(useAppStore.getState().conversationStreaming).some(Boolean)).toBe(false);
+  });
+
+  it("preserves live streams when a partial runtime update omits its ownership set", () => {
+    useAppStore.setState({ isStreaming: true, conversationStreaming: { "conv-runtime": true },
+      runtimeSession: { active_stream_conversation_ids: [] },
+    });
+    handleRuntimeEvent({ type: "task.update", partial: true, session: { selected_model: "new-model" } } as ServerEvent);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(useAppStore.getState().conversationStreaming["conv-runtime"]).toBe(true);
+    expect(useAppStore.getState().runtimeSession?.selected_model).toBe("new-model");
+  });
+
   it("admits a new run after a restore snapshot cleared its optimistic streaming flag", () => {
     useAppStore.setState({ isStreaming: false, messages: [{
       id: "new-assistant", role: "assistant", content: "", timestamp: 1, isStreaming: false,
@@ -454,6 +495,8 @@ describe("runtime task update events", () => {
     vi.clearAllMocks();
     useAppStore.setState({
       todos: [],
+      conversationId: "conv-runtime",
+      workingDirectory: "C:/runtime",
       runtimeSession: null,
       permissionMode: "confirm",
       pendingApproval: null,
@@ -466,6 +509,8 @@ describe("runtime task update events", () => {
       type: "task.update",
       session: {
         session_id: "session-runtime",
+        active_conversation_id: "conv-runtime",
+        workspace_root: "C:/runtime",
         permission_mode: "plan",
         pending_approval_count: 2,
         pending_approvals: [
@@ -493,6 +538,22 @@ describe("runtime task update events", () => {
       "approval-1",
       "ask-1",
     ]);
+  });
+
+  it.each(["task.update", "permission.mode.updated"] as const)("keeps new owner permissions when a delayed %s arrives", (type) => {
+    useAppStore.setState({ conversationId: "new-owner", workingDirectory: "C:/new", permissionMode: "bypass", agentMode: "build", draft: "new draft" });
+    const event = type === "task.update"
+      ? { type, session: { active_conversation_id: "old-owner", workspace_root: "C:/old", permission_mode: "plan" } }
+      : { type, conversation_id: "old-owner", workspace_root: "C:/old", mode: "plan" };
+    expect(handleRuntimeEvent(event as ServerEvent)).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ permissionMode: "bypass", agentMode: "build", draft: "new draft" });
+  });
+
+  it("applies a permission event only to its matching conversation and workspace", () => {
+    expect(handleRuntimeEvent({ type: "permission.mode.updated", conversation_id: "conv-runtime", workspace_root: "C:/other", mode: "plan" } as ServerEvent)).toBe(true);
+    expect(useAppStore.getState().permissionMode).toBe("confirm");
+    expect(handleRuntimeEvent({ type: "permission.mode.updated", conversation_id: "conv-runtime", workspace_root: "C:/runtime", mode: "bypass" } as ServerEvent)).toBe(true);
+    expect(useAppStore.getState().permissionMode).toBe("bypass");
   });
 
   it("still handles legacy todo task updates", () => {

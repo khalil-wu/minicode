@@ -72,7 +72,7 @@ describe("CollaborationCell agent navigation", () => {
       entries: [{ agentId: "worker-a", agentLabel: "Ada", content: "Secret worker instructions" }],
     }} conversationId="collaboration-owner" />);
     expect(container.querySelector("details")?.open).toBe(false);
-    fireEvent.click(screen.getByText("错误详情"));
+    fireEvent.click(screen.getByText("发送消息 · 失败"));
     expect(screen.getByRole("alert").textContent).toBe("消息发送失败，请重新连接");
     expect(screen.queryByRole("status")).toBeNull();
     expect(container.textContent).not.toContain("Secret worker instructions");
@@ -92,7 +92,7 @@ describe("CollaborationCell agent navigation", () => {
       error: "子任务启动失败", entries: [{ agentId: "worker-a", agentLabel: "布局任务", content: instructions }],
     }} conversationId="collaboration-owner" />);
     expect(container.querySelector("details")?.open).toBe(false);
-    fireEvent.click(screen.getByText("错误详情"));
+    fireEvent.click(screen.getByText("启动子智能体 · 失败"));
     expect(screen.getByRole("alert").textContent).toBe("子任务启动失败");
     expect(screen.queryByText("委派失败")).toBeNull();
     expect(screen.queryByText("开始工作")).toBeNull();

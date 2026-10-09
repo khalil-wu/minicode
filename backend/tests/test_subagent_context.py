@@ -58,6 +58,27 @@ def test_normal_subagent_inherits_parent_deny_rules() -> None:
     assert ctx.source == "subagent:implement"
 
 
+@pytest.mark.parametrize("mode", ["bypass", "auto", "confirm", "plan"])
+@pytest.mark.parametrize("agent_type", ["general-purpose", "explore", "plan", "custom-reviewer"])
+@pytest.mark.parametrize("delivery", ["foreground", "background", "teammate"])
+def test_read_only_child_roles_inherit_parent_permission_profile(mode, agent_type, delivery) -> None:
+    from backend.permissions.checker import PermissionChecker
+    from backend.config import PermissionSettings
+    from backend.config_requirements import permission_mode_requirements
+
+    parent_permission = PermissionChecker(PermissionSettings()).build_context(
+        mode=mode, sandbox_mode=permission_mode_requirements(mode)[1],
+    )
+    parent = ToolExecutionContext(permission=parent_permission)
+    child = build_subagent_permission_context(agent_type, parent, read_only=True,
+        team_mode=delivery == "teammate", background=delivery == "background")
+
+    assert child.mode == parent_permission.mode
+    assert child.approval_policy == parent_permission.approval_policy
+    assert child.sandbox_mode == parent_permission.sandbox_mode
+    assert "exit_plan_mode" in child.tool_deny_rules
+
+
 def test_subagent_preserves_complete_parent_permission_owner_without_aliasing(
     tmp_path: Path,
 ) -> None:
@@ -203,7 +224,7 @@ def test_teammate_toolset_keeps_sync_delegation_and_task_coordination() -> None:
     assert "exit_plan_mode" not in teammate_plan
 
 
-def test_default_teammate_has_independent_permission_owner() -> None:
+def test_default_teammate_clones_the_parent_permission_owner() -> None:
     parent = ToolExecutionContext(
         permission=PermissionContext(
             mode="bypass",
@@ -219,35 +240,29 @@ def test_default_teammate_has_independent_permission_owner() -> None:
         team_mode=True,
     )
 
-    assert ctx.mode == "confirm"
+    assert ctx.mode == "bypass"
     assert ctx.source == "teammate:implement"
     assert ctx.pre_plan_mode is None
-    assert ctx.approval_policy == "on-request"
-    assert ctx.sandbox_mode == "workspace-write"
+    assert ctx.approval_policy == "never"
+    assert ctx.sandbox_mode == "danger-full-access"
     assert "custom_tool" in ctx.tool_deny_rules
     assert TEAMMATE_ALLOWED_TOOLS.isdisjoint(ctx.tool_deny_rules)
     assert "exit_plan_mode" in ctx.tool_deny_rules
 
 
-def test_teammate_owns_its_permission_mode_instead_of_inheriting_plan() -> None:
-    """A Plan-mode leader still spawns a write-capable teammate.
-
-    A teammate is an independent worker and owns its permission mode, so it is
-    not narrowed by the leader's Plan mode. Ordinary subagents deliberately
-    differ and do inherit Plan mode, so both halves are pinned here.
-    """
+def test_teammate_and_ordinary_child_preserve_the_parent_plan_ceiling() -> None:
 
     parent = ToolExecutionContext(permission=PermissionContext(mode="plan"))
 
     teammate = build_subagent_permission_context("implement", parent, team_mode=True)
-    assert teammate.mode == "confirm"
-    assert teammate.sandbox_mode == "workspace-write"
+    assert teammate.mode == "plan"
+    assert teammate.sandbox_mode == "read-only"
 
     subagent = build_subagent_permission_context("implement", parent, team_mode=False)
     assert subagent.mode == "plan"
     assert subagent.sandbox_mode == "read-only"
 
-    # A read-only contract still wins over the teammate's own mode.
+    # An additional read-only contract never widens that inherited ceiling.
     read_only_teammate = build_subagent_permission_context(
         "implement", parent, team_mode=True, read_only=True
     )
@@ -266,7 +281,7 @@ def test_required_plan_teammate_can_only_exit_through_leader_approval() -> None:
 
     assert ctx.mode == "plan"
     assert ctx.source == "teammate:implement:required_plan"
-    assert ctx.pre_plan_mode is None
+    assert ctx.pre_plan_mode == "bypass"
     assert ctx.approval_policy == "on-request"
     assert ctx.sandbox_mode == "read-only"
     assert "task" not in ctx.tool_deny_rules
@@ -362,9 +377,12 @@ def test_teammate_requested_mode_is_clamped_to_the_parent_ceiling(
     approval_policy: str,
     sandbox_mode: str,
 ) -> None:
+    from backend.config_requirements import permission_mode_requirements
+    parent_approval, parent_sandbox = permission_mode_requirements(parent_mode)
     ctx = build_subagent_permission_context(
         "implement",
-        ToolExecutionContext(permission=PermissionContext(mode=parent_mode)),
+        ToolExecutionContext(permission=PermissionContext(mode=parent_mode,
+            approval_policy=parent_approval, sandbox_mode=parent_sandbox)),
         team_mode=True,
         requested_mode=requested_mode,
     )
@@ -397,7 +415,7 @@ def test_read_only_teammate_cannot_exit_into_write_mode() -> None:
         read_only=True,
     )
 
-    assert ctx.mode == "plan"
+    assert ctx.mode == "bypass"
     assert ctx.source == "teammate:explore"
     assert "exit_plan_mode" in ctx.tool_deny_rules
 
@@ -652,7 +670,7 @@ def test_tool_search_uses_teammate_policy_instead_of_ordinary_subagent_policy() 
     assert plan_state.loaded_deferred_tools == {"exit_plan_mode"}
 
 
-def test_explore_subagent_gets_plan_mode_regardless_of_parent() -> None:
+def test_explore_subagent_keeps_parent_mode_and_explicit_denials() -> None:
     parent = ToolExecutionContext(
         permission=PermissionContext(
             mode="bypass",
@@ -662,7 +680,7 @@ def test_explore_subagent_gets_plan_mode_regardless_of_parent() -> None:
 
     ctx = build_subagent_permission_context("explore", parent)
 
-    assert ctx.mode == "plan"
+    assert ctx.mode == "bypass"
     assert "write_file" in ctx.tool_deny_rules
     assert "task" in ctx.tool_deny_rules
 

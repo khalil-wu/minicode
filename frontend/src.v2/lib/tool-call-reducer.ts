@@ -7,6 +7,15 @@ export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blo
 export const isTerminalToolCallStatus = (status: ToolCallStatus): boolean =>
   status !== "pending" && status !== "running";
 
+export const isToolCallAwaitingApproval = (record: ToolCallRecord): boolean =>
+  !isTerminalToolCallStatus(record.status)
+  && (record.transition === "waiting_approval" || record.waitingOn === "approval");
+
+/** A streamed/queued call or an approval wait has not entered execution. */
+export const isToolCallExecuting = (record: ToolCallRecord): boolean =>
+  record.status === "running" && !record.waitingOn
+  && !["queued", "prepared", "waiting_approval"].includes(record.transition || "");
+
 export interface ToolCallRecord {
   id: string;
   name: string;

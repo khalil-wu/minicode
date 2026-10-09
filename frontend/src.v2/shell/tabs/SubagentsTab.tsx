@@ -18,7 +18,6 @@ import { subagentModelPatch } from "../../lib/subagent-model";
 import { formatModelLabel } from "../../lib/model-label";
 import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
 import { SubagentPlanReviewCard } from "../../chat/InlineAgentPrompt";
-import { revealConversationMessage } from "../../chat/revealConversationMessage";
 import {
   projectAgentViews,
   type AgentView,
@@ -172,7 +171,6 @@ const AgentDetail = ({
   pendingAction,
   source,
   agents,
-  sourceMessageId,
   planRequest,
 }: {
   view: AgentView;
@@ -188,7 +186,6 @@ const AgentDetail = ({
   pendingAction: "result" | null;
   source: SubagentState;
   agents: AgentView[];
-  sourceMessageId?: string;
   planRequest?: PendingAskUser;
 }) => {
   const isLive = view.status === "running" || view.status === "waiting";
@@ -226,10 +223,6 @@ const AgentDetail = ({
 
       <div className="subagents-detail-body">
         <div className="subagents-context" aria-label="任务关系">
-          {sourceMessageId && conversationId && <button type="button" className="subagents-source-link"
-            onClick={() => revealConversationMessage(conversationId, sourceMessageId)}>
-            <ArrowLeft size={12} aria-hidden="true" /><span>查看主任务中的委派</span>
-          </button>}
           {(view.status !== "completed" || turns.length === 0) && <span role="status">{statusText(view)}</span>}
           {(view.teamName || view.parent) && <div className="subagents-identity-row">
             {view.teamName && <span className="subagents-identity-name">{view.teamName}</span>}
@@ -332,10 +325,6 @@ export const SubagentsTab = () => {
   const askUserQueue = useAppStore((state) => state.askUserQueue);
   const conversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
-  const messages = useAppStore((state) => state.messages);
-  const sourceMessageId = selectedAgent?.turnId
-    ? messages.find((message) => message.role === "assistant" && message.turnId === selectedAgent.turnId)?.id
-    : undefined;
   const visibleTranscript = transcriptPresentation.ownerId === selectedAgentId
     && transcriptPresentation.conversationId === conversationId
     && transcriptPresentation.workspaceRoot === workingDirectory
@@ -518,7 +507,6 @@ export const SubagentsTab = () => {
         key={`${conversationId}:${selectedView.id}`}
         view={selectedView}
         source={selectedAgent}
-        sourceMessageId={sourceMessageId}
         agents={views}
         planRequest={planRequest}
         onBack={() => setSelectedAgentId(null)}

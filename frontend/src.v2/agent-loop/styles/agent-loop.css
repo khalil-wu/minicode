@@ -578,11 +578,17 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   font-weight: var(--fw-regular);
 }
 
-.agent-loop-process-cell .exec-cell-command-preview,
 .agent-loop-process-cell .activity-cell-detail,
 .agent-loop-process-cell .activity-cell-detail-path,
 .agent-loop-process-cell .activity-cell-file-change-target {
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .exec-cell-command-preview {
+  font-family: var(--font-ui);
   font-size: var(--text-sm);
   font-weight: var(--fw-regular);
   line-height: 1.5;
