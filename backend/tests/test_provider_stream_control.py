@@ -798,8 +798,8 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
     updates = asyncio.run(collect())
 
     assert len(sleeps) == 1
-    # Default base delay 0.5s with up to +25% jitter (cc getRetryDelay shape).
-    assert 0.5 <= sleeps[0] <= 0.625
+    # Codex defaults to a 200ms base with ±10% jitter.
+    assert 0.18 <= sleeps[0] <= 0.22
     assert len(updates) == 2
     assert updates[0].type == "agent.progress"
     assert updates[0].data["id"] == "provider:connection:iter:525"

@@ -12,6 +12,7 @@ import re
 import json
 import yaml
 from dataclasses import dataclass, field
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ class SkillLoader:
 
     def __init__(self, project_root: Path | str | None = None) -> None:
         self._project_root = self._normalize_project_root(project_root)
+        self._discovered = False
         self._catalog: list[SkillMeta] = []
         self._path_cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
@@ -85,6 +87,7 @@ class SkillLoader:
         if normalized == self._project_root:
             return
         self._project_root = normalized
+        self._discovered = False
         self._catalog.clear()
         self._path_cache.clear()
         self._full_cache.clear()
@@ -253,6 +256,7 @@ class SkillLoader:
                     catalog.append(meta)
 
         self._catalog = catalog
+        self._discovered = True
         self._path_cache = {self._path_key(meta.source_path): meta for meta in catalog}
         self._full_cache.clear()
         logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
@@ -267,13 +271,13 @@ class SkillLoader:
         nested container layouts). Resolve
         directory identities so linked directory trees cannot create cycles.
         """
-        pending = [base_dir]
+        pending = deque([base_dir])
         seen_dirs: set[str] = set()
         found: list[Path] = []
         excluded = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
 
         while pending:
-            current = pending.pop(0)
+            current = pending.popleft()
             try:
                 identity = os.path.normcase(str(current.resolve()))
             except OSError:
@@ -314,7 +318,7 @@ class SkillLoader:
         """
         # 检查缓存
         # 需要先 discover
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
 
         meta = self.get_meta_by_path(source_path) if source_path else self.get_unambiguous_meta(skill_name)
@@ -352,7 +356,7 @@ class SkillLoader:
         Returns:
             格式化的 Skill 列表（每个 ~20 tokens）
         """
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
 
         if not self._catalog:
@@ -367,17 +371,17 @@ class SkillLoader:
 
     def list_skill_names(self) -> list[str]:
         """列出所有 Skill 名称。"""
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
         return list(dict.fromkeys(meta.name for meta in self._catalog))
 
     def list_metas(self) -> list[SkillMeta]:
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
         return list(self._catalog)
 
     def get_metas(self, skill_name: str) -> list[SkillMeta]:
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
         return [meta for meta in self._catalog if meta.name.casefold() == skill_name.casefold()]
 
@@ -393,7 +397,7 @@ class SkillLoader:
     def get_meta_by_path(self, source_path: str | Path | None) -> SkillMeta | None:
         if source_path is None:
             return None
-        if not self._catalog:
+        if not self._discovered:
             self.discover()
         return self._path_cache.get(self._path_key(Path(source_path)))
 

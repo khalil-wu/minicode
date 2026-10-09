@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Profiler } from "react";
 import { CollaborationCell } from "./CollaborationCell";
 import { useAppStore } from "../../stores";
 import type { CollaborationCellState } from "./cellTypes";
@@ -18,6 +19,21 @@ describe("CollaborationCell agent navigation", () => {
     entries: [{ agentId: "worker-a", agentLabel: "布局任务", content: "检查页面布局" }],
     collapsed: false, createdAt: 1,
   };
+
+  it("does not re-render an identity row when a different worker reports progress", () => {
+    useAppStore.setState((state) => ({ subagents: [...state.subagents,
+      { id: "worker-b", teammateName: "Lin", role: "explore", status: "running" }],
+    }));
+    const commits = vi.fn();
+    render(<Profiler id="identity-row" onRender={commits}><CollaborationCell cell={cell} conversationId="collaboration-owner" /></Profiler>);
+    const initial = commits.mock.calls.length;
+    act(() => useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => agent.id === "worker-b"
+      ? { ...agent, currentActivity: "新的进度" } : agent) })));
+    expect(commits.mock.calls.length).toBe(initial);
+    act(() => useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => agent.id === "worker-a"
+      ? { ...agent, teammateName: "Ada updated" } : agent) })));
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada updated" })).toBeTruthy();
+  });
 
   it("keeps delegation success separate from the child's live status and opens that child", () => {
     render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);

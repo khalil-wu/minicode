@@ -146,13 +146,13 @@ function readApprovedWorkspaceRoots() {
   return roots;
 }
 
-function persistApprovedWorkspaceRoots() {
+function persistApprovedWorkspaceRoots(roots) {
   if (!trustedRootsFile) return;
   const directory = path.dirname(trustedRootsFile);
   fs.mkdirSync(directory, { recursive: true });
   writeFileAtomic.sync(
     trustedRootsFile,
-    `${JSON.stringify({ version: 1, roots: Array.from(approvedWorkspaceRoots).sort() }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, roots: Array.from(roots).sort() }, null, 2)}\n`,
     { encoding: "utf8" },
   );
 }
@@ -171,9 +171,11 @@ function rememberTrustedWorkspaceRoot(targetPath) {
   } catch {
     return "";
   }
+  if (!Array.from(approvedWorkspaceRoots).some((root) => isSamePath(root, resolved))) {
+    persistApprovedWorkspaceRoots([...approvedWorkspaceRoots, resolved]);
+    approvedWorkspaceRoots.add(resolved);
+  }
   trustedWorkspaceRoots.add(resolved);
-  approvedWorkspaceRoots.add(resolved);
-  persistApprovedWorkspaceRoots();
   return resolved;
 }
 

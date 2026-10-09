@@ -78,7 +78,7 @@ async def handle_provider_transport_failure(
 
     is_timeout = isinstance(failure, asyncio.TimeoutError)
     cause = failure if is_timeout else failure.cause
-    classification = classify_llm_error(cause)
+    classification = classify_llm_error("timeout" if is_timeout else cause)
     error_parts = [
         f"stream timeout after {settings.stream_timeout_seconds}s"
         if is_timeout
@@ -126,26 +126,29 @@ async def handle_provider_transport_failure(
             if safe_to_replay
             else (stream_attempt, None)
         )
+    server_delay = retry_after_seconds(cause, default=None) if not is_timeout else None
+    if classification.provider_error_type == "busy" and server_delay is None:
+        retry_delay = None
+    retry_limit = max_retries if max_retries is not None else settings.stream_max_attempts
+    switched_transport = bool(
+        safe_to_replay and not connection_retry and retry_delay is None
+        and not classification.fatal and classification.retryable
+        and stream_attempt >= retry_limit
+        and (classification.provider_error_type != "busy" or server_delay is not None)
+        and switch_transport is not None and switch_transport()
+    )
+    if switched_transport:
+        new_attempt = 0
+        retry_delay = server_delay if server_delay is not None else 0.0
     if safe_to_replay and retry_delay is not None:
-        # Reserve the last existing retry for HTTP when WS repeatedly fails.
-        # This does not extend the retry budget or replay committed effects.
-        retry_limit = max_retries if max_retries is not None else settings.stream_max_attempts
-        if (
-            not connection_retry
-            and new_attempt > 1
-            and new_attempt == retry_limit
-            and switch_transport is not None
-            and switch_transport()
-        ):
+        if switched_transport:
             yield AgentEvent.progress(
-                "WebSocket 持续中断，改用 HTTPS 重试。",
+                "WebSocket 重试已耗尽，改用 HTTPS 继续。",
                 stage="status", status="running", phase="recover", label="provider",
                 provider_state="reconnecting", id=progress_id or provider_progress_id(iteration_id_value),
             )
-        if not is_timeout:
-            provider_retry_after = retry_after_seconds(cause)
-            if provider_retry_after > 0:
-                retry_delay = max(retry_delay, provider_retry_after)
+        if not connection_retry and server_delay is not None:
+            retry_delay = server_delay
         error_type = "timeout" if is_timeout else classification.error_type
         provider_error_type = (
             "network" if is_timeout else classification.provider_error_type
@@ -231,6 +234,11 @@ async def handle_provider_transport_failure(
             # No ordinal: the wait is unbounded, so advertising N/M would claim
             # a budget that is not being spent.
             progress_message = "无法连接提供商，正在等待网络恢复"
+            progress_summary = span_summary
+            progress_retry_attempt = None
+            progress_max_retries = None
+        elif switched_transport:
+            progress_message = "切换传输后正在连接提供商"
             progress_summary = span_summary
             progress_retry_attempt = None
             progress_max_retries = None

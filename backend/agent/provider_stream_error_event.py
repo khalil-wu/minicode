@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from backend.agent.loop_runtime_helpers import (
 )
 from backend.agent.policies.stream_retry import plan_connection_retry
 from backend.agent.message import AgentEvent
+from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.recovery_controller import RecoveryProfile
@@ -36,12 +38,33 @@ Degrade = Callable[..., AsyncIterator[AgentEvent | TurnTerminalProjection]]
 ErrorRecovery = Callable[..., Awaitable[bool]]
 
 
-def committed_provider_error(state, classification, message):
-    """Keep fatal errors terminal after committed tools have been retained."""
-    if not classification.fatal:
-        return None
-    _set_terminal_reason(state, terminal_reason_from_error_type(classification.error_type), status="failed")
-    return AgentEvent.error(message, recoverable=True, error_type=classification.error_type)
+async def committed_provider_error(failure, *, state, turn_kernel, provider_attempt, progress_id):
+    """Report the real failure while retaining tools that already executed."""
+    if isinstance(failure, BaseException):
+        cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
+        classification = classify_llm_error("timeout" if isinstance(cause, asyncio.TimeoutError) else cause)
+        message = format_llm_error(cause) or "Provider request timed out"
+        failure_data = {}
+    else:
+        _, classification, failure_data = provider_error_details(failure)
+        message = failure.content
+    await turn_kernel.close_provider_attempt(provider_attempt, status="failed",
+        summary="Provider stream failed after committed tools", data={
+            **failure_data, "error_type": classification.error_type,
+            "provider_error_type": classification.provider_error_type,
+            "error_message": message,
+        }, project_progress=classification.fatal)
+    if classification.fatal:
+        _set_terminal_reason(state, terminal_reason_from_error_type(classification.error_type), status="failed")
+        return AgentEvent.error(message, recoverable=False, error_type=classification.error_type,
+            provider_error_type=classification.provider_error_type)
+    state.mark_transition("provider_stream_after_tools", error_type=classification.error_type,
+        provider_error_type=classification.provider_error_type, error_message=message)
+    return AgentEvent.progress(
+        "模型连接中断，保留已完成的工具结果后继续。", stage="status", status="running",
+        phase="recover", label="provider", provider_state="reconnecting", id=progress_id,
+        detail=message, error_message=message,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +183,7 @@ async def handle_provider_error_event(
 
     classification_input, classification, provider_failure_data = provider_error_details(event)
     raw = getattr(event, "raw", {}) or {}
+    server_delay = max(0.0, float(raw["retry_after_seconds"])) if raw.get("retry_after_seconds") is not None else None
     incomplete_tool_stream = stream_state.incomplete_tool_stream
     if (
         raw.get("status_code") == 401 and refresh_auth is not None
@@ -221,23 +245,27 @@ async def handle_provider_error_event(
                 query_source=query_source,
                 retry_state=retry_state,
             )
+        if classification.provider_error_type == "busy" and server_delay is None:
+            retry_delay = None
+        retry_limit = max_retries if max_retries is not None else total_attempts
+        switched_transport = bool(
+            not connection_retry and retry_delay is None and not classification.fatal
+            and classification.retryable and stream_attempt >= retry_limit
+            and (classification.provider_error_type != "busy" or server_delay is not None)
+            and switch_transport is not None and switch_transport()
+        )
+        if switched_transport:
+            new_attempt = 0
+            retry_delay = server_delay if server_delay is not None else 0.0
         if retry_delay is not None:
-            retry_limit = max_retries if max_retries is not None else total_attempts
-            if not connection_retry and new_attempt > 1 and new_attempt == retry_limit and switch_transport is not None and switch_transport():
+            if switched_transport:
                 yield AgentEvent.progress(
-                    "WebSocket 持续中断，改用 HTTPS 重试。",
+                    "WebSocket 重试已耗尽，改用 HTTPS 继续。",
                     stage="status", status="running", phase="recover", label="provider",
                     provider_state="reconnecting", id=progress_id or provider_progress_id(iteration_id_value),
                 )
-            try:
-                provider_retry_after = max(
-                    0.0,
-                    float(raw.get("retry_after_seconds") or 0.0),
-                )
-            except (TypeError, ValueError):
-                provider_retry_after = 0.0
-            if provider_retry_after > 0:
-                retry_delay = max(retry_delay, provider_retry_after)
+            if not connection_retry and server_delay is not None:
+                retry_delay = server_delay
             await turn_kernel.close_provider_attempt(
                 provider_attempt,
                 status="failed",
@@ -305,7 +333,7 @@ async def handle_provider_error_event(
                     provider_state="reconnecting",
                     visibility="debug",
                 )
-            else:
+            elif not switched_transport:
                 attempt_label = (
                     f"第 {new_attempt}/{effective_max_retries} 次"
                     if effective_max_retries > 0

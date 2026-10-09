@@ -6,20 +6,29 @@ from copy import deepcopy
 from typing import Any, Iterable
 
 
-def code_mode_parameters(parameters: dict[str, Any]) -> str:
+def code_mode_parameters(parameters: dict[str, Any] | bool) -> str:
     """Render the object actually accepted by tools.name(args), including unions.
 
     This directory is model input. Positional-looking signatures and an arbitrary
     four-field cutoff caused invalid search calls and omitted delegation prompts.
     ALL_TOOLS retains the complete JSON Schema, including numeric constraints.
     """
+    if isinstance(parameters, bool):
+        return "unknown" if parameters else "never"
+    if "const" in parameters:
+        return json.dumps(parameters["const"], ensure_ascii=False)
     if "enum" in parameters:
         return " | ".join(json.dumps(value, ensure_ascii=False) for value in parameters["enum"])
     alternatives = parameters.get("anyOf") or parameters.get("oneOf")
     if alternatives:
         base = {key: value for key, value in parameters.items() if key not in {"anyOf", "oneOf"}}
-        return " | ".join(code_mode_parameters({**base, **branch}) for branch in alternatives)
+        return " | ".join(code_mode_parameters({**base, **branch} if isinstance(branch, dict) else branch) for branch in alternatives)
+    if intersections := parameters.get("allOf"):
+        types = [code_mode_parameters(branch) for branch in intersections]
+        return " & ".join(f"({kind})" if " | " in kind else kind for kind in types)
     kind = parameters.get("type", "object" if "properties" in parameters else "unknown")
+    if isinstance(kind, list):
+        return " | ".join(code_mode_parameters({**parameters, "type": item}) for item in kind)
     if kind == "object" and "properties" in parameters:
         required = parameters.get("required", [])
         fields = [
@@ -27,11 +36,17 @@ def code_mode_parameters(parameters: dict[str, Any]) -> str:
             f"{'' if name in required else '?'}: {code_mode_parameters(value)}"
             for name, value in parameters["properties"].items()
         ]
+        if any(isinstance(value, dict) and value.get("description") for value in parameters["properties"].values()):
+            lines = ["{"]
+            for (name, value), field in zip(parameters["properties"].items(), fields):
+                if isinstance(value, dict):
+                    lines.extend(f"  // {line.strip()}" for line in str(value.get("description") or "").splitlines() if line.strip())
+                lines.append(f"  {field};")
+            lines.append("}")
+            return "\n".join(lines)
         return "{ " + ", ".join(fields) + " }"
     if kind == "array":
         return f"Array<{code_mode_parameters(parameters.get('items', {}))}>"
-    if isinstance(kind, list):
-        return " | ".join("number" if item == "integer" else item for item in kind)
     return "number" if kind == "integer" else kind
 
 

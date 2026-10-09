@@ -324,13 +324,8 @@ export const pickDirectory = async (): Promise<string | null> => {
 export const pickWorkspaceDirectory = async (): Promise<string | null> =>
   (await desktop()?.pickWorkspaceDirectory()) ?? null;
 
-export const trustWorkspace = async (path: string): Promise<string | null> => {
-  try {
-    return (await desktop()?.trustWorkspace(path)) ?? null;
-  } catch {
-    return null;
-  }
-};
+export const trustWorkspace = async (path: string): Promise<string | null> =>
+  (await desktop()?.trustWorkspace(path)) ?? null;
 
 // --- Filesystem ---
 

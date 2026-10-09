@@ -712,7 +712,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }));
     if (targetWorkspace) {
       const rt = desktop();
-      if (rt?.trustWorkspace) rt.trustWorkspace(targetWorkspace);
+      if (rt?.trustWorkspace) void rt.trustWorkspace(targetWorkspace).catch((error) => {
+        pushToast(`无法信任工作区 ${targetWorkspace}：${error instanceof Error ? error.message : String(error)}`, "error");
+      });
     }
   },
   switchConversation: (id) => {

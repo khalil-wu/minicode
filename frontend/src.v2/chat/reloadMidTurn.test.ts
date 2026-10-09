@@ -155,7 +155,7 @@ const wire = (withPartialAssistant: boolean) => [
   },
 ];
 
-const SESSION_TYPES = new Set(["session.restored", "conversation.switched"]);
+const SESSION_TYPES = new Set(["session.restored", "session.synced", "conversation.switched"]);
 
 const deliver = (raw: Record<string, unknown>) => {
   const event = normalizeInboundServerEvent(raw);
@@ -221,5 +221,30 @@ describe("renderer reload while a turn is running", () => {
     const assistant = useAppStore.getState().messages.find((message) => message.id === A);
     expect(assistant?.terminalStatus).toBe("partial");
     expect(assistant?.isStreaming).toBeFalsy();
+  });
+  it("keeps the newest live item and the recent-page cursor through deferred restore and session sync", () => {
+    const events = wire(true);
+    const snapshot = conversationPayload(true);
+    const page = { ...snapshot, transcript: [
+      ...Array.from({ length: 80 - snapshot.transcript.length }, (_, index) => ({ id: `history-${index}`, role: index % 2 ? "assistant" : "user", content: `History ${index}`, timestamp: now })),
+      ...snapshot.transcript,
+    ], transcript_page: { before_message_id: "history-0", has_more: true, total_messages: 240 } };
+    const withPage = (raw: Record<string, unknown>) => ({ ...raw, conversation: page, active_conversation: page,
+      session: { ...runtimeSnapshot(true), active_conversation: page } });
+    deliver(withPage(events[0]));
+    deliver({ ...withPage(events[1]), is_hydrating: true });
+    expect(useAppStore.getState().messages).toHaveLength(80);
+    expect(useAppStore.getState().conversationHistoryPages[C]).toMatchObject({ hasMore: true, beforeMessageId: "history-0" });
+    for (const event of events.slice(2, 6)) deliver(event);
+    expect(summarize().assistantTextBlocks).toContain("FINAL ANSWER");
+    deliver({ ...withPage(events[1]), is_hydrating: false });
+    expect(useAppStore.getState().conversationHydration[C]?.isHydrating).toBe(false);
+    expect(summarize().assistantTextBlocks).toContain("FINAL ANSWER");
+    deliver({ ...withPage(events[0]), type: "session.synced", synced: true, protocol_version: "1.0.0" });
+    expect(summarize().assistantTextBlocks).toContain("FINAL ANSWER");
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(useAppStore.getState().conversationHistoryPages[C]).toMatchObject({ hasMore: true, beforeMessageId: "history-0" });
+    for (const event of events.slice(6)) deliver(event);
+    expect(summarize().assistantTerminalStatus).toBe("completed");
   });
 });

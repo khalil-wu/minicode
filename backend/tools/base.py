@@ -530,6 +530,9 @@ class BaseTool(ABC):
 
     name: str
     description: str
+    # External tools keep raw and historical model identities for policy
+    # matching when the current model-facing name is sanitized or shortened.
+    policy_aliases: tuple[str, ...] = ()
     permission: PermissionLevel = PermissionLevel.AUTO
     read_only: bool = False
     orchestrates_tools: bool = False
@@ -610,6 +613,11 @@ class BaseTool(ABC):
         schema the model sees.
         """
         return getattr(self, "description", "") or ""
+
+    @property
+    def policy_identity(self) -> str:
+        """Stable identity written into durable permission rules."""
+        return self.name
 
     def model_schema(self) -> ToolSchema:
         """Compact schema shown only to the model.

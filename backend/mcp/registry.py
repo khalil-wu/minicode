@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import logging
 import json
 import re
@@ -35,20 +36,51 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_name_for_mcp(name: str) -> str:
-    """Claude Code's wire-name normalization for MCP servers and tools."""
+    """Sanitize the model name while keeping raw MCP identities for routing."""
     return re.sub(r"[^a-zA-Z0-9_-]", "_", str(name or ""))
 
 
-# Claude Code MAX_MCP_DESCRIPTION_LENGTH (client.ts:218): tool descriptions
-# longer than this are truncated with a marker before reaching the model.
-MAX_MCP_DESCRIPTION_LENGTH = 2048
+def _model_tool_names(proxies: list[MCPToolProxy], used_names: set[str]) -> dict[tuple[str, str], str]:
+    """Codex's catalog-wide namespace/name collision hashing and 128-byte cap."""
+    namespaces: dict[str, set[str]] = {}
+    tools: dict[tuple[str, str], set[str]] = {}
+    candidates: list[tuple[str, str, str, str, tuple[str, str]]] = []
+    for proxy in proxies:
+        server, raw_name = proxy._server_name, proxy._tool_def.name
+        namespace = f"mcp__{normalize_name_for_mcp(server)}"
+        namespace_identity = f"{server}\0{server}\0"
+        raw_identity = f"{namespace_identity}\0{raw_name}\0{raw_name}"
+        namespaces.setdefault(namespace, set()).add(namespace_identity)
+        candidates.append((namespace, normalize_name_for_mcp(raw_name), namespace_identity, raw_identity, (server, raw_name)))
 
+    def suffix(identity: str) -> str:
+        return "_" + hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
 
-def _truncate_mcp_description(description: str) -> str:
-    desc = str(description or "")
-    if len(desc) <= MAX_MCP_DESCRIPTION_LENGTH:
-        return desc
-    return desc[:MAX_MCP_DESCRIPTION_LENGTH] + "… [truncated]"
+    resolved: list[tuple[str, str, str, tuple[str, str]]] = []
+    for namespace, tool_name, namespace_identity, raw_identity, identity in candidates:
+        if len(namespaces[namespace]) > 1:
+            namespace += suffix(namespace_identity)
+        tools.setdefault((namespace, tool_name), set()).add(raw_identity)
+        resolved.append((namespace, tool_name, raw_identity, identity))
+
+    names: dict[tuple[str, str], str] = {}
+    for namespace, tool_name, raw_identity, identity in sorted(resolved, key=lambda item: item[2]):
+        if len(tools[(namespace, tool_name)]) > 1:
+            tool_name += suffix(raw_identity)
+        name = f"{namespace}__{tool_name}"
+        attempt = 0
+        while len(name) > 128 or name in used_names:
+            hash_suffix = suffix(raw_identity if attempt == 0 else f"{raw_identity}\0{attempt}")
+            room = 128 - len(namespace) - 2
+            name = (
+                f"{namespace}__{tool_name[:room - len(hash_suffix)]}{hash_suffix}"
+                if room >= len(hash_suffix)
+                else f"{namespace[:128 - len(hash_suffix) - 2]}__{hash_suffix}"
+            )
+            attempt += 1
+        used_names.add(name)
+        names[identity] = name
+    return names
 
 
 def _model_visible(tool_def: MCPToolDef) -> bool:
@@ -94,7 +126,10 @@ class MCPToolProxy(BaseTool):
             f"mcp__{normalize_name_for_mcp(server_name)}__"
             f"{normalize_name_for_mcp(tool_def.name)}"
         )
-        self.description = _truncate_mcp_description(tool_def.description)
+        self.policy_aliases = tuple(dict.fromkeys((
+            f"mcp__{server_name}__{tool_def.name}", self.name,
+        )))
+        self.description = tool_def.description
         # Keep the qualified protocol name for execution and policy matching,
         # while projecting MCP calls the same way Codex does in its activity UI.
         self.activity_kind = "mcpToolCall"
@@ -142,6 +177,17 @@ class MCPToolProxy(BaseTool):
         )
 
     @property
+    def server_name(self) -> str:
+        return self._server_name
+
+    @property
+    def policy_identity(self) -> str:
+        raw = f"mcp__{self._server_name}__{self._tool_def.name}"
+        # Rules use fnmatch syntax. An exact admitted tool name containing glob
+        # characters remains an exact rule when converted from its wire name.
+        return raw.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+    @property
     def _client(self) -> MCPClient | None:
         """Dynamic client lookup — survives MCP server reconnections."""
         if self._manager is not None:
@@ -181,10 +227,20 @@ class MCPToolProxy(BaseTool):
             parameters=params,
         )
 
+    def model_schema(self) -> ToolSchema:
+        schema = self.get_schema()
+        parameters = dict(schema.parameters)
+        # OpenAI requires the root properties object even for no-argument MCP
+        # tools; Codex adapts this at its model schema boundary too.
+        parameters.setdefault("properties", {})
+        return ToolSchema(name=self.name, description=self.description, parameters=parameters)
+
     def get_spec(self):
         from backend.mcp.tool_spec_adapter import MCPToolSpecAdapter
 
-        return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(self.name)
+        return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(
+            self.name, policy_aliases=self.policy_aliases,
+        )
 
     def _catalog_is_current(self) -> bool:
         """Reject a call whose model-visible MCP schema crossed a catalog change.
@@ -422,10 +478,11 @@ class MCPToolRegistry:
         if manager is None or self._version == manager.registry_version:
             return
         tools_by_server = manager.get_all_tools()
-        for server_name in list(self._server_tools):
-            self.unregister_server_tools(server_name)
-        for server_name, tools in tools_by_server.items():
-            self.register_server_tools(server_name, tools, manager.get_client(server_name))
+        proxies = [
+            proxy for server_name, tools in tools_by_server.items()
+            for proxy in self._admitted_proxies(server_name, tools, manager.get_client(server_name))
+        ]
+        self._publish_catalog(proxies)
         self._version = manager.registry_version
 
     def register_server_tools(
@@ -435,12 +492,22 @@ class MCPToolRegistry:
         client: MCPClient,
     ) -> int:
         """Register all tools exposed by one MCP server."""
-        self.unregister_server_tools(server_name)
-        registered_names: list[str] = []
+        proxies = [
+            self._tool_registry.get_tool(name)
+            for owner, names in self._server_tools.items() if owner != server_name
+            for name in names
+        ]
+        proxies.extend(self._admitted_proxies(server_name, tools, client))
+        self._publish_catalog(proxies)
+        return len(self._server_tools.get(server_name, []))
 
+    def _admitted_proxies(self, server_name: str, tools: list[MCPToolDef], client: MCPClient) -> list[MCPToolProxy]:
+        proxies: list[MCPToolProxy] = []
+        seen: set[str] = set()
         for tool_def in tools:
-            if not _model_visible(tool_def):
+            if not _model_visible(tool_def) or tool_def.name in seen:
                 continue
+            seen.add(tool_def.name)
             proxy = MCPToolProxy(
                 server_name=server_name,
                 tool_def=tool_def,
@@ -457,46 +524,46 @@ class MCPToolRegistry:
             except SchemaError as exc:
                 logger.warning("[MCPRegistry] Skipped %s: invalid input schema: %s", proxy.name, exc.message)
                 continue
-            existing_owner = self._wire_name_owner.get(proxy.name)
-            if existing_owner is not None:
-                # Manual/user MCP config outranks plugin config. For equal
-                # scopes, preserve deterministic first-wins behavior rather
-                # than silently routing a wire name to a different tool.
-                replace_plugin = existing_owner.startswith("plugin:") and not server_name.startswith("plugin:")
-                if not replace_plugin:
-                    logger.warning(
-                        "[MCPRegistry] Skipped normalized tool-name collision %s from %s; owned by %s",
-                        proxy.name,
-                        server_name,
-                        existing_owner,
-                    )
-                    continue
-                previous_names = self._server_tools.get(existing_owner, [])
-                self._server_tools[existing_owner] = [
-                    name for name in previous_names if name != proxy.name
-                ]
-                self._tool_registry.unregister(proxy.name)
-                self._wire_name_owner.pop(proxy.name, None)
-                logger.info(
-                    "[MCPRegistry] Manual server %s replaced plugin wire-name owner %s for %s",
-                    server_name,
-                    existing_owner,
-                    proxy.name,
-                )
-            elif self._tool_registry.has_tool(proxy.name):
-                logger.warning(
-                    "[MCPRegistry] Skipped MCP tool %s from %s; a non-MCP tool already owns the name",
-                    proxy.name,
-                    server_name,
-                )
-                continue
-            self._tool_registry.register(proxy, owner=f"mcp:{server_name}")
-            self._wire_name_owner[proxy.name] = server_name
-            registered_names.append(proxy.name)
-            logger.info("[MCPRegistry] Registered tool: %s (from %s)", proxy.name, server_name)
+            proxies.append(proxy)
+        return proxies
 
-        self._server_tools[server_name] = registered_names
-        return len(registered_names)
+    def _publish_catalog(self, proxies: list[MCPToolProxy]) -> None:
+        current_names = set(self._wire_name_owner)
+        previous = {
+            (proxy._server_name, proxy._tool_def.name): proxy
+            for name in current_names
+            if (proxy := self._tool_registry.get_tool(name)) is not None
+        }
+        names = _model_tool_names(proxies, set(self._tool_registry.list_tools()) - current_names)
+        desired: dict[str, MCPToolProxy] = {}
+        for proxy in proxies:
+            identity = (proxy._server_name, proxy._tool_def.name)
+            name = names[identity]
+            old = previous.get(identity)
+            aliases = tuple(dict.fromkeys((
+                *proxy.policy_aliases,
+                *(old.policy_aliases if old is not None else ()),
+                *((old.name,) if old is not None else ()),
+                name,
+            )))
+            if name != proxy.name or aliases != proxy.policy_aliases:
+                # In-flight forks share tool instances. Rename a catalog copy
+                # so their already-admitted schemas keep their exact identity.
+                proxy = copy.copy(proxy)
+                proxy.name = name
+                proxy.policy_aliases = aliases
+            desired[name] = proxy
+        for name in current_names:
+            if name not in desired or self._tool_registry.get_tool(name) is not desired[name]:
+                self._tool_registry.unregister(name)
+        self._server_tools = {}
+        self._wire_name_owner = {}
+        for name, proxy in desired.items():
+            server = proxy._server_name
+            if self._tool_registry.get_tool(name) is not proxy:
+                self._tool_registry.register(proxy, owner=f"mcp:{server}")
+            self._wire_name_owner[name] = server
+            self._server_tools.setdefault(server, []).append(name)
 
     def unregister_server_tools(self, server_name: str) -> None:
         """Unregister all tools that came from one MCP server."""

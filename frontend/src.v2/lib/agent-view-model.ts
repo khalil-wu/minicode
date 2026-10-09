@@ -189,7 +189,20 @@ export function projectAgentViews(
   agents: SubagentState[],
   now = Date.now(),
 ): AgentView[] {
-  const resolve = (id: string) => agents.find((agent) => agent.id === id || agent.taskId === id);
+  const byId = new Map<string, SubagentState>();
+  const childrenByParent = new Map<string, AgentLink[]>();
+  for (const agent of agents) {
+    for (const id of [agent.id, agent.taskId]) {
+      if (id && !byId.has(id)) byId.set(id, agent);
+    }
+    const parentId = agent.parentRunId;
+    if (parentId) {
+      const children = childrenByParent.get(parentId) ?? [];
+      children.push(agentLink(agent));
+      childrenByParent.set(parentId, children);
+    }
+  }
+  const resolve = (id: string) => byId.get(id);
   const links = (ids: string[] = []) => ids.flatMap((id) => {
     const agent = resolve(id);
     return agent ? [agentLink(agent)] : [];
@@ -214,7 +227,8 @@ export function projectAgentViews(
         && !resultError
         && (source.resultAvailable || terminalWithoutResult),
       );
-      const parent = source.parentRunId ? resolve(source.parentRunId) : undefined;
+      const parentId = source.parentRunId;
+      const parent = parentId ? resolve(parentId) : undefined;
       return {
         id: source.id,
         model: source.model,
@@ -231,7 +245,7 @@ export function projectAgentViews(
         parent: parent ? agentLink(parent) : undefined,
         dependencies: links(source.dependsOn),
         blockedDependencies: links(source.blockedBy),
-        children: agents.filter((agent) => agent.parentRunId === source.id).map(agentLink),
+        children: childrenByParent.get(source.id) ?? [],
         awaitingPlanApproval: isLiveAgent(source) && Boolean(source.awaitingPlanApproval),
         effectiveStatus,
         hasResult: Boolean(resultError || resultContent || source.resultAvailable),
@@ -245,6 +259,29 @@ export function projectAgentViews(
         resultError,
       };
     });
+}
+
+type AgentReferenceIndex = { identities: Map<string, SubagentState>; names: Map<string, SubagentState | null> };
+const referenceIndexes = new WeakMap<SubagentState[], AgentReferenceIndex>();
+
+/** Collaboration rows subscribe only to the real identities they display. */
+export function agentsForReferences(agents: SubagentState[], ids: readonly string[]): SubagentState[] {
+  let index = referenceIndexes.get(agents);
+  if (!index) {
+    index = { identities: new Map(), names: new Map() };
+    for (const agent of agents) {
+      if (agent.role === "message" || agent.role === "workflow") continue;
+      for (const identity of [agent.id, agent.agentPath]) {
+        if (identity && !index.identities.has(identity)) index.identities.set(identity, agent);
+      }
+      if (agent.teammateName) index.names.set(agent.teammateName, index.names.has(agent.teammateName) ? null : agent);
+    }
+    referenceIndexes.set(agents, index);
+  }
+  return ids.flatMap((id) => {
+    const agent = index.identities.get(id) ?? index.names.get(id);
+    return agent ? [agent] : [];
+  });
 }
 
 export function projectAllAgentViews(agents: SubagentState[], now = Date.now()): AgentView[] {

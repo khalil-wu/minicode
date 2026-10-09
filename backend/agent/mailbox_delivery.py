@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
@@ -451,6 +451,7 @@ async def inject_subagent_mailbox_updates(
     conversation_id: str,
     emit_event: Any | None = None,
     run_context: RunContext | None = None,
+    before_inject: Callable[[], None] | None = None,
 ) -> int:
     """Pull addressed messages into a subagent at an iteration boundary."""
     if run_context is None or not _mailbox_deliverable(metadata, run_context):
@@ -582,6 +583,8 @@ async def inject_subagent_mailbox_updates(
     max_seq = max(int(getattr(message, "seq", 0) or 0) for message in messages)
 
     try:
+        if before_inject is not None:
+            before_inject()
         ctx.append_user(format_subagent_mailbox_injection(messages))
     except Exception:
         release_claims = getattr(runtime, "release_swarm_message_claims", None)
@@ -692,6 +695,7 @@ async def inject_parent_notifications(
     parent_run_id: str = "",
     conversation_id: str = "",
     emit_event: Any | None = None,
+    before_inject: Callable[[], None] | None = None,
 ) -> int:
     """Inject durable child completion notifications into a parent turn."""
     if run_context is None or not _mailbox_deliverable(metadata, run_context):
@@ -726,14 +730,10 @@ async def inject_parent_notifications(
     mark_failed = getattr(runtime, "mark_parent_notification_failed", None)
     if not callable(list_notifications) or not callable(ack_notification):
         return 0
-    try:
-        notifications = list_notifications(
-            parent_run_id=parent_run_id,
-            conversation_id=conversation_id,
-        )
-    except Exception as exc:
-        logger.debug("list parent notifications failed: %s", exc)
-        return 0
+    notifications = list_notifications(
+        parent_run_id=parent_run_id,
+        conversation_id=conversation_id,
+    )
     prompt_context = state.prompt_context if isinstance(state.prompt_context, dict) else {}
     already_injected = {
         str(value or "").strip()
@@ -786,6 +786,8 @@ async def inject_parent_notifications(
                 )
                 continue
         try:
+            if before_inject is not None:
+                before_inject()
             ctx.append_user(format_parent_notification_message(item))
             if subagent_id:
                 raw_collected = prompt_context.get("collected_subagent_ids", [])
@@ -823,7 +825,7 @@ async def inject_parent_notifications(
                     parent_run_id=parent_run_id,
                     conversation_id=conversation_id,
                 )
-            logger.debug("parent notification inject failed for %s: %s", notification_id, exc)
+            raise
 
     if injected:
         state.mark_transition(

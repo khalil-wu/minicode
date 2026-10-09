@@ -66,6 +66,7 @@ import { releasePreviewScope } from "./previewRequestScope";
 import { providerTracePayloadFromDone } from "./providerTrace";
 import { incomingConversationMetaIsStale, isVisibleConversationMeta, normalizedConversationRevision } from "./activeConversation";
 import { modelSelectionPatch, runtimeModelSelectionPatch } from "../lib/model-selection";
+import { releaseConversationReadingState } from "./transcriptReadingState";
 
 type ConversationSummary = ConversationSummaryPayload;
 type ConversationPayload = ConversationRecordPayload;
@@ -1307,7 +1308,7 @@ export const handleSessionEvent = (
           activeConversation,
           activeConversationId,
           fallbackMessages,
-          { forceAuthoritative: authoritativeEpochReset },
+          { forceAuthoritative: authoritativeEpochReset, preserveStreamingAssistant: hasActiveStream },
         );
       } else {
         clearActiveConversationView();
@@ -1412,6 +1413,7 @@ export const handleSessionEvent = (
           .map((conversation) => conversation.id)
           .filter((id) => !knownConversationIds.has(id));
         for (const removedId of removedConversationIds) {
+          releaseConversationReadingState(removedId);
           releasePreviewScope(removedId);
           useAppStore.getState().clearPendingProviderProgress(removedId);
           useAppStore.getState().clearConversationControlPlaneState(removedId);

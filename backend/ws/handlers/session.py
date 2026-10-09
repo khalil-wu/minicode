@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
 
-from backend.conversations.public_projection import project_public_conversation
+from backend.conversations.models import ConversationRecord
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -170,16 +171,8 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     active_payload = restored_conversation
     is_hydrating = False
     if restored_conversation_id:
-        target = session.conversation_repo.get_conversation(str(restored_conversation_id))
-        if (
-            target is not None
-            and not getattr(target, "archived", False)
-            and getattr(target, "conversation_type", "main") == "main"
-        ):
-            target = await session.reconcile_persisted_ui_agent_state(
-                target.id,
-                conversation=target,
-            ) or target
+        target = ConversationRecord.from_dict(restored_conversation)
+        if not target.archived and target.conversation_type == "main":
             session.active_conversation_id = target.id
             workspace_activated = await session.switch_workspace_for_conversation(target, announce=False)
             if not workspace_activated:
@@ -188,17 +181,32 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                     "The conversation was restored, but its workspace could not be activated. "
                     "Reopen or trust the workspace before using workspace tools."
                 )
-            # Session restore publishes the same hydration lifecycle as an
-            # explicit conversation switch.  Without the completion callback
-            # the renderer can remain in the restoring state indefinitely.
-            is_hydrating = session.load_active_conversation_snapshot(
-                target.id,
-                target.context_snapshot,
-                notify=True,
-                defer_start=True,
-            )
-            session.sync_permission_mode_with_active_conversation(source="session.restore")
-            active_payload = project_public_conversation(target, transcript_limit=80)
+            async def restored(owner: str) -> None:
+                if owner != session.active_conversation_id:
+                    return
+                if session.conversation_runtime.hydration_error is not None:
+                    await session._on_conversation_hydration_complete(owner)
+                    return
+                generation = session.conversation_runtime._hydration_generation
+                conversation = await session.reconcile_persisted_ui_agent_state(owner)
+                current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+                if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
+                    return
+                session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
+                session.refresh_llm_selection()
+                await session.send_payload(
+                    build_restore_conversation_switched_payload(
+                        restored_conversation_id=owner, active_payload=current_view,
+                        is_hydrating=False, runtime_snapshot=session.runtime_snapshot(),
+                    ), log_context="conversation.switched",
+                )
+                await session.reemit_pending_state(conversation_id=owner)
+
+            session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+            is_hydrating = True
+            session.permission_context = session.permission_context_for_conversation(target, source="session.restore")
+            session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.session.restore")
+            session.refresh_llm_selection()
         else:
             restored_conversation_id = None
             active_payload = None
@@ -292,6 +300,14 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     from backend.services.session_restore_service import build_session_synced_payload, seq_from_restore_payload
     from backend.ws.session_restore import SessionRestoreManager
 
+    # Other windows can switch/delete this owner during the disk read. Freeze
+    # the runtime snapshot only after its page belongs to the current owner.
+    while True:
+        owner = session.active_conversation_id
+        active_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner) if owner else None
+        if owner == session.active_conversation_id:
+            break
+
     requested_last_seq = seq_from_restore_payload(data)
     current_seq = session.event_outbox.current_replay_seq
     replay_log_degraded = session.event_outbox.replay_log_degraded
@@ -322,7 +338,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         build_session_synced_payload(
             result,
             protocol_version=RUNTIME_PROTOCOL_VERSION,
-            active_conversation=session.active_conversation,
+            active_conversation=active_view,
             active_conversation_id=session.active_conversation_id,
             workspace_root=workspace_root,
             selected_model=session.selected_model,

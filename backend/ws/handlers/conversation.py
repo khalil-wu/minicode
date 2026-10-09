@@ -1240,7 +1240,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
 
 async def handle_conversation_unarchive(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     conversation_id = str(data.get("conversation_id", ""))
-    updated = session.conversation_repo.set_archived(conversation_id, False)
+    updated = await to_thread_cancel_safe(session.conversation_repo.set_archived, conversation_id, False)
     if updated is None:
         await emit_conversation_not_found(session, conversation_id)
         from backend.ws.command_results import emit_command_error
@@ -3258,7 +3258,7 @@ async def handle_conversation_permission_rules_add(session: "WebSocketSession", 
         await session.emit_command_result("permissions.rules.add", f"Conversation '{conversation_id}' not found", level="error")
         return True
 
-    mutation = prepare_permission_rule_add(target, data, conversation_id=conversation_id)
+    mutation = prepare_permission_rule_add(target, data, conversation_id=conversation_id, tool_registry=session.tool_registry)
     if not mutation.should_update:
         await session.emit_command_result(
             mutation.outcome.command,
@@ -3313,7 +3313,7 @@ async def handle_conversation_permission_rules_remove(session: "WebSocketSession
         await session.emit_command_result("permissions.rules.remove", f"Conversation '{conversation_id}' not found", level="error")
         return True
 
-    mutation = prepare_permission_rule_remove(target, data, conversation_id=conversation_id)
+    mutation = prepare_permission_rule_remove(target, data, conversation_id=conversation_id, tool_registry=session.tool_registry)
     if not mutation.should_update:
         await session.emit_command_result(
             mutation.outcome.command,
@@ -3424,6 +3424,7 @@ async def handle_permissions_content_rule_add(session: "WebSocketSession", data:
         str(data.get("rule") or ""),
         deny=bool(data.get("deny", False)),
         scope=str(data.get("scope") or "global"),
+        tool_registry=session.tool_registry,
     )
     outcome = result.outcome
     await session.emit_command_result(

@@ -336,7 +336,7 @@ class CapabilityRegistry:
             direct=direct,
             schema_available=schema_available,
             code_mode_available=code_mode_available,
-            catalog_text=self._build_catalog_text(name, tool, spec),
+            catalog_text=self._build_catalog_text(name, tool, spec, model_description),
             search_hint=getattr(tool, "search_hint", "") or "",
             short_description=model_description,
             runtime_metadata=meta,
@@ -456,18 +456,15 @@ class CapabilityRegistry:
     def get_tools(self) -> list[BaseTool]:
         return list(self._tools.values())
 
-    def _build_catalog_text(self, name: str, tool: BaseTool, spec: Any) -> str:
+    def _build_catalog_text(self, name: str, tool: BaseTool, spec: Any, model_description: str) -> str:
         """Return lightweight search text without materializing JSON schema."""
         parts = [
             name,
             getattr(tool, "search_hint", "") or "",
             getattr(spec, "capability", "") or "",
             getattr(spec, "toolset", "") or "",
+            model_description,
         ]
-        try:
-            parts.append(tool.model_description() or "")
-        except Exception:
-            parts.append(getattr(tool, "description", "") or "")
         required_args = getattr(spec, "required_args", ()) or ()
         parts.extend(str(arg) for arg in required_args)
         return " ".join(str(part) for part in parts if str(part).strip())
@@ -484,6 +481,8 @@ class CapabilityRegistry:
         for name, tool in self._tools.items():
             spec = self.get_tool_spec(name)
             direct = active_policy.is_directly_visible(spec)
+            if not direct:
+                continue
             exposure = spec.exposure if spec else "core"
             if permission_checker and permission_context:
                 capability_check = getattr(permission_checker, "capability_available", None)
@@ -618,11 +617,15 @@ class CapabilityRegistry:
         from backend.tools.schema import postprocess_tool_schema
         from backend.tools.catalog import canonicalize_tool_schemas
 
-        views = self.build_schema_views(
-            toolset_policy=active_policy,
-            permission_checker=permission_checker,
-            permission_context=permission_context,
-        )
+        views = [
+            self._build_schema_view_for_tool(
+                name, tool, active_policy=active_policy,
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+            )
+            for name, tool in self._tools.items()
+            if active_policy.is_directly_visible(self.get_tool_spec(name))
+        ]
         direct_views = sorted(
             (v for v in views if v.direct and v.schema is not None),
             key=lambda view: (

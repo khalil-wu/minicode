@@ -105,6 +105,7 @@ def select_handlers(
     event: Any,
     match_target: str,
     condition_matches: Callable[[Any], bool],
+    match_aliases: tuple[str, ...] = (),
 ) -> list[Any]:
     policy = event_policy(event)
     selected: list[Any] = []
@@ -123,13 +124,13 @@ def select_handlers(
     # whether the pattern matches that concrete string.
     should_filter = policy.matcher_applies and bool(str(match_target or ""))
     for entry in entries:
-        if should_filter and not matcher_matches(
+        if should_filter and not any(matcher_matches(
             entry.raw_matcher
             if hasattr(entry, "raw_matcher")
             else entry.matcher.pattern,
-            match_target,
+            target,
             tool_match=tool_match,
-        ):
+        ) for target in (match_target, *(match_aliases if tool_match else ()))):
             continue
         if not condition_matches(entry):
             continue

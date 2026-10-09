@@ -273,21 +273,27 @@ def _prepare_hook_condition_matcher(
     match_target: str,
     env_extras: dict[str, str] | None,
     tool_registry: Any | None = None,
-) -> Callable[[Any], bool]:
-    """Prepare one condition matcher for a preview or execution batch."""
+    has_conditions: bool = True,
+) -> tuple[Callable[[Any], bool], tuple[str, ...]]:
+    """Read one tool identity for this batch's condition and matcher aliases."""
 
-    if event not in {
+    condition_event = event in {
         HookEvent.PRE_TOOL_USE,
         HookEvent.POST_TOOL_USE,
         HookEvent.POST_TOOL_USE_FAILURE,
         HookEvent.PERMISSION_REQUEST,
-    }:
-        return lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())
+    }
+    if not condition_event and event != HookEvent.PERMISSION_DENIED:
+        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), ()
     fields = env_extras or {}
     tool_name = fields.get("TOOL_NAME", match_target)
+    tool = tool_registry.get_tool(tool_name) if tool_registry is not None else None
+    policy_aliases = tool.policy_aliases if tool is not None else ()
+    if not condition_event:
+        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), policy_aliases
+    if not has_conditions:
+        return (lambda entry: True), policy_aliases
     arguments = _json_object(fields.get("TOOL_ARGS_JSON", ""))
-    get_tool = getattr(tool_registry, "get_tool", None)
-    tool = get_tool(tool_name) if callable(get_tool) else None
     from backend.permissions.content_rules import parse_content_rule, rule_matches_call
     from backend.tools.base import validate_tool_input
 
@@ -300,9 +306,9 @@ def _prepare_hook_condition_matcher(
         if not input_is_valid:
             return False
         rule = parse_content_rule(condition)
-        return bool(rule is not None and rule_matches_call(rule, tool_name, arguments))
+        return bool(rule is not None and rule_matches_call(rule, tool_name, arguments, policy_aliases=policy_aliases))
 
-    return condition_matches
+    return condition_matches, policy_aliases
 
 
 def _hook_input(
@@ -804,21 +810,21 @@ class HookManager:
         from backend.hooks.policy import event_policy
 
         entries = self.hooks.get(event, ())
-        condition_matches = (
-            _prepare_hook_condition_matcher(
-                event=event,
-                match_target=match_target,
-                env_extras=env_extras,
-                tool_registry=self._tool_registry,
-            )
-            if any(str(entry.condition or "").strip() for entry in entries)
-            else lambda _entry: True
+        if not entries:
+            return ()
+        condition_matches, policy_aliases = _prepare_hook_condition_matcher(
+            event=event,
+            match_target=match_target,
+            env_extras=env_extras,
+            tool_registry=self._tool_registry,
+            has_conditions=any(str(entry.condition or "").strip() for entry in entries),
         )
         selected = select_handlers(
             entries,
             event=event,
             match_target=match_target,
             condition_matches=condition_matches,
+            match_aliases=policy_aliases,
         )
         policy = event_policy(event)
         return tuple(
@@ -1328,21 +1334,19 @@ class HookManager:
         from backend.hooks.dispatcher import execute_handlers, select_handlers
         from backend.hooks.reducer import reduce_hook_executions
 
-        condition_matches = (
-            _prepare_hook_condition_matcher(
-                event=event,
-                match_target=match_target,
-                env_extras=env_extras,
-                tool_registry=self._tool_registry,
-            )
-            if any(str(entry.condition or "").strip() for entry in entries)
-            else lambda _entry: True
+        condition_matches, policy_aliases = _prepare_hook_condition_matcher(
+            event=event,
+            match_target=match_target,
+            env_extras=env_extras,
+            tool_registry=self._tool_registry,
+            has_conditions=any(str(entry.condition or "").strip() for entry in entries),
         )
         selected = select_handlers(
             entries,
             event=event,
             match_target=match_target,
             condition_matches=condition_matches,
+            match_aliases=policy_aliases,
         )
         synchronous: list[_HookEntry] = []
         for entry in selected:

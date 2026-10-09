@@ -10,7 +10,7 @@ from backend.mcp import config_file, project_settings
 from backend.mcp.client import MCPCallResult, MCPToolDef
 from backend.mcp.manager import MCPServerConfig, MCPServerManager, MCPServerState, ServerStatus
 from backend.mcp.policy import mcp_policy_from_requirements
-from backend.mcp.registry import MAX_MCP_DESCRIPTION_LENGTH, MCPToolProxy, MCPToolRegistry
+from backend.mcp.registry import MCPToolProxy, MCPToolRegistry
 from backend.tools.base import PermissionLevel
 from backend.tools.registry import ToolRegistry
 
@@ -95,7 +95,7 @@ async def test_registered_schema_and_permission_use_one_catalog_until_changed_de
     bridge.register_server_tools("fixture", manager.get_all_tools()["fixture"], client)
     proxy = tools.get_tool("mcp__fixture__read")
     assert isinstance(proxy, MCPToolProxy)
-    assert len(proxy.get_schema().description) < MAX_MCP_DESCRIPTION_LENGTH + 100
+    assert definition.description in proxy.get_schema().description
     assert proxy.permission is PermissionLevel.AUTO
     await manager._notify_status("fixture", ServerStatus.CONNECTED)
     assert not (await proxy.execute({})).is_error

@@ -48,7 +48,7 @@ def test_runtime_source_paths_do_not_contain_common_mojibake_tokens() -> None:
     assert offenders == []
 
 
-def test_default_agent_registry_exposes_mcp_resource_bridge_but_not_proxy_tools(
+def test_projectless_registry_exposes_mcp_resource_bridge_without_active_project_proxies(
     monkeypatch,
 ) -> None:
     from backend.mcp.client import MCPToolDef
@@ -70,16 +70,17 @@ def test_default_agent_registry_exposes_mcp_resource_bridge_but_not_proxy_tools(
             }
 
         def get_client(self, _server_name):
-            raise AssertionError("MCP proxy tools should not be registered eagerly")
+            raise AssertionError("Projectless scope must not inherit the active project's MCP client")
 
     monkeypatch.setattr(
         _state,
         "bootstrap",
         SimpleNamespace(
-            file_memory=None, mcp_manager=FakeMCPManager(), skill_manager=None
+            file_memory=None, mcp_manager=FakeMCPManager(), skill_manager=None,
+            get_mcp_manager_for_workspace=lambda workspace_root: None,
         ),
     )
-    registry = build_tool_registry(ArtifactStore())
+    registry = build_tool_registry(ArtifactStore(), workspace_root=None)
     names = set(registry.list_tools())
     assert not any(name.startswith("mcp__") for name in names)
     assert {"list_mcp_resources", "read_mcp_resource", "read_terminal"} <= names

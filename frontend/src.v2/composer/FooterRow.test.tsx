@@ -148,6 +148,10 @@ describe("FooterRow permission picker", () => {
       currentProviderBaseUrl: "https://api.openai.com/v1",
       currentWireApi: "responses",
       conversationId: "conv-footer",
+      isConnected: true,
+      pendingConversationSwitchId: null,
+      pendingConversationCreateId: null,
+      conversationHydration: {},
       appMode: "cowork",
       availableModels: ["gpt-5"],
       effortLevel: "high",
@@ -260,6 +264,36 @@ describe("FooterRow permission picker", () => {
       source: "usage_ring_auto",
       silent: true,
     }));
+  });
+
+  it("inspects a restored owner once its full context is hydrated, without borrowing a previous limit or refreshing again on sync", () => {
+    const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as Parameters<typeof handleSessionEvent>[1];
+    const conversation = { id: "usage-restored", title: "Restored usage", revision: 1, transcript: [{ id: "restored-user", role: "user", content: "Restore" }],
+      context_snapshot: { context_ledger: { schema_version: 1, estimated_tokens: 21133, actual_tokens: 19791, compaction_count: 0,
+        entries: [{ category: "history", label: "History", estimated_tokens: 21133, item_count: 2, source_count: 1 }] } } };
+    const usageRequests = () => vi.mocked(sendClientCommand).mock.calls.filter(([command]) => command.type === "session.usage.inspect");
+    useAppStore.setState({ conversationId: "previous-owner", isConnected: false, conversationMessages: {}, conversationStreaming: {},
+      conversations: [{ id: "previous-owner", title: "Previous", updatedAt: "2026-10-09" }],
+      contextUsage: { used: 3000, limit: 40000 }, messages: [], conversationHistoryPages: {} });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(usageRequests()).toHaveLength(0);
+    act(() => {
+      useAppStore.setState({ isConnected: true });
+      handleSessionEvent({ type: "conversation.switched", conversation_id: conversation.id, conversation, is_hydrating: true, context_pending: true } as never, buffers);
+    });
+    expect(usageRequests()).toHaveLength(0);
+    expect(useAppStore.getState().contextUsage).toMatchObject({ used: 19791, limit: 0 });
+    expect(screen.getByRole("meter", { name: "用量暂无数据" })).toBeTruthy();
+    act(() => { handleSessionEvent({ type: "conversation.switched", conversation_id: conversation.id, conversation, is_hydrating: false } as never, buffers); });
+    expect(usageRequests()).toHaveLength(1);
+    expect(usageRequests()[0][0]).toEqual({ type: "session.usage.inspect", conversation_id: conversation.id, source: "usage_ring_auto", silent: true });
+    act(() => { handleRuntimeEvent({ type: "context_usage", conversation_id: conversation.id, used: 19791, limit: 720000,
+      ledger: conversation.context_snapshot.context_ledger } as never); });
+    expect(screen.getByRole("meter", { name: "会话用量 3%" })).toBeTruthy();
+    expect(useAppStore.getState().contextUsage).toMatchObject({ used: 19791, limit: 720000 });
+    act(() => { handleSessionEvent({ type: "session.synced", active_conversation_id: conversation.id, active_conversation: conversation,
+      session: { active_conversation_id: conversation.id }, synced: true } as never, buffers); });
+    expect(usageRequests()).toHaveLength(1);
   });
 
   it("shows all permission choices with distinct icons and concise descriptions", () => {

@@ -39,7 +39,6 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Subprotocol
 
 from backend.feature_flags import feature_enabled
-from backend.mcp import MAX_MCP_INSTRUCTIONS_LENGTH, truncate_mcp_instructions
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain,
@@ -515,18 +514,11 @@ class MCPClient:
     def _set_server_instructions(self, value: Any) -> None:
         raw = str(value or "")
         sanitized = sanitize_untrusted_unicode(raw)
-        self._instructions = truncate_mcp_instructions(sanitized)
+        self._instructions = sanitized
         if sanitized != raw:
             logger.warning(
                 "[MCP:%s] Removed unsafe Unicode from server instructions",
                 self.server_name,
-            )
-        if len(sanitized) > MAX_MCP_INSTRUCTIONS_LENGTH:
-            logger.warning(
-                "[MCP:%s] Server instructions truncated from %d to %d characters",
-                self.server_name,
-                len(sanitized),
-                MAX_MCP_INSTRUCTIONS_LENGTH,
             )
 
     async def connect(self) -> None:

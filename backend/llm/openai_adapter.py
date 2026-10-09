@@ -1337,8 +1337,8 @@ def _responses_error_event_raw(
         raw["provider_error_schema_type"] = provider_error_schema_type
     if message:
         raw["provider_error_message"] = message
-        stated_delay = retry_after_from_message(message)
-        if stated_delay > 0:
+        stated_delay = retry_after_from_message(message, default=None)
+        if stated_delay is not None:
             raw["retry_after_seconds"] = stated_delay
     raw["provider_error"] = details
     return message, raw

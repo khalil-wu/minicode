@@ -499,8 +499,8 @@ def _anthropic_exception_error_event(
         raw["provider_error_schema_type"] = schema_type
     if provider_message:
         raw["provider_error_message"] = provider_message
-    retry_after = retry_after_seconds(exc)
-    if retry_after > 0:
+    retry_after = retry_after_seconds(exc, default=None)
+    if retry_after is not None:
         raw["retry_after_seconds"] = retry_after
     return StreamEvent(
         type=StreamEventType.ERROR,
@@ -565,12 +565,11 @@ def _anthropic_declared_error_event(
         event.get("retry_after"),
     ):
         try:
-            delay = max(0.0, min(float(candidate), 300.0))
+            delay = max(0.0, float(candidate))
         except (TypeError, ValueError):
             continue
-        if delay > 0:
-            raw["retry_after_seconds"] = delay
-            break
+        raw["retry_after_seconds"] = delay
+        break
     return StreamEvent(
         type=StreamEventType.ERROR,
         content=f"MiniCode Anthropic Messages 请求失败：{provider_message or _clean_error_message(message)}{suffix}",

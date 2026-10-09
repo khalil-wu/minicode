@@ -16,7 +16,6 @@ from backend.agent.model_execution import refresh_request_auth, provider_auth_re
 from backend.agent.loop_runtime_helpers import (
     epoch_ms,
     is_max_output_finish_reason,
-    format_llm_error,
 )
 from backend.agent.message import AgentEvent
 from backend.agent.provider_stream_event_dispatch import (
@@ -26,7 +25,6 @@ from backend.agent.provider_stream_event_dispatch import (
 from backend.agent.provider_stream_error_event import (
     ProviderErrorEventResult,
     handle_provider_error_event,
-    provider_error_details,
     committed_provider_error,
 )
 from backend.agent.provider_stream_control import (
@@ -61,7 +59,6 @@ from backend.agent.provider_text_projection import finish_provider_text_item
 from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.tool_stream_tracker import StreamingToolTracker
-from backend.llm.errors import classify_llm_error
 from backend.llm.base import (
     StreamEventType,
     UsageInfo,
@@ -190,10 +187,9 @@ async def stream_provider_response(
                 except (asyncio.TimeoutError, ProviderStreamFailure) as failure:
                     settle_attempt_usage()
                     if stream_state.committed_tool_ids:
-                        cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
-                        classification = classify_llm_error(cause)
-                        if error := committed_provider_error(state, classification, format_llm_error(cause)):
-                            yield error
+                        yield await committed_provider_error(failure, state=state,
+                            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+                            progress_id=provider_progress_key)
                         break
                     transport_result = None
                     async for transport_update in handle_provider_transport_failure(
@@ -324,9 +320,9 @@ async def stream_provider_response(
                     break
                 if dispatch_result.action == "error":
                     if stream_state.committed_tool_ids:
-                        _, classification, _ = provider_error_details(event)
-                        if error := committed_provider_error(state, classification, event.content):
-                            yield error
+                        yield await committed_provider_error(event, state=state,
+                            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+                            progress_id=provider_progress_key)
                         break
                     error_result = None
                     async for error_update in handle_provider_error_event(

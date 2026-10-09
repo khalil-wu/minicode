@@ -9,6 +9,7 @@ import { handleDiffEvent } from "./diffEvents";
 import { hydrateMessages } from "./transcriptHydration";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
+import { releaseConversationReadingState } from "./transcriptReadingState";
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({
   openWorkspaceFolder: vi.fn(),
@@ -71,6 +72,8 @@ const conversationMessages: ChatMessage[] = [
 
 describe("MessageList cell UI", () => {
   beforeEach(() => {
+    releaseConversationReadingState("conv-message-list-test");
+    releaseConversationReadingState("conv-message-list-other");
     localStorage.clear();
     useAppStore.setState({
       conversationId: "conv-message-list-test",
@@ -88,6 +91,8 @@ describe("MessageList cell UI", () => {
 
   afterEach(() => {
     cleanup();
+    releaseConversationReadingState("conv-message-list-test");
+    releaseConversationReadingState("conv-message-list-other");
     localStorage.clear();
     useAppStore.setState({
       conversationId: null,

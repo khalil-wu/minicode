@@ -47,7 +47,7 @@ class NestedToolEvents:
     async def publish(self, event: AgentEvent) -> None:
         # Recording stays available during cleanup, after the consumer closes.
         # A tool must not overtake its durable claim even if its UI is slow.
-        await to_thread_cancel_safe(self.journal.record_event, event)
+        await self.journal.record_event_async(event)
         if self._closed:
             raise asyncio.CancelledError
         pending = _QueuedEvent(event, asyncio.get_running_loop().create_future())

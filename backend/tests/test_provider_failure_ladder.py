@@ -21,8 +21,56 @@ from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.config import AgentSettings, LLMSettings
 from backend.llm.anthropic_adapter import AnthropicAdapter
 from backend.llm.base import LLMMessage, UsageInfo, safe_stream_chat_with_request_metadata
-from backend.llm.errors import retry_after_from_message
+from backend.llm.errors import llm_error_raw, retry_after_from_message, retry_after_seconds
 from backend.llm.openai_adapter import OpenAIAdapter
+
+
+@pytest.mark.parametrize("delay", [0.0, 0.05, 120.0, 600.0])
+def test_server_retry_deadline_overrides_local_backoff_without_a_cap(delay):
+    async def scenario():
+        error = RuntimeError("HTTP 429 rate limit exceeded")
+        error.response = SimpleNamespace(headers={"retry-after": str(delay)}, status_code=429)
+        raw = llm_error_raw(error, "openai")
+        assert raw["retry_after_seconds"] == delay
+        event = StreamEvent(type=StreamEventType.ERROR, content="HTTP 429 rate limit exceeded", raw=raw)
+        waits = []
+        result = await _drive(event, retry_state=StreamRetryState(), attempt=0, waits=waits)
+        assert result.action == "retry"
+        assert waits == [delay]
+
+    from backend.llm.base import StreamEvent, StreamEventType
+    asyncio.run(scenario())
+
+
+def test_retry_advice_distinguishes_absence_from_an_expired_deadline():
+    assert retry_after_seconds("no server advice", default=None) is None
+    assert retry_after_from_message("try again in 0s", default=None) == 0.0
+    assert retry_after_from_message("try again in 600s") == 600.0
+    error = RuntimeError("HTTP 429 rate limit exceeded")
+    error.response = SimpleNamespace(headers={"retry-after": "Thu, 01 Jan 1970 00:00:00 GMT"})
+    assert retry_after_seconds(error, default=None) == 0.0
+
+
+def test_explicit_retry_budget_and_base_survive_codex_default_alignment(monkeypatch):
+    monkeypatch.setattr("backend.agent.policies.stream_retry.random.random", lambda: 0.5)
+    policy = DefaultStreamRetryPolicy(AgentSettings(stream_max_attempts=7, stream_retry_delay_seconds=0.7))
+    assert policy.decide_retry("HTTP 503 unavailable", 0).delay_seconds == 0.7
+    assert policy.decide_retry("HTTP 503 unavailable", 6).delay_seconds == pytest.approx(44.8)
+    assert policy.decide_retry("HTTP 503 unavailable", 6).should_retry
+    assert not policy.decide_retry("HTTP 503 unavailable", 7).should_retry
+
+
+def test_overload_without_server_advice_is_terminal_for_the_request():
+    from backend.llm.base import StreamEvent, StreamEventType
+
+    async def scenario():
+        event = StreamEvent(type=StreamEventType.ERROR, content="HTTP 529 overloaded", raw={"status_code": 529})
+        waits = []
+        result = await _drive(event, retry_state=StreamRetryState(), attempt=0, waits=waits)
+        assert result.action == "finish"
+        assert waits == []
+
+    asyncio.run(scenario())
 
 
 def _openai(wire: str, handler) -> tuple[OpenAIAdapter, httpx.AsyncClient]:

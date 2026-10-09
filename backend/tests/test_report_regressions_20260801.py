@@ -21,25 +21,23 @@ from backend.tools.write_file import WriteFileTool
 from backend.ws.events import ServerEventType
 
 
-def test_stream_idle_timeout_keeps_pi_codex_default_and_retry_matches_cc() -> None:
+def test_stream_idle_timeout_and_retry_defaults_match_codex() -> None:
     settings = AgentSettings()
-    # Idle timeout stays at the pi/codex 5-minute default; retry shape now
-    # matches Claude Code (withRetry.ts: DEFAULT_MAX_RETRIES=10, BASE_DELAY_MS=500).
+    # Codex model-provider-info and async-utils/backoff defaults.
     assert settings.stream_timeout_seconds == 300.0
-    assert settings.stream_max_attempts == 10
-    assert settings.stream_retry_delay_seconds == 0.5
+    assert settings.stream_max_attempts == 5
+    assert settings.stream_retry_delay_seconds == 0.2
     assert AgentSettings().max_turn_seconds == 0.0
 
 
-def test_stream_retry_uses_cc_jittered_backoff() -> None:
+def test_stream_retry_uses_codex_jittered_backoff() -> None:
     policy = DefaultStreamRetryPolicy(AgentSettings())
 
-    # cc getRetryDelay: base = min(500ms * 2**(attempt-1), 32s) + up to 25% jitter.
-    assert 0.5 <= policy.decide_retry("503 service unavailable", 0).delay_seconds <= 0.625
-    assert 1.0 <= policy.decide_retry("503 service unavailable", 1).delay_seconds <= 1.25
-    assert 2.0 <= policy.decide_retry("503 service unavailable", 2).delay_seconds <= 2.5
-    assert policy.decide_retry("503 service unavailable", 9).should_retry is True
-    assert policy.decide_retry("503 service unavailable", 10).should_retry is False
+    assert 0.18 <= policy.decide_retry("503 service unavailable", 0).delay_seconds <= 0.22
+    assert 0.36 <= policy.decide_retry("503 service unavailable", 1).delay_seconds <= 0.44
+    assert 0.72 <= policy.decide_retry("503 service unavailable", 2).delay_seconds <= 0.88
+    assert policy.decide_retry("503 service unavailable", 4).should_retry is True
+    assert policy.decide_retry("503 service unavailable", 5).should_retry is False
 
 
 def test_stream_retry_classifies_pi_and_claude_transient_provider_shapes() -> None:
@@ -81,17 +79,17 @@ def test_stream_retry_retries_525_but_not_real_policy_block() -> None:
     )
 
     assert retry.should_retry is True
-    assert 0.5 <= retry.delay_seconds <= 0.625
+    assert 0.18 <= retry.delay_seconds <= 0.22
     assert blocked.should_retry is False
 
 
-def test_stream_retry_529_is_source_aware_and_consecutive_bounded() -> None:
+def test_stream_retry_does_not_add_a_foreground_or_three_error_capacity_fuse() -> None:
     policy = DefaultStreamRetryPolicy(AgentSettings())
     state = StreamRetryState()
 
     assert policy.decide_retry(
         "HTTP 529 overloaded", 0, query_source="background", retry_state=state
-    ).should_retry is False
+    ).should_retry is True
 
     state = StreamRetryState()
     assert policy.decide_retry(
@@ -102,10 +100,10 @@ def test_stream_retry_529_is_source_aware_and_consecutive_bounded() -> None:
     ).should_retry is True
     assert policy.decide_retry(
         "HTTP 529 overloaded", 2, query_source="user", retry_state=state
-    ).should_retry is False
+    ).should_retry is True
 
-    # A non-529 failure breaks the consecutive sequence; the next busy response
-    # gets the first 529 retry slot again.
+    # The request owner requires server advice for overloads; the local policy
+    # only decides the configured retry budget, independent of task source.
     assert policy.decide_retry(
         "HTTP 503 unavailable", 3, query_source="user", retry_state=state
     ).should_retry is True

@@ -846,6 +846,9 @@ def test_run_agent_loop_retries_after_distinct_policy_blocks(tmp_path) -> None:
             return "unused"
 
     class _PolicyBlocksChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -986,6 +989,9 @@ def test_run_agent_loop_emits_accepted_final_reply_before_done() -> None:
 
 def test_run_agent_loop_keeps_initial_preamble_out_of_timeline_thinking() -> None:
     class _AllowPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1019,6 +1025,9 @@ def test_run_agent_loop_keeps_initial_preamble_out_of_timeline_thinking() -> Non
 
 def test_run_agent_loop_streams_post_tool_process_note_before_next_tool() -> None:
     class _AllowPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1258,6 +1267,9 @@ def test_run_agent_loop_executes_adjacent_auto_tools_in_parallel() -> None:
             return ToolResult(content=f"{self.name} done")
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1321,6 +1333,9 @@ def test_run_agent_loop_times_out_parallel_tools(monkeypatch) -> None:
             return ToolResult(content=f"{self.name} done")
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1396,6 +1411,9 @@ def test_run_agent_loop_preserves_tool_result_order_when_parallel_tools_finish_o
             return ToolResult(content=f"{self.name} done")
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1495,6 +1513,9 @@ def test_run_agent_loop_recovers_from_empty_run_command_with_model_guidance(tmp_
             return "unused"
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1537,6 +1558,9 @@ def test_run_agent_loop_recovers_from_empty_run_command_with_model_guidance(tmp_
 
 def test_desktop_no_workspace_turn_disables_local_workspace_tools() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1613,6 +1637,9 @@ def test_desktop_no_workspace_turn_disables_local_workspace_tools() -> None:
 
 def test_desktop_no_workspace_bypass_keeps_local_workspace_tools_available() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1679,6 +1706,9 @@ def test_desktop_no_workspace_bypass_keeps_local_workspace_tools_available() -> 
 
 def test_run_agent_loop_keeps_tool_lifecycle_on_tool_events() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1730,6 +1760,9 @@ def test_run_agent_loop_keeps_tool_lifecycle_on_tool_events() -> None:
 
 def test_run_agent_loop_hides_preamble_when_model_calls_tools() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1842,6 +1875,9 @@ def test_run_agent_loop_requires_explicit_model_query_for_empty_web_search() -> 
             return "unused"
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -1993,6 +2029,9 @@ def test_run_agent_loop_requires_explicit_model_url_for_empty_web_fetch() -> Non
             return "unused"
 
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2033,6 +2072,9 @@ def test_run_agent_loop_requires_explicit_model_url_for_empty_web_fetch() -> Non
 
 def test_run_agent_loop_discards_tool_preamble_draft() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2121,6 +2163,9 @@ def test_run_agent_loop_does_not_degrade_partial_tool_stream_to_answer() -> None
 
 def test_run_agent_loop_hides_raw_provider_reasoning() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2315,6 +2360,9 @@ def test_run_agent_loop_stop_hook_feedback_uses_explicit_turn_boundary(monkeypat
 
 def test_run_agent_loop_commits_model_final_reply_without_regex_retry() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2352,6 +2400,9 @@ def test_run_agent_loop_commits_model_final_reply_without_regex_retry() -> None:
 
 def test_run_agent_loop_does_not_discard_final_draft_for_regex_retry() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2393,6 +2444,9 @@ def test_run_agent_loop_does_not_discard_final_draft_for_regex_retry() -> None:
 
 def test_run_agent_loop_uses_tool_results_when_final_model_stream_times_out() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2542,6 +2596,9 @@ def test_run_agent_loop_retracts_partial_text_before_replaying_timeout() -> None
 
 def test_run_agent_loop_uses_tool_results_when_final_model_stream_errors() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2734,6 +2791,9 @@ def test_run_agent_loop_normalizes_raised_provider_errors_into_bounded_retries()
 
 def test_run_agent_loop_commits_future_action_reply_after_tools_without_regex_retry() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2774,6 +2834,9 @@ def test_run_agent_loop_commits_future_action_reply_after_tools_without_regex_re
 
 def test_run_agent_loop_commits_continue_offer_tail_after_tools_without_regex_retry() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2812,6 +2875,9 @@ def test_run_agent_loop_commits_continue_offer_tail_after_tools_without_regex_re
 
 def test_run_agent_loop_allows_repeated_successful_tool_calls() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2850,6 +2916,9 @@ def test_run_agent_loop_allows_repeated_successful_tool_calls() -> None:
 
 def test_run_agent_loop_executes_duplicate_successful_tool_calls_in_same_model_step() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2891,6 +2960,9 @@ def test_run_agent_loop_executes_duplicate_successful_tool_calls_in_same_model_s
 
 def test_run_agent_loop_executes_same_provider_tool_id_twice_in_one_model_step() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2933,6 +3005,9 @@ def test_run_agent_loop_executes_same_provider_tool_id_twice_in_one_model_step()
 
 def test_run_agent_loop_allows_similar_web_searches_for_independent_evidence() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -2988,6 +3063,9 @@ def test_run_agent_loop_allows_similar_web_searches_for_independent_evidence() -
 
 def test_run_agent_loop_allows_distinct_web_search_after_soft_budget() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -3039,6 +3117,9 @@ def test_run_agent_loop_allows_distinct_web_search_after_soft_budget() -> None:
 
 def test_run_agent_loop_keeps_web_tools_available_after_repeated_similar_searches() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 
@@ -3093,6 +3174,9 @@ def test_run_agent_loop_keeps_web_tools_available_after_repeated_similar_searche
 
 def test_low_stakes_meme_turn_limits_prefetched_web_searches() -> None:
     class _AutoPermissionChecker:
+        def policy_snapshot(self):
+            return {}
+
         def check(self, tool_name: str, args=None, context=None):
             from backend.tools.base import PermissionLevel
 

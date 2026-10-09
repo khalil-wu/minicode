@@ -13,6 +13,7 @@ from backend.config import DATA_ROOT, AppConfig, load_config
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.memory.file_memory import FileMemory
 from backend.memory.manager import MemoryManager
+from backend.mcp import MCP_MANAGER_UNSET
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
 
@@ -134,8 +135,14 @@ class AppBootstrap:
         try:
             from backend.workspace.state import get_explicit_active_workspace_root
 
+            initial_workspace = get_explicit_active_workspace_root()
+            if initial_workspace is not None:
+                # Projectless chats retain their global MCP owner even when
+                # startup opens a project. Prepare it without waiting on its
+                # external servers before activating the initial workspace.
+                await self._prepare_mcp_manager(None, activate=False)
             await self.ensure_mcp_manager(
-                get_explicit_active_workspace_root(),
+                initial_workspace,
                 activate=True,
             )
             logger.info("MCP manager initialized")
@@ -348,12 +355,12 @@ class AppBootstrap:
         *,
         workspace_root: str | Path | None | object = _WORKSPACE_ROOT_UNSET,
         config: AppConfig | None = None,
-        mcp_manager: Any | None = None,
+        mcp_manager: Any = MCP_MANAGER_UNSET,
     ) -> ToolRegistry:
-        from backend.workspace.state import get_active_workspace_root
+        from backend.workspace.state import get_explicit_active_workspace_root
 
         if workspace_root is _WORKSPACE_ROOT_UNSET:
-            resolved_workspace_root = get_active_workspace_root()
+            resolved_workspace_root = get_explicit_active_workspace_root()
         elif workspace_root is None:
             resolved_workspace_root = None
         else:
@@ -365,7 +372,8 @@ class AppBootstrap:
             config=effective_config,
             llm_provider=lambda: self.create_llm(config=effective_config),
             mcp_manager=(
-                mcp_manager if mcp_manager is not None else self.mcp_manager
+                self.get_mcp_manager_for_workspace(resolved_workspace_root)
+                if mcp_manager is MCP_MANAGER_UNSET else mcp_manager
             ),
         )
 

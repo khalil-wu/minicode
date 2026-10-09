@@ -14,6 +14,7 @@ from backend.agent.answer_acceptance import apply_stop_hook_policy
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.answer_recovery import (
     accept_completed_stream_steer,
+    accept_completed_coordination_input,
     recover_empty_answer,
 )
 from backend.agent.final_answer_runtime import commit_accepted_final_answer
@@ -101,6 +102,17 @@ async def orchestrate_final_answer(
     for event in completed_steer.events:
         yield event
     if completed_steer.action == "retry":
+        yield FinalAnswerOutcome("retry", degraded_reason)
+        return
+
+    coordination = await accept_completed_coordination_input(
+        state=state, context_builder=context_builder, stream_text=stream_text,
+        turn_kernel=turn_kernel, candidate_text=candidate_text,
+        provider_phase=provider_phase, provider_items=provider_items,
+    )
+    for event in coordination.events:
+        yield event
+    if coordination.action == "retry":
         yield FinalAnswerOutcome("retry", degraded_reason)
         return
 

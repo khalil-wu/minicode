@@ -99,7 +99,9 @@ describe("AgentTimeline", () => {
     expect(failedOutput.toolCallRecords?.[0]).toMatchObject({ id: "output-call", name: "get_command_output", status: "failed" });
     expect(failedRun).toMatchObject({ status: "failed", command: "npm test" });
     rerender(<AgentTimeline cells={[pendingOutput, openExec("latest", "npm test")]} renderCell={renderCell} isRunning />);
-    expect(screen.getByRole("region", { name: "正在运行 1 条命令" })).toBeTruthy();
+    expect(screen.queryByRole("region")).toBeNull();
+    expect(screen.getByText("activity")).toBeTruthy();
+    expect(screen.getByText("npm test")).toBeTruthy();
   });
 
   it("keeps unclassified failures visible without inventing a read failure or generic group", () => {
@@ -107,11 +109,21 @@ describe("AgentTimeline", () => {
       status: "failed", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true,
     };
     const { rerender } = render(<AgentTimeline cells={[activity("read", "fileRead"), failedTool]} renderCell={renderCell} />);
-    expect(screen.getByRole("region", { name: "读取 · 失败" })).toBeTruthy();
+    expect(screen.queryByRole("region")).toBeNull();
+    expect(screen.getAllByText("activity")).toHaveLength(2);
     expect(screen.queryByText("查看失败")).toBeNull();
     rerender(<AgentTimeline cells={[failedTool, { ...failedTool, id: "mcp-two" }]} renderCell={renderCell} />);
     expect(screen.queryByRole("region")).toBeNull();
     expect(screen.getAllByText("activity")).toHaveLength(2);
+  });
+  it("keeps an unclassified successful action directly visible between readable groups", () => {
+    const unknown: AgentLoopProcessCell = { kind: "activity", id: "custom", activityKind: "genericTool", title: "MCP calendar",
+      status: "done", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true };
+    const { container } = render(<AgentTimeline cells={[activity("one", "fileRead"), activity("two", "fileRead"), unknown]} renderCell={({ cell, key }) =>
+      <div key={key}>{cell.kind === "activity" ? cell.title : cell.id}</div>} />);
+    expect(screen.getByText("MCP calendar")).toBeTruthy();
+    expect(screen.getByText("MCP calendar").closest(".agent-loop-timeline-group-work")).toBeNull();
+    expect(container.querySelectorAll(".agent-loop-timeline-group-work")).toHaveLength(1);
   });
   it("preserves a user's collapse choice when a live group closes", () => {
     const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);

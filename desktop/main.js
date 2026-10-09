@@ -458,6 +458,10 @@ async function restartManagedBackend(reason) {
   appendDesktopLog(`[backend] restarting sidecar after ${reason}`);
   const nextRuntime = await launchManagedBackend();
   publishBackendRuntimeChange(previousRuntime, nextRuntime);
+  if (startupFailureWindow && !windowManager.getMainWindow()) {
+    await windowManager.createMainWindow();
+    closeStartupFailureWindow();
+  }
 }
 
 function getRendererAdditionalArguments() {

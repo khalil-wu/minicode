@@ -250,6 +250,7 @@ def build_deferred_tools_prompt_block(
     permission_context: Any | None = None,
     scope: str = DEFAULT_DEFERRED_CATALOG_SCOPE,
     limit: int = DEFAULT_DEFERRED_TOOL_PROMPT_LIMIT,
+    schema_views: list[Any] | None = None,
 ) -> str:
     """Return a cc-style lightweight directory of deferred tool names.
 
@@ -259,14 +260,21 @@ def build_deferred_tools_prompt_block(
     only; search hints, descriptions, and schemas stay behind tool_search until
     a selected tool is activated for the next model iteration.
     """
-    catalog = DeferredToolCatalog(
-        registry,
+    views = schema_views if schema_views is not None else registry.build_schema_views(
         toolset_policy=toolset_policy or _toolset_policy_for_context(permission_context),
         permission_checker=permission_checker,
         permission_context=permission_context,
-        scope=scope,
+        materialize_schema=False,
     )
-    names = sorted({entry.name for entry in catalog.entries() if str(entry.name or "").strip()})
+    # A names-only directory does not need a tokenized BM25 index. The search
+    # tool builds its index only when an actual discovery request arrives.
+    names = sorted({
+        view.name for view in views
+        if view.name not in BRIDGE_TOOL_NAMES
+        and view.exposure in {"deferred", "deferred_model_only"}
+        and not view.direct and view.schema_available
+        and deferred_catalog_scope_allows(view.runtime_metadata, scope)
+    })
     if not names:
         return ""
     safe_limit = max(1, min(int(limit or DEFAULT_DEFERRED_TOOL_PROMPT_LIMIT), 200))
@@ -319,11 +327,13 @@ class ToolSearchTool(BaseTool):
 
     def model_description(self) -> str:
         return (
-            "Activate deferred tools named in "
-            "<available-deferred-tools>. Until fetched, only each tool's name is "
-            "known and it cannot be invoked. Use 'select:ToolName' for an exact "
-            "tool. Selected tools become available on the next iteration; "
-            "in code-only mode, call them through tool_exec."
+            "Searches deferred tool metadata with BM25 and exposes matching tools "
+            "for the next model call. Search capability keywords, or use "
+            "'select:ToolName' for an exact tool named in <available-deferred-tools>. "
+            "Until fetched, a deferred tool cannot be invoked. "
+            "In code-only mode, call selected tools through tool_exec. "
+            "For MCP tool discovery, always use tool_search instead of "
+            "list_mcp_resources or list_mcp_resource_templates."
         )
 
     def model_schema(self) -> ToolSchema:

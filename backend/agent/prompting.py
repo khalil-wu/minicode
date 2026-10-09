@@ -303,25 +303,19 @@ def _tool_names(tool_schemas: list[Any]) -> set[str]:
     return names
 
 
-def _compact_mcp_instruction_text(text: Any) -> str:
-    """Defensively apply the same limit used during the MCP handshake."""
-    from backend.mcp import truncate_mcp_instructions
-
-    return truncate_mcp_instructions(text).strip()
-
-
 def build_tool_runtime_guidance(
     tool_schemas: list[Any],
     mcp_instructions: dict[str, str] | None = None,
     *,
     reachable_mcp_tools: set[str] | None = None,
+    reachable_mcp_servers: set[str] | None = None,
 ) -> str:
     """Build compact per-turn runtime guidance from available tools."""
     # This section is derived from the live tool registry and MCP server
     # instructions. Recompute it instead of maintaining a second process-wide
     # cache whose invalidation would be weaker than the registry lifecycle.
     return _build_tool_runtime_guidance_uncached(tool_schemas, mcp_instructions,
-        reachable_mcp_tools=reachable_mcp_tools)
+        reachable_mcp_tools=reachable_mcp_tools, reachable_mcp_servers=reachable_mcp_servers)
 
 
 def _build_tool_runtime_guidance_uncached(
@@ -329,6 +323,7 @@ def _build_tool_runtime_guidance_uncached(
     mcp_instructions: dict[str, str] | None = None,
     *,
     reachable_mcp_tools: set[str] | None = None,
+    reachable_mcp_servers: set[str] | None = None,
 ) -> str:
     names = _tool_names(tool_schemas)
     mcp_tools = sorted(name for name in names | (reachable_mcp_tools or set()) if name.startswith("mcp__"))
@@ -363,7 +358,7 @@ def _build_tool_runtime_guidance_uncached(
     if mcp_tools and mcp_instructions:
         from backend.mcp.registry import normalize_name_for_mcp
 
-        exposed_servers = {
+        exposed_servers = reachable_mcp_servers if reachable_mcp_servers is not None else {
             server for server in mcp_instructions
             if any(tool.startswith(f"mcp__{normalize_name_for_mcp(server)}__") for tool in mcp_tools)
         }
@@ -371,7 +366,7 @@ def _build_tool_runtime_guidance_uncached(
             json.dumps(
                 {
                     "server": server,
-                    "instructions": _compact_mcp_instruction_text(text),
+                    "instructions": text.strip(),
                 },
                 ensure_ascii=False,
             )

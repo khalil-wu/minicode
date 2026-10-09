@@ -12,6 +12,7 @@ from backend.agent.response_utils import (
     provider_items_for_final_answer,
 )
 from backend.agent.turn_kernel import _set_terminal_reason
+from backend.agent.mailbox_delivery import inject_parent_notifications, inject_subagent_mailbox_updates
 from backend.agent.terminal_projection import TurnTerminalProjection
 
 
@@ -108,12 +109,27 @@ async def accept_completed_stream_steer(
     if queued_steer is None:
         return AnswerRecoveryResult("accept")
 
+    events = _retain_completed_answer(
+        context_builder=context_builder, stream_text=stream_text,
+        candidate_text=candidate_text, provider_phase=provider_phase,
+        provider_items=provider_items,
+    )
+    await turn_kernel.accept_turn_steer(queued_steer)
+    state.mark_transition(
+        "user_steer",
+        message_id=queued_steer.message_id,
+        user_message_id=queued_steer.user_message_id,
+    )
+    stream_text.reset_for_retry()
+    return AnswerRecoveryResult("retry", tuple(events))
+
+
+def _retain_completed_answer(*, context_builder, stream_text, candidate_text,
+                             provider_phase, provider_items) -> list[AgentEvent]:
     events: list[AgentEvent] = []
     if candidate_text.strip():
-        # The answer is complete, so commit it (model_final/completed) so it
-        # stays visible and persisted, then start a fresh turn for the steer.
-        # The completed message is sealed before pending messages are injected;
-        # a completed answer is never retracted as "cancelled".
+        # Seal the completed model item before appending pending user or
+        # coordination input. The current turn continues from both records.
         started = stream_text.start_agent_message()
         if started is not None:
             events.append(started)
@@ -130,11 +146,49 @@ async def accept_completed_stream_steer(
             phase=provider_phase or "final_answer",
             provider_items=provider_items_for_final_answer(provider_items),
         )
-    await turn_kernel.accept_turn_steer(queued_steer)
-    state.mark_transition(
-        "user_steer",
-        message_id=queued_steer.message_id,
-        user_message_id=queued_steer.user_message_id,
+    return events
+
+
+async def accept_completed_coordination_input(
+    *, state, context_builder, stream_text, turn_kernel, candidate_text,
+    provider_phase, provider_items,
+) -> AnswerRecoveryResult:
+    """Consume pending child/mailbox input before accepting turn completion.
+
+    Preserve the completed model item before the first new input is appended,
+    then request another sampling step. Notifications are acknowledged only
+    after that next request consumes them, just like iteration admission.
+    """
+    events: list[AgentEvent] = []
+    retained = False
+
+    def retain_answer() -> None:
+        nonlocal retained
+        if retained:
+            return
+        events.extend(_retain_completed_answer(
+            context_builder=context_builder, stream_text=stream_text,
+            candidate_text=candidate_text, provider_phase=provider_phase,
+            provider_items=provider_items,
+        ))
+        retained = True
+
+    mailbox_count = await inject_subagent_mailbox_updates(
+        ctx=context_builder, state=state, metadata=turn_kernel.metadata,
+        conversation_id=turn_kernel.run_record.conversation_id,
+        emit_event=turn_kernel.emit_event, run_context=turn_kernel.run_context,
+        before_inject=retain_answer,
     )
+    notification_count = await inject_parent_notifications(
+        ctx=context_builder, state=state, metadata=turn_kernel.metadata,
+        runtime=turn_kernel.runtime, run_context=turn_kernel.run_context,
+        parent_run_id=turn_kernel.run_record.run_id,
+        conversation_id=turn_kernel.run_record.conversation_id,
+        emit_event=turn_kernel.emit_event, before_inject=retain_answer,
+    )
+    if not mailbox_count and not notification_count:
+        return AnswerRecoveryResult("accept")
+    state.mark_transition("coordination_follow_up", mailbox_count=mailbox_count,
+        notification_count=notification_count)
     stream_text.reset_for_retry()
     return AnswerRecoveryResult("retry", tuple(events))

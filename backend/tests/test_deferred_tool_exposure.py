@@ -132,7 +132,7 @@ def test_empty_model_tool_mode_uses_explicit_adapter_setting() -> None:
         config=SimpleNamespace(llm=SimpleNamespace(tool_mode="direct")),
     )
     assert requested_tool_mode(default_code_mode_only=True, model_execution=snapshot, llm=llm) == "direct"
-    assert "in code-only mode, call them through tool_exec" in ToolSearchTool().model_description()
+    assert "In code-only mode, call selected tools through tool_exec" in ToolSearchTool().model_description()
 
 
 def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> None:

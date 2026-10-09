@@ -51,11 +51,34 @@ it("drops an older page after an authoritative message replacement", async () =>
   let resolve!: (response: Response) => void;
   vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
   const loading = loadEarlierToolItems("conv", "old");
-  const replacement = { ...original, blocks: [] };
+  const replacement = { ...original, blocks: [], toolPage: { ...original.toolPage! } };
   useAppStore.setState({ messages: [replacement] });
   resolve(new Response(JSON.stringify({ message_id: "old", blocks: [tool(1)], tool_page: { before: 1, remaining: 1, total: 5 } })));
   await loading;
   expect(useAppStore.getState().messages[0]).toBe(replacement);
+});
+
+it("merges the requested snapshot with same-message deltas and keeps every unindexed live block", async () => {
+  const original = hydrateMessages([{ id: "old", role: "assistant", is_streaming: true, blocks: [tool(4),
+    { ...answer, status: "in_progress", is_streaming: true }], tool_page: { before: 4, remaining: 4, total: 5 } }], { live: true })[0];
+  useAppStore.setState({ conversationId: "conv", messages: [original], isStreaming: true, conversationMessages: {}, conversationStreaming: { conv: true } });
+  let resolve!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+  const loading = loadEarlierToolItems("conv", "old");
+  const state = useAppStore.getState();
+  state.appendAgentMessageDelta("final", " more", "conv", "old");
+  state.startAgentMessage("new-commentary", "conv", "old", "commentary");
+  state.appendAgentMessageDelta("new-commentary", "正在继续", "conv", "old", "commentary");
+  state.appendToolCallBlock({ id: "new-tool", name: "read_file", args: { file_path: "next.py" }, status: "running", startedAt: 10 }, "conv", "old");
+  const liveBlocks = useAppStore.getState().messages[0].blocks!;
+  const appended = liveBlocks.filter((block) => block.transcriptIndex === undefined);
+  expect(appended).toHaveLength(2);
+  resolve(new Response(JSON.stringify({ message_id: "old", blocks: [tool(2), tool(3)], tool_page: { before: 2, remaining: 2, total: 5 } })));
+  await loading;
+  const blocks = useAppStore.getState().messages[0].blocks!;
+  expect(blocks.map((block) => block.transcriptIndex)).toEqual([2, 3, 4, 5, undefined, undefined]);
+  expect(blocks.slice(-2)).toEqual(appended);
+  expect(blocks[3]).toMatchObject({ content: "Final answer more" });
 });
 
 it("reloads the active conversation when its tool cursor is obsolete", async () => {

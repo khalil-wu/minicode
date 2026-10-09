@@ -202,6 +202,49 @@ test("native workspace approval is persisted for a later desktop launch", () => 
   assert.equal(security.restoreTrustedWorkspaceRoot(workspace), fs.realpathSync.native(workspace));
 });
 
+test("reactivating an approved workspace does not rewrite the backend trust ledger", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-trust-reactivate-"));
+  const workspace = path.join(tempRoot, "workspace");
+  const trustedRootsFile = path.join(tempRoot, "trusted_workspaces.json");
+  fs.mkdirSync(workspace);
+  fs.writeFileSync(trustedRootsFile, JSON.stringify({ version: 1, roots: [workspace] }));
+  security.init({ initialRoots: [], trustedRootsFile });
+  const writeFileAtomic = require("write-file-atomic");
+  const original = writeFileAtomic.sync;
+  let writes = 0;
+  writeFileAtomic.sync = (...args) => { writes += 1; return original(...args); };
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      assert.equal(security.rememberTrustedWorkspaceRoot(workspace), fs.realpathSync.native(workspace));
+    }
+    assert.equal(writes, 0);
+    assert.equal(security.isWithinTrustedWorkspace(workspace), true);
+  } finally {
+    writeFileAtomic.sync = original;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("a rejected trust ledger write does not publish an uncommitted workspace approval", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-trust-write-failure-"));
+  const workspace = path.join(tempRoot, "workspace");
+  fs.mkdirSync(workspace);
+  security.init({ initialRoots: [], trustedRootsFile: path.join(tempRoot, "trusted_workspaces.json") });
+  const writeFileAtomic = require("write-file-atomic");
+  const original = writeFileAtomic.sync;
+  let writes = 0;
+  writeFileAtomic.sync = () => { writes += 1; throw Object.assign(new Error("actual rename denied"), { code: "EPERM" }); };
+  try {
+    assert.throws(() => security.rememberTrustedWorkspaceRoot(workspace), /actual rename denied/);
+    assert.equal(security.isWithinTrustedWorkspace(workspace), false);
+    assert.throws(() => security.rememberTrustedWorkspaceRoot(workspace), /actual rename denied/);
+    assert.equal(writes, 2);
+  } finally {
+    writeFileAtomic.sync = original;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("legacy active workspace is migrated and can be restored without activating other history", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-migration-"));
   const workspace = path.join(tempRoot, "workspace");

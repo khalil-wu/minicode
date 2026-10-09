@@ -34,7 +34,6 @@ from backend.agent.provider_lifecycle import (
 )
 from backend.llm.errors import (
     classify_llm_error,
-    llm_error_status_code,
     retry_after_seconds,
 )
 from backend.llm.provider_contracts import ReasoningPolicy
@@ -64,20 +63,15 @@ _LOCAL_REQUEST_METADATA_KEYS = {
     "prompt_cache_child_tools_hash",
     LIFECYCLE_RUNTIME_METADATA_KEY,
 }
-# Side-query retry: the delay curve (0.5s exponential base, 8s cap, jitter
-# downward) comes from pi-ai's transport-layer getRetryDelayMs; the 3-attempt
-# ceiling matches pi's settings.retry.maxRetries default. pi's own auxiliary
-# calls actually use a 2s base with no cap, so this fuse is deliberately
-# tighter than upstream.
+# Auxiliary requests share Codex's 200ms exponential retry clock. Explicit
+# operation options own their budget; compaction retains five stream retries.
 _SIDE_QUERY_MAX_RETRIES = 3
 _SIDE_QUERY_OPERATION_MAX_RETRIES = {
     # Compaction owns its complete retry budget here. Five retries cover the
     # observed 12-second 429 window without an outer loop multiplying calls.
     "compact": 5,
 }
-_SIDE_QUERY_BASE_DELAY_SECONDS = 0.5
-_SIDE_QUERY_MAX_DELAY_SECONDS = 8.0
-_SIDE_QUERY_SERVER_DELAY_LIMIT_SECONDS = 60.0
+_SIDE_QUERY_BASE_DELAY_SECONDS = 0.2
 # Auxiliary calls are not streamed, so the agent loop's per-event watchdog
 # (provider_stream_wait) never sees them, and the raw HTTP clients run with
 # timeout=None because stream liveness is owned by that watchdog. Without a
@@ -1115,27 +1109,6 @@ class LLMAdapter(ABC):
                 )
             )
         )
-        query_source = str(options.query_source or "").strip().lower()
-        if not query_source:
-            query_source = (
-                "compact"
-                if operation == "compact"
-                else "side_question"
-                if operation == "context_side_query"
-                else "background"
-            )
-        foreground_529_sources = {
-            "user",
-            "main",
-            "foreground",
-            "sdk",
-            "agent:custom",
-            "agent:default",
-            "agent:builtin",
-            "compact",
-            "side_question",
-        }
-        consecutive_529 = 0
         try:
             while True:
                 record["attempts"] = attempt + 1
@@ -1156,36 +1129,17 @@ class LLMAdapter(ABC):
                     raise
                 except Exception as exc:
                     classification = classify_llm_error(exc)
-                    status_code = llm_error_status_code(exc)
-                    is_529 = status_code == 529 or (
-                        classification.provider_error_type == "busy"
-                        and "529" in str(exc).lower()
-                    )
-                    if is_529:
-                        consecutive_529 += 1
-                    else:
-                        consecutive_529 = 0
-                    background_capacity_error = is_529 and (
-                        query_source not in foreground_529_sources
-                        or consecutive_529 >= 3
-                    )
+                    server_delay = retry_after_seconds(exc, default=None)
                     if (
                         not classification.retryable
-                        or background_capacity_error
+                        or (classification.provider_error_type == "busy" and server_delay is None)
                         or attempt >= max_retries
                     ):
                         raise
-                    # pi fails fast when the server asks for more than the
-                    # retry budget instead of sleeping the request away.
-                    server_delay = retry_after_seconds(exc, maximum=float("inf"))
-                    if server_delay > _SIDE_QUERY_SERVER_DELAY_LIMIT_SECONDS:
-                        raise
-                    delay_seconds = min(
-                        _SIDE_QUERY_BASE_DELAY_SECONDS * (2**attempt),
-                        _SIDE_QUERY_MAX_DELAY_SECONDS,
-                    )
-                    delay_seconds *= 1.0 - random.random() * 0.25
-                    delay_seconds = max(delay_seconds, server_delay)
+                    delay_seconds = _SIDE_QUERY_BASE_DELAY_SECONDS * (2**attempt)
+                    delay_seconds *= 0.9 + random.random() * 0.2
+                    if server_delay is not None:
+                        delay_seconds = server_delay
                     attempt += 1
                     logger.warning(
                         "Retrying auxiliary model call %s (%d/%d) in %.1fs after %s",

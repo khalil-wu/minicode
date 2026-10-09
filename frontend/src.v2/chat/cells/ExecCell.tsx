@@ -12,6 +12,7 @@ import {
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { toolCleanupNotice } from "../../lib/tool-call-reducer";
+import { useTranscriptReadingPreference } from "../transcriptReadingState";
 
 /**
  * A command has one compact lifecycle row and one optional output panel. The
@@ -32,11 +33,10 @@ export function ExecCell({
   const outputMeta = [cell.exitCode != null ? `exit ${cell.exitCode}` : "", duration].filter(Boolean).join(" · ");
   const running = isRunningCellStatus(status);
   const shouldAutoExpand = !cell.collapsed || cell.status === "failed" || cell.status === "partial";
-  const [expansionPreference, setExpanded] = useState(shouldAutoExpand);
+  const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`exec:${cell.id}`, shouldAutoExpand);
   const expanded = useTranscriptSearch() || expansionPreference;
   const title = commandTitle(cell.status, Boolean(cell.background), duration, expanded);
   const [copied, setCopied] = useState(false);
-  const userToggled = useRef(false);
   const previousId = useRef(cell.id);
   const previousRunning = useRef(running);
 

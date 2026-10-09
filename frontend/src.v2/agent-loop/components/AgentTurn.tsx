@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import type React from "react";
 import type { HistoryCellState } from "../../chat/cells/cellTypes";
 import type { AgentLoopTurnProjection } from "../projection/project-turn";
@@ -6,6 +6,7 @@ import { AgentProcessSummary } from "./AgentProcessSummary";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
+import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
 
 export type RenderAgentCellArgs = {
   key?: React.Key;
@@ -38,7 +39,7 @@ export const AgentTurn = memo(function AgentTurn({
   const initialProcessExpanded = !turn.hasCompleteFinalAnswer
     ? true
     : defaultProcessExpanded ?? turn.initialProcessExpanded;
-  const [processPreference, setProcessExpanded] = useState(initialProcessExpanded);
+  const [processPreference, setProcessExpanded, userToggled] = useTranscriptReadingPreference(`process:${turn.processDetailMode}`, initialProcessExpanded);
   const searching = useTranscriptSearch();
   const processExpanded = searching || processPreference;
   const previousTurnId = useRef(turn.id);
@@ -46,7 +47,6 @@ export const AgentTurn = memo(function AgentTurn({
   const previousDefaultProcessExpanded = useRef(defaultProcessExpanded);
   const previousStatus = useRef(turn.status);
   const previousHasCompleteFinalAnswer = useRef(turn.hasCompleteFinalAnswer);
-  const userToggled = useRef(false);
 
   useEffect(() => {
     const changedTurn = previousTurnId.current !== turn.id;
@@ -102,11 +102,15 @@ export const AgentTurn = memo(function AgentTurn({
   // the reply so the user sees the complete change set at the end of the turn.
   const timelineCells = useMemo(() => turn.processCells.filter((cell) => cell.kind !== "diff"), [turn.processCells]);
   const diffCells = useMemo(() => turn.processCells.filter((cell) => cell.kind === "diff"), [turn.processCells]);
+  const onUserDisclosure = useCallback(() => {
+    userToggled.current = true;
+    setProcessExpanded(true);
+  }, [setProcessExpanded, userToggled]);
   const visibleTimelineCells = useMemo(() => processExpanded
     ? timelineCells
     : [], [processExpanded, timelineCells]);
   const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
-  const failureIsTimelineEvidence = turn.processCells.some((cell) => cell.kind === "error");
+  const failureIsTimelineEvidence = useMemo(() => turn.processCells.some((cell) => cell.kind === "error"), [turn.processCells]);
   const showProcessStack =
     turn.hasProcessContent &&
     visibleTimelineCells.length > 0;
@@ -155,7 +159,10 @@ export const AgentTurn = memo(function AgentTurn({
           data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent 处理进度"
           onClickCapture={(event) => {
-            if ((event.target as Element).closest("button[aria-expanded], summary")) userToggled.current = true;
+            if ((event.target as Element).closest("button[aria-expanded], button.agent-loop-timeline-group-title, summary")) {
+              userToggled.current = true;
+              setProcessExpanded(processPreference);
+            }
           }}
         >
           {processSummary}
@@ -169,7 +176,7 @@ export const AgentTurn = memo(function AgentTurn({
               isRunning={turn.status === "running"}
               expandWorkGroups={userToggled.current}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
-              onUserDisclosure={() => { userToggled.current = true; }}
+              onUserDisclosure={onUserDisclosure}
             />
           )}
 

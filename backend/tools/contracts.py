@@ -53,6 +53,11 @@ class ToolSpec:
     exposure: ToolExposure = "core"
     always_load: bool = False  # force direct visibility even when deferred
     required_args: tuple[str, ...] = ()
+    policy_aliases: tuple[str, ...] = ()
+
+    @property
+    def policy_names(self) -> tuple[str, ...]:
+        return (self.name, *self.policy_aliases)
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   requestGitChanges: vi.fn(),
   isDesktop: vi.fn(() => false),
   fsListTree: vi.fn(),
+  trustWorkspace: vi.fn(),
   searchWorkspaceFiles: vi.fn(),
   writeWorkspaceFile: vi.fn(),
   createWorkspaceDirectory: vi.fn(),
@@ -42,7 +43,7 @@ vi.mock("../desktop/runtime", () => ({
   openPath: vi.fn(),
   fsListTree: mocks.fsListTree,
   fsSearchFiles: vi.fn().mockResolvedValue([]),
-  trustWorkspace: vi.fn(),
+  trustWorkspace: mocks.trustWorkspace,
 }));
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({
@@ -87,6 +88,7 @@ describe("FileTree directory request ownership", () => {
     mocks.requestGitChanges.mockReset();
     mocks.isDesktop.mockReturnValue(false);
     mocks.fsListTree.mockReset();
+    mocks.trustWorkspace.mockReset().mockResolvedValue(undefined);
     mocks.searchWorkspaceFiles.mockReset().mockResolvedValue([]);
     mocks.writeWorkspaceFile.mockReset();
     mocks.createWorkspaceDirectory.mockReset();
@@ -109,6 +111,14 @@ describe("FileTree directory request ownership", () => {
       workingDirectory: "",
       requestGitChanges: originalRequestGitChanges,
     });
+  });
+
+  it("shows a trust failure without claiming an empty or readable workspace", async () => {
+    mocks.isDesktop.mockReturnValue(true);
+    mocks.trustWorkspace.mockRejectedValue(new Error("EPERM: rename trusted_workspaces.json"));
+    render(<FileTree />);
+    expect((await screen.findByRole("alert")).textContent).toContain("EPERM: rename trusted_workspaces.json");
+    expect(mocks.fsListTree).not.toHaveBeenCalled();
   });
 
   it("keeps one keyboard tab stop and navigates visible siblings and parents", async () => {

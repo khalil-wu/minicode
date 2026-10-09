@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from backend.agent.prompting import build_tool_runtime_guidance
@@ -45,16 +45,13 @@ WORKSPACE_REQUIRED_TOOL_PATTERNS = (
 
 def permission_context_cache_key(context: PermissionContext | None) -> tuple[Any, ...]:
     if context is None:
-        return ("", (), (), "")
-    return (
-        str(getattr(context, "mode", "") or ""),
-        tuple(sorted(str(rule) for rule in getattr(context, "tool_deny_rules", []) or [])),
-        tuple(sorted(
-            (str(key), str(getattr(value, "value", value)))
-            for key, value in (getattr(context, "session_overrides", {}) or {}).items()
-        )),
-        str(getattr(context, "source", "") or ""),
-    )
+        return ()
+    # Schema visibility depends on approval policy, filesystem scope and sandbox
+    # settings as well as mode. Use the complete turn permission contract.
+    return (json.dumps(
+        {field.name: getattr(context, field.name) for field in fields(context)},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ),)
 
 
 def workspace_bound_tool_names(tool_registry: ToolRegistry) -> set[str]:
@@ -166,7 +163,9 @@ def derive_turn_tool_schema_state(
         tool_registry.version if tool_registry is not None else None,
         mcp_registry_version,
         toolset_policy.cache_key() if toolset_policy is not None else "",
-        id(permission_checker), tuple(sorted(mcp_instructions.items())),
+        id(permission_checker),
+        json.dumps(permission_checker.policy_snapshot(), sort_keys=True) if permission_checker is not None else "",
+        tuple(sorted(mcp_instructions.items())),
     )
     if (previous is not None and previous.permission_key == permission_key
             and previous.derivation_key == derivation_key
@@ -181,6 +180,12 @@ def derive_turn_tool_schema_state(
         for schema in canonical_base_schemas
     )
     names = sorted(tool_schema_names(canonical_base_schemas))
+    views = tool_registry.build_schema_views(
+        toolset_policy=toolset_policy,
+        permission_checker=permission_checker,
+        permission_context=permission_context,
+        materialize_schema=False,
+    ) if tool_registry is not None else []
     deferred = ""
     if "tool_search" in names and tool_registry is not None:
         deferred = build_deferred_tools_prompt_block(
@@ -188,26 +193,27 @@ def derive_turn_tool_schema_state(
             toolset_policy=toolset_policy,
             permission_checker=permission_checker,
             permission_context=permission_context,
+            schema_views=views,
         )
     reachable_mcp_tools = set()
+    reachable_mcp_servers = None
     if tool_registry is not None:
         reachable_mcp_tools = {
-            view.name for view in tool_registry.build_schema_views(
-                toolset_policy=toolset_policy,
-                permission_checker=permission_checker,
-                permission_context=permission_context,
-                materialize_schema=False,
-            )
+            view.name for view in views
             if view.name.startswith("mcp__") and (view.direct or view.code_mode_available
                 or ("tool_search" in names and view.exposure in {"deferred", "deferred_model_only"}))
         }
+        reachable_mcp_servers = {
+            server for name in reachable_mcp_tools
+            if (server := getattr(tool_registry.get_tool(name), "server_name", ""))
+        } or None
     return TurnToolSchemaDerivation(
         permission_key=permission_key,
         schema_key=schema_key,
         tool_schemas=canonical_base_schemas,
         tool_names=names,
         runtime_guidance=build_tool_runtime_guidance(canonical_base_schemas, mcp_instructions,
-            reachable_mcp_tools=reachable_mcp_tools),
+            reachable_mcp_tools=reachable_mcp_tools, reachable_mcp_servers=reachable_mcp_servers),
         deferred_tools_prompt_block=deferred,
         derivation_key=derivation_key,
     )

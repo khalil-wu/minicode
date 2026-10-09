@@ -55,7 +55,7 @@ def _compiled_path_deny_spec(patterns: tuple[str, ...]) -> GitIgnoreSpec:
     return GitIgnoreSpec.from_lines(patterns)
 
 
-def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
+def _tool_pattern_matches(tool_name: str, pattern: str, policy_aliases: tuple[str, ...] = ()) -> bool:
     """Match ordinary globs plus an MCP server-level rule.
 
     `mcp__server` is a deliberate server boundary, not a literal tool named
@@ -63,11 +63,12 @@ def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
     match by raw prefix.
     """
     normalized_pattern = str(pattern or "").strip()
-    if fnmatch.fnmatch(tool_name, normalized_pattern):
-        return True
-    if normalized_pattern.startswith("mcp__") and "*" not in normalized_pattern:
-        return tool_name.startswith(normalized_pattern + "__")
-    return False
+    return any(
+        fnmatch.fnmatch(name, normalized_pattern)
+        or (normalized_pattern.startswith("mcp__") and "*" not in normalized_pattern
+            and name.startswith(normalized_pattern + "__"))
+        for name in (tool_name, *policy_aliases)
+    )
 
 
 def _callable_accepts_tool_parameter(owner: Any, method_name: str, callable_obj: Any) -> bool:
@@ -1035,11 +1036,12 @@ class PermissionChecker:
         tool: "BaseTool | None" = None,
     ) -> tuple[bool, str]:
         """Check static capability boundaries without inventing invocation args."""
-        matched = self._first_match(tool_name, self._settings.always_deny)
+        policy_aliases = tool.policy_aliases if tool is not None else ()
+        matched = self._first_match(tool_name, self._settings.always_deny, policy_aliases)
         if matched:
             return False, f"Tool '{tool_name}' is disabled by the static permission policy ({matched})."
         if context is not None:
-            matched = self._first_match(tool_name, context.tool_deny_rules)
+            matched = self._first_match(tool_name, context.tool_deny_rules, policy_aliases)
             if matched:
                 return False, f"Tool '{tool_name}' is disabled for this session ({matched})."
         if tool is not None:
@@ -1054,18 +1056,19 @@ class PermissionChecker:
         self,
         tool_name: str,
         args: dict[str, Any] | None,
+        policy_aliases: tuple[str, ...] = (),
     ) -> PermissionLevel | None:
         """Evaluate parsed Tool(content) rules with deny > ask > allow precedence."""
         from backend.permissions.content_rules import rule_matches_call
 
         for rule in self._content_deny:
-            if rule_matches_call(rule, tool_name, args, effect="deny"):
+            if rule_matches_call(rule, tool_name, args, effect="deny", policy_aliases=policy_aliases):
                 return PermissionLevel.ALWAYS_DENY
         for rule in self._content_ask:
-            if rule_matches_call(rule, tool_name, args, effect="ask"):
+            if rule_matches_call(rule, tool_name, args, effect="ask", policy_aliases=policy_aliases):
                 return PermissionLevel.CONFIRM
         for rule in self._content_allow:
-            if rule_matches_call(rule, tool_name, args, effect="allow"):
+            if rule_matches_call(rule, tool_name, args, effect="allow", policy_aliases=policy_aliases):
                 return PermissionLevel.AUTO
         return None
 
@@ -1153,6 +1156,7 @@ class PermissionChecker:
         tool: "BaseTool | None" = None,
     ) -> tuple[PermissionLevel, str, str]:
         capability_floor = (PermissionLevel.AUTO, "", "")
+        policy_aliases = tool.policy_aliases if tool is not None else ()
 
         def raise_floor(
             level: PermissionLevel,
@@ -1173,17 +1177,17 @@ class PermissionChecker:
             return level, source, rule
 
         # 1. 检查是否在 always_deny
-        matched = self._first_match(tool_name, self._settings.always_deny)
+        matched = self._first_match(tool_name, self._settings.always_deny, policy_aliases)
         if matched:
             return PermissionLevel.ALWAYS_DENY, "static_policy", matched
 
         policy_override: tuple[PermissionLevel, str, str] | None = None
         if context is not None:
-            matched = self._first_match(tool_name, context.tool_deny_rules)
+            matched = self._first_match(tool_name, context.tool_deny_rules, policy_aliases)
             if matched:
                 return PermissionLevel.ALWAYS_DENY, "context_deny", matched
 
-            override = self._resolve_override_match(tool_name, context.session_overrides)
+            override = self._resolve_override_match(tool_name, context.session_overrides, policy_aliases)
             if override is not None:
                 pattern, level = override
                 if level == PermissionLevel.ALWAYS_DENY:
@@ -1193,7 +1197,7 @@ class PermissionChecker:
         # Content-level rules (Tool(content) syntax). A deny rule wins in every
         # mode (safety); an allow rule forces AUTO except in plan mode (plan is
         # strict read-only regardless of allow rules).
-        content_decision = self._content_rule_decision(tool_name, args)
+        content_decision = self._content_rule_decision(tool_name, args, policy_aliases)
         if content_decision == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
         if policy_override is None and content_decision in {
@@ -1222,13 +1226,13 @@ class PermissionChecker:
         # before confirm/auto/accept-edits choose their default behavior.
         static_auto: tuple[PermissionLevel, str, str] | None = None
         static_floor: list[tuple[PermissionLevel, str, str]] = []
-        matched = self._first_match(tool_name, self._settings.require_diff_review)
+        matched = self._first_match(tool_name, self._settings.require_diff_review, policy_aliases)
         if matched:
             static_floor.append((PermissionLevel.DIFF_REVIEW, "static_policy", matched))
-        matched = self._first_match(tool_name, self._settings.require_confirm)
+        matched = self._first_match(tool_name, self._settings.require_confirm, policy_aliases)
         if matched:
             static_floor.append((PermissionLevel.CONFIRM, "static_policy", matched))
-        matched = self._first_match(tool_name, self._settings.auto_allow)
+        matched = self._first_match(tool_name, self._settings.auto_allow, policy_aliases)
         if matched:
             static_auto = (PermissionLevel.AUTO, "static_policy", matched)
 
@@ -2045,23 +2049,25 @@ class PermissionChecker:
 
     @staticmethod
     def _resolve_override(
-        tool_name: str, overrides: dict[str, PermissionLevel]
+        tool_name: str, overrides: dict[str, PermissionLevel], policy_aliases: tuple[str, ...] = ()
     ) -> PermissionLevel | None:
-        for pattern, level in overrides.items():
-            if _tool_pattern_matches(tool_name, pattern):
-                return level
-        return None
+        match = PermissionChecker._resolve_override_match(tool_name, overrides, policy_aliases)
+        return match[1] if match is not None else None
 
     @staticmethod
     def _resolve_override_match(
         tool_name: str,
         overrides: dict[str, PermissionLevel],
+        policy_aliases: tuple[str, ...] = (),
     ) -> tuple[str, PermissionLevel] | None:
-        for pattern, level in overrides.items():
-            if _tool_pattern_matches(tool_name, pattern):
-                return pattern, level
-        return None
+        matches = [
+            (pattern, level) for pattern, level in overrides.items()
+            if _tool_pattern_matches(tool_name, pattern, policy_aliases)
+        ]
+        # A later approval for the new wire name cannot erase a deny attached
+        # to the same raw tool/server identity before it was renamed.
+        return next((match for match in matches if match[1] == PermissionLevel.ALWAYS_DENY), matches[0] if matches else None)
 
     @staticmethod
-    def _first_match(tool_name: str, patterns: list[str]) -> str:
-        return next((pattern for pattern in patterns if _tool_pattern_matches(tool_name, pattern)), "")
+    def _first_match(tool_name: str, patterns: list[str], policy_aliases: tuple[str, ...] = ()) -> str:
+        return next((pattern for pattern in patterns if _tool_pattern_matches(tool_name, pattern, policy_aliases)), "")

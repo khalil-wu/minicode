@@ -302,10 +302,9 @@ class AgentSettings:
     # MiniCode's 90s watchdog is opt-in behind MINICODE_ENABLE_STREAM_WATCHDOG.
     stream_timeout_seconds: float = 300.0
     first_byte_timeout_seconds: float = 0.0
-    # MiniCode retries streams 10 times with 500ms base and ±25% jitter
-    # (cc/src/services/api/withRetry.ts: DEFAULT_MAX_RETRIES=10, BASE_DELAY_MS=500).
-    stream_max_attempts: int = 10
-    stream_retry_delay_seconds: float = 0.5
+    # Codex provider defaults: five stream retries, 200ms exponential base.
+    stream_max_attempts: int = 5
+    stream_retry_delay_seconds: float = 0.2
     stream_retryable_substrings: tuple[str, ...] = ()
     # A provider that cannot be reached is waited out rather than budgeted: the
     # request never left the client, so replaying it is always safe, and the

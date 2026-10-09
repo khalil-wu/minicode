@@ -670,16 +670,20 @@ const ContextUsageRing = memo(() => {
   const conversationId = useAppStore((s) => s.conversationId);
   const currentModel = useAppStore((s) => s.currentModel);
   const appMode = useAppStore((s) => s.appMode);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const hydration = useAppStore((s) => conversationId ? s.conversationHydration[conversationId] : undefined);
+  const ownerReady = isConnected && !pendingConversationSwitchId && !hydration?.isHydrating;
 
   useEffect(() => {
-    if (!conversationId) return;
+    if (!conversationId || !ownerReady) return;
     sendClientCommand({
       type: "session.usage.inspect",
       conversation_id: conversationId,
       source: "usage_ring_auto",
       silent: true,
     });
-  }, [appMode, conversationId, currentModel]);
+  }, [appMode, conversationId, currentModel, ownerReady, hydration?.updatedAt]);
 
   if (!contextUsage && budgetBuckets.length === 0 && totalBudgetPercent <= 0) return null;
 

@@ -32,7 +32,7 @@ class MCPToolSpecAdapter:
             annotations=getattr(tool_def, "annotations", None) or {},
         )
 
-    def build_spec(self, runtime_name: str) -> ToolSpec:
+    def build_spec(self, runtime_name: str, *, policy_aliases: tuple[str, ...] = ()) -> ToolSpec:
         required = self._required_args()
         return ToolSpec(
             name=runtime_name,
@@ -40,6 +40,7 @@ class MCPToolSpecAdapter:
             toolset="mcp",
             exposure="deferred",
             required_args=required,
+            policy_aliases=policy_aliases,
         )
 
     def _required_args(self) -> tuple[str, ...]:

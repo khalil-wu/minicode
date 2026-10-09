@@ -1,6 +1,7 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../../components/AgentAvatar";
-import { projectAgentViews } from "../../lib/agent-view-model";
+import { agentsForReferences, projectAgentViews } from "../../lib/agent-view-model";
 import type { CollaborationCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import "./cells.css";
@@ -13,12 +14,15 @@ export const CollaborationCell = memo(function CollaborationCell({
   cell: CollaborationCellState;
   conversationId?: string;
 }) {
-  const agentIds = [...new Set(cell.entries.map((entry) => entry.agentId))];
-  const agents = useAppStore((state) => conversationId
-    ? conversationId === state.conversationId ? state.subagents : state.conversationAgentStates[conversationId]?.subagents
-    : undefined);
+  const agentIds = useMemo(() => [...new Set(cell.entries.map((entry) => entry.agentId))], [cell.entries]);
+  const agents = useAppStore(useShallow((state) => {
+    const source = conversationId
+      ? conversationId === state.conversationId ? state.subagents : state.conversationAgentStates[conversationId]?.subagents
+      : undefined;
+    return source ? agentsForReferences(source, agentIds) : [];
+  }));
   const activeConversationId = useAppStore((state) => state.conversationId);
-  const views = projectAgentViews(agents ?? []);
+  const views = useMemo(() => projectAgentViews(agents), [agents]);
   const agentFor = (id: string) => {
     const exact = views.find((agent) => agent.id === id || agent.identityKey === id);
     if (exact) return exact;

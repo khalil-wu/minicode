@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, PencilLine, TerminalSquare } from "../../lib/icons";
 import type { AgentLoopProcessCell } from "../projection/project-turn";
@@ -11,9 +11,11 @@ import {
 import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
 import { isProviderReasoningSummary } from "../../lib/provider-reasoning";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
+import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
 
 type TimelineGroupKind = "work" | "thinking" | "narration" | "context" | "notice";
 type TimelineGroup = {
+  key: string;
   kind: TimelineGroupKind;
   cells: AgentLoopProcessCell[];
   segment?: number;
@@ -62,6 +64,7 @@ const cellSegmentClosed = (cell: AgentLoopProcessCell): boolean => {
 
 const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
   const groups: TimelineGroup[] = [];
+  const groupCounts = new Map<string, number>();
   for (const cell of cells) {
     const kind = timelineGroupKind(cell);
     const segment = cellSegment(cell);
@@ -69,13 +72,17 @@ const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
     const joinsPrevious = previous?.kind === kind && (
       kind !== "work"
       || (segment !== undefined && previous.segment === segment
-        && cell.kind !== "collaboration" && previous.cells.every((item) => item.kind !== "collaboration"))
+        && cell.kind !== "collaboration" && workLabel(cell) !== undefined
+        && previous.cells.every((item) => item.kind !== "collaboration" && workLabel(item) !== undefined))
     );
     if (joinsPrevious) {
       previous.cells.push(cell);
       previous.closed = previous.closed && cellSegmentClosed(cell);
     } else {
-      groups.push({ kind, cells: [cell], segment, closed: cellSegmentClosed(cell) });
+      const scope = `${kind}:${segment ?? cell.id}`;
+      const ordinal = groupCounts.get(scope) ?? 0;
+      groupCounts.set(scope, ordinal + 1);
+      groups.push({ key: `${scope}:${ordinal}`, kind, cells: [cell], segment, closed: cellSegmentClosed(cell) });
     }
   }
   return groups;
@@ -145,11 +152,12 @@ const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNod
 
 function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDisclosure }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onUserDisclosure?: () => void }) {
   const searching = useTranscriptSearch();
-  const [visibleCount, setVisibleCount] = useState(40);
+  const [visibleCount, setVisibleCount, userChangedWindow] = useTranscriptReadingPreference(`work-window:${group.key}`, 40);
   const previousWindow = useRef({ first: group.cells[0]?.id, count: group.cells.length });
   useEffect(() => {
     const previous = previousWindow.current;
     if (previous.first !== group.cells[0]?.id && group.cells.length > previous.count) {
+      userChangedWindow.current = true;
       setVisibleCount((count) => count + group.cells.length - previous.count);
       setExpanded(true);
     }
@@ -163,9 +171,8 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
     || ((cell.kind === "exec" || cell.kind === "activity" || cell.kind === "collaboration")
       && (cell.status === "failed" || cell.status === "partial")));
   const defaultExpanded = containsFailure || (isRunning && (!group.closed || containsScreenshot)) || expandWorkGroups;
-  const [expansionPreference, setExpanded] = useState(defaultExpanded);
+  const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`work:${group.key}`, defaultExpanded);
   const expanded = searching || expansionPreference;
-  const userToggled = useRef(false);
   const detailId = useId();
   useEffect(() => {
     if (!userToggled.current) setExpanded(defaultExpanded);
@@ -204,7 +211,7 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
       </button>
       {expanded && (
         <div id={detailId} className="agent-loop-timeline-group-items">
-          {hiddenCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => setVisibleCount((count) => count + 40)}>显示更早的操作（{hiddenCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
+          {hiddenCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => { userChangedWindow.current = true; onUserDisclosure?.(); setVisibleCount((count) => count + 40); }}>显示更早的操作（{hiddenCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
           {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
         </div>
       )}
@@ -213,7 +220,7 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
 }
 
 function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoopProcessCell, { kind: "thinking" }>; renderCell: RenderAgentCell }) {
-  const [expansionPreference, setExpanded] = useState(false);
+  const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`thinking:${cell.id}`, false);
   const expanded = useTranscriptSearch() || expansionPreference;
   return (
     <section className="agent-loop-thinking-disclosure" data-thinking-expanded={expanded}>
@@ -222,7 +229,7 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
         className="agent-loop-timeline-group-title agent-loop-thinking-toggle"
         aria-label="Thinking"
         aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => { userToggled.current = true; setExpanded((value) => !value); }}
       >
         <span>Thinking</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
@@ -241,10 +248,11 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
 export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, loadedToolItems, onUserDisclosure }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; loadedToolItems?: number; onUserDisclosure?: () => void }) {
   const searching = useTranscriptSearch();
   const groups = useMemo(() => groupTimelineCells(cells), [cells]);
-  const [visibleGroupCount, setVisibleGroupCount] = useState(40);
+  const [visibleGroupCount, setVisibleGroupCount, userChangedWindow] = useTranscriptReadingPreference("timeline-window", 40);
   const previouslyLoaded = useRef(loadedToolItems);
   useEffect(() => {
     if (loadedToolItems !== undefined && previouslyLoaded.current !== undefined && loadedToolItems > previouslyLoaded.current) {
+      userChangedWindow.current = true;
       const added = loadedToolItems - previouslyLoaded.current;
       setVisibleGroupCount((count) => count + added);
     }
@@ -257,7 +265,7 @@ export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, sh
     .reduce((sum, group) => sum + group.cells.filter(needsAttention).length, 0);
   return (
     <div className="chat-turn-process-stack agent-loop-timeline">
-      {hiddenGroupCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => setVisibleGroupCount((count) => count + 40)}>显示更早的处理过程（{hiddenGroupCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
+      {hiddenGroupCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => { userChangedWindow.current = true; onUserDisclosure?.(); setVisibleGroupCount((count) => count + 40); }}>显示更早的处理过程（{hiddenGroupCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
       {visibleGroups.map((group, groupIndex) => {
         const keyed = withStableRenderKeys(group.cells);
         if (group.kind === "thinking") {
@@ -272,7 +280,7 @@ export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, sh
         }
         if (group.kind === "work") {
           if (group.cells.length > 1 && group.cells.some((cell) => workLabel(cell) !== undefined)) {
-            return <WorkGroup key={`timeline-group-work-${group.segment === undefined ? `unscoped-${groupIndex}` : `segment-${group.segment}`}`} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} />;
+            return <WorkGroup key={group.key} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }

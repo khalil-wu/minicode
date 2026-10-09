@@ -46,6 +46,7 @@ import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { openWebInBrowser } from "../chat/openWebInBrowser";
+import { pushToast } from "../overlays/ToastContainer";
 
 const CLOSED_OVERLAYS = {
   commandPaletteOpen: false,
@@ -545,7 +546,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     });
     if (d) {
       const rt = desktop();
-      if (rt?.trustWorkspace) rt.trustWorkspace(d);
+      if (rt?.trustWorkspace) void rt.trustWorkspace(d).catch((error) => {
+        pushToast(`无法信任工作区 ${d}：${error instanceof Error ? error.message : String(error)}`, "error");
+      });
     }
   },
   setWorkspaceGit: (state) => set({ workspaceGit: state }),

@@ -451,6 +451,8 @@ class SessionLifecycle:
             logger.error("Failed to restart file watcher: %s", exc, exc_info=True)
 
     def clear_workspace_runtime(self) -> None:
+        from backend.api import _state
+
         self._workspace_generation += 1
         self.invalidate_sandbox_capabilities()
         self._retire_workspace_task(self._workspace_context_task)
@@ -458,8 +460,9 @@ class SessionLifecycle:
         self._retire_workspace_task(self._workspace_mcp_task)
         self._workspace_mcp_task = None
         self._workspace_context = None
-        self._session.mcp_manager = None
-        self._session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
+        bootstrap = _state.bootstrap
+        self._session.mcp_manager = bootstrap.get_mcp_manager_for_workspace(None) if bootstrap is not None else None
+        self._session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False, workspace_root=None)
         if self.file_watcher is not None:
             self.file_watcher.stop()
             self.file_watcher = None
@@ -636,7 +639,7 @@ class SessionLifecycle:
                 return
             self._session.mcp_manager = manager
             refresh_registry = self._session.refresh_tool_registry_if_mcp_changed
-            refresh_registry(allow_when_busy=False)
+            refresh_registry(allow_when_busy=False, workspace_root=workspace_root)
             await send_mcp_projection(
                 self._session, manager, {"type": "mcp_status", "servers": get_mcp_status(manager)},
             )
@@ -645,7 +648,10 @@ class SessionLifecycle:
 
         def publish_mcp_manager(manager: Any | None) -> None:
             self._session.mcp_manager = manager
-            refresh_registry(allow_when_busy=False)
+            refresh_registry(
+                allow_when_busy=False,
+                workspace_root=manager.workspace_root if manager is not None else project_path,
+            )
 
         async def begin_workspace_mcp(workspace_root: Path) -> None:
             from backend.api import _state

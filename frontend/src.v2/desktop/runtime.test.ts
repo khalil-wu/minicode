@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
-import { pickWorkspaceDirectory, fsListTreeResult, fsSearchFiles, openPath, ptyClear, ptyList, ptyRestart, ptySnapshot, ptySpawn, revealPath } from "./runtime";
+import { pickWorkspaceDirectory, trustWorkspace, fsListTreeResult, fsSearchFiles, openPath, ptyClear, ptyList, ptyRestart, ptySnapshot, ptySpawn, revealPath } from "./runtime";
 import { pushToast } from "../overlays/ToastContainer";
 
 const spawn = vi.fn();
@@ -15,6 +15,12 @@ const clear = vi.fn();
 
 describe("desktop filesystem error projection", () => {
   afterEach(() => { delete window.__MINICODE_RUNTIME__; });
+
+  it("propagates a workspace trust persistence failure to the requesting UI boundary", async () => {
+    const failure = new Error("EPERM: rename trusted_workspaces.json");
+    window.__MINICODE_RUNTIME__ = { desktop: { trustWorkspace: vi.fn().mockRejectedValue(failure) } as never };
+    await expect(trustWorkspace("C:/workspace")).rejects.toBe(failure);
+  });
 
   it("propagates a tree read failure instead of returning an empty workspace", async () => {
     const failure = new Error("Directory is outside the trusted workspace.");

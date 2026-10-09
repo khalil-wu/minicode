@@ -195,7 +195,7 @@ def test_skill_install_prompt_is_delivered_before_waiting_for_answer(tmp_path, m
             return None
 
     class _Journal:
-        def record_event(self, _event):
+        async def record_event_async(self, _event):
             pass
 
     async def install(_manager, _candidates):

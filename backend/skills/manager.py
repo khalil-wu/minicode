@@ -84,7 +84,7 @@ class SkillManager:
         if not self._discovered:
             self.discover()
 
-        msg_lower = user_message.lower()
+        mentioned_names, mentioned_paths = _extract_skill_mentions(user_message)
         candidates: list[SkillDetection] = []
         selected_paths: set[str] = set()
         selected_names: set[str] = set()
@@ -94,7 +94,7 @@ class SkillManager:
                 continue
             name = str(selected.get("name") or "").strip()
             source_path = str(selected.get("path") or "").strip()
-            selected_names.add(name)
+            selected_names.add(name.casefold())
             meta = self._loader.get_meta_by_path(source_path)
             if meta is None:
                 candidates.append(SkillDetection(
@@ -110,7 +110,7 @@ class SkillManager:
             if key in selected_paths:
                 continue
             selected_paths.add(key)
-            selected_names.add(meta.name)
+            selected_names.add(meta.name.casefold())
             candidates.append(SkillDetection(
                 name=meta.name,
                 trigger_mode="explicit",
@@ -118,9 +118,24 @@ class SkillManager:
                 source_path=str(meta.source_path),
             ))
 
+        # Linked mentions select the exact discovery path even when names collide.
+        # App, MCP and plugin links never become plain Skill-name invocations.
+        for meta in self._loader.list_metas():
+            key = self._skill_key(meta.source_path)
+            if not meta.user_invocable or key in selected_paths or key not in mentioned_paths:
+                continue
+            selected_paths.add(key)
+            selected_names.add(meta.name.casefold())
+            candidates.append(SkillDetection(
+                name=meta.name,
+                trigger_mode="explicit",
+                reason=f"用户显式选择 Skill 路径 {meta.source_path}",
+                source_path=str(meta.source_path),
+            ))
+
         all_skills = self._loader.list_skill_names()
         for name in all_skills:
-            if name in selected_names:
+            if name.casefold() in selected_names:
                 continue
             meta = self._loader.get_invocation_meta(name)
             if meta is None:
@@ -130,7 +145,8 @@ class SkillManager:
             if self._skill_key(meta.source_path) in selected_paths:
                 continue
 
-            if _message_explicitly_invokes_skill_name(msg_lower, name):
+            variants = {name.casefold(), name.casefold().replace("_", "-"), name.casefold().replace("-", "_")}
+            if mentioned_names & variants:
                 candidates.append(SkillDetection(
                     name=name,
                     trigger_mode="explicit",
@@ -280,18 +296,20 @@ class SkillManager:
             path = path.absolute()
         return str(path)
 
-def _message_explicitly_invokes_skill_name(message: str, skill_name: str) -> bool:
-    """Detect explicit ``$skill`` or ``/skill`` invocation."""
-    normalized = skill_name.strip().lower()
-    if not normalized:
-        return False
-    variants = {
-        normalized,
-        normalized.replace("_", "-"),
-        normalized.replace("-", "_"),
-    }
-    for variant in variants:
-        pattern = rf"(?<![\w.-])[$/]{re.escape(variant)}(?![\w.-])"
-        if re.search(pattern, message):
-            return True
-    return False
+_LINKED_MENTION_RE = re.compile(r"\[\$([A-Za-z0-9_:.-]+)\]\s*\(([^)]+)\)")
+_PLAIN_MENTION_RE = re.compile(r"(?<![\w.-])[$/]([A-Za-z0-9_:.-]+)(?![\w.-])")
+_ENV_VAR_NAMES = {"path", "home", "user", "shell", "pwd", "tmpdir", "temp", "tmp", "lang", "term", "xdg_config_home"}
+
+
+def _extract_skill_mentions(message: str) -> tuple[set[str], set[str]]:
+    paths: set[str] = set()
+
+    def linked(match: re.Match[str]) -> str:
+        path = match.group(2).strip()
+        if match.group(1).casefold() not in _ENV_VAR_NAMES and not path.startswith(("app://", "mcp://", "plugin://")):
+            paths.add(SkillManager._skill_key(path.removeprefix("skill://")))
+        return " "
+
+    plain_text = _LINKED_MENTION_RE.sub(linked, message)
+    names = {match.group(1).casefold() for match in _PLAIN_MENTION_RE.finditer(plain_text)}
+    return names - _ENV_VAR_NAMES, paths

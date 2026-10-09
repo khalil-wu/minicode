@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import copy
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -577,9 +578,9 @@ class ConversationRepository:
                 return False
 
             known_generations = self._manifest_generations(manifest or {})
-            loaded = self._load_record(conversation_id)
+            loaded = self._load_record(conversation_id) if manifest is None else None
             last_generation = max(
-                [*known_generations, int(getattr(loaded, "revision", 0) or 0)],
+                [*known_generations, self._manifest_revision(manifest or {}), int(getattr(loaded, "revision", 0) or 0)],
                 default=0,
             )
             deletion_generation = last_generation + 1
@@ -2308,12 +2309,16 @@ class ConversationRepository:
     def _ensure_summary_index_loaded(self) -> None:
         if self._summary_index is None:
             self._summary_index = {}
-        discovered_ids = set(self._discover_conversation_ids())
+        disk_stamps = self._discover_summary_stamps()
+        discovered_ids = set(disk_stamps)
         for conversation_id in set(self._summary_index) - discovered_ids:
             self._summary_index.pop(conversation_id, None)
             self._summary_index_stamps.pop(conversation_id, None)
         for conversation_id in discovered_ids:
-            stamp = self._summary_disk_stamp(conversation_id)
+            stamp = disk_stamps[conversation_id]
+            if len(self._summary_index_stamps.get(conversation_id, ())) == 2:
+                # Older manifests keep summary metadata in a generation file.
+                stamp = self._summary_disk_stamp(conversation_id)
             if (
                 conversation_id in self._summary_index
                 and self._summary_index_stamps.get(conversation_id) == stamp
@@ -2332,36 +2337,35 @@ class ConversationRepository:
                 )
                 summary = None
             if summary is not None:
+                manifest = self._manifest_cache.get(conversation_id)
+                if manifest is not None and manifest[1].get("metadata") is None:
+                    stamp = self._summary_disk_stamp(conversation_id)
                 self._summary_index[summary.id] = summary
                 self._summary_index_stamps[conversation_id] = stamp
             else:
                 self._summary_index.pop(conversation_id, None)
                 self._summary_index_stamps.pop(conversation_id, None)
 
-    def _discover_conversation_ids(self) -> list[str]:
-        conversation_ids = {
-            path.name[: -len(".manifest.json")]
-            for path in self._base_dir.glob("*.manifest.json")
-        }
-        conversation_ids.update({
-            path.name[: -len(".meta.json")]
-            for path in self._base_dir.glob("*.meta.json")
-            if ".g" not in path.name
-        })
-        for path in self._base_dir.glob("*.json"):
-            if (
-                path.name.endswith(".meta.json")
-                or path.name.endswith(".snapshot.json")
-                or path.name.endswith(".manifest.json")
-                or re.search(r"\.g\d+\.", path.name)
-            ):
-                continue
-            conversation_ids.add(path.stem)
-        return sorted(
-            conversation_id
-            for conversation_id in conversation_ids
-            if _CONVERSATION_ID_PATTERN.fullmatch(conversation_id)
-        )
+    def _discover_summary_stamps(self) -> dict[str, tuple[tuple[int, int], ...]]:
+        """Use one directory inventory for discovery and summary freshness."""
+        files: dict[str, dict[str, tuple[int, int]]] = {}
+        with os.scandir(self._base_dir) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(".json") or name.endswith(".snapshot.json") or re.search(r"\.g\d+\.", name):
+                    continue
+                suffix = next((suffix for suffix in (".manifest.json", ".meta.json") if name.endswith(suffix)), ".json")
+                conversation_id = name[:-len(suffix)]
+                if _CONVERSATION_ID_PATTERN.fullmatch(conversation_id):
+                    stat = entry.stat()
+                    files.setdefault(conversation_id, {})[suffix] = (stat.st_mtime_ns, stat.st_size)
+        stamps = {}
+        for conversation_id, versions in files.items():
+            if ".manifest.json" in versions:
+                stamps[conversation_id] = (versions[".manifest.json"],)
+            else:
+                stamps[conversation_id] = ((-1, -1), versions.get(".meta.json", (-1, -1)), versions.get(".json", (-1, -1)))
+        return stamps
 
 
 def _normalize_loaded_transcript(

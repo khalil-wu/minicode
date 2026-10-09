@@ -12,6 +12,7 @@ import pytest
 
 from backend.agent.message import AgentEvent
 from backend.conversations.models import ConversationRecord
+from backend.conversations.public_projection import project_public_conversation
 from backend.llm.capabilities import ProviderCapabilities
 from backend.services.conversation_payload_service import build_conversation_switched_payload
 from backend.services.conversation_goal_service import build_goal_updated_payload
@@ -200,7 +201,7 @@ def test_real_session_projection_builders_pass_runtime_contract() -> None:
     synced = build_session_synced_payload(
         {"session_id": "session-1", "synced": True, "session": runtime},
         protocol_version="1.0.0",
-        active_conversation=conversation,
+        active_conversation=project_public_conversation(conversation, transcript_limit=80),
         active_conversation_id=conversation.id,
         workspace_root=conversation.workspace_root,
         selected_model="gpt-test",

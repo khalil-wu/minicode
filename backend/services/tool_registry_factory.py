@@ -10,6 +10,7 @@ from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
 from backend.commands.catalog import get_builtin_command_catalog
 from backend.config import AppConfig, load_config
+from backend.mcp import MCP_MANAGER_UNSET
 from backend.permissions.checker import PermissionChecker
 from backend.tools.agent_tools import AskUserTool, BriefTool, ReadArtifactTool, TaskStatusTool, TaskStopTool, TaskTool
 from backend.tools.agent_artifact_tools import PresentFileTool
@@ -63,7 +64,7 @@ def build_tool_registry(
     workspace_root: str | Path | None | object = _WORKSPACE_ROOT_UNSET,
     config: AppConfig | None = None,
     llm_provider: Any | None = None,
-    mcp_manager: Any | None = None,
+    mcp_manager: Any = MCP_MANAGER_UNSET,
 ) -> ToolRegistry:
     """
     Build the default tool registry (DESIGN.md section 8.2).
@@ -230,7 +231,11 @@ def build_tool_registry(
     registry.register(ScheduleCronListTool())
     registry.register(ScheduleCronDeleteTool())
 
-    effective_mcp_manager = mcp_manager if mcp_manager is not None else (bootstrap.mcp_manager if bootstrap else None)
+    effective_mcp_manager = (
+        bootstrap.get_mcp_manager_for_workspace(resolved_workspace_root)
+        if mcp_manager is MCP_MANAGER_UNSET and bootstrap is not None
+        else None if mcp_manager is MCP_MANAGER_UNSET else mcp_manager
+    )
     from backend.tools.mcp_tools import (
         GetMcpPromptTool,
         ListMcpResourceNotificationsTool,
@@ -257,8 +262,8 @@ def build_tool_registry(
     for command_definition in get_builtin_command_catalog():
         registry.register_command(command_definition["name"], command_definition)
 
-    if mcp_manager is not None:
-        register_mcp_tools(registry, mcp_manager, artifact_store)
+    if effective_mcp_manager is not None:
+        register_mcp_tools(registry, effective_mcp_manager, artifact_store)
 
     return registry
 

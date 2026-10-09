@@ -23,6 +23,7 @@ import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import { buildInterruptCommand } from "../../lib/interrupt-command";
 import { knownFilePathsForCell } from "../cells/activityCellHelpers";
+import { TranscriptReadingContext, turnReadingState } from "../transcriptReadingState";
 
 // ── ChatTurn ────────────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ export const ChatTurn = memo(function ChatTurn({
   workspaceRoot?: string;
 }) {
   const committedCells = turn.committedCells;
+  const readingState = useMemo(() => conversationId ? turnReadingState(conversationId, turn.id) : null, [conversationId, turn.id]);
   const [loadingTools, setLoadingTools] = useState(false);
   const processDetailMode = useAppStore((state) => state.viewMode);
   const stopActiveRun = useCallback(() => {
@@ -80,6 +82,7 @@ export const ChatTurn = memo(function ChatTurn({
   );
 
   return (
+    <TranscriptReadingContext.Provider key={`${conversationId ?? ""}:${turn.id}`} value={readingState}>
     <AgentTurn
       turn={agentTurn}
       wide={wide}
@@ -96,6 +99,7 @@ export const ChatTurn = memo(function ChatTurn({
         </button>
       ) : undefined}
     />
+    </TranscriptReadingContext.Provider>
   );
 });
 

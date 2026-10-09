@@ -35,7 +35,7 @@ _SUBCOMMAND_SEPARATORS = frozenset({";", "|", "&", "`", "\n", "<", ">", "(", ")"
 _BACKSLASH_ESCAPES = sys.platform != "win32"
 _FILE_TOOL_GLOBS: tuple[str, ...] = ("read_file", "write_file", "edit_file", "save_*")
 
-_RULE_RE = re.compile(r"^([A-Za-z_][\w*?.\-]*)\s*(?:\((.*)\))?$", re.DOTALL)
+_RULE_RE = re.compile(r"^([A-Za-z_][\w*?.:@/\-\[\]!]*)\s*(?:\((.*)\))?$", re.DOTALL)
 
 _UNSAFE_COMMAND_WRAPPERS = frozenset(
     {
@@ -331,6 +331,7 @@ def rule_matches_call(
     args: dict[str, Any] | None,
     *,
     effect: str = "allow",
+    policy_aliases: tuple[str, ...] = (),
 ) -> bool:
     """True if ``rule`` matches a tool call (tool name + content).
 
@@ -339,7 +340,7 @@ def rule_matches_call(
     compound expression (with env/wrapper prefixes stripped), while allow rules
     only ever match a single non-compound command.
     """
-    if not _tool_rule_matches(tool_name, rule.tool_glob):
+    if not any(_tool_rule_matches(name, rule.tool_glob) for name in (tool_name, *policy_aliases)):
         return False
     if rule.content is None:
         return True  # whole-tool rule

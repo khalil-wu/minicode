@@ -142,6 +142,7 @@ class TurnKernel:
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
         self._scheduled_steer: TurnInput | None = None
         self._provider_call_count = 0
+        self._provider_attempt_count = 0
 
     @classmethod
     def create(
@@ -561,10 +562,11 @@ class TurnKernel:
         )
         resolved_progress_id = progress_id or provider_progress_id(iteration_id)
         span_owner = str(self.run_record.run_id or "").strip()
+        self._provider_attempt_count += 1
         resolved_span_id = (
-            f"provider:{span_owner}:{iteration_id}:{retry_index + 1}"
+            f"provider:{span_owner}:{iteration_id}:{self._provider_attempt_count}"
             if span_owner
-            else f"provider:{iteration_id}:{retry_index + 1}"
+            else f"provider:{iteration_id}:{self._provider_attempt_count}"
         )
         attempt = ProviderAttempt(
             iteration_id=iteration_id,

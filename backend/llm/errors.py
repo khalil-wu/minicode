@@ -455,7 +455,7 @@ _RETRY_AFTER_MESSAGE_RE = re.compile(
 )
 
 
-def retry_after_from_message(text: str | None, *, maximum: float = 60.0) -> float:
+def retry_after_from_message(text: str | None, *, maximum: float = float("inf"), default: float | None = 0.0) -> float | None:
     """Parse the delay a provider states in prose, e.g. ``try again in 11.05s``.
 
     OpenAI's token/request rate limits carry the reset time only in the error
@@ -463,7 +463,7 @@ def retry_after_from_message(text: str | None, *, maximum: float = 60.0) -> floa
     """
     match = _RETRY_AFTER_MESSAGE_RE.search(str(text or ""))
     if match is None:
-        return 0.0
+        return default
     value = float(match.group(1))
     if match.group(2).lower() == "ms":
         value /= 1000.0
@@ -473,13 +473,14 @@ def retry_after_from_message(text: str | None, *, maximum: float = 60.0) -> floa
 def retry_after_seconds(
     message: str | BaseException | None,
     *,
-    maximum: float = 60.0,
-) -> float:
+    maximum: float = float("inf"),
+    default: float | None = 0.0,
+) -> float | None:
     """Parse HTTP ``Retry-After`` metadata from an exception chain.
 
     Both the delay-seconds and HTTP-date forms from RFC 9110 are supported.
-    The default 60s maximum matches pi's DEFAULT_MAX_RETRY_DELAY_MS so a
-    provider cannot make the Agent sleep indefinitely.
+    Absence and an expired/zero deadline remain distinct when default=None.
+    The request owner's existing turn deadline bounds the selected wait.
     """
 
     limit = max(0.0, float(maximum))
@@ -520,13 +521,11 @@ def retry_after_seconds(
         stated = retry_after_from_message(
             _provider_error_body_details(body).get("message") or body,
             maximum=limit,
+            default=None,
         )
-        if stated > 0:
+        if stated is not None:
             return stated
-    return 0.0
-
-
-_ADAPTER_ERROR_RETRY_AFTER_MAXIMUM = 300.0
+    return default
 
 _PROVIDER_SECRET_TEXT_RE = re.compile(
     r"(?i)"
@@ -659,9 +658,9 @@ def llm_error_raw(exc: BaseException, provider: str) -> dict[str, Any]:
         raw["status_code"] = status
     retry_after = retry_after_seconds(
         exc,
-        maximum=_ADAPTER_ERROR_RETRY_AFTER_MAXIMUM,
+        default=None,
     )
-    if retry_after > 0:
+    if retry_after is not None:
         raw["retry_after_seconds"] = retry_after
     body_details = _provider_error_body_details(_provider_response_body(exc))
     provider_error_code = str(body_details.get("code") or "").strip()

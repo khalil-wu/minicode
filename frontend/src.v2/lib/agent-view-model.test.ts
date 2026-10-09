@@ -4,9 +4,23 @@ import {
   sanitizeAgentResultContent,
   visibleAgentChips,
   agentStatusSummary,
+  agentsForReferences,
 } from "./agent-view-model";
 
 describe("agent view model", () => {
+  it("resolves large agent trees with one relationship scan and preserves exact identity over ambiguous names", () => {
+    let relationshipReads = 0;
+    const agents = Array.from({ length: 1000 }, (_, index) => ({ id: `agent-${index}`, taskId: `task-${index}`,
+      agentPath: `/root/${index}`, role: "explore", status: "running" as const, teammateName: index < 2 ? "same" : `Name ${index}`,
+      get parentRunId() { relationshipReads++; return index ? "agent-0" : undefined; },
+    }));
+    const views = projectAgentViews(agents);
+    expect(views[0].children).toHaveLength(999);
+    expect(views[1].parent?.id).toBe("agent-0");
+    expect(relationshipReads).toBeLessThanOrEqual(4000);
+    expect(agentsForReferences(agents, ["same", "agent-1", "/root/2", "Name 3"]).map((agent) => agent.id))
+      .toEqual(["agent-1", "agent-2", "agent-3"]);
+  });
   it("projects only real delegated work and sorts actionable states first", () => {
     const views = projectAgentViews([
       { id: "subagent-done", role: "reviewer", status: "done", summary: "Review complete" },

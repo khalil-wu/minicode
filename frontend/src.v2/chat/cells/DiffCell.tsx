@@ -11,9 +11,10 @@ import { pushToast } from "../../overlays/ToastContainer";
 import { showConfirm } from "../../overlays/DialogService";
 import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../../lib/workspace-path";
 import "./cells.css";
+import { useTranscriptReadingPreference } from "../transcriptReadingState";
 
 export function DiffCell({ cell, showActions = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; conversationId?: string; workspaceRoot?: string }) {
-  const [showAllFiles, setShowAllFiles] = useState(false);
+  const [showAllFiles, setShowAllFiles, userChangedFiles] = useTranscriptReadingPreference(`diff-files:${cell.id}`, false);
   const [reverting, setReverting] = useState(false);
   const [reverted, setReverted] = useState(false);
   const activeWorkspace = useAppStore((state) => state.workingDirectory);
@@ -23,7 +24,6 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   const visibleScope = useRef({ id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory });
   visibleScope.current = { id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory };
   useEffect(() => {
-    setShowAllFiles(false);
     setReverting(false);
     setReverted(false);
   }, [cell.id, ownerConversationId, normalizeWorkspaceRoot(workingDirectory)]);
@@ -159,7 +159,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
           type="button"
           className="diff-cell-more-files"
           aria-expanded={showAllFiles}
-          onClick={() => setShowAllFiles((value) => !value)}
+          onClick={() => { userChangedFiles.current = true; setShowAllFiles((value) => !value); }}
         >
           <span>{showAllFiles ? "收起文件列表" : `再显示 ${hiddenFileCount} 个文件`}</span>
           {showAllFiles ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}

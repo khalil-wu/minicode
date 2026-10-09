@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from backend.agent.context import ContextBuilder
+from backend.agent.context import CompactionNoopError, ContextBuilder
 from backend.agent.error_withholding import RecoveryStrategy, is_media_size_error
 from backend.agent.message import AgentEvent
 from backend.agent.recovery_controller import (
@@ -128,7 +128,7 @@ async def try_error_withholding_recovery(
                 )
                 error_controller.clear()
                 return True
-        except Exception as exc:
+        except CompactionNoopError as exc:
             error_controller.record_recovery(strategy.name, False, str(exc))
     error_controller.clear()
     return False

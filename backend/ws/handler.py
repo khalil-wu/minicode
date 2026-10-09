@@ -76,6 +76,7 @@ from backend.ws.utils import (
 )
 
 logger = logging.getLogger(__name__)
+_MCP_REFRESH_SCOPE_UNSET = object()
 WS_EVENT_REPLAY_MAX = 1000
 
 _NOTIFICATION_HOOK_EVENT_TYPES = frozenset(
@@ -1320,7 +1321,10 @@ class WebSocketSession(
         """Cancel one conversation run, or every run owned by this session."""
         return await self.run_manager.cancel(conversation_id=conversation_id, reason=reason)
 
-    def refresh_tool_registry_if_mcp_changed(self, *, allow_when_busy: bool = True) -> bool:
+    def refresh_tool_registry_if_mcp_changed(
+        self, *, allow_when_busy: bool = True,
+        workspace_root: Path | None | object = _MCP_REFRESH_SCOPE_UNSET,
+    ) -> bool:
         """Rebuild this session's tool registry when the MCP registry changed.
 
         A WS session holds a single ``tool_registry``; bumping
@@ -1338,7 +1342,8 @@ class WebSocketSession(
 
         Returns True iff a rebuild happened.
         """
-        workspace_root = self.session_lifecycle.workspace_root_for_conversation()
+        if workspace_root is _MCP_REFRESH_SCOPE_UNSET:
+            workspace_root = self.session_lifecycle.workspace_root_for_conversation()
         manager = self._mcp_manager_for_workspace(workspace_root)
         current_version = mcp_registry_version(manager)
         manager_snapshot_id = id(manager)
@@ -1456,7 +1461,7 @@ class WebSocketSession(
         inventory_instance_id: str | None = None
         inventory_revision: int | None = None
         if callable(list_with_revision):
-            versioned_listing = inventory if inventory is not None else list_with_revision()
+            versioned_listing = inventory if inventory is not None else await asyncio.to_thread(list_with_revision)
             if isinstance(versioned_listing, tuple) and len(versioned_listing) == 3:
                 raw_instance_id, raw_revision, summaries = versioned_listing
                 if not isinstance(raw_instance_id, str) or not raw_instance_id.strip():
@@ -1482,7 +1487,7 @@ class WebSocketSession(
             else:
                 raise ValueError("list_conversations_with_revision returned an invalid result")
         else:
-            summaries = self.conversation_repo.list_conversations()
+            summaries = await asyncio.to_thread(self.conversation_repo.list_conversations)
         conversations = [
             item.to_dict()
             for item in summaries

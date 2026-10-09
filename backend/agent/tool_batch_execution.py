@@ -83,7 +83,6 @@ from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PARALLEL_TOOL_CONCURRENCY = 10
 _CREATED_FILE_EDIT_TRACKER_KEY = "_created_file_edit_records"
 
 
@@ -99,11 +98,9 @@ class _ToolBatchRuntime:
 
 def _parallel_tool_concurrency(batch_size: int) -> int:
     raw = os.environ.get("MINICODE_MAX_TOOL_CONCURRENCY", "").strip()
-    try:
-        configured = int(raw) if raw else _DEFAULT_PARALLEL_TOOL_CONCURRENCY
-    except ValueError:
-        configured = _DEFAULT_PARALLEL_TOOL_CONCURRENCY
-    return min(batch_size, max(1, configured))
+    # The tool's concurrency contract and ordered read/write gate own
+    # admission. Only an explicit host setting adds a numerical ceiling.
+    return min(batch_size, max(1, int(raw))) if raw else max(1, batch_size)
 
 
 def _parallel_tool_batch_timeout() -> float | None:

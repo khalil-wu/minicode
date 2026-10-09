@@ -462,7 +462,7 @@ class QueryEngine:
                         event_stream = runner
                     async for event in event_stream:
                         if not use_nested_stream:
-                            await to_thread_cancel_safe(journal.record_event, event)
+                            await journal.record_event_async(event)
                         terminal.observe_runner_event(event)
                         if event.type in {
                             "agent.run.started",

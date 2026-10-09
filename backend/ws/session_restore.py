@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -46,30 +47,17 @@ class SessionRestoreManager:
         # Restore conversation
         if last_conversation_id:
             try:
-                conversation = self.conversation_repo.get_conversation(last_conversation_id)
+                conversation = await asyncio.to_thread(
+                    self.conversation_repo.get_conversation_view, last_conversation_id,
+                )
                 if (
                     conversation
-                    and not getattr(conversation, "archived", False)
-                    and getattr(conversation, "conversation_type", "main") == "main"
+                    and not conversation["archived"]
+                    and conversation["conversation_type"] == "main"
                 ):
-                    bound_workspace_root = str(conversation.worktree_path or conversation.workspace_root or "").strip()
-                    result["conversation"] = {
-                        "id": conversation.id,
-                        "title": conversation.title,
-                        "conversation_type": conversation.conversation_type,
-                        "archived": conversation.archived,
-                        "memory_mode": conversation.memory_mode,
-                        "permission_mode": conversation.permission_mode,
-                        "message_count": conversation.message_count,
-                        "updated_at": conversation.updated_at,
-                        "workspace_root": conversation.workspace_root,
-                        "git_branch": conversation.git_branch,
-                        "worktree_path": conversation.worktree_path,
-                        "git_isolated": conversation.git_isolated,
-                        "goal": conversation.goal,
-                    }
-                    # Return last N messages for UI
-                    result["messages"] = conversation.transcript[-50:] if conversation.transcript else []
+                    bound_workspace_root = str(conversation["worktree_path"] or conversation["workspace_root"]).strip()
+                    result["conversation"] = conversation
+                    result["messages"] = conversation["transcript"]
                     result["restored"] = True
                     logger.info(f"Restored conversation {last_conversation_id} with {len(result['messages'])} messages")
             except Exception as e:
@@ -80,34 +68,19 @@ class SessionRestoreManager:
         # client-supplied workspace can be stale after deleting/switching into
         # a global chat, and must not turn an unbound conversation back into a
         # project workspace.
-        workspace_candidates = [
-            value
-            for value in (bound_workspace_root,)
-            if str(value or "").strip()
-        ]
-        seen_workspaces: set[str] = set()
-        workspace_errors: list[str] = []
-        for workspace_candidate in workspace_candidates:
-            candidate = str(workspace_candidate or "").strip()
-            if not candidate or candidate in seen_workspaces:
-                continue
-            seen_workspaces.add(candidate)
+        if bound_workspace_root:
             try:
-                workspace_root = normalize_project_import_path(candidate)
-                if not workspace_root.exists() or not workspace_root.is_dir():
-                    raise ValueError(f"Workspace does not exist: {candidate}")
+                workspace_root = normalize_project_import_path(bound_workspace_root)
+                if not workspace_root.is_dir():
+                    raise ValueError(f"Workspace does not exist: {bound_workspace_root}")
                 result["workspace"] = {
                     "root_path": str(workspace_root),
                     "name": workspace_root.name,
                 }
                 logger.info(f"Restored workspace: {workspace_root}")
-                break
             except Exception as e:
-                logger.error(f"Failed to restore workspace {candidate}: {e}")
-                workspace_errors.append(str(e))
-
-        if result["workspace"] is None and workspace_errors:
-            result["error"] = f"Failed to restore workspace: {workspace_errors[-1]}"
+                logger.error(f"Failed to restore workspace {bound_workspace_root}: {e}")
+                result["error"] = f"Failed to restore workspace: {e}"
 
         return result
 

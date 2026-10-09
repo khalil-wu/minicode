@@ -56,6 +56,7 @@ import {
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "../tool-calls/renderers/ToolTextRenderer";
+import { useTranscriptReadingPreference } from "../transcriptReadingState";
 
 /**
  * ActivityCell — compact action + original target, with evidence on disclosure.
@@ -107,10 +108,9 @@ export const ActivityCell = memo(function ActivityCell({
     ? recordInputTarget(records[0])
     : "";
   const shouldAutoExpand = !cell.collapsed;
-  const [expansionPreference, setIsExpanded] = useState(shouldAutoExpand);
+  const [expansionPreference, setIsExpanded, userToggled] = useTranscriptReadingPreference(`activity:${cell.id}`, shouldAutoExpand);
   const isExpanded = useTranscriptSearch() || expansionPreference;
   const [copiedPatch, setCopiedPatch] = useState<string | null>(null);
-  const userToggled = useRef(false);
   const previousId = useRef(cell.id);
 
   useEffect(() => {

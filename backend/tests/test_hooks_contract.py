@@ -201,7 +201,7 @@ def test_condition_matcher_is_prepared_once_for_preview_and_execution(monkeypatc
     class Registry:
         def get_tool(self, name: str) -> object:
             registry_calls.append(name)
-            return object()
+            return SimpleNamespace(policy_aliases=())
 
     def validate(_tool: object, arguments: dict[str, object]) -> str:
         validation_calls.append(dict(arguments))

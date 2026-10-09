@@ -75,6 +75,7 @@ def _make_session():
     session.turn_wait_state = TurnWaitState()
     session.event_outbox = SimpleNamespace(connected=True)
     session.conversation_repo = _FakeConversationRepo()
+    session.tool_registry = ToolRegistry()
     session.conversation_runtime = SimpleNamespace(
         active_conversation_id="conv-1",
         active_conversation=session.conversation_repo.record,

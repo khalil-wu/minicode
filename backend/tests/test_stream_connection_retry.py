@@ -126,7 +126,7 @@ async def _noop_close() -> None:
 
 
 async def _drive_transport_failure(failure, *, settings: AgentSettings, stream_attempt: int,
-                                   max_retries: int, retry_state: StreamRetryState):
+                                   max_retries: int, retry_state: StreamRetryState, switch_transport=lambda: False):
     kernel = _TurnKernel()
     budget = _BudgetRuntime()
 
@@ -158,7 +158,7 @@ async def _drive_transport_failure(failure, *, settings: AgentSettings, stream_a
                 progress_id="progress:conn",
                 max_retries=max_retries,
                 close_stream=_noop_close,
-                switch_transport=lambda: False,
+                switch_transport=switch_transport,
             )
         ]
 
@@ -281,9 +281,9 @@ def test_mid_stream_failure_still_spends_the_request_budget() -> None:
     assert isinstance(result, ProviderTransportFailureResult)
     assert result.action == "retry"
     # The request retry ordinal advanced, and the delay came from the request
-    # policy: 500ms base doubled for attempt 1, plus up to 25% jitter.
+    # policy: Codex's 200ms base doubled for attempt 1, with ±10% jitter.
     assert result.stream_attempt == 2
-    assert 1.0 <= budget.requested[0] <= 1.25
+    assert 0.36 <= budget.requested[0] <= 0.44
 
     progress = next(item for item in updates if item.type == "agent.progress")
     assert progress.data["retry_attempt"] == 2
@@ -307,4 +307,25 @@ def test_connection_track_falls_back_to_the_request_budget_when_disabled() -> No
     assert isinstance(result, ProviderTransportFailureResult)
     assert result.action == "retry"
     assert result.stream_attempt == 2
-    assert 1.0 <= budget.requested[0] <= 1.25
+    assert 0.36 <= budget.requested[0] <= 0.44
+
+
+def test_transport_fallback_waits_for_exhaustion_and_resets_the_retry_ordinal():
+    switches = []
+
+    def switch():
+        switches.append(True)
+        return True
+
+    first, _, _ = asyncio.run(_drive_transport_failure(
+        ProviderStreamFailure(httpx.ReadError("connection reset")), settings=AgentSettings(),
+        stream_attempt=1, max_retries=2, retry_state=StreamRetryState(), switch_transport=switch))
+    assert first[-1].stream_attempt == 2
+    assert switches == []
+    second, _, budget = asyncio.run(_drive_transport_failure(
+        ProviderStreamFailure(httpx.ReadError("connection reset")), settings=AgentSettings(stream_max_attempts=2),
+        stream_attempt=2, max_retries=2, retry_state=StreamRetryState(), switch_transport=switch))
+    assert switches == [True]
+    assert second[-1].action == "retry"
+    assert second[-1].stream_attempt == 0
+    assert budget.requested == [0.0]

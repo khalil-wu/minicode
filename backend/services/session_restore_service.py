@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from backend.conversations.public_projection import project_public_conversation
-
 
 def _snapshot_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -132,7 +130,7 @@ def build_session_synced_payload(
     result: dict[str, Any],
     *,
     protocol_version: str,
-    active_conversation: Any | None,
+    active_conversation: dict[str, Any] | None,
     active_conversation_id: str | None,
     workspace_root: Any | None,
     selected_model: str,
@@ -152,8 +150,8 @@ def build_session_synced_payload(
 ) -> dict[str, Any]:
     active_is_visible = (
         active_conversation is not None
-        and not getattr(active_conversation, "archived", False)
-        and getattr(active_conversation, "conversation_type", "main") == "main"
+        and not active_conversation["archived"]
+        and active_conversation["conversation_type"] == "main"
     )
     return {
         "type": "session.synced",
@@ -162,7 +160,7 @@ def build_session_synced_payload(
         "synced": result["synced"],
         "session": result["session"],
         "active_conversation_id": active_conversation_id if active_is_visible else None,
-        "active_conversation": project_public_conversation(active_conversation) if active_is_visible else None,
+        "active_conversation": active_conversation if active_is_visible else None,
         "working_directory": str(workspace_root) if workspace_root is not None else "",
         "model": selected_model,
         "current_model": selected_model,

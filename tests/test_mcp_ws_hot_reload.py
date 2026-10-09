@@ -258,6 +258,9 @@ def _make_real_bootstrap(manager: _RealPathMcpManager) -> AppBootstrap:
         on_mcp_status_change=_noop_status,
     )
     bootstrap.mcp_manager = manager
+    from backend.workspace.state import get_explicit_active_workspace_root
+
+    bootstrap._mcp_managers[bootstrap._mcp_workspace_key(get_explicit_active_workspace_root())] = manager
     return bootstrap
 
 

@@ -444,7 +444,7 @@ def test_side_query_retries_transient_error_with_same_session_identity(monkeypat
     assert result == "prompt-processed result"
     assert adapter.calls == 2
     assert adapter.session_ids == [options.session_id, options.session_id]
-    assert sleep_delays == [0.5]
+    assert sleep_delays == [pytest.approx(0.18)]
     assert records[0]["status"] == "completed"
     assert records[0]["attempts"] == 2
     assert records[0]["retry_count"] == 1
@@ -481,7 +481,37 @@ def test_side_query_does_not_retry_fatal_provider_error(monkeypatch) -> None:
     assert adapter.calls == 1
 
 
-def test_web_fetch_side_query_does_not_amplify_background_529(monkeypatch) -> None:
+@pytest.mark.parametrize("server_delay", [0.0, 0.05, 600.0])
+def test_compaction_side_query_uses_the_server_retry_deadline_once(monkeypatch, server_delay):
+    class RetryAdapter(LLMAdapter):
+        def __init__(self):
+            self.calls = 0
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(type=StreamEventType.DONE)
+
+        async def simple_chat(self, messages, *, max_tokens=None):
+            self.calls += 1
+            if self.calls == 1:
+                error = RuntimeError("HTTP 429 rate limit exceeded")
+                error.retry_after_seconds = server_delay
+                raise error
+            return "compacted context"
+
+    waits = []
+
+    async def wait(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr("backend.llm.base.asyncio.sleep", wait)
+    adapter = RetryAdapter()
+    assert asyncio.run(adapter.side_query([LLMMessage(role="user", content="history")],
+        options=SideQueryOptions(operation="compact"))) == "compacted context"
+    assert waits == [server_delay]
+    assert adapter.calls == 2
+
+
+def test_overloaded_side_query_without_server_advice_is_not_retried(monkeypatch) -> None:
     class _BusyAdapter(LLMAdapter):
         def __init__(self) -> None:
             self.calls = 0
@@ -496,7 +526,7 @@ def test_web_fetch_side_query_does_not_amplify_background_529(monkeypatch) -> No
             raise RuntimeError("HTTP 529 overloaded_error")
 
     async def unexpected_sleep(_delay: float) -> None:
-        raise AssertionError("background 529 must not be retried")
+        raise AssertionError("overload without server advice must not be retried")
 
     monkeypatch.setattr("backend.llm.base.asyncio.sleep", unexpected_sleep)
     adapter = _BusyAdapter()
@@ -510,6 +540,35 @@ def test_web_fetch_side_query_does_not_amplify_background_529(monkeypatch) -> No
         )
 
     assert adapter.calls == 1
+
+
+def test_background_side_query_honors_capacity_advice_without_a_role_fuse(monkeypatch):
+    class BusyAdapter(LLMAdapter):
+        def __init__(self):
+            self.calls = 0
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(type=StreamEventType.DONE)
+
+        async def simple_chat(self, messages, *, max_tokens=None):
+            self.calls += 1
+            if self.calls < 4:
+                error = RuntimeError("HTTP 529 overloaded")
+                error.retry_after_seconds = 0
+                raise error
+            return "capacity restored"
+
+    waits = []
+
+    async def wait(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr("backend.llm.base.asyncio.sleep", wait)
+    adapter = BusyAdapter()
+    assert asyncio.run(adapter.side_query([LLMMessage(role="user", content="page")],
+        options=SideQueryOptions(operation="web_fetch_apply", query_source="background"))) == "capacity restored"
+    assert adapter.calls == 4
+    assert waits == [0, 0, 0]
 
 
 def test_side_query_retry_exhaustion_still_raises_without_raw_fallback(monkeypatch) -> None:

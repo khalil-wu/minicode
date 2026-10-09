@@ -79,7 +79,7 @@ class ToolAvailabilityFilter:
 
     def allows(self, spec: ToolSpec) -> bool:
         return bool(
-            spec.name in self.tools
+            any(name in self.tools for name in spec.policy_names)
             or spec.toolset in self.toolsets
             or (spec.capability and spec.capability in self.capabilities)
         )
@@ -363,7 +363,7 @@ class ToolsetPolicy:
         """
 
         specs = list(specs)
-        known_tools = {spec.name for spec in specs}
+        known_tools = {name for spec in specs for name in spec.policy_names}
         known_toolsets = {spec.toolset for spec in specs} | {ALL_TOOLSETS}
         unknown_toolsets = sorted(self.enabled_toolsets - known_toolsets)
         if unknown_toolsets:
@@ -377,11 +377,11 @@ class ToolsetPolicy:
             )
 
     def is_available(self, spec: ToolSpec) -> bool:
-        if spec.name in self.disabled_tools or spec.toolset in self.disabled_toolsets:
+        if any(name in self.disabled_tools for name in spec.policy_names) or spec.toolset in self.disabled_toolsets:
             return False
         if spec.exposure == "hidden":
             return False
-        if spec.name not in self.enabled_tools and not self._toolset_enabled(spec.toolset):
+        if not any(name in self.enabled_tools for name in spec.policy_names) and not self._toolset_enabled(spec.toolset):
             return False
         if any(
             not availability_filter.allows(spec)
@@ -403,7 +403,7 @@ class ToolsetPolicy:
                 return False
             if self.code_mode_only and spec.exposure not in {"direct_model_only", "deferred_model_only"} and spec.name not in CODE_MODE_DIRECT_TOOLS:
                 return False
-        if spec.name in self.enabled_tools:
+        if any(name in self.enabled_tools for name in spec.policy_names):
             return True
         if not self.enabled_toolsets:
             return False

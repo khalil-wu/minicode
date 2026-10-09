@@ -25,6 +25,7 @@ from backend.agent.tool_events import (
 from backend.agent.turn_kernel import _set_terminal_reason
 from backend.llm.base import UsageInfo
 from backend.llm.errors import classify_llm_error
+from backend.secret_redaction import redact_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,14 @@ async def fail_provider_runtime(
         "Agent runtime failed while processing provider output",
         exc_info=(type(exc), exc, exc.__traceback__),
     )
+    error = AgentEvent.error(
+        message=(
+            "MiniCode 内部执行状态处理失败。本轮已停止，未按模型 API 错误自动重试。\n"
+            + redact_secrets(str(exc))
+        ),
+        recoverable=False,
+        error_type="runtime",
+    )
     await turn_kernel.close_provider_attempt(
         provider_attempt,
         status="failed",
@@ -278,13 +287,8 @@ async def fail_provider_runtime(
         data={
             "error_type": "runtime",
             "exception_type": type(exc).__name__,
+            "error_message": error.data["message"],
         },
     )
     _set_terminal_reason(state, "runtime_error", status="failed")
-    yield AgentEvent.error(
-        message=(
-            "MiniCode 内部执行状态处理失败。本轮已停止，未按模型 API 错误自动重试。"
-        ),
-        recoverable=False,
-        error_type="runtime",
-    )
+    yield error

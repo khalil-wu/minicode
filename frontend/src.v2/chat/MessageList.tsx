@@ -16,6 +16,7 @@ import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 import type { ChatTurnState } from "./cells/cellTypes";
 import { loadRevealMessage } from "./revealConversationMessage";
 import { useReplyViewport } from "./useReplyViewport";
+import { conversationReadingState } from "./transcriptReadingState";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -28,6 +29,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
+  const readingState = useMemo(() => conversationId ? conversationReadingState(conversationId) : undefined, [conversationId]);
   const historyPage = useAppStore((s) => conversationId ? s.conversationHistoryPages[conversationId] : undefined);
   const revealTarget = useAppStore((s) => s.messageRevealTarget);
   const hydrating = useAppStore((s) => Boolean(conversationId && s.conversationHydration[conversationId]?.isHydrating));
@@ -64,15 +66,16 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const contentRef = useRef<HTMLDivElement>(null);
   const tailRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-  const [isFollowing, setIsFollowing] = useState(true);
-  const isNearBottom = useRef(true);
-  const prevConvId = useRef(conversationId);
+  const [isFollowing, setIsFollowing] = useState(readingState?.viewport?.isFollowing ?? true);
+  const isNearBottom = useRef(readingState?.viewport?.isFollowing ?? true);
   const lastRenderedMessageIdRef = useRef<string | null>(messages.at(-1)?.id ?? null);
   const lastRenderedMessageCountRef = useRef(messages.length);
   const userScrollIntentRef = useRef(0);
   const followPausedRef = useRef(false);
   followPausedRef.current = searchActive || Boolean(sourceMessage);
-  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(readingState?.viewport?.showAllHistory ?? false);
+  const visibleHistoryRef = useRef(showAllHistory);
+  visibleHistoryRef.current = showAllHistory;
   const [isScrollbarActive, setIsScrollbarActive] = useState(false);
   const scrollbarFadeTimerRef = useRef<number | null>(null);
 
@@ -163,9 +166,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   }, [conversationId, firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId]);
   const initialVirtualOffset = useCallback(() => Math.max(
     0,
-    historicalTurns.length * (ESTIMATED_TURN_HEIGHT + ESTIMATED_TURN_GAP)
+    readingState?.viewport?.scrollTop ?? historicalTurns.length * (ESTIMATED_TURN_HEIGHT + ESTIMATED_TURN_GAP)
       - INITIAL_VIRTUAL_VIEWPORT_HEIGHT,
-  ), [firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId]);
+  ), [firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId, readingState]);
   const virtualListRef = useRef<HTMLDivElement>(null);
   const virtualConversationRef = useRef(conversationId);
   const [virtualScrollMargin, setVirtualScrollMargin] = useState(0);
@@ -193,7 +196,10 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     scrollMargin: virtualScrollMargin,
     initialRect: { width: 0, height: INITIAL_VIRTUAL_VIEWPORT_HEIGHT },
     initialOffset: initialVirtualOffset,
+    initialMeasurementsCache: readingState?.viewport?.measurements,
   });
+  const renderedMeasurementsRef = useRef(turnVirtualizer.measurementsCache);
+  useLayoutEffect(() => { renderedMeasurementsRef.current = turnVirtualizer.measurementsCache; });
   useLayoutEffect(() => {
     if (virtualConversationRef.current === conversationId) return;
     virtualConversationRef.current = conversationId;
@@ -288,22 +294,34 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   useReplyViewport(ref, followBottom);
 
   useLayoutEffect(() => {
-    if (prevConvId.current !== conversationId) {
-      prevConvId.current = conversationId;
-      setShowAllHistory(false);
-      isNearBottom.current = true;
-      setIsFollowing(true);
-      setShowScrollBtn(false);
-      lastRenderedMessageIdRef.current = messages.at(-1)?.id ?? null;
-      lastRenderedMessageCountRef.current = messages.length;
-      historyScrollRef.current = null;
-      const frame = requestAnimationFrame(() => {
-        const el = ref.current;
-        if (el) setScrollTop(el, el.scrollHeight);
-      });
-      return () => cancelAnimationFrame(frame);
-    }
-  }, [conversationId, messages, setScrollTop]);
+    const el = ref.current!;
+    const viewport = readingState?.viewport;
+    setShowAllHistory(viewport?.showAllHistory ?? false);
+    isNearBottom.current = viewport?.isFollowing ?? true;
+    setIsFollowing(isNearBottom.current);
+    setShowScrollBtn(!isNearBottom.current);
+    const currentMessages = useAppStore.getState().messages;
+    lastRenderedMessageIdRef.current = currentMessages.at(-1)?.id ?? null;
+    lastRenderedMessageCountRef.current = currentMessages.length;
+    historyScrollRef.current = null;
+    const frame = viewport && !viewport.isFollowing ? requestAnimationFrame(() => {
+      if (!isNearBottom.current) setScrollTop(el, viewport.scrollTop);
+    }) : null;
+    if (!viewport || viewport.isFollowing) scheduleBottomScroll();
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+      if (readingState) readingState.viewport = {
+        scrollTop: el.scrollTop,
+        isFollowing: isNearBottom.current,
+        showAllHistory: visibleHistoryRef.current,
+        measurements: renderedMeasurementsRef.current,
+      };
+    };
+  }, [readingState, scheduleBottomScroll, setScrollTop]);
 
   const captureHistoryScroll = useCallback(() => {
     const el = ref.current;

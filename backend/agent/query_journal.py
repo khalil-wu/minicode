@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.agent.execution_journal import ExecutionJournal, JournalEvent, conversation_projection_owner_fields
 from backend.agent.message import AgentEvent
+from backend.async_cleanup import to_thread_cancel_safe
 
 if TYPE_CHECKING:
     from backend.agent.context import ContextBuilder
@@ -218,6 +219,37 @@ class QueryJournalRecorder:
             )
             self.runtime_terminal_receipt_recorded = True
 
+    async def record_event_async(self, event: AgentEvent) -> None:
+        """Keep memory-only stream reduction on the owning event loop.
+
+        Tool claims, results and terminal evidence still await their durable
+        write. Text deltas only cross to a worker when the next progress
+        receipt is due; ignored transport/thinking frames require no worker.
+        """
+        if self.journal is None:
+            return
+        data = event.data
+        nested = (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"}
+        if nested and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user"}:
+            await to_thread_cancel_safe(self.record_event, event)
+        elif event.type == "item.started":
+            self.record_event(event)
+        elif event.type == "agent_message.delta":
+            receipt = self._agent_message_delta_receipt(data)
+            if receipt is not None:
+                payload, now = receipt
+                await to_thread_cancel_safe(self.journal.append, "progress", payload)
+                self.agent_message_receipts[payload["item_id"]] = (
+                    payload["content_offset"] + len(payload["content_delta"]), now,
+                )
+        elif event.type in {
+            "agent.lifecycle.cleanup", "turn.diff.updated", "artifact.preview",
+            "item.completed", "tool_call", "tool_result", "context_compacted",
+            "approval_request", "ask_user", "error", "agent.terminal.intent",
+            "agent.run.completed",
+        }:
+            await to_thread_cancel_safe(self.record_event, event)
+
     def record_terminal(self, event: AgentEvent) -> None:
         if self.turn_kernel is not None:
             event.data.setdefault("checkpoint", self._checkpoint_evidence())
@@ -320,6 +352,16 @@ class QueryJournalRecorder:
         self.terminal_recorded = True
 
     def _record_agent_message_delta(self, data: dict[str, Any]) -> None:
+        receipt = self._agent_message_delta_receipt(data)
+        if receipt is None or self.journal is None:
+            return
+        payload, now = receipt
+        self.journal.append("progress", payload)
+        self.agent_message_receipts[payload["item_id"]] = (
+            payload["content_offset"] + len(payload["content_delta"]), now,
+        )
+
+    def _agent_message_delta_receipt(self, data: dict[str, Any]) -> tuple[dict[str, Any], float] | None:
         item_id = str(data.get("item_id") or "agent-message").strip()
         delta = str(data.get("delta") or "")
         if not delta:
@@ -340,11 +382,7 @@ class QueryJournalRecorder:
             not previous_length
             or now - previous_at >= 0.12
         ):
-            if self.journal is None:
-                return
-            self.journal.append(
-                "progress",
-                {
+            return ({
                     "kind": "assistant_message",
                     "item_id": item_id,
                     "content_delta": message["content"][previous_length:],
@@ -352,9 +390,8 @@ class QueryJournalRecorder:
                     "source": message["source"],
                     "status": "running",
                     "transcript_only": True,
-                },
-            )
-            self.agent_message_receipts[item_id] = (len(message["content"]), now)
+                }, now)
+        return None
 
     def _record_completed_item(self, data: dict[str, Any]) -> None:
         item = data.get("item") if isinstance(data.get("item"), dict) else {}

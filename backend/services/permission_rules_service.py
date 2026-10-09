@@ -6,6 +6,7 @@ from typing import Any
 from backend.services.runtime_control_service import CommandOutcome
 from backend.services.command_target import resolve_conversation_target as resolve_permission_rule_target
 from backend.tools.base import PermissionLevel
+from backend.tools.catalog import canonical_tool_policy_name
 from backend.ws.utils import (
     normalize_permission_level,
     normalize_permission_overrides,
@@ -44,9 +45,10 @@ def prepare_permission_rule_add(
     data: dict[str, Any],
     *,
     conversation_id: str,
+    tool_registry: Any | None = None,
 ) -> PermissionRuleMutation:
     rule_kind = str(data.get("rule_kind") or data.get("kind") or "deny").strip().lower()
-    pattern = str(data.get("pattern") or "").strip()
+    pattern = canonical_tool_policy_name(str(data.get("pattern") or "").strip(), tool_registry)
     deny_rules = normalize_tool_patterns(getattr(target, "permission_deny_rules", []))
     overrides = normalize_permission_overrides(getattr(target, "permission_overrides", {}))
     if not pattern:
@@ -114,11 +116,15 @@ def prepare_permission_rule_remove(
     data: dict[str, Any],
     *,
     conversation_id: str,
+    tool_registry: Any | None = None,
 ) -> PermissionRuleMutation:
     rule_kind = str(data.get("rule_kind") or data.get("kind") or "deny").strip().lower()
-    pattern = str(data.get("pattern") or "").strip()
+    authored_pattern = str(data.get("pattern") or "").strip()
+    pattern = canonical_tool_policy_name(authored_pattern, tool_registry)
     deny_rules = normalize_tool_patterns(getattr(target, "permission_deny_rules", []))
     overrides = normalize_permission_overrides(getattr(target, "permission_overrides", {}))
+    if authored_pattern in deny_rules or authored_pattern in overrides:
+        pattern = authored_pattern
     if not pattern:
         return _mutation_no_update(
             deny_rules,

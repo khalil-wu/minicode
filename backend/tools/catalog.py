@@ -10,6 +10,23 @@ if TYPE_CHECKING:
 
 
 BRIDGE_TOOL_NAMES = {"tool_search"}
+
+
+def canonical_tool_policy_name(name: str, tool_registry: "ToolRegistry | None") -> str:
+    """Bind an exact known tool rule to its durable raw identity.
+
+    Globs and ambiguous historical normalized aliases remain authored patterns;
+    they must not be resolved to an arbitrary tool from a colliding catalog.
+    """
+    if tool_registry is None:
+        return name
+    tool = tool_registry.get_tool(name)
+    if tool is None:
+        matches = [candidate for candidate in tool_registry.get_tools() if name in candidate.policy_aliases]
+        if len(matches) == 1:
+            tool = matches[0]
+    return tool.policy_identity if tool is not None else name
+
 def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSpec:
     tool = tool_registry.get_tool(tool_name)
     if tool is None:
@@ -59,6 +76,7 @@ def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSp
             else "core"
         ),
         required_args=required,
+        policy_aliases=tool.policy_aliases,
     )
 
 
