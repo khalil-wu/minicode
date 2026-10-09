@@ -111,13 +111,11 @@ export function AgentProcessSummary({
 }
 
 function formatElapsedSeconds(durationMs: number | null): string {
-  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "";
-  if (durationMs < 1_000) return "不到1秒";
-  const seconds = durationMs / 1_000;
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 1_000) return "";
+  const seconds = Math.floor(durationMs / 1_000);
   if (seconds >= 60) {
-    const roundedSeconds = Math.round(seconds);
-    const minutes = Math.floor(roundedSeconds / 60);
-    const remainder = roundedSeconds % 60;
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
     if (minutes >= 60) {
       const hours = Math.floor(minutes / 60);
       const remainingMinutes = minutes % 60;
@@ -125,8 +123,5 @@ function formatElapsedSeconds(durationMs: number | null): string {
     }
     return remainder > 0 ? `${minutes}分钟${remainder}秒` : `${minutes}分钟`;
   }
-  const value = seconds < 10
-    ? seconds.toFixed(1).replace(/\.0$/, "")
-    : String(Math.round(seconds));
-  return `${value}秒`;
+  return `${seconds}秒`;
 }

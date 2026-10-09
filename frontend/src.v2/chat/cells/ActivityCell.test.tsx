@@ -1141,7 +1141,7 @@ describe("ActivityCell", () => {
     // rather than to a nested label box repeating the tool's own name.
     expect(container.querySelectorAll(".activity-cell-expanded")).toHaveLength(1);
     expect(container.querySelector(".activity-cell-output-preview")).toBeNull();
-    expect(container.querySelector(".activity-cell-detail-duration")?.textContent).toBe("4.1s");
+    expect(container.querySelector(".activity-cell-detail-duration")?.textContent).toBe("4s");
     expect(container.querySelector(".activity-cell-expanded [aria-label=\"操作结果\"]")?.textContent)
       .toContain("Navigation requested.");
   });

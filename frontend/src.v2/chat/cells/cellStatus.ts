@@ -65,15 +65,12 @@ export const execCellStatus = (
 ): CellStatus => (status === "pending_approval" ? "pending" : status);
 
 /**
- * Single duration format for every cell. Sub-second work keeps millisecond
- * precision because that is the only resolution that distinguishes a cache hit
- * from real work; anything longer reads in seconds.
+ * Single duration format for every cell: whole seconds, with sub-second work
+ * omitted from the presentation. Recorded timestamps retain their precision.
  */
 export function formatCellDuration(ms: number | undefined): string {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const wholeSeconds = Math.floor(seconds);
-  return `${Math.floor(wholeSeconds / 60)}m${wholeSeconds % 60}s`;
+  if (ms == null || !Number.isFinite(ms) || ms < 1000) return "";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
 }

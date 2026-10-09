@@ -35,6 +35,23 @@ describe("AgentProcessSummary", () => {
     expect(screen.queryByText(/个工具|个失败|输入|输出|推理/)).toBeNull();
   });
 
+  it("waits for a full elapsed second and freezes whole seconds at completion", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const props = { processExpanded: true, hasTimelineItems: true, startedAt: 99_050, onToggle: () => undefined };
+    const view = render(<AgentProcessSummary {...props} status="running" durationMs={null} />);
+    expect(screen.getByText("处理中")).toBeTruthy();
+    expect(screen.queryByText(/不到|0秒|0\.9/)).toBeNull();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByText("已处理 1秒")).toBeTruthy();
+    view.rerender(<AgentProcessSummary {...props} status="completed" durationMs={1_950} />);
+    act(() => vi.advanceTimersByTime(5000));
+    expect(screen.getByText("已处理 1秒")).toBeTruthy();
+    view.rerender(<AgentProcessSummary {...props} status="completed" durationMs={950} />);
+    expect(screen.getByText("已处理")).toBeTruthy();
+    expect(screen.queryByText(/不到|0秒/)).toBeNull();
+  });
+
   it("shows only the animated processing status when no activity has arrived", () => {
     const onToggle = vi.fn();
     const { container } = render(
@@ -105,8 +122,8 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByRole("status", { name: "处理失败 · 1.5秒" })).toBeTruthy();
-    expect(screen.getByText("处理失败 · 1.5秒")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "处理失败 · 1秒" })).toBeTruthy();
+    expect(screen.getByText("处理失败 · 1秒")).toBeTruthy();
   });
 
   it("keeps the concrete failure visible even when work details are collapsible", () => {

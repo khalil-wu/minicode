@@ -133,7 +133,7 @@ const AgentRow = ({
     <span className="subagents-row-copy">
       <span className="subagents-row-heading">
         <span className="subagents-row-title">{view.teammateName || view.title}</span>
-        {view.status !== "completed" && durationMs != null && (
+        {view.status !== "completed" && durationMs != null && durationMs >= 1000 && (
           <span className="subagents-row-time">{Math.floor(durationMs / 60000)}分{Math.floor(durationMs / 1000) % 60}秒</span>
         )}
         {view.status === "completed" && view.relativeTimeLabel && (
