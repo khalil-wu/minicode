@@ -35,6 +35,9 @@ from backend.permissions.network import (
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.html_sanitizer import assess_extraction, sanitize_html_with_status
 from backend.llm.errors import (
+    _provider_error_body_details,
+    _provider_response_body,
+    _safe_provider_diagnostic_text,
     classify_llm_error,
     llm_error_raw,
     sanitize_llm_error_message,
@@ -887,12 +890,29 @@ class WebSearchTool(BaseTool):
                 ),
             )
         except Exception as exc:
-            logger.warning("hosted web_search failed query=%r: %s", query, exc)
+            provider = str(getattr(llm, "_provider_id", "") or getattr(getattr(llm, "_settings", None), "provider", "") or type(llm).__name__)
+            classification = classify_llm_error(exc)
+            raw = llm_error_raw(exc, provider)
+            provider_error = _provider_error_body_details(_provider_response_body(exc))
+            detail = _safe_provider_diagnostic_text(exc, limit=len(str(exc)))
+            if provider_error:
+                detail += "\n" + json.dumps(provider_error, ensure_ascii=False)
+            logger.warning("hosted web_search failed query=%r: %s", query, detail)
             return ToolResult(
-                content=f"Hosted web search failed: {exc}",
+                content=f"网页搜索失败。\n{detail}",
                 is_error=True,
+                status="failed",
                 extraction_status="failed",
                 evidence_type="candidate",
+                result_kind="search",
+                provider=provider,
+                provider_error_type=classification.provider_error_type,
+                error_kind=classification.error_type,
+                user_summary="网页搜索失败。",
+                developer_detail=detail,
+                recoverable=classification.retryable,
+                projection="error",
+                runtime_metadata={"provider_error": {**raw, "provider_error": provider_error}},
             )
 
         if not str(content or "").strip():

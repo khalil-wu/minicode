@@ -721,7 +721,7 @@ def test_web_search_provider_failure_does_not_fall_back_to_scraping() -> None:
 
     assert result.is_error
     assert result.extraction_status == "failed"
-    assert result.content == "Hosted web search failed: provider unavailable"
+    assert result.content == "网页搜索失败。\nprovider unavailable"
 
 
 def test_web_search_uses_configured_search_api_with_request_domain_filters(monkeypatch) -> None:

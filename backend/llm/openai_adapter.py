@@ -1344,6 +1344,24 @@ def _responses_error_event_raw(
     return message, raw
 
 
+class ResponsesStreamError(RuntimeError):
+    """A failed Responses event with its provider-owned diagnostic fields."""
+
+    def __init__(self, event_type: str, error: Any, *, fallback: str):
+        message, self.raw = _responses_error_event_raw(event_type, error, fallback=fallback)
+        self.body = dict(self.raw["provider_error"])
+        original_message = _get_attr_or_item(error, "message", None) or (error if isinstance(error, str) else message)
+        # The shared projection keeps a compact summary; the exception retains
+        # the complete redacted diagnostic for an expandable tool failure.
+        diagnostic = _safe_provider_diagnostic_text(original_message, limit=len(str(original_message)))
+        self.body["message"] = diagnostic
+        self.raw["provider_error"] = self.body
+        self.status_code = self.raw.get("status_code")
+        self.request_id = self.body.get("request_id")
+        prefix = "Responses API response failed" if event_type == "response.failed" else "Responses API error"
+        super().__init__(f"{prefix}: {diagnostic}")
+
+
 def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
     """Return opaque Responses output items safe to round-trip as input.
 
@@ -5076,8 +5094,8 @@ class OpenAIAdapter(LLMAdapter):
         except LifecycleStaleError:
             raise
         except Exception as exc:
-            logger.error("Responses API simple_chat 失败: %s", exc)
-            raise RuntimeError(f"LLM 调用失败: {_clean_error_message(exc)}") from exc
+            logger.error("Responses API simple_chat 失败: %s", _safe_provider_diagnostic_text(exc, limit=len(str(exc))))
+            raise
 
     async def _collect_simple_responses_stream(
         self,
@@ -5102,16 +5120,12 @@ class OpenAIAdapter(LLMAdapter):
                 if citation not in citations:
                     citations.append(citation)
 
-        def error_message(event: Any, default: str) -> str:
+        def stream_error(event: Any, default: str) -> ResponsesStreamError:
             response_obj = _get_attr_or_item(event, "response", None)
             error = _get_attr_or_item(event, "error", None) or _get_attr_or_item(
                 response_obj, "error", None
-            )
-            message, _details = _responses_error_details(
-                error,
-                fallback=default,
-            )
-            return message
+            ) or event
+            return ResponsesStreamError(str(_get_attr_or_item(event, "type", "")), error, fallback=default)
 
         try:
             async for event in stream:
@@ -5166,13 +5180,9 @@ class OpenAIAdapter(LLMAdapter):
                     reason = _response_finish_reason(response_obj) or "unknown"
                     raise RuntimeError(f"Incomplete response returned, reason: {reason}")
                 elif event_type == "response.failed":
-                    raise RuntimeError(
-                        f"Responses API response failed: {error_message(event, 'unknown error')}"
-                    )
+                    raise stream_error(event, "Responses API response failed")
                 elif event_type in {"error", "response.error"}:
-                    raise RuntimeError(
-                        f"Responses API error: {error_message(event, 'unknown error')}"
-                    )
+                    raise stream_error(event, "Responses API stream error")
 
             if not saw_completed:
                 raise RuntimeError("Responses API stream closed before response.completed")
