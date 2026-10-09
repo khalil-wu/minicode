@@ -80,12 +80,16 @@ describe("real item/terminal disclosure and child roles", () => {
 
   it("retains the work area when a reader explicitly discloses a tool's details", () => {
     useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
-      blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, output: "Actual file contents" } } : block) } : message) }));
+      blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Actual file contents" } } : block) } : message) }));
     const {rerender}=render(<ChatTurn turn={turn()} />);
     fireEvent.click(screen.getByRole("button",{name:"展开活动详情"}));
+    expect(screen.getByText("Actual file contents")).toBeTruthy();
     complete();rerender(<ChatTurn turn={turn()} />);
     expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
     expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+    expect(screen.getByText("Actual file contents")).toBeTruthy();
+    done();rerender(<ChatTurn turn={turn()} />);
+    expect(screen.getByText("Actual file contents")).toBeTruthy();
   });
 
   it("revokes final qualification when the same provider item is reclassified as commentary", () => {
