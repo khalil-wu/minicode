@@ -361,7 +361,11 @@ def test_generated_image_http_token_is_bound_to_session_conversation_and_artifac
 
 def test_conversation_create_emits_authoritative_switch_for_the_new_task(
     monkeypatch,
+    tmp_path,
+    request,
 ) -> None:
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    request.addfinalizer(artifacts.shutdown)
     created = ConversationRecord(
         id="conv-new-task",
         title="New chat",
@@ -391,6 +395,7 @@ def test_conversation_create_emits_authoritative_switch_for_the_new_task(
 
     session = SimpleNamespace(
         active_conversation_id="conv-old-task",
+        artifact_store=artifacts,
         conversation_repo=SimpleNamespace(
             create_conversation=Mock(return_value=created),
         ),
@@ -751,7 +756,11 @@ def test_usage_snapshot_emits_budget_and_context_without_visible_silent_result(
 
 def test_truncate_remains_successful_when_usage_refresh_fails(
     monkeypatch,
+    tmp_path,
+    request,
 ) -> None:
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    request.addfinalizer(artifacts.shutdown)
     conversation_id = "conv-truncate"
     current = ConversationRecord(
         id=conversation_id,
@@ -761,6 +770,7 @@ def test_truncate_remains_successful_when_usage_refresh_fails(
     )
     owner = SimpleNamespace(
         session_id="owner",
+        artifact_store=artifacts,
         active_conversation_id=conversation_id,
         conversation_repo=SimpleNamespace(get_conversation=lambda _conversation_id: current),
         load_active_conversation_snapshot=Mock(),
@@ -780,11 +790,11 @@ def test_truncate_remains_successful_when_usage_refresh_fails(
         "emit_session_usage_snapshot",
         AsyncMock(side_effect=RuntimeError("usage refresh failed")),
     )
-    request = SimpleNamespace(conversation_id=conversation_id, message_id="user-1")
+    truncate_request = SimpleNamespace(conversation_id=conversation_id, message_id="user-1")
 
     asyncio.run(conversation_handlers._handle_conversation_truncate_claimed(
         session,
-        request,
+        truncate_request,
         current,
     ))
 

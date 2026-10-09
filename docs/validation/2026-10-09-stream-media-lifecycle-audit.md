@@ -38,4 +38,8 @@
 
 远端全套以本提交的 [GitHub Actions](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927) 为准。详细日志与回放保存在忽略目录 `output/harness-ui-chain-20261009/`、`output/playwright/`。
 
+本批首轮远端提交 `5eaeee89` 中，前端、Windows harness、桌面、root 全套及 Electron 集成通过；backend 全套为 4,782 通过、11 失败、49 跳过。失败来自七个会话测试替身缺失必需的 `ArtifactStore`、三个旧私有函数调用遗漏 `operation`，以及说明词表误把真实 `generatedImage()` 的字段当作工具名称。补齐临时真实依赖、实际入口参数和两项有源码依据的字段词表后，原 owner、历史、删除游标、hook 与恢复断言保持，相关六模块集中 80 项通过。生产入口一直显式传递实际 operation，没有添加默认兼容分支。
+
+Electron 默认集成由 `run-electron-e2e.mjs` 执行 `electron-multi-agent.spec.ts`，通过 `_electron.launch` 使用 desktop 安装的 Electron；该测试不使用 Playwright 的 browser/page fixture。CI 删除无用的独立 Chromium 下载，保留 Electron 安装、Xvfb 和完整实际集成；新的远端提交仍必须重验全部六个作业。
+
 保留用户原有 `design.md`、实际会话和未保存内容。未重启或取消用户应用；正在运行的 Electron/后端进程仍需正常重启才能加载本批源码。签名发布要求不变，本批不发布旧版或未签名 EXE。

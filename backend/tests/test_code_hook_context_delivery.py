@@ -34,7 +34,7 @@ async def test_nested_hook_context_reaches_model_once_independent_of_selected_ou
     )
     builder = ContextBuilder(token_budget=TokenBudget(total=200000, response_reserve=1000))
     try:
-        result = await _present_result(await runtime.wait("cell", yield_time_ms=0), context, 256)
+        result = await _present_result(await runtime.wait("cell", yield_time_ms=0), context, 256, "tool_exec")
         assert "hook_context" not in json.loads(result.content)
         assert len(result.content) <= 256
         assert result.runtime_metadata["hook_model_context"] == ["NESTED_HOOK_FIXTURE"]

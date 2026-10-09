@@ -109,6 +109,8 @@ _NON_TOOL_DOC_TOKENS = frozenset(
         "image_block",
         "audio_block",
         "media_type",
+        "image_url",  # generatedImage() payload, not a registered tool name.
+        "output_hint",  # Optional text accompanying generatedImage() output.
         "yield_control",
     }
 )

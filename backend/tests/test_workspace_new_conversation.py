@@ -7,20 +7,24 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from backend.conversations.repository import ConversationRepository
+from backend.artifact.store import ArtifactStore
 from backend.ws.handlers import conversation, workspace
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 
 
 @pytest.mark.parametrize("command", ["workspace.set", "workspace.switch", "workspace.import", "conversation.create"])
-def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command):
+def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, request):
     old_root, new_root = tmp_path / "alpha", tmp_path / "beta"
     old_root.mkdir()
     new_root.mkdir()
     repo = ConversationRepository(tmp_path / "conversations")
     old = repo.create_conversation(workspace_root=str(old_root), transcript=[{"role": "user", "content": "Alpha task"}], context_snapshot={"project": "alpha"})
     before = repo.get_conversation(old.id)
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    request.addfinalizer(artifacts.shutdown)
     session = SimpleNamespace(
         active_conversation_id=old.id, conversation_repo=repo,
+        artifact_store=artifacts,
         git_branch_for=Mock(return_value="main"), switch_workspace_for_conversation=AsyncMock(return_value=True),
         load_active_conversation_snapshot=Mock(return_value=False), sync_permission_mode_with_active_conversation=Mock(),
         send_payload=AsyncMock(), emit_command_result=AsyncMock(),

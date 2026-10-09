@@ -202,9 +202,6 @@ jobs:
       - name: Install desktop
         working-directory: desktop
         run: npm ci
-      - name: Install Playwright browser
-        working-directory: frontend
-        run: npx playwright install --with-deps chromium
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
       - name: Run Electron-facing frontend tests

@@ -11,6 +11,7 @@ from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.message import AgentEvent
 from backend.agent.query_journal import QueryJournalRecorder
 from backend.agent.state import AgentState
+from backend.artifact.store import ArtifactStore
 from backend.conversations.models import ConversationRecord
 from backend.conversations.public_projection import project_public_conversation
 from backend.conversations.repository import ConversationRepository
@@ -148,7 +149,7 @@ def test_queued_notifications_keep_connection_generation_and_replay_ownership(tm
     asyncio.run(scenario())
 
 
-def test_recent_page_and_api_preserve_all_history_and_reject_deleted_anchor(tmp_path, monkeypatch):
+def test_recent_page_and_api_preserve_all_history_and_reject_deleted_anchor(tmp_path, monkeypatch, request):
     from backend.api import _state
     from backend.api.routes_chat import router
     repository = ConversationRepository(base_dir=tmp_path)
@@ -160,7 +161,10 @@ def test_recent_page_and_api_preserve_all_history_and_reject_deleted_anchor(tmp_
     assert recent["message_count"] == 202 and len(recent["transcript"]) == 80
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr(_state.ws_manager, "get_session", lambda _: SimpleNamespace(conversation_repo=repository))
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    request.addfinalizer(artifacts.shutdown)
+    session = SimpleNamespace(conversation_repo=repository, artifact_store=artifacts)
+    monkeypatch.setattr(_state.ws_manager, "get_session", lambda _: session)
     messages = recent["transcript"]
     page = recent["transcript_page"]
     with TestClient(app) as client:

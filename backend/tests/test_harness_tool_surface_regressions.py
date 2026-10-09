@@ -70,7 +70,7 @@ def test_unavailable_cell_keeps_recovery_receipt_when_outcomes_are_large(tmp_pat
         store = ArtifactStore(storage_dir=tmp_path / "artifacts")
         report = {"cell_id": "lost-cell", "status": "unavailable", "error": "Inspect recorded outcomes before retrying writes.", "completed_tools": [{"output": "x" * 10000}]}
         result = await _present_result(ToolResult(json.dumps(report), is_error=True, status="failed", runtime_metadata={"code_cell": report}),
-                                       ToolExecutionContext(permission=PermissionContext(), artifact_store=store), 512)
+                                       ToolExecutionContext(permission=PermissionContext(), artifact_store=store), 512, "tool_wait")
         preview = json.loads(result.content)
         assert preview["cell_id"] == "lost-cell"
         assert preview["status"] == "unavailable"
