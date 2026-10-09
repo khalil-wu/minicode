@@ -23,5 +23,5 @@ it('opens Problems without an editor tab and counts errors separately from hints
   expect(useAppStore.getState().activeBottomTab).toBe('problems')
   expect(await screen.findByText('1 错误 · 0 警告 · 2 项匹配')).toBeTruthy()
   expect(diagnostics.hook).toHaveBeenLastCalledWith('/project', true)
-  expect(screen.getByRole('tab', { name: '问题 1 个错误' })).toBeTruthy()
+  expect(await screen.findByRole('tab', { name: '问题 1 个错误' })).toBeTruthy()
 })
