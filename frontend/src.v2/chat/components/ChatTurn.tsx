@@ -141,7 +141,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <ActivityCell cell={cell} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "exec":
-      return <ExecCell cell={cell} isActive={isActive} onStop={isTranscriptMode ? undefined : onStopExecution} />;
+      return <ExecCell cell={cell} isActive={isActive} conversationId={conversationId} onStop={isTranscriptMode ? undefined : onStopExecution} />;
 
     case "diff":
       return <DiffCell cell={cell} showActions={!isTranscriptMode} conversationId={conversationId} workspaceRoot={workspaceRoot} />;

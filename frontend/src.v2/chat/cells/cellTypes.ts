@@ -63,10 +63,12 @@ export interface ActivityCellState {
   status: "pending" | "pending_approval" | "running" | "done" | "partial" | "failed" | "interrupted";
   collapsed: boolean;
   toolCallRecords?: ToolCallRecord[];
+  artifacts?: ArtifactPreview[];
   progress?: {
     current?: number;
     total?: number;
     text?: string;
+    phase?: ProgressContentBlock["phase"];
     retryAttempt?: number;
     maxRetries?: number;
     retryAfterMs?: number;
@@ -94,6 +96,7 @@ export interface ExecCellState {
   id: string;
   command: string;
   callSource?: ToolCallRecord["callSource"];
+  artifacts?: ArtifactPreview[];
   cwd?: string;
   background?: boolean;
   status: "pending" | "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";

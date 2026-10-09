@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from backend.conversations.repository import ConversationRepository
+from backend.artifact.store import ArtifactStore
 from backend.ws.handlers import conversation
 
 
@@ -35,6 +37,49 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
     session.session_lifecycle.schedule_runtime_capabilities = Mock()
     session.conversation_runtime = SimpleNamespace(defer_repository_hydration=Mock())
     return session
+
+
+def test_actual_switch_initial_and_hydrated_pages_restore_legacy_image_sources(tmp_path, monkeypatch):
+    repo = ConversationRepository(tmp_path / "conversations")
+    target = repo.create_conversation()
+    store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    one = store.save("AA==", source="browser_control.embedded_screenshot", type="image", media_type="image/png", conversation_id=target.id)
+    two = store.save("AQ==", source="tool_exec.image", type="image", media_type="image/png", conversation_id=target.id)
+    original = {"id": "answer", "role": "assistant", "content": "Done", "artifacts": [
+        {"artifactId": one, "kind": "image", "summary": "Same label"},
+        {"artifactId": two, "kind": "image", "summary": "Same label"}],
+        "blocks": [{"type": "tool_call", "record": {"id": "capture", "name": "browser_control", "args": {"action": "screenshot"},
+                    "status": "success", "startedAt": 1, "artifactId": one, "artifactKind": "image", "artifactMediaType": "image/png"}}]}
+    repo.append_transcript_message(target.id, original)
+    session = _session(repo, "previous")
+    session.artifact_store = store
+    session.conversation_runtime.hydration_error = None
+    session.conversation_runtime._hydration_generation = 1
+    loop_thread = threading.get_ident()
+    get_meta = store.get_meta
+    reads = []
+
+    def read_meta(*args, **kwargs):
+        reads.append(threading.get_ident())
+        return get_meta(*args, **kwargs)
+
+    monkeypatch.setattr(store, "get_meta", read_meta)
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        callback = session.conversation_runtime.defer_repository_hydration.call_args.kwargs["on_hydration_complete"]
+        await callback(target.id)
+    asyncio.run(scenario())
+    payloads = [call.args[0] for call in session.send_payload.await_args_list]
+    assert [payload["is_hydrating"] for payload in payloads] == [True, False]
+    for payload in payloads:
+        artifacts = payload["conversation"]["transcript"][0]["artifacts"]
+        assert artifacts[0]["source"] == "tool" and artifacts[0]["toolCallId"] == "capture"
+        assert artifacts[1]["source"] == "tool" and artifacts[1]["operation"] == "tool_exec"
+        assert "toolCallId" not in artifacts[1]
+    assert "source" not in repo.get_conversation(target.id).transcript[0]["artifacts"][1]
+    assert reads and all(thread_id != loop_thread for thread_id in reads)
+    store.shutdown()
 
 
 def test_short_switch_rejection_preserves_previous_conversation(tmp_path):

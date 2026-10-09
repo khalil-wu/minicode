@@ -777,6 +777,19 @@ def test_ui_agent_snapshot_never_persists_running_tool_as_summary() -> None:
     assert state["subagents"][0]["summary"] == "查询北京天气"
 
 
+def test_ui_agent_snapshot_keeps_explicit_empty_tool_at_the_next_model_request() -> None:
+    state = _ui_agent_state_for_event(None, "subagent.progress", {
+        "subagent_id": "child-real", "tool_name": "list_files", "iteration": 1, "waiting_on": "tool",
+    })
+    state = _ui_agent_state_for_event(state, "subagent.progress", {
+        "subagent_id": "child-real", "tool_name": "", "iteration": 2, "waiting_on": "model",
+        "snapshot": {"current_tool": "", "waiting_on": "model", "iteration": 2, "last_progress_at": 4567},
+    })
+    row = state["subagents"][0]
+    assert row["currentTool"] == "" and row["waitingOn"] == "model" and row["iteration"] == 2
+    assert row["lastProgressAt"] == 4567
+
+
 def test_ui_agent_snapshot_keeps_all_children_and_live_identity_metadata() -> None:
     state = None
     for index in range(35):

@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "rea
 import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil } from "lucide-react";
 import { Blocks } from "../../lib/icons";
 import type { ActivityCellState } from "./cellTypes";
+import type { ArtifactPreview } from "../../stores/types";
 import { useAppStore } from "../../stores";
 import {
   type ActivityDetail,
@@ -148,10 +149,17 @@ export const ActivityCell = memo(function ActivityCell({
     [records],
   );
   const questionRecords = records.filter(isUserQuestionRecord);
-  const imageArtifactRecords = useMemo(
-    () => records.filter(isImageArtifactRecord),
-    [records],
-  );
+  const imageArtifacts = useMemo(() => {
+    const images = new Map<string, ArtifactPreview>(records.filter(isImageArtifactRecord).map((record) => [record.artifactId!, {
+      artifactId: record.artifactId!, kind: "image" as const,
+      summary: artifactSummaryForRecord(record), mediaType: record.artifactMediaType, bytes: record.artifactBytes,
+    }]));
+    for (const artifact of cell.artifacts ?? []) {
+      const original = images.get(artifact.artifactId);
+      images.set(artifact.artifactId, original ? { ...artifact, summary: original.summary } : artifact);
+    }
+    return [...images.values()];
+  }, [records, cell.artifacts]);
   const outputPreview = getOutputPreview(nonPlanRecords);
   const showOutputPreview = !isInlineAction
     && !isFileChange
@@ -205,7 +213,7 @@ export const ActivityCell = memo(function ActivityCell({
   });
   const hasChangeEvidence = isFileChange && changeDetails.length > 0;
   const hasInlineEvidence = isInlineAction && inlineDisclosureRecords.length > 0;
-  const hasArtifactEvidence = !isFileChange && imageArtifactRecords.length > 0;
+  const hasArtifactEvidence = !isFileChange && imageArtifacts.length > 0;
   const hasGenericEvidence = !isFileChange
     && !isInlineAction
     && (showDetailRows || showOutputPreview || questionRecords.length > 0);
@@ -227,6 +235,8 @@ export const ActivityCell = memo(function ActivityCell({
     maxRetries: cell.progress.maxRetries,
     message: cell.progress.text || "",
     providerState: cell.progress.providerState,
+    phase: cell.progress.phase,
+    errorMessage: cell.progress.errorMessage,
   };
   const isProviderRequest = isProviderRequestProgress(providerProgress);
   const progressLabel = readableToolLabel(cell.progress?.text, isRunning);
@@ -404,10 +414,10 @@ export const ActivityCell = memo(function ActivityCell({
             );
           })}
 
-          {hasArtifactEvidence && imageArtifactRecords.map((record) => (
+          {hasArtifactEvidence && imageArtifacts.map((artifact) => (
             <ToolArtifactImage
-              key={record.artifactId}
-              record={record}
+              key={artifact.artifactId}
+              artifact={artifact}
               conversationId={ownerConversationId}
             />
           ))}
@@ -440,10 +450,19 @@ export const ActivityCell = memo(function ActivityCell({
           )}
 
           {browserDetails.map(({ record, expression, output, error }) => (
-            <div key={`browser-details-${record.id}`} className="activity-cell-tool-detail-card">
-              {expression.trim() && <pre className="activity-cell-inline-output" aria-label="JavaScript">{expression}</pre>}
-              {output.trim() && <ToolResultText record={record} text={output} className="activity-cell-output-pre" label="操作结果" />}
-              {error.trim() && <ToolResultText record={record} text={error} className="activity-cell-error-pre" label="错误详情" error />}
+            <div key={`browser-details-${record.id}`} className="activity-cell-tool-detail-card activity-cell-browser-detail-card">
+              {expression.trim() && <div className="activity-cell-browser-detail-section">
+                <div className="activity-cell-browser-detail-label" aria-hidden="true">JavaScript</div>
+                <pre className="activity-cell-browser-detail-output tool-result-code" aria-label="JavaScript">{expression}</pre>
+              </div>}
+              {output.trim() && <div className="activity-cell-browser-detail-section">
+                {expression.trim() && <div className="activity-cell-browser-detail-label" aria-hidden="true">操作结果</div>}
+                <ToolResultText record={record} text={output} className="activity-cell-browser-detail-output" label="操作结果" />
+              </div>}
+              {error.trim() && <div className="activity-cell-browser-detail-section" data-error="true">
+                <div className="activity-cell-browser-detail-label" aria-hidden="true">错误详情</div>
+                <ToolResultText record={record} text={error} className="activity-cell-browser-detail-output" label="错误详情" error />
+              </div>}
             </div>
           ))}
 
@@ -485,16 +504,11 @@ const isImageArtifactRecord = (record: ActivityToolRecord): boolean => {
   return recordHasImageArtifact(record);
 };
 
-const artifactMediaType = (record: ActivityToolRecord): string => {
-  const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
-  return artifactMediaTypeForProjection(record.artifactMediaType, kind) || "image/png";
-};
-
-function ToolArtifactImage({
-  record,
+export function ToolArtifactImage({
+  artifact,
   conversationId,
 }: {
-  record: ActivityToolRecord;
+  artifact: ArtifactPreview;
   conversationId: string;
 }) {
   // The websocket handle is installed by an effect after the first render.
@@ -502,9 +516,9 @@ function ToolArtifactImage({
   // cell rebuilds its signed artifact URL when that handle becomes available
   // or a reconnect completes.
   const isConnected = useAppStore((s) => s.isConnected);
-  const artifactId = String(record.artifactId || "").trim();
+  const artifactId = artifact.artifactId;
   const ownerConversationId = conversationId.trim();
-  const mediaType = artifactMediaType(record);
+  const mediaType = artifactMediaTypeForProjection(artifact.mediaType, canonicalArtifactKind(artifact.kind, artifact.mediaType)) || "image/png";
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const [reloadNonce, setReloadNonce] = useState(0);
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
@@ -524,7 +538,7 @@ function ToolArtifactImage({
     }),
     reloadNonce,
   ), [artifactId, ownerConversationId, isConnected, reloadNonce, sessionId]);
-  const label = readableToolLabel(artifactSummaryForRecord(record));
+  const label = readableToolLabel(artifact.summary);
   const scopeMessage = !ownerConversationId
     ? "截图未关联到会话，暂时无法预览。"
     : !isConnected || !sessionId
@@ -539,8 +553,8 @@ function ToolArtifactImage({
     openArtifactPreview({
       artifactId,
       name: label,
-      summary: record.summary,
-      kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
+      summary: artifact.summary,
+      kind: canonicalArtifactKind(artifact.kind, artifact.mediaType),
       mediaType,
       conversationId: ownerConversationId,
     });
@@ -584,7 +598,7 @@ function ToolArtifactImage({
         )}
         <span className="activity-cell-artifact-caption">
           <span>{label}</span>
-          {record.artifactBytes != null && <span>{formatArtifactBytes(record.artifactBytes)}</span>}
+          {artifact.bytes != null && <span>{formatArtifactBytes(artifact.bytes)}</span>}
         </span>
       </button>
       {loadState === "error" && imageUrl && (

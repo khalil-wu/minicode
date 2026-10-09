@@ -1,4 +1,4 @@
-import type { ChatMessage, ContentBlock } from "../stores/types";
+import type { ArtifactPreview, ChatMessage, ContentBlock } from "../stores/types";
 import { acknowledgeMessageUpdate, messageTopologyKey, streamingMessageUpdate } from "../lib/message-changes";
 import {
   getContentBlocks,
@@ -35,7 +35,7 @@ import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOu
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
-import { canonicalArtifactKind, isBrowserScreenshotRecord } from "../lib/artifact-projection";
+import { canonicalArtifactKind } from "../lib/artifact-projection";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 
 type CommittedCellState = Exclude<
@@ -233,14 +233,12 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
   title: activityTitle(item),
   subtitle: activitySubtitle(item) || undefined,
   status: statusForActivity(item),
-  // A browser screenshot is the result itself, not incidental tool output.
-  // Keep that cell open on first projection so the captured page is visible
-  // without making the user hunt through a collapsed activity row.
-  collapsed: !item.records?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record)),
+  collapsed: true,
   toolCallRecords: item.records,
   progress: item.progress?.length
     ? {
         text: item.progress.at(-1)?.summary || item.progress.at(-1)?.message,
+        phase: item.progress.at(-1)?.phase,
         retryAttempt: item.progress.at(-1)?.retryAttempt,
         maxRetries: item.progress.at(-1)?.maxRetries,
         retryAfterMs: item.progress.at(-1)?.retryAfterMs,
@@ -290,6 +288,7 @@ type ProcessItemCacheEntry = {
   messageId: string;
   timestamp: number;
   workspaceRoot: string;
+  images: ArtifactPreview[];
   projection: ProcessItemProjection;
 };
 
@@ -350,24 +349,48 @@ const processCells = (
   items: TurnActivityItem[],
   message: ChatMessage,
   workspaceRoot: string,
+  toolImages: ArtifactPreview[],
 ): CommittedCellState[] => {
   const cells: CommittedCellState[] = [];
   const diffCells: DiffCellState[] = [];
+  const imagesByCall = new Map<string, ArtifactPreview[]>();
+  for (const artifact of toolImages) {
+    if (artifact.toolCallId) imagesByCall.set(artifact.toolCallId, [...(imagesByCall.get(artifact.toolCallId) ?? []), artifact]);
+  }
   const normalizedItems = items.flatMap(splitActivityRecords);
   for (const item of normalizedItems) {
     const anchor = item.blocks[0];
     const entries = processItemCache.get(anchor) ?? new Map<string, ProcessItemCacheEntry>();
     const cached = entries.get(item.id);
-    const projection = cached && cached.messageId === message.id && cached.timestamp === message.timestamp
-      && cached.workspaceRoot === workspaceRoot && sameProcessItem(cached.item, item)
-      ? cached.projection
-      : projectProcessItem(item, message);
-    entries.set(item.id, { item, messageId: message.id, timestamp: message.timestamp, workspaceRoot, projection });
+    const images = (item.records ?? []).flatMap((record) => imagesByCall.get(record.id) ?? []);
+    const cacheMatches = cached && cached.messageId === message.id && cached.timestamp === message.timestamp
+      && cached.workspaceRoot === workspaceRoot && sameProcessItem(cached.item, item) && shallow(cached.images, images);
+    const projection = cacheMatches ? cached.projection : projectProcessItem(item, message);
+    if (!cacheMatches && images.length) projection.cells = projection.cells.map((cell) => {
+      const ownedImages = cell.kind === "activity"
+        ? (cell.toolCallRecords ?? []).flatMap((record) => imagesByCall.get(record.id) ?? [])
+        : cell.kind === "exec" ? imagesByCall.get(cell.id) ?? []
+        : [];
+      return ownedImages.length && (cell.kind === "activity" || cell.kind === "exec") ? { ...cell, artifacts: ownedImages } : cell;
+    });
+    entries.set(item.id, { item, messageId: message.id, timestamp: message.timestamp, workspaceRoot, images, projection });
     processItemCache.set(anchor, entries);
     cells.push(...projection.cells);
     if (projection.diff) diffCells.push(projection.diff);
   }
   const overallDiff = aggregateDiffCells(diffCells, message.id, workspaceRoot);
+  const projectedImageIds = new Set(cells.flatMap((cell) => cell.kind === "activity" || cell.kind === "exec" ? (cell.artifacts ?? []).map((artifact) => artifact.artifactId) : []));
+  for (const artifact of toolImages) {
+    if (projectedImageIds.has(artifact.artifactId)) continue;
+    // Tool pages keep their exact owner id even before the owning step loads.
+    if (artifact.toolCallId && message.toolPage?.remaining) continue;
+    cells.push({
+      kind: "activity", id: `${message.id}-image-${artifact.artifactId}`,
+      activityKind: artifact.operation?.startsWith("browser") ? "browser" : artifact.operation === "tool_exec" || artifact.operation === "tool_wait" ? "commandExecution" : "mcpToolCall",
+      title: artifact.operation?.startsWith("browser") ? "浏览器截图" : artifact.operation === "tool_exec" || artifact.operation === "tool_wait" ? "代码执行输出" : artifact.summary,
+      status: "done", collapsed: true, artifacts: [artifact], startedAt: message.timestamp,
+    });
+  }
   return overallDiff ? [...cells, overallDiff] : cells;
 };
 
@@ -601,7 +624,18 @@ function buildTurn(
     (block): block is Extract<ContentBlock, { type: "progress" }> =>
       block.type === "progress" && block.stage === "image_generation",
   );
-  const artifacts = assistantMessage.artifacts ?? [];
+  const records = blocks.flatMap((block) => block.type === "tool_call" ? [block.record] : []);
+  const artifactOwners = new Map(records.filter((record) => record.artifactId).map((record) => [record.artifactId, record]));
+  const toolImages = (assistantMessage.artifacts ?? []).flatMap((artifact) => {
+    if (canonicalArtifactKind(artifact.kind, artifact.mediaType) !== "image" || artifact.source === "image_generation") return [];
+    const owner = artifactOwners.get(artifact.artifactId);
+    if (artifact.source !== "tool" && (!owner || owner.resultKind === "image_generation")) return [];
+    if (artifact.source === "tool" && (!owner || artifact.toolCallId === owner.id)) return [artifact];
+    return [{ ...artifact, source: "tool" as const, toolCallId: owner?.id || artifact.toolCallId,
+      callSource: owner?.callSource || artifact.callSource, operation: owner?.name || artifact.operation }];
+  });
+  const toolImageIds = new Set(toolImages.map((artifact) => artifact.artifactId));
+  const artifacts = (assistantMessage.artifacts ?? []).filter((artifact) => !toolImageIds.has(artifact.artifactId));
   const imageTextSplit = splitAnswerAroundImageArtifact(
     blocks,
     projection.finalAnswer,
@@ -641,6 +675,7 @@ function buildTurn(
     ),
     assistantMessage,
     workspaceRoot,
+    toolImages,
   );
   if (
     (assistantMessage.terminalStatus === "failed"
@@ -808,6 +843,12 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
       if (index === undefined || index < 0) return null;
       const previous = base.committedCells[index];
       if (previous.kind !== "activity" && previous.kind !== "exec") return null;
+      // Images belong to the current message's tool ownership projection.
+      // A result/stdout update must rebuild that projection, including images
+      // that were added or removed since the previously rendered tool cell.
+      if (previous.artifacts?.length || message.artifacts?.some((artifact) =>
+        artifact.source !== "image_generation" && canonicalArtifactKind(artifact.kind, artifact.mediaType) === "image"
+        && (artifact.toolCallId === block.record.id || artifact.artifactId === block.record.artifactId))) return null;
       const item = { ...projectToolBlock(block, previous.segment ?? 0), segmentClosed: previous.segmentClosed };
       const projected = projectProcessItem(item, message);
       if (projected.diff || projected.cells.length !== 1 || projected.cells[0].id !== previous.id) return null;

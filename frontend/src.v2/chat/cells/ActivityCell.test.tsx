@@ -1146,6 +1146,27 @@ describe("ActivityCell", () => {
       .toContain("Navigation requested.");
   });
 
+  it("keeps all tool images collapsed and deduplicates a forwarded browser artifact", () => {
+    useAppStore.setState({ conversationId: "conv-multiple-images", isConnected: true });
+    socketState.sessionId = "session-images";
+    const cell: ActivityCellState = { kind: "activity", id: "multiple-images", activityKind: "browser", title: "浏览器截图",
+      status: "done", collapsed: true, startedAt: 1,
+      toolCallRecords: [{ id: "capture", name: "browser_control", args: { action: "screenshot" }, status: "success", startedAt: 1,
+        artifactId: "screen-one", artifactKind: "image", artifactMediaType: "image/png" }],
+      artifacts: [
+        { artifactId: "screen-one", kind: "image", summary: "浏览器截图", mediaType: "image/png", source: "tool", toolCallId: "capture" },
+        { artifactId: "screen-two", kind: "image", summary: "第二张截图", mediaType: "image/png", source: "tool", toolCallId: "capture" },
+      ],
+    };
+    const { container } = render(<ActivityCell cell={cell} conversationId="conv-multiple-images" />);
+    expect(container.querySelectorAll(".activity-cell-artifact-card")).toHaveLength(0);
+    fireEvent.click(container.querySelector(".activity-cell-main-button")!);
+    expect(container.querySelectorAll(".activity-cell-artifact-card")).toHaveLength(2);
+    expect(container.querySelectorAll('[data-artifact-id="screen-one"]')).toHaveLength(1);
+    fireEvent.click(container.querySelector(".activity-cell-main-button")!);
+    expect(container.querySelectorAll(".activity-cell-artifact-card")).toHaveLength(0);
+  });
+
   it("renders a browser screenshot inside the tool activity card using an owner-scoped artifact URL", () => {
     useAppStore.setState({ conversationId: "conv-screen", isConnected: true });
     socketState.sessionId = "session-screen";

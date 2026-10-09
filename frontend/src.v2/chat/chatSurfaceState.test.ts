@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ContentBlock } from "../stores/types";
-import { inheritMessageTopology } from "../lib/message-changes";
+import { inheritMessageTopology, recordStreamingToolUpdate, streamingMessageUpdate } from "../lib/message-changes";
 import {
   createRecentTurnProjectionCache,
   projectMessagesToTurns,
@@ -23,6 +23,92 @@ const message = (
 });
 
 describe("chat surface explicit projection", () => {
+  it("rebuilds current tool image ownership across streamed results and output receipts", () => {
+    const record = { id: "image-tool", name: "browser_control", args: { action: "screenshot" }, status: "running" as const, startedAt: 1 };
+    const block: ContentBlock = { type: "tool_call", record };
+    const artifact = { artifactId: "one", kind: "image" as const, summary: "Screenshot", source: "tool" as const, toolCallId: record.id };
+    const assistant = message("assistant-4", "assistant", [block], { artifacts: [artifact, { ...artifact, artifactId: "two" }], isStreaming: true });
+    const messages = [message("user-1", "user"), message("assistant-2", "assistant"), message("user-3", "user"), assistant];
+    const cache = createRecentTurnProjectionCache();
+    expect(projectRecentMessagesToTurns(messages, true, 1, cache, "images").turns[0].committedCells[0]).toMatchObject({
+      artifacts: [{ artifactId: "one" }, { artifactId: "two" }],
+    });
+
+    const completed = { ...assistant, blocks: [{ ...block, record: { ...record, status: "success" as const,
+      artifactId: "one", artifactKind: "image", artifactMediaType: "image/png" } }] };
+    recordStreamingToolUpdate(assistant, completed, 0);
+    expect(streamingMessageUpdate(completed)?.changes.get(0)).toBe("tool");
+    const completedMessages = [...messages.slice(0, -1), completed];
+    inheritMessageTopology(messages, completedMessages);
+    expect(projectRecentMessagesToTurns(completedMessages, true, 1, cache, "images").turns[0].committedCells[0]).toMatchObject({
+      artifacts: [{ artifactId: "one" }, { artifactId: "two" }],
+    });
+
+    const output = { ...completed, blocks: [{ ...completed.blocks[0], record: { ...completed.blocks[0].record, outputPreview: "Screenshot captured" } }] };
+    recordStreamingToolUpdate(completed, output, 0);
+    expect(streamingMessageUpdate(output)?.changes.get(0)).toBe("tool_output");
+    expect(projectMessagesToTurns([output], true)[0].committedCells[0]).toMatchObject({
+      artifacts: [{ artifactId: "one" }, { artifactId: "two" }],
+    });
+
+    const removed = { ...output, artifacts: [artifact], blocks: [{ ...output.blocks[0], record: { ...output.blocks[0].record, outputPreview: "Updated screenshot output" } }] };
+    recordStreamingToolUpdate(output, removed, 0);
+    expect(streamingMessageUpdate(removed)?.changes.get(0)).toBe("tool_output");
+    expect(projectMessagesToTurns([removed], true)[0].committedCells[0]).toMatchObject({ artifacts: [{ artifactId: "one" }] });
+  });
+
+  it("reuses a tool image cell across text deltas and refreshes it when another image arrives", () => {
+    const record = { id: "image-tool", name: "browser_control", args: { action: "screenshot" }, status: "success" as const, startedAt: 1 };
+    const tool: ContentBlock = { type: "tool_call", record };
+    const note: ContentBlock = { type: "text", source: "commentary", content: "Inspecting", itemId: "note", status: "completed" };
+    const artifact = { artifactId: "image-one", kind: "image" as const, summary: "Screenshot", source: "tool" as const, toolCallId: record.id };
+    const assistant = message("assistant-2", "assistant", [tool, note], { artifacts: [artifact], isStreaming: true });
+    const first = projectMessagesToTurns([assistant], true)[0].committedCells[0];
+    const updated = { ...assistant, blocks: [tool, { ...note, content: "Inspecting the controls" }] };
+    expect(projectMessagesToTurns([updated], true)[0].committedCells[0]).toBe(first);
+    const secondImage = { ...updated, artifacts: [artifact, { ...artifact, artifactId: "image-two" }] };
+    const next = projectMessagesToTurns([secondImage], true)[0].committedCells[0];
+    expect(next).not.toBe(first);
+    expect(next).toMatchObject({ artifacts: [{ artifactId: "image-one" }, { artifactId: "image-two" }] });
+  });
+
+  it("keeps browser and code-cell images with their tool evidence instead of the answer", () => {
+    const screenshot: ContentBlock = { type: "tool_call", record: {
+      id: "browser-capture", name: "browser_control", args: { action: "screenshot" }, status: "success", startedAt: 1,
+      artifactId: "screen", artifactKind: "image", artifactMediaType: "image/png",
+    } };
+    const assistant = message("assistant-2", "assistant", [screenshot, { type: "text", source: "model_final", content: "Done", status: "completed" }], {
+      artifacts: [
+        { artifactId: "screen", kind: "image", summary: "Code cell image", mediaType: "image/png" },
+        { artifactId: "code-output", kind: "image", summary: "Code cell image", mediaType: "image/png", source: "tool", toolCallId: "code-owner", operation: "tool_exec" },
+        { artifactId: "generated", kind: "image", summary: "Generated image", mediaType: "image/png", source: "image_generation" },
+      ],
+    });
+    const turn = projectMessagesToTurns([assistant], false)[0];
+    expect(turn.finalAnswerCell?.artifacts?.map((artifact) => artifact.artifactId)).toEqual(["generated"]);
+    expect(turn.committedCells.find((cell) => cell.id === "browser-capture")).toMatchObject({
+      kind: "activity", collapsed: true, artifacts: [{ artifactId: "screen", toolCallId: "browser-capture", source: "tool" }],
+    });
+    expect(turn.committedCells.find((cell) => cell.kind === "activity" && cell.artifacts?.some((artifact) => artifact.artifactId === "code-output")))
+      .toMatchObject({ kind: "activity", activityKind: "commandExecution", collapsed: true, title: "代码执行输出" });
+    expect(assistant.artifacts[0].source).toBeUndefined();
+  });
+
+  it("does not float an image into the answer while its earlier tool owner is paged out", () => {
+    const assistant = message("assistant-2", "assistant", [], { toolPage: { before: 40, remaining: 40, total: 80 },
+      artifacts: [{ artifactId: "old-screen", kind: "image", summary: "Screenshot", source: "tool", toolCallId: "earlier-browser" }],
+    });
+    const before = projectMessagesToTurns([assistant], false)[0];
+    expect(before.finalAnswerCell).toBeNull();
+    expect(before.committedCells).toHaveLength(0);
+    const loaded = { ...assistant, blocks: [{ type: "tool_call" as const, record: {
+      id: "earlier-browser", name: "browser_control", args: { action: "screenshot" }, status: "success" as const, startedAt: 1,
+    } }] };
+    expect(projectMessagesToTurns([loaded], false)[0].committedCells[0]).toMatchObject({
+      kind: "activity", artifacts: [{ artifactId: "old-screen", toolCallId: "earlier-browser" }],
+    });
+  });
+
   it("reuses unchanged tool cells while thinking and answer text grow", () => {
     const tool: ContentBlock = {
       type: "tool_call", record: { id: "read-one", name: "run_command", args: { command: "npm test" }, status: "success", startedAt: 1, finishedAt: 2, stdoutPreview: "passed\n".repeat(200) },

@@ -68,6 +68,7 @@ def build_subagent_status_event(
         # `subagent.done`, because the renderer intentionally makes terminal
         # rows sticky to reject stale progress events.
         event.data["status"] = status
+        event.data["tool_name"] = str(snapshot.get("current_tool") or "")
         event.data["snapshot"] = public_snapshot
     else:
         termination_reason = str(
@@ -329,6 +330,28 @@ def build_subagent_transcript_messages(
             content = public_text(payload.get("content") or payload.get("text"), max_chars=262_144).strip()
             if content:
                 final_text = content
+            continue
+
+        if event_type == "system" and payload.get("lifecycle") == "provider_progress":
+            provider_state = str(payload.get("provider_state") or payload.get("providerState") or "")
+            error = public_text(payload.get("error_message"), max_chars=12_000).strip()
+            if provider_state != "failed" and not error:
+                continue
+            message = public_text(payload.get("message") or payload.get("summary"), max_chars=12_000).strip()
+            source_id = str(payload.get("operation_id") or payload.get("id") or event_id)
+            span_id = str(payload.get("provider_span_id") or "")
+            retry = int(payload.get("retry_attempt") or 0)
+            assistant = _ensure_assistant(timestamp, event_id)
+            assistant["blocks"].append({
+                "type": "progress", "id": f"{source_id}:error:{span_id}:{provider_state}:{retry}",
+                "operationId": source_id, "stage": "status", "phase": "recover",
+                "status": "failed" if provider_state == "failed" else "info",
+                "message": message, "visibility": "timeline",
+                "providerState": provider_state, "errorMessage": error or message,
+                "detail": public_text(payload.get("detail"), max_chars=12_000),
+                "retryAttempt": retry, "maxRetries": int(payload.get("max_retries") or 0),
+                "retryAfterMs": int(payload.get("retry_after_ms") or 0), "timestamp": timestamp,
+            })
             continue
 
         if event_type == "tool_use":

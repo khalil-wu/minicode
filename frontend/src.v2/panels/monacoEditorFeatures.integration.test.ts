@@ -6,7 +6,7 @@ import { EditorExtensionsRegistry } from "monaco-editor/editor/browser/editorExt
 import { CommandsRegistry } from "monaco-editor/platform/commands/common/commands.js";
 import { TypeScriptWorker } from "monaco-editor/languages/features/typescript/tsWorker.js";
 import { loadMiniCodeLanguageServices, editorModelUri, registerMiniCodeEditorOpener } from "./monacoLanguageServices";
-import { miniCodeCodeEditingOptions } from "./monacoEditorFeatures";
+import { loadMiniCodeEditorFeatures, miniCodeCodeEditingOptions } from "./monacoEditorFeatures";
 import { WorkspaceHTMLWorker } from "./workspaceHtmlService";
 import { useAppStore } from "../stores";
 import { StandaloneServices } from "monaco-editor/editor/standalone/browser/standaloneServices.js";
@@ -33,6 +33,15 @@ vi.mock("./workspaceTypeScriptWorker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/languages/features/css/css.worker?worker", () => ({ default: class {} }));
 vi.mock("./workspaceHtmlWorker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/languages/features/json/json.worker?worker", () => ({ default: class {} }));
+
+// Native editor contributions and the TS mode are lazy production modules.
+// Transform their graph during suite loading, like the static Monaco imports
+// above; the hook below measures language-service activation, not Vite's cold
+// module transformation while other test workers are running.
+await Promise.all([
+  loadMiniCodeEditorFeatures(),
+  import("monaco-editor/languages/features/typescript/tsMode.js"),
+]);
 
 const disposables: Array<{ dispose(): void }> = [];
 beforeAll(async () => {

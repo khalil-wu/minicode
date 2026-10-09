@@ -8,7 +8,6 @@ import { ToolGlyph } from "../../chat/toolUtils";
 import {
   isWebFetchActivity,
 } from "../../chat/cells/activityCellHelpers";
-import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
 import { isProviderReasoningSummary } from "../../lib/provider-reasoning";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
 import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
@@ -163,14 +162,10 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
     }
     previousWindow.current = { first: group.cells[0]?.id, count: group.cells.length };
   }, [group.cells]);
-  const containsScreenshot = group.cells.some((cell) => (
-    cell.kind === "activity"
-    && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
-  ));
   const containsFailure = group.cells.some((cell) => cell.kind === "error"
     || ((cell.kind === "exec" || cell.kind === "activity" || cell.kind === "collaboration")
       && (cell.status === "failed" || cell.status === "partial")));
-  const defaultExpanded = containsFailure || (isRunning && (!group.closed || containsScreenshot)) || expandWorkGroups;
+  const defaultExpanded = containsFailure || (isRunning && !group.closed) || expandWorkGroups;
   const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`work:${group.key}`, defaultExpanded);
   const expanded = searching || expansionPreference;
   const detailId = useId();

@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import threading
 from pathlib import Path
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -1230,6 +1231,153 @@ def test_websocket_exposes_conversation_lifecycle(monkeypatch, tmp_path) -> None
             assert blank["conversations"] == []
             assert blank["active_conversation_id"] is None
             assert blank["active_conversation"] is None
+
+
+@pytest.mark.parametrize("corrupt_kind", ["transcript", "snapshot"])
+def test_websocket_delete_uses_metadata_when_retained_history_is_corrupt(monkeypatch, tmp_path, corrupt_kind):
+    from backend.conversations.repository import ConversationRepository, ConversationStorageCorruptError
+
+    _install_noop_llm(monkeypatch)
+    base_dir = tmp_path / "delete-store"
+    monkeypatch.setattr("backend.main.CONVERSATION_DATA_DIR", base_dir, raising=False)
+    monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", base_dir)
+    monkeypatch.setattr("backend.ws.handlers.conversation._schedule_long_term_memory_forgetting", lambda *args: None)
+    repository = ConversationRepository(base_dir)
+    healthy = repository.create_conversation(title="Keep this chat", memory_mode="disabled",
+        transcript=[{"id": "keep-user", "role": "user", "content": "Keep my message"}],
+        context_snapshot={"scratch": "Retain the other workspace draft"})
+    target = repository.create_conversation(title="Damaged retained history", memory_mode="disabled",
+        transcript=[{"id": "damaged-user", "role": "user", "content": "Delete this chat"}],
+        context_snapshot={"scratch": "Damaged chat context"})
+    repository.set_archived(target.id, True)
+    suffix = "transcript.jsonl" if corrupt_kind == "transcript" else "snapshot.json"
+    for path in base_dir.glob(f"{target.id}.g*.{suffix}"):
+        path.write_text("{not valid JSON\n", encoding="utf-8")
+    cold_repository = ConversationRepository(base_dir)
+    assert cold_repository.get_conversation_summary(target.id).id == target.id
+    with pytest.raises(ConversationStorageCorruptError, match="no readable committed generation"):
+        cold_repository.get_conversation(target.id)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?session_id=delete-corrupt-{corrupt_kind}") as ws:
+            _receive_until_event(ws, "mcp_status")
+            _receive_until_event(ws, "llm.model.updated")
+            ws.send_json({"type": "conversation.switch", "conversation_id": healthy.id})
+            _receive_conversation_switched(ws, healthy.id)
+            ws.send_json({"type": "conversation.delete", "conversation_id": target.id})
+            for _ in range(60):
+                payload = ws.receive_json()
+                if payload.get("type") == "command.result" and payload.get("command") == "conversation.delete":
+                    outcome = payload
+                    break
+            else:
+                raise AssertionError("The actual websocket delete route did not settle")
+            assert outcome["level"] == "success", outcome
+            assert outcome["data"]["conversation_id"] == target.id
+            ws.send_json({"type": "conversation.list"})
+            inventory = _receive_until_event(ws, "conversation.list")
+            assert inventory["active_conversation_id"] == healthy.id
+            assert all(item["id"] != target.id for item in inventory["conversations"])
+
+    deleted = json.loads((base_dir / f"{target.id}.manifest.json").read_text(encoding="utf-8"))
+    assert deleted["deleted"] is True
+    assert list(base_dir.glob(f"{target.id}.g*")) == []
+    retained = ConversationRepository(base_dir).get_conversation(healthy.id)
+    assert retained.context_snapshot["scratch"] == "Retain the other workspace draft"
+    assert retained.transcript[0]["content"] == "Keep my message"
+
+
+@pytest.mark.parametrize("fallback_deadline_expires", [False, True])
+def test_websocket_delete_fallback_serializes_with_the_later_user_switch(monkeypatch, tmp_path, fallback_deadline_expires):
+    from backend.conversations.repository import ConversationRepository
+    from backend.ws.command_dispatcher import SessionCommandDispatcher
+    from backend.ws.handler import WebSocketSession
+    from backend.ws.handlers import conversation as conversation_handlers
+
+    _install_noop_llm(monkeypatch)
+    base_dir = tmp_path / "switch-delete-store"
+    monkeypatch.setattr("backend.main.CONVERSATION_DATA_DIR", base_dir, raising=False)
+    monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", base_dir)
+    monkeypatch.setattr(conversation_handlers, "_schedule_long_term_memory_forgetting", lambda *args: None)
+    repository = ConversationRepository(base_dir)
+    selected = repository.create_conversation(title="User's next chat", memory_mode="disabled",
+        context_snapshot={"scratch": "User's selected workspace draft"})
+    fallback = repository.create_conversation(title="Automatic fallback", memory_mode="disabled")
+    target = repository.create_conversation(title="Delete the active chat", memory_mode="disabled")
+    fallback_started = threading.Event()
+    release_fallback = threading.Event()
+    switch_ingress = threading.Event()
+    switch_workspace_started = threading.Event()
+    real_view = ConversationRepository.get_conversation_view
+    real_ingress = SessionCommandDispatcher._handle_command
+    real_workspace_switch = WebSocketSession.switch_workspace_for_conversation
+
+    def blocked_view(self, conversation_id, *args, **kwargs):
+        if conversation_id == fallback.id:
+            fallback_started.set()
+            if not release_fallback.wait(timeout=3):
+                raise AssertionError("The test failed to release the fallback view read")
+        return real_view(self, conversation_id, *args, **kwargs)
+
+    async def observed_ingress(self, command, connection_generation=None):
+        if command.type == "conversation.switch" and command.data.get("conversation_id") == selected.id:
+            switch_ingress.set()
+        return await real_ingress(self, command, connection_generation)
+
+    async def observed_workspace_switch(self, conversation, **kwargs):
+        if conversation.id == selected.id:
+            switch_workspace_started.set()
+        return await real_workspace_switch(self, conversation, **kwargs)
+
+    monkeypatch.setattr(ConversationRepository, "get_conversation_view", blocked_view)
+    monkeypatch.setattr(SessionCommandDispatcher, "_handle_command", observed_ingress)
+    monkeypatch.setattr(WebSocketSession, "switch_workspace_for_conversation", observed_workspace_switch)
+    if fallback_deadline_expires:
+        real_deadline = conversation_handlers.await_with_deadline
+
+        async def short_fallback_deadline(awaitable, **kwargs):
+            if kwargs["label"].startswith("fallback conversation activation"):
+                kwargs["timeout"] = 0.05
+            return await real_deadline(awaitable, **kwargs)
+
+        monkeypatch.setattr(conversation_handlers, "await_with_deadline", short_fallback_deadline)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?session_id=delete-fallback-switch-{fallback_deadline_expires}") as ws:
+            _receive_until_event(ws, "mcp_status")
+            _receive_until_event(ws, "llm.model.updated")
+            ws.send_json({"type": "conversation.switch", "conversation_id": target.id})
+            _receive_conversation_switched(ws, target.id)
+            ws.send_json({"type": "conversation.delete", "conversation_id": target.id})
+            try:
+                assert fallback_started.wait(timeout=2)
+                ws.send_json({"type": "conversation.switch", "conversation_id": selected.id})
+                assert switch_ingress.wait(timeout=2)
+                if fallback_deadline_expires:
+                    for _ in range(60):
+                        payload = ws.receive_json()
+                        if payload.get("type") == "command.result" and payload.get("command") == "conversation.delete":
+                            assert payload["level"] == "warning"
+                            assert any(error.endswith(":fallback_activation") for error in payload["data"]["cleanup_errors"])
+                            break
+                    else:
+                        raise AssertionError("The retained fallback deadline did not report its pending activation")
+                # TestClient runs the app on a separate event-loop thread.
+                # Keep the fallback blocked while the switch has time to
+                # reach workspace activation if its lifecycle lock is lost.
+                assert not switch_workspace_started.wait(timeout=0.2)
+            finally:
+                release_fallback.set()
+            _receive_conversation_switched(ws, selected.id)
+            ws.send_json({"type": "conversation.list"})
+            for _ in range(60):
+                payload = ws.receive_json()
+                if payload.get("type") == "conversation.list" and payload.get("active_conversation_id") == selected.id:
+                    break
+            else:
+                raise AssertionError("Late fallback activation overrode the user's selected conversation")
+    retained = ConversationRepository(base_dir).get_conversation(selected.id)
+    assert retained.context_snapshot["scratch"] == "User's selected workspace draft"
 
 
 def test_websocket_context_fork_resolves_frontend_message_id(monkeypatch, tmp_path) -> None:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from backend.agent.conversation_query_guard import conversation_query_guards
+from backend.artifact.store import ArtifactStore
 from backend.conversations.models import ConversationRecord
 from backend.ws.handler import WebSocketSession
 from backend.ws.command_dispatcher import (
@@ -241,7 +242,7 @@ def test_delete_release_waiter_still_releases_fence_after_its_own_cancellation()
     asyncio.run(scenario())
 
 
-def test_workspace_projection_switches_every_active_renderer() -> None:
+def test_workspace_projection_switches_every_active_renderer(tmp_path) -> None:
     conversation = ConversationRecord(
         id="conv_workspace",
         title="Workspace task",
@@ -253,6 +254,7 @@ def test_workspace_projection_switches_every_active_renderer() -> None:
             session_id=session_id,
             active_conversation_id=conversation.id,
             conversation_repo=SimpleNamespace(get_conversation=lambda _conversation_id: conversation),
+            artifact_store=ArtifactStore(storage_dir=tmp_path / session_id),
             switch_workspace_for_conversation=AsyncMock(return_value=True),
             send_payload=AsyncMock(return_value=True),
             runtime_snapshot=lambda session_id=session_id: {"session_id": session_id},

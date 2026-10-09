@@ -1180,11 +1180,37 @@
   padding: 4px 0;
 }
 
-.activity-cell-tool-detail-card .activity-cell-inline-output {
-  max-height: min(260px, 34vh);
+.activity-cell-browser-detail-card {
+  max-height: min(360px, 44vh);
+  overflow: auto;
+}
+
+.activity-cell-browser-detail-section {
+  min-width: 0;
+  padding: 2px 0;
+}
+
+.activity-cell-browser-detail-section + .activity-cell-browser-detail-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.activity-cell-browser-detail-label {
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+
+.activity-cell-browser-detail-section[data-error="true"] .activity-cell-browser-detail-label {
+  color: var(--state-danger);
+}
+
+.activity-cell-browser-detail-output {
   margin: 0;
-  padding: 2px;
-  background: transparent;
+  padding: 0;
+  color: var(--text-secondary);
 }
 
 .activity-cell-tool-record-target + .activity-cell-inline-output {

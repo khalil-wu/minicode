@@ -2077,14 +2077,141 @@ def test_main_responses_fails_closed_for_unknown_stream_event_without_payload_le
         _collect(adapter.stream_chat([LLMMessage(role="user", content="hello")]))
     )
 
-    assert [event.type for event in events] == [StreamEventType.ERROR]
-    assert events[0].raw == {
+    assert [event.type for event in events] == [StreamEventType.TRANSPORT_ACTIVITY, StreamEventType.ERROR]
+    assert events[0].content == "" and events[0].raw == {}
+    assert events[1].raw == {
         "provider": "openai_responses",
         "provider_error_type": "network",
         "event_type": "eof_without_terminal",
         "provider_error_code": "eof_without_terminal",
     }
-    assert "secret-provider-payload" not in str(events[0].raw)
+    assert "secret-provider-payload" not in str([event.raw for event in events])
+
+
+@pytest.mark.parametrize("frame_kind", ["response.reasoning_text.delta", "response.in_progress", "response.future_event", "malformed"])
+def test_ignored_responses_frames_keep_the_provider_wait_alive_without_public_content(frame_kind):
+    from backend.agent.provider_stream_wait import wait_for_next_provider_event
+    from backend.config import AgentSettings
+
+    frames = [SimpleNamespace(type=frame_kind, delta="private-provider-content") for _ in range(10)]
+    responses = _ResponsesCreate([*frames, _completed_response(text="Done")])
+    open_stream = responses.stream
+
+    def delayed_stream(*args, **kwargs):
+        context = open_stream(*args, **kwargs)
+        if frame_kind == "malformed":
+            # Isolated malformed frames are accepted by the existing bounded
+            # parser; interleave valid passive frames to preserve that budget.
+            context.response._lines = [line for index, item in enumerate(context.response._lines)
+                for line in (["data: {not-json", item] if index < 10 else [item])]
+        original_lines = context.response.aiter_lines
+
+        async def delayed_lines():
+            async for line in original_lines():
+                await asyncio.sleep(0.025)
+                yield line
+
+        context.response.aiter_lines = delayed_lines
+        return context
+
+    responses.stream = delayed_stream
+    adapter = OpenAIAdapter(LLMSettings(provider="openai", api_key="test-key", model="gpt-5.4", wire_api="responses"), http_client=responses)
+
+    async def collect_with_real_wait():
+        stream = adapter.stream_chat([LLMMessage(role="user", content="hello")]).__aiter__()
+        events = []
+        tool_context = SimpleNamespace(cancel_event=asyncio.Event(), pending_provider_tasks=set())
+        budget = SimpleNamespace(bounded_provider_timeout=lambda seconds: (seconds, False))
+        try:
+            while True:
+                results = [item async for item in wait_for_next_provider_event(
+                    stream_iter=stream, first_event=not events, settings=AgentSettings(stream_timeout_seconds=0.15),
+                    budget_runtime=budget, tool_context=tool_context, stream_state=None,
+                    pending_tool_calls=[], awaiting_trailing_tool_done=False,
+                )]
+                result = results[-1]
+                if result.action == "finish":
+                    break
+                events.append(result.event)
+        finally:
+            await stream.aclose()
+        return events
+
+    events = asyncio.run(collect_with_real_wait())
+    assert len(responses.requests) == 1
+    assert sum(event.type == StreamEventType.TRANSPORT_ACTIVITY for event in events) >= 10
+    assert events[-1].type == StreamEventType.DONE
+    assert "private-provider-content" not in str(events)
+    assert [event for event in events if event.type == StreamEventType.THINKING_CHUNK] == []
+    assert responses.last_response.closed
+
+
+def test_content_free_transport_activity_has_no_process_projection():
+    from backend.agent.provider_event_projection import ProviderProjectionResult, project_non_text_provider_event
+    from backend.llm.base import StreamEvent
+
+    async def project():
+        return [event async for event in project_non_text_provider_event(
+            StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY), stream_state=None, stream_text=None,
+            live_text_streaming=True, tool_tracker=None, tool_registry=None, tool_context=None,
+            process_event_factory=None,
+        )]
+
+    events = asyncio.run(project())
+    assert events == [ProviderProjectionResult(True)]
+
+
+@pytest.mark.parametrize("boundary", ["idle", "cancel", "deadline"])
+def test_transport_activity_does_not_bypass_silence_cancellation_or_turn_deadline(boundary):
+    from backend.agent.loop_preflight import PhaseDeadlineExceeded
+    from backend.agent.provider_stream_wait import wait_for_next_provider_event
+    from backend.agent.turn_budget import TurnDeadlineController
+    from backend.agent.turn_budget_runtime import TurnBudgetRuntime
+    from backend.config import AgentSettings
+    from backend.llm.base import StreamEvent, UsageInfo
+
+    async def exercise():
+        cancel_event = asyncio.Event()
+        tool_context = SimpleNamespace(cancel_event=cancel_event, pending_provider_tasks=set())
+        budget = TurnBudgetRuntime(
+            state=None, tool_context=tool_context, usage=UsageInfo, rollout_budget=None,
+            deadlines=TurnDeadlineController(max_turn_seconds=0.06 if boundary == "deadline" else 0),
+            controller=None, termination=None,
+        )
+        budget.ensure_started()
+
+        async def activity():
+            yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+            while True:
+                if boundary == "idle":
+                    await asyncio.Event().wait()
+                await asyncio.sleep(0.01)
+                yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+
+        async def cancel():
+            await asyncio.sleep(0.04)
+            cancel_event.set()
+
+        cancellation = asyncio.create_task(cancel()) if boundary == "cancel" else None
+        stream = activity()
+        try:
+            while True:
+                async for _ in wait_for_next_provider_event(
+                    stream_iter=stream, first_event=False,
+                    settings=AgentSettings(stream_timeout_seconds=0.06), budget_runtime=budget,
+                    tool_context=tool_context, stream_state=None, pending_tool_calls=[],
+                    awaiting_trailing_tool_done=False,
+                ):
+                    pass
+        finally:
+            await stream.aclose()
+            if cancellation is not None:
+                await cancellation
+            assert not tool_context.pending_provider_tasks
+
+    expected = {"idle": asyncio.TimeoutError, "cancel": asyncio.CancelledError, "deadline": PhaseDeadlineExceeded}[boundary]
+    with pytest.raises(expected):
+        asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(

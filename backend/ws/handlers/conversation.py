@@ -119,10 +119,11 @@ async def _switch_active_sessions_to_conversation_workspace(
             if current is None:
                 raise RuntimeError("conversation disappeared after workspace activation")
             await owner_session.send_payload(
-                build_conversation_switched_payload(
+                await asyncio.to_thread(build_conversation_switched_payload,
                     current,
                     is_hydrating=False,
                     runtime_snapshot=owner_session.runtime_snapshot(),
+                    artifact_store=owner_session.artifact_store,
                 ),
                 log_context="conversation.switched",
             )
@@ -625,10 +626,11 @@ async def handle_conversation_create(
         # never answer the list snapshot by switching the backend back to the
         # conversation that was active before creation.
         await session.send_payload(
-            build_conversation_switched_payload(
+            await asyncio.to_thread(build_conversation_switched_payload,
                 created,
                 is_hydrating=is_hydrating,
                 runtime_snapshot=session.runtime_snapshot(),
+                artifact_store=session.artifact_store,
             ),
             log_context="conversation.switched",
         )
@@ -717,10 +719,11 @@ async def handle_conversation_clone(session: "WebSocketSession", data: dict[str,
             )
             session.sync_permission_mode_with_active_conversation(source="conversation.clone")
             await session.send_payload(
-                build_conversation_switched_payload(
+                await asyncio.to_thread(build_conversation_switched_payload,
                     clone,
                     is_hydrating=is_hydrating,
                     runtime_snapshot=session.runtime_snapshot(),
+                    artifact_store=session.artifact_store,
                 ),
                 log_context="conversation.switched",
             )
@@ -811,10 +814,11 @@ async def handle_conversation_merge(session: "WebSocketSession", data: dict[str,
             defer_start=True,
         )
         await session.send_payload(
-            build_conversation_switched_payload(
+            await asyncio.to_thread(build_conversation_switched_payload,
                 updated_target,
                 is_hydrating=is_hydrating,
                 runtime_snapshot=session.runtime_snapshot(),
+                artifact_store=session.artifact_store,
             ),
             log_context="conversation.switched",
         )
@@ -921,7 +925,9 @@ async def _publish_conversation_switch(
     session: "WebSocketSession", target: Any, view: dict[str, Any], data: dict[str, Any],
 ) -> None:
     from datetime import UTC, datetime
+    from backend.services.conversation_payload_service import restore_tool_artifact_sources
 
+    view = await asyncio.to_thread(restore_tool_artifact_sources, view, session.artifact_store)
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
     session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
@@ -939,6 +945,8 @@ async def _publish_conversation_switch(
             await session.reconcile_persisted_ui_agent_state(owner)
         session.refresh_llm_selection()
         current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+        if current_view is not None:
+            current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
         if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
             return
         await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
@@ -1001,11 +1009,14 @@ async def _activate_conversation_or_blank(
 
     previous_active_id = session.active_conversation_id
     previous_active = (
-        choose_conversation_activation_target(session.conversation_repo, previous_active_id)
+        await to_thread_cancel_safe(
+            choose_conversation_activation_target, session.conversation_repo, previous_active_id,
+        )
         if previous_active_id else None
     )
-    target = choose_conversation_activation_target(
-        session.conversation_repo, preferred_id, conversations=conversation_summaries,
+    target = await to_thread_cancel_safe(
+        choose_conversation_activation_target, session.conversation_repo, preferred_id,
+        conversations=conversation_summaries,
     )
     if target is None:
         if not preferred_id or previous_active is None:
@@ -1080,7 +1091,9 @@ async def handle_conversation_rename(session: "WebSocketSession", data: dict[str
 
 async def handle_conversation_archive(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     conversation_id = str(data.get("conversation_id", "")).strip()
-    target = session.conversation_repo.get_conversation_summary(conversation_id)
+    target = await to_thread_cancel_safe(
+        session.conversation_repo.get_conversation_summary, conversation_id,
+    )
     if target is None:
         await emit_conversation_not_found(session, conversation_id)
         from backend.ws.command_results import emit_command_error
@@ -1371,7 +1384,10 @@ async def _handle_conversation_delete_fenced(session: "WebSocketSession", data: 
     )
 
     request = parse_conversation_delete_request(data)
-    target = session.conversation_repo.get_conversation(request.conversation_id)
+    # Deletion owns persisted metadata, not a readable model transcript.
+    target = await to_thread_cancel_safe(
+        session.conversation_repo.get_conversation_summary, request.conversation_id,
+    )
     if target is None:
         await emit_conversation_not_found(session, request.conversation_id)
         from backend.ws.command_results import emit_command_error
@@ -1585,7 +1601,9 @@ async def _handle_conversation_delete_after_run_fence(
                 data=outcome.data,
             )
             return True
-    deleted = session.conversation_repo.delete_conversation(request.conversation_id)
+    deleted = await to_thread_cancel_safe(
+        session.conversation_repo.delete_conversation, request.conversation_id,
+    )
     if not deleted:
         await emit_conversation_not_found(session, request.conversation_id)
         return True
@@ -1595,9 +1613,16 @@ async def _handle_conversation_delete_after_run_fence(
     )
     _schedule_long_term_memory_forgetting(session, target)
     # A renderer can connect while cancellation, scheduler cleanup, worktree
-    # cleanup, or dormant replay scanning is awaiting. It cannot run a
-    # lifecycle command until the shared lock releases, but it still needs its
-    # retained runtime/cache state purged before the deletion is projected.
+    # cleanup, or dormant replay scanning is awaiting. Each newly connected
+    # owner needs its scoped runtime/cache purged; fallback activation is
+    # serialized with that window's lifecycle commands below.
+    async def activate_deleted_owner_if_current(owner_session: "WebSocketSession") -> None:
+        # This coroutine, including its lock, remains cleanup-owned if the
+        # deadline expires while workspace/view activation is still running.
+        async with owner_session.conversation_lifecycle_lock():
+            if owner_session.active_conversation_id == request.conversation_id:
+                await _activate_conversation_or_blank(owner_session, reconcile_agent_state=False)
+
     final_owner_sessions = _all_live_sessions(session)
     for owner_session in final_owner_sessions:
         session_counts, session_errors = await _purge_conversation_runtime_state(
@@ -1612,10 +1637,7 @@ async def _handle_conversation_delete_after_run_fence(
                 cleanup_errors.append(scoped_error)
         if owner_session.active_conversation_id == request.conversation_id:
             activated = await await_with_deadline(
-                _activate_conversation_or_blank(
-                    owner_session,
-                    reconcile_agent_state=False,
-                ),
+                activate_deleted_owner_if_current(owner_session),
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                 label=f"fallback conversation activation for session {owner_session.session_id}",
                 owner=_conversation_cleanup_owner(owner_session, request.conversation_id) or cleanup_owner,
@@ -2607,10 +2629,11 @@ async def handle_conversation_clear(session: "WebSocketSession", data: dict[str,
                 cleanup_errors.append(f"{owner_session.session_id}:reload")
                 continue
             await owner_session.send_payload(
-                build_conversation_switched_payload(
+                await asyncio.to_thread(build_conversation_switched_payload,
                     current,
                     is_hydrating=False,
                     runtime_snapshot=owner_session.runtime_snapshot(),
+                    artifact_store=owner_session.artifact_store,
                 ),
                 log_context="conversation.switched",
             )
@@ -2731,10 +2754,11 @@ async def _handle_conversation_truncate_claimed(
         owner_session.load_active_conversation_snapshot(current.id, current.context_snapshot)
         owner_session.sync_permission_mode_with_active_conversation(source="conversation.truncate")
         await owner_session.send_payload(
-            build_conversation_switched_payload(
+            await asyncio.to_thread(build_conversation_switched_payload,
                 current,
                 is_hydrating=False,
                 runtime_snapshot=owner_session.runtime_snapshot(),
+                artifact_store=owner_session.artifact_store,
             ),
             log_context="conversation.switched",
         )

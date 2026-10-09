@@ -28,6 +28,7 @@ from . import _state
 from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
 from backend.services.conversation_resources_service import background_command_detail, conversation_resource_page
+from backend.services.conversation_payload_service import restore_tool_artifact_sources
 from backend.ws.command_scope import resolve_command_scope
 from backend.conversations.import_export import import_conversation_tree
 
@@ -126,7 +127,7 @@ async def conversation_messages(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if page is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return page
+    return await run_in_threadpool(restore_tool_artifact_sources, page, session.artifact_store)
 
 @router.get("/api/conversations/{conversation_id}/messages/{message_id}/tools")
 async def conversation_message_tools(

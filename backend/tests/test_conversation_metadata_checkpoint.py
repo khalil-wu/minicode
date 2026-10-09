@@ -5,6 +5,7 @@ import json
 import pytest
 
 from backend.conversations.repository import ConversationRepository, ConversationWriteConflict
+from backend.conversations.models import ConversationRecord, ConversationSummary
 
 
 def test_metadata_updates_reuse_checkpoint_and_keep_revision_conflicts(tmp_path, monkeypatch):
@@ -95,3 +96,108 @@ def test_legacy_checkpoint_is_readable_and_metadata_write_upgrades_manifest(tmp_
     renamed = upgraded.rename_conversation(created.id, "new release")
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == 8
     assert ConversationRepository(tmp_path).get_conversation(created.id).revision == renamed.revision
+@pytest.mark.parametrize("inline_metadata", [True, False])
+def test_archive_and_restore_use_metadata_when_cold_history_checkpoint_is_corrupt(tmp_path, monkeypatch, inline_metadata):
+    repo = ConversationRepository(tmp_path)
+    history = [{"role": "user", "content": "x" * 4096} for _ in range(64)]
+    created = repo.create_conversation(transcript=[{"id": f"message-{index}", **item} for index, item in enumerate(history)], context_snapshot={"history": history})
+    manifest_path = tmp_path / f"{created.id}.manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    metadata_path, transcript_path, snapshot_path = repo._generation_paths(created.id, before["current_generation"])
+    original_transcript, original_snapshot = transcript_path.read_bytes(), snapshot_path.read_bytes()
+    transcript_path.write_text("{broken transcript", encoding="utf-8")
+    snapshot_path.write_text("{broken checkpoint", encoding="utf-8")
+    if not inline_metadata:
+        before.pop("metadata")
+        manifest_path.write_text(json.dumps(before), encoding="utf-8")
+    cold = ConversationRepository(tmp_path)
+    def history_forbidden(*args, **kwargs):
+        raise AssertionError("archive metadata must not read or cache full history")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(cold, "_read_generation", history_forbidden)
+        scoped.setattr(cold, "_read_transcript_path", history_forbidden)
+        scoped.setattr(cold, "_read_snapshot_path", history_forbidden)
+        scoped.setattr(cold, "_cache_record", history_forbidden)
+        archived = cold.set_archived(created.id, True)
+        assert isinstance(archived, ConversationSummary)
+        assert archived.archived and archived.archived_at and archived.message_count == 64
+        restored = cold.set_archived(created.id, False)
+        assert not restored.archived and not restored.archived_at
+        assert restored.message_count == 64 and restored.revision == archived.revision + 1
+        assert cold.get_conversation_summary(created.id).revision == restored.revision
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert after["current_generation"] == before["current_generation"]
+    assert after.get("previous_generation") == before.get("previous_generation")
+    assert transcript_path.read_text(encoding="utf-8") == "{broken transcript"
+    assert snapshot_path.read_text(encoding="utf-8") == "{broken checkpoint"
+    assert metadata_path.exists() and created.id not in cold._record_cache
+    transcript_path.write_bytes(original_transcript)
+    snapshot_path.write_bytes(original_snapshot)
+    recovered = cold.get_conversation(created.id)
+    assert recovered.transcript == created.transcript and recovered.context_snapshot == created.context_snapshot
+    assert recovered.revision == restored.revision and not recovered.archived
+
+
+def test_warm_archive_invalidates_full_cache_and_keeps_detached_history_and_inventory(tmp_path, monkeypatch):
+    repo = ConversationRepository(tmp_path)
+    created = repo.create_conversation(transcript=[{"role": "user", "content": "kept"}], context_snapshot={"history": [{"role": "user", "content": "kept"}]})
+    detached = repo.get_conversation(created.id)
+    repo.list_conversations()
+    def history_forbidden(*args, **kwargs):
+        raise AssertionError("warm archive must not load or deepcopy full history")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(repo, "_load_record_for_mutation", history_forbidden)
+        scoped.setattr(repo, "_cache_record", history_forbidden)
+        archived = repo.set_archived(created.id, True)
+        assert created.id not in repo._record_cache and created.id not in repo._record_cache_stamps
+        assert repo.list_conversations()[0].archived
+    archived.title = "caller-owned change"
+    assert repo.get_conversation_summary(created.id).title == created.title
+    loaded = repo.get_conversation(created.id)
+    assert loaded.archived and loaded.transcript == detached.transcript and loaded.context_snapshot == detached.context_snapshot
+    assert not detached.archived
+
+
+def test_archive_keeps_existing_partial_projection_and_later_journal_replay(tmp_path, monkeypatch):
+    import asyncio
+    from backend.agent.execution_journal import ExecutionJournal
+    from backend.services.conversation_projection_service import replay_pending_conversation_projections
+    repo = ConversationRepository(tmp_path / "conversations")
+    created = repo.create_conversation(transcript=[{"id": "question", "role": "user", "content": "Work"}], context_snapshot={"history": [{"role": "user", "content": "Work"}]})
+    partial = repo.commit_turn_projection(created.id, assistant_message={"id": "answer", "role": "assistant", "content": "First step", "terminal_status": "partial"},
+        context_delta={"set": {"note": "first"}, "removed": []}, partial=True, expected_revision=created.revision)
+    manifest_path = tmp_path / "conversations" / f"{created.id}.manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    projection_path = repo._partial_projection_path(created.id, before["projection_log"]["generation"])
+    projection_bytes = projection_path.read_bytes()
+    cold = ConversationRepository(tmp_path / "conversations")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(cold, "_read_generation", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("archive read history")))
+        archived = cold.set_archived(created.id, True)
+        restored = cold.set_archived(created.id, False)
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in ("current_generation", "previous_generation", "projection_log", "projection_revision", "previous_projection_log"):
+        assert after.get(key) == before.get(key)
+    assert projection_path.read_bytes() == projection_bytes
+    assert restored.message_count == partial.message_count == 2
+    assert restored.content_revision == partial.content_revision and restored.revision == archived.revision + 1
+    journal = ExecutionJournal("archive-replay", base_dir=tmp_path / "journals")
+    journal.append_lifecycle("conversation_projection_pending", {"conversation_id": created.id, "expected_revision": restored.revision,
+        "assistant_message": {"id": "answer", "role": "assistant", "content": "Next step", "terminal_status": "partial"},
+        "context_delta": {"set": {"note": "next"}, "removed": []}, "partial": True})
+    asyncio.run(replay_pending_conversation_projections(cold, journal, conversation_id=created.id))
+    loaded = ConversationRepository(tmp_path / "conversations").get_conversation(created.id)
+    assert not loaded.archived and loaded.context_snapshot["note"] == "next"
+    assert loaded.transcript[-1]["content"] == "Next step" and len(loaded.transcript) == 2
+    assert not journal.pending_conversation_projections()
+
+
+def test_archive_legacy_without_manifest_keeps_full_checkpoint_upgrade(tmp_path):
+    legacy = ConversationRecord(id="conv_legacyarchive", title="Legacy", transcript=[{"id": "old", "role": "user", "content": "Kept"}], context_snapshot={"history": [{"role": "user", "content": "Kept"}]})
+    (tmp_path / f"{legacy.id}.json").write_text(json.dumps(legacy.to_dict()), encoding="utf-8")
+    repo = ConversationRepository(tmp_path)
+    summary = repo.set_archived(legacy.id, True)
+    assert isinstance(summary, ConversationSummary) and summary.archived
+    assert (tmp_path / f"{legacy.id}.manifest.json").exists()
+    restored = ConversationRepository(tmp_path).get_conversation(legacy.id)
+    assert restored.transcript == legacy.transcript and restored.context_snapshot == legacy.context_snapshot

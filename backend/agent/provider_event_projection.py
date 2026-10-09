@@ -52,6 +52,11 @@ async def project_non_text_provider_event(
     active provider request.
     """
 
+    if event.type == StreamEventType.TRANSPORT_ACTIVITY:
+        # The received frame resets the existing provider wait. It owns no
+        # model text, thinking, tool activity or user-visible progress.
+        yield ProviderProjectionResult(True)
+        return
     if event.type == StreamEventType.THINKING_CHUNK:
         reasoning_type = str(
             (getattr(event, "raw", {}) or {}).get("provider_reasoning_type") or ""

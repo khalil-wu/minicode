@@ -2228,6 +2228,8 @@ def store_result_events(
                 "message_id": str(tool_ctx.metadata.get("assistant_message_id") or ""),
                 "kind": "image", "media_type": media_type, "summary": "MCP image",
                 "bytes": len(body),
+                "source": "tool", "tool_call_id": tc.id, "operation": tc.name,
+                **({"call_source": asdict(tool_ctx.source_for_call(tc.id))} if tool_ctx.source_for_call(tc.id).kind != "direct" else {}),
             }))
         first = image_artifact_events[0].data
         result = replace(result, artifact_id=result.artifact_id or first["artifact_id"],
@@ -2269,6 +2271,8 @@ def store_result_events(
                 "media_type": media_type,
                 "summary": resource["uri"],
                 "bytes": resource["bytes"],
+                "source": "tool", "tool_call_id": tc.id, "operation": tc.name,
+                **({"call_source": asdict(tool_ctx.source_for_call(tc.id))} if tool_ctx.source_for_call(tc.id).kind != "direct" else {}),
             }))
     event = store_result(
         tc,

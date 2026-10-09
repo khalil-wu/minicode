@@ -340,6 +340,7 @@ class StreamEventType(Enum):
     THINKING_CHUNK = "thinking_delta"
     IMAGE_CHUNK = "image_chunk"  # 图片内容块（base64）
     PROVIDER_ACTIVITY = "provider_activity"  # Provider 托管工具的有意义进度
+    TRANSPORT_ACTIVITY = "transport_activity"  # A received frame with no public model content.
     TOOL_CALL_START = "tool_call_start"  # 工具块开始（id+name 已知，args 未完成）
     TOOL_CALL_DELTA = "tool_call_delta"  # 工具参数 JSON 片段
     TOOL_CALL = "tool_call"  # 工具调用请求（完整参数）

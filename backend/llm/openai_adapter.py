@@ -133,6 +133,7 @@ from backend.permissions.network import (
 )
 
 logger = logging.getLogger(__name__)
+_RESPONSES_TRANSPORT_ACTIVITY = object()
 
 _DELTA_DEBOUNCE_BYTES = 128
 
@@ -3040,6 +3041,7 @@ class OpenAIAdapter(LLMAdapter):
                 if not line or line == "[DONE]":
                     if line == "[DONE]":
                         break
+                    yield _RESPONSES_TRANSPORT_ACTIVITY
                     continue
                 try:
                     event = _json_to_namespace(json.loads(line))
@@ -3049,6 +3051,7 @@ class OpenAIAdapter(LLMAdapter):
                         "Ignoring malformed responses stream event (%d chars)",
                         len(line),
                     )
+                    yield _RESPONSES_TRANSPORT_ACTIVITY
                     continue
                 malformed_budget.accept()
                 if getattr(event, "type", "") == "response.metadata":
@@ -3930,6 +3933,9 @@ class OpenAIAdapter(LLMAdapter):
                     raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
                     raw_done["request_summary"] = build_responses_request_summary(sent_payload)
                     request_summary_ready = True
+                if event is _RESPONSES_TRANSPORT_ACTIVITY:
+                    yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+                    continue
                 event_type = str(_get_attr_or_item(event, "type", "") or "")
                 response_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
                 if response_usage is not None:
@@ -3957,6 +3963,10 @@ class OpenAIAdapter(LLMAdapter):
                         unhandled=True,
                         sequence_number=_get_attr_or_item(event, "sequence_number", None),
                     )
+                    # Codex measures idle time at the SSE frame boundary,
+                    # before interpreting its payload. Keep that liveness
+                    # without exposing unknown data as model content.
+                    yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
                     continue
                 if event_type:
                     if not accept_response_sequence(str(event_type), event):
@@ -4322,7 +4332,7 @@ class OpenAIAdapter(LLMAdapter):
                     # callers) from accidentally exposing private chain-of-
                     # thought.  The content-free provider timeline recorded
                     # above still preserves event/index/length diagnostics.
-                    pass
+                    yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
 
                 elif event_type == "response.output_item.added":
                     item = _get_attr_or_item(event, "item", None)
@@ -4847,7 +4857,7 @@ class OpenAIAdapter(LLMAdapter):
                     )
                     return
                 elif event_type in _OPENAI_PASSIVE_RESPONSE_STREAM_EVENTS:
-                    pass
+                    yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
                 else:
                     # Every event in the installed SDK union is explicitly
                     # classified above. Reaching this branch means the local

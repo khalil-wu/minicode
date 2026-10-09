@@ -133,6 +133,7 @@ async def handle_runtime_capabilities_inspect(session: "WebSocketSession", data:
 
 
 async def handle_session_restore(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import restore_tool_artifact_sources
     from backend.services.session_restore_service import (
         build_restore_conversation_switched_payload,
         build_restored_runtime_snapshot,
@@ -190,6 +191,8 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                 generation = session.conversation_runtime._hydration_generation
                 conversation = await session.reconcile_persisted_ui_agent_state(owner)
                 current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+                if current_view is not None:
+                    current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
                 if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
                     return
                 session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
@@ -222,6 +225,8 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         if workspace_root is not None
         else None
     )
+    if active_payload is not None:
+        active_payload = await asyncio.to_thread(restore_tool_artifact_sources, active_payload, session.artifact_store)
     runtime_snapshot = build_restored_runtime_snapshot(
         session.runtime_snapshot(),
         restored_conversation_id=restored_conversation_id,
@@ -297,6 +302,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
 
 
 async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import restore_tool_artifact_sources
     from backend.services.session_restore_service import build_session_synced_payload, seq_from_restore_payload
     from backend.ws.session_restore import SessionRestoreManager
 
@@ -305,6 +311,8 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     while True:
         owner = session.active_conversation_id
         active_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner) if owner else None
+        if active_view is not None:
+            active_view = await asyncio.to_thread(restore_tool_artifact_sources, active_view, session.artifact_store)
         if owner == session.active_conversation_id:
             break
 

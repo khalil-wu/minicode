@@ -1109,6 +1109,7 @@
 #root :where(
   .exec-cell-output-pre,
   .activity-cell-inline-output,
+  .activity-cell-browser-detail-card,
   .activity-cell-change-card .inline-diff,
   .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
@@ -1124,6 +1125,7 @@
 #root :where(
   .exec-cell-output-pre,
   .activity-cell-inline-output,
+  .activity-cell-browser-detail-card,
   .activity-cell-change-card .inline-diff,
   .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
@@ -1138,6 +1140,7 @@
 #root :where(
   .exec-cell-output-pre,
   .activity-cell-inline-output,
+  .activity-cell-browser-detail-card,
   .activity-cell-change-card .inline-diff,
   .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
@@ -1160,6 +1163,7 @@
 #root :where(
   .exec-cell-output-pre,
   .activity-cell-inline-output,
+  .activity-cell-browser-detail-card,
   .activity-cell-change-card .inline-diff,
   .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
@@ -1175,6 +1179,7 @@
 #root :where(
   .exec-cell-output-pre,
   .activity-cell-inline-output,
+  .activity-cell-browser-detail-card,
   .activity-cell-change-card .inline-diff,
   .agent-loop-timeline-group-items,
   .activity-cell-output-pre,

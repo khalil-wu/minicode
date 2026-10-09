@@ -296,6 +296,10 @@ describe("handleArtifactEvent", () => {
       bytes: 8,
       media_type: "image/png",
       text_offset: 27,
+      source: "tool",
+      tool_call_id: "browser-leaf",
+      call_source: { kind: "code_mode", parent_call_id: "code-parent", cell_id: "cell-1", runtime_call_id: "1" },
+      operation: "browser_control",
     } as never)).toBe(true);
 
     const messages = useAppStore.getState().messages;
@@ -306,6 +310,10 @@ describe("handleArtifactEvent", () => {
         kind: "image",
         summary: "Generated PNG chart",
         textOffset: 27,
+        source: "tool",
+        toolCallId: "browser-leaf",
+        callSource: { kind: "code_mode", parent_call_id: "code-parent", cell_id: "cell-1", runtime_call_id: "1" },
+        operation: "browser_control",
       }),
     ]);
   });

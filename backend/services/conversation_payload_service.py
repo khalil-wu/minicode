@@ -280,15 +280,37 @@ def build_conversation_switched_payload(
     *,
     is_hydrating: bool,
     runtime_snapshot: dict[str, Any],
+    artifact_store: Any | None = None,
 ) -> dict[str, Any]:
+    projected = project_public_conversation(conversation, transcript_limit=80)
+    if artifact_store is not None:
+        projected = restore_tool_artifact_sources(projected, artifact_store)
     return {
         "type": "conversation.switched",
         "conversation_id": conversation.id,
-        "conversation": project_public_conversation(conversation, transcript_limit=80),
+        "conversation": projected,
         "is_hydrating": bool(is_hydrating),
         "session": runtime_snapshot,
         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
+
+
+def restore_tool_artifact_sources(payload: dict[str, Any], artifact_store: Any) -> dict[str, Any]:
+    """Read old image provenance without mutating the stored conversation."""
+    transcript = []
+    for message in payload.get("transcript", []):
+        artifacts = []
+        for artifact in message.get("artifacts", []):
+            if not artifact.get("source") and (artifact.get("kind") == "image" or str(artifact.get("mediaType") or "").startswith("image/")):
+                meta = artifact_store.get_meta(artifact["artifactId"], conversation_id=payload["id"], workspace_root=payload.get("workspace_root", ""))
+                if meta is not None:
+                    if meta.source == "generated_image":
+                        artifact = {**artifact, "source": "image_generation"}
+                    elif meta.source == "tool_exec.image" or meta.source.startswith(("browser_control.", "mcp__")):
+                        artifact = {**artifact, "source": "tool", "operation": meta.source.split(".", 1)[0]}
+            artifacts.append(artifact)
+        transcript.append({**message, "artifacts": artifacts} if "artifacts" in message else message)
+    return {**payload, "transcript": transcript}
 
 
 def parse_conversation_truncate_request(

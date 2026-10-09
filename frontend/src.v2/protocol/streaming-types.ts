@@ -796,6 +796,10 @@ export interface ArtifactPreviewEvent {
   media_type?: string;
   url?: string;
   text_offset?: number;
+  source?: "tool" | "image_generation";
+  tool_call_id?: string;
+  call_source?: ToolCallEvent["call_source"];
+  operation?: string;
 }
 
 export interface InspectorUpdateEvent {

@@ -61,6 +61,17 @@ const openExec = (id: string, command: string): AgentLoopProcessCell => ({
 });
 
 describe("AgentTimeline", () => {
+  it("keeps a completed screenshot group collapsed when narration moves to the next step", () => {
+    const screenshot: AgentLoopProcessCell = { kind: "activity", id: "closed-capture", activityKind: "browser", title: "截图",
+      status: "done", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true,
+      toolCallRecords: [{ id: "capture", name: "browser_control", args: { action: "screenshot" }, status: "success", startedAt: 1,
+        artifactId: "screen", artifactKind: "image", artifactMediaType: "image/png" }],
+    };
+    const { container } = render(<AgentTimeline cells={[{ ...exec("browse-check", "check"), segment: 2 }, screenshot]} renderCell={renderCell} isRunning />);
+    expect(container.querySelector('[data-group-kind="work"]')?.getAttribute("data-group-expanded")).toBe("false");
+    expect(screen.queryByText("activity")).toBeNull();
+  });
+
   it("keeps an agent lifecycle row separate from adjacent tools without invented group chrome", () => {
     const cells = [
       { kind: "collaboration", id: "delegate", action: "delegated", status: "failed", entries: [], collapsed: true, createdAt: 1, segment: 2, segmentClosed: true },

@@ -1210,12 +1210,37 @@ class ConversationRepository:
 
     def set_archived(
         self, conversation_id: str, archived: bool
-    ) -> ConversationRecord | None:
+    ) -> ConversationSummary | None:
+        """Publish archive metadata and return its summary without loading history."""
         def mutate(record: ConversationRecord) -> None:
             record.archived = bool(archived)
             record.archived_at = utc_now_iso() if archived else ""
 
-        return self._mutate_meta(conversation_id, mutate)
+        with self._store_lock(conversation_id):
+            manifest = self._read_manifest(conversation_id, log_errors=False)
+            if manifest is None:
+                record = self._mutate_meta(conversation_id, mutate)
+                return record.to_summary() if record is not None else None
+            if self._manifest_is_deleted(manifest):
+                return None
+            metadata = manifest.get("metadata")
+            if metadata is None:
+                metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
+            record = ConversationRecord.from_dict(metadata)
+            record.revision = self._manifest_revision(manifest)
+            mutate(record)
+            record.updated_at = utc_now_iso()
+            self._commit_metadata(record)
+            summary = record.to_summary()
+            # This record contains metadata only. A later history read must
+            # load the unchanged checkpoint and its existing projection log.
+            with self._process_lock:
+                self._record_cache.pop(conversation_id, None)
+                self._record_cache_stamps.pop(conversation_id, None)
+                if self._summary_index is not None:
+                    self._summary_index[conversation_id] = copy.deepcopy(summary)
+                    self._summary_index_stamps[conversation_id] = self._summary_disk_stamp(conversation_id)
+            return summary
 
     def update_model_selection(
         self, conversation_id: str, *, provider: str, model: str,

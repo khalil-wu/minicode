@@ -423,6 +423,7 @@ def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -
         "kind": "image",
         "summary": "Generated PNG image",
         "bytes": len(PNG_BYTES),
+        "source": "image_generation",
         "mediaType": "image/png",
         "textOffset": 14,
     }
@@ -434,6 +435,7 @@ def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -
         "kind": "image",
         "summary": "Generated PNG image",
         "bytes": len(PNG_BYTES),
+        "source": "image_generation",
         "media_type": "image/png",
         "text_offset": 14,
     }

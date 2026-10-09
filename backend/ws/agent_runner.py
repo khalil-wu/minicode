@@ -209,6 +209,7 @@ def _generated_image_projection(
         "kind": "image",
         "summary": summary,
         "bytes": len(decoded_image),
+        "source": "image_generation",
     }
     transcript_artifact = {
         "artifactId": artifact_id,
@@ -248,7 +249,7 @@ def _finalize_generated_image_text_offsets(
         "The image has been generated.",
     )
     for artifact in artifacts:
-        if str(artifact.get("kind") or "").strip().lower() != "image":
+        if str(artifact.get("kind") or "").strip().lower() != "image" or artifact.get("source") == "tool":
             continue
         try:
             current_offset = int(
@@ -899,6 +900,7 @@ def _subagent_ui_metadata(data: dict[str, Any]) -> dict[str, Any]:
         "objective": "objective", "depends_on": "dependsOn", "blocked_by": "blockedBy",
         "background": "background", "read_only": "readOnly", "write_scope": "writeScope",
         "current_activity": "currentActivity", "waiting_on": "waitingOn",
+        "current_tool": "currentTool", "iteration": "iteration",
         "last_progress_at": "lastProgressAt", "needs_input": "needsInput",
         "teammate_name": "teammateName", "team_name": "teamName",
         "awaiting_plan_approval": "awaitingPlanApproval", "active_plan_request_id": "activePlanRequestId",
@@ -5331,10 +5333,15 @@ class SessionAgentRunnerMixin:
                     _project_agent_message_event(turn_state, event.type, event.data)
                 elif event.type == "artifact.preview":
                     event.data["message_id"] = assistant_message_id
-                    event.data.setdefault("text_offset", _utf16_code_unit_length(turn_state.content()))
+                    if event.data.get("source") != "tool":
+                        event.data.setdefault("text_offset", _utf16_code_unit_length(turn_state.content()))
                     artifact = {"artifactId": event.data["artifact_id"], "kind": event.data.get("kind", "file"),
                         "summary": event.data.get("summary", ""), "bytes": event.data.get("bytes", 0),
-                        "mediaType": event.data.get("media_type", ""), "textOffset": event.data["text_offset"]}
+                        "mediaType": event.data.get("media_type", ""),
+                        **({"textOffset": event.data["text_offset"]} if "text_offset" in event.data else {})}
+                    for wire_key, stored_key in (("source", "source"), ("tool_call_id", "toolCallId"), ("call_source", "callSource"), ("operation", "operation")):
+                        if event.data.get(wire_key):
+                            artifact[stored_key] = event.data[wire_key]
                     for existing in assistant_artifacts:
                         if existing["artifactId"] == artifact["artifactId"]:
                             existing.update(artifact)

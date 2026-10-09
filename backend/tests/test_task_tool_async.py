@@ -88,6 +88,67 @@ def test_in_process_teammate_cannot_spawn_background_subagent() -> None:
     asyncio.run(run())
 
 
+def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, tmp_path):
+    from backend.agent.runtime_spans import runtime_span
+
+    async def run() -> None:
+        emitted: list[tuple[str, dict]] = []
+
+        async def emit(kind, data):
+            emitted.append((kind, data))
+
+        async def replay_query(**kwargs):
+            bridge = kwargs["session_context"].emit_event
+            source = AgentEvent.progress(
+                "连接中断，正在重连（第 1/2 次）", stage="status", status="running", phase="recover",
+                id="provider:child:iteration-1", provider_state="reconnecting", visibility="debug",
+                retry_attempt=1, max_retries=2, error_message="stream disconnected", retry_after_ms=200,
+            )
+            await bridge(source.type, source.data)
+            yield source
+            # A new transport attempt may reuse the logical operation and
+            # retry ordinal. Its separate request span must retain its failure.
+            started = runtime_span("provider.request.started", span_id="provider:child:retry-restart", phase="provider")
+            await bridge(started.type, started.data)
+            yield started
+            await bridge(source.type, source.data)
+            yield source
+            failed = AgentEvent.progress(
+                "提供商请求失败", stage="status", status="failed", phase="model",
+                id="provider:child:iteration-1", provider_state="failed", visibility="debug",
+                retry_attempt=2, max_retries=2, error_message="upstream request_timeout after retries",
+            )
+            await bridge(failed.type, failed.data)
+            yield failed
+            yield AgentEvent.error("upstream request_timeout after retries", recoverable=False)
+            yield AgentEvent.done(status="failed", reason="provider_error")
+
+        monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", replay_query)
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+        result = await _task_tool()._run_single_subtask(
+            description="source receipt", prompt="Recover from stream failure.", agent_type="explore",
+            context=ToolExecutionContext(permission=PermissionContext(), session_id="dedupe-child", task_id="parent",
+                emit_event=emit, metadata={"run_id": "parent-run"}, run_context=RunContext(agent_runtime=runtime)),
+        )
+        assert result.status == "failed"
+        done = next(data for kind, data in emitted if kind == "subagent.done")
+        transcript = runtime.load_agent_transcript(done["subagent_id"])
+        source_events = [event for event in transcript["events"] if event["payload"].get("lifecycle") == "provider_progress"]
+        assert len(source_events) == 3
+        retry_events = [data for kind, data in emitted if kind == "subagent.progress"
+            and data.get("activity_kind") == "provider" and data.get("user_visible")]
+        assert len(retry_events) == 3
+        notices = [block for message in done["transcript_snapshot"]["messages"]
+            for block in message.get("blocks", []) if block.get("type") == "progress"]
+        assert len(notices) == 3 and notices[0]["errorMessage"] == "stream disconnected"
+        assert len({notice["id"] for notice in notices}) == 3
+        assert notices[1]["errorMessage"] == "stream disconnected"
+        assert notices[2]["status"] == "failed" and notices[2]["errorMessage"] == "upstream request_timeout after retries"
+        assert done["transcript_snapshot"]["messages"][-1]["failure_message"] == "upstream request_timeout after retries"
+
+    asyncio.run(run())
+
+
 def test_in_process_teammate_cannot_spawn_another_named_teammate() -> None:
     async def run() -> None:
         result = await _task_tool().execute(
@@ -1418,7 +1479,7 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     )
 
     assert result.is_error is False
-    progress_events = [data for event_type, data in events if event_type == "subagent.progress"]
+    progress_events = [data for event_type, data in events if event_type == "subagent.progress" and data.get("activity_kind") != "provider"]
     assert len(progress_events) >= 2
     assert progress_events[0]["source_event_type"] == "tool_call"
     assert progress_events[0]["tool_name"] == "read_file"
@@ -1458,6 +1519,96 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     assert mailbox_events[0]["mailbox_epoch"] == progress_events[0]["mailbox_epoch"]
     await bridges[0]("subagent.event", mailbox_events[0])
     assert len([event for event in events if event[0] == "subagent.event"]) == 1
+
+
+def test_real_child_query_projects_stream_failures_and_clears_completed_tool(tmp_path):
+    from backend.conversations.public_projection import project_public_transcript_message
+    from backend.services.subagent_service import build_subagent_transcript_messages, build_subagent_status_event
+    from backend.tools.list_files import ListFilesTool
+
+    async def run() -> None:
+        emitted: list[tuple[str, dict]] = []
+        observed_states: list[dict] = []
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+
+        async def emit(kind: str, data: dict) -> None:
+            emitted.append((kind, data))
+            if kind == "subagent.progress":
+                observed_states.append(runtime.get_subagent_snapshot(data["subagent_id"], include_result=False))
+
+        class ReplayProvider(LLMAdapter):
+            calls = 0
+
+            async def stream_chat(self, messages, tools=None, metadata=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[ToolCallEvent(
+                        id="list-child", name="list_files", arguments={"path": str(tmp_path)},
+                    )])
+                    yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+                elif self.calls == 2:
+                    yield StreamEvent(type=StreamEventType.ERROR,
+                        content="stream closed before response.completed", raw={
+                            "provider_error_type": "network", "provider_error_code": "request_timeout",
+                        })
+                else:
+                    yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="scene finished", phase="final_answer")
+                    yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+            async def simple_chat(self, messages):
+                return ""
+
+        provider = ReplayProvider()
+        registry = ToolRegistry()
+        registry.register(ListFilesTool())
+        tool = TaskTool(
+            llm_provider=provider, tool_registry_provider=registry,
+            artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+            permission_checker_provider=lambda: PermissionChecker(PermissionSettings(), workspace_root=tmp_path),
+            agent_settings_provider=lambda: AgentSettings(max_iterations=3, stream_max_attempts=1),
+            token_budget_provider=lambda: TokenBudget(),
+        )
+        result = await tool.execute({
+            "description": "create scene", "prompt": "List the workspace then build the scene.",
+            "agent_type": "general-purpose",
+        }, context=ToolExecutionContext(
+            permission=PermissionContext(mode="bypass"), session_id="child-owner", task_id="parent-task",
+            conversation_id="parent-conversation", emit_event=emit, metadata={"run_id": "parent-run"},
+            run_context=RunContext(agent_runtime=runtime),
+        ))
+        assert result.is_error is False
+        assert provider.calls == 3
+        done = next(data for kind, data in emitted if kind == "subagent.done")
+        progress = [data for kind, data in emitted if kind == "subagent.progress"]
+        tool_start = next(data for data in progress if data.get("tool_name") == "list_files")
+        assert tool_start["waiting_on"] == "tool"
+        tool_end = next(data for data in progress if data.get("activity_kind") == "tool_result")
+        assert tool_end["tool_name"] == "" and tool_end["waiting_on"] == "model"
+        retry = next(data for data in progress if data.get("user_visible") and data.get("activity_kind") == "provider")
+        assert retry["waiting_on"] == "provider" and retry["iteration"] == 2
+        assert any(state["waiting_on"] == "provider" and state["current_tool"] == "" for state in observed_states)
+        assert observed_states[-1]["waiting_on"] == "model" and observed_states[-1]["current_tool"] == ""
+        status_event = build_subagent_status_event(done["subagent_id"], observed_states[-1])
+        assert status_event.data["tool_name"] == "" and status_event.data["snapshot"]["iteration"] == 2
+        transcript = runtime.load_agent_transcript(done["subagent_id"])
+        spans = [event["payload"] for event in transcript["events"] if event["payload"].get("lifecycle") == "runtime_span"]
+        assert sum(span["event"] == "provider.request.started" for span in spans) == 3
+        assert sum(span["event"] == "provider.request.failed" for span in spans) == 1
+        notices = [block for message in build_subagent_transcript_messages(transcript)
+            for block in message.get("blocks", []) if block.get("type") == "progress"]
+        assert len(notices) == 1
+        notice = notices[0]
+        assert notice["phase"] == "recover" and notice["retryAttempt"] == 1
+        assert "stream closed before response.completed" in notice["errorMessage"]
+        public = project_public_transcript_message({"role": "assistant", "id": "notice", "content": "", "blocks": notices})
+        assert public["blocks"][0]["retryAttempt"] == 1
+        source_retry = next(event["payload"] for event in transcript["events"]
+            if event["payload"].get("lifecycle") == "provider_progress" and event["payload"].get("error_message"))
+        assert public["blocks"][0]["maxRetries"] == source_retry["max_retries"]
+        persisted = runtime.load_persisted_subagent(done["subagent_id"])
+        assert persisted.current_tool == "" and persisted.waiting_on == "model" and persisted.iteration == 2
+
+    asyncio.run(run())
 
 
 def test_subagent_push_transcript_is_monotonic_and_terminally_complete(

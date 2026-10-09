@@ -129,6 +129,10 @@ class SubagentRunRecord:
     write_scope: list[str] = field(default_factory=list)
     resume_config: dict[str, Any] = field(default_factory=dict)
     current_activity: str = ""
+    current_tool: str = ""
+    waiting_on: str = ""
+    iteration: int = 0
+    last_progress_at: int = 0
     status: AgentRunStatus = "running"
     tool_count: int = 0
     result_summary: str = ""
@@ -506,6 +510,10 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         active_plan_request_id=str(data.get("active_plan_request_id") or ""),
         is_idle=bool(data.get("is_idle", False)),
         current_activity=str(data.get("current_activity") or ""),
+        current_tool=str(data.get("current_tool") or ""),
+        waiting_on=str(data.get("waiting_on") or ""),
+        iteration=int(data.get("iteration") or 0),
+        last_progress_at=int(data.get("last_progress_at") or 0),
         status=str(data.get("status") or "running"),  # type: ignore[arg-type]
         tool_count=int(data.get("tool_count") or 0),
         result_summary=str(data.get("result_summary") or ""),

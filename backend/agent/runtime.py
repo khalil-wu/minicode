@@ -2335,6 +2335,10 @@ class AgentRuntime:
         agent_path: str,
         mailbox_epoch: int,
         current_activity: str | None = None,
+        current_tool: str | None = None,
+        waiting_on: str | None = None,
+        iteration: int | None = None,
+        last_progress_at: int | None = None,
         permission_mode: str | None = None,
         awaiting_plan_approval: bool | None = None,
         active_plan_request_id: str | None = None,
@@ -2354,6 +2358,14 @@ class AgentRuntime:
         candidate = replace(record)
         if current_activity is not None:
             candidate.current_activity = str(current_activity or "")
+        if current_tool is not None:
+            candidate.current_tool = current_tool
+        if waiting_on is not None:
+            candidate.waiting_on = waiting_on
+        if iteration is not None:
+            candidate.iteration = iteration
+        if last_progress_at is not None:
+            candidate.last_progress_at = last_progress_at
         if permission_mode is not None:
             candidate.permission_mode = str(permission_mode or "confirm")
         if awaiting_plan_approval is not None:

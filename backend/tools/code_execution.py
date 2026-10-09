@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from backend.agent.message import AgentEvent
 from backend.async_cleanup import to_thread_cancel_safe
@@ -11,7 +11,7 @@ from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, ToolResult, ToolSchema, artifact_owner_workspace_root, validate_tool_input
 
 
-async def _present_result(result: ToolResult, context: ToolExecutionContext, max_chars: int) -> ToolResult:
+async def _present_result(result: ToolResult, context: ToolExecutionContext, max_chars: int, operation: str) -> ToolResult:
     if len(result.content) > max_chars:
         artifact_id = await to_thread_cancel_safe(context.artifact_store.save, result.content, source="tool_exec.output",
             conversation_id=context.conversation_id, workspace_root=artifact_owner_workspace_root(context))
@@ -55,8 +55,14 @@ async def _present_result(result: ToolResult, context: ToolExecutionContext, max
         await context.run_context.publish_nested_event(AgentEvent("artifact.preview", {
             "artifact_id": artifact_id, "conversation_id": context.conversation_id,
             "message_id": str(context.metadata.get("assistant_message_id") or ""),
-            "kind": "image", "media_type": image["media_type"], "summary": "Code cell image",
+            "kind": "image", "media_type": image["media_type"],
+            "summary": "生成图片" if image.get("source") == "image_generation" else "代码执行图片输出",
             "bytes": image_bytes,
+            "source": image.get("source", "tool"),
+            **({"tool_call_id": image.get("tool_call_id") or context.tool_call_id} if image.get("tool_call_id") or context.tool_call_id else {}),
+            "operation": image.get("operation") or operation,
+            **({"call_source": image["call_source"]} if image.get("call_source") else
+               {"call_source": asdict(context.source_for_call(context.tool_call_id))} if context.source_for_call(context.tool_call_id).kind != "direct" else {}),
         }))
     return replace(result, images=presented_images) if presented_images else result
 
@@ -70,6 +76,7 @@ class ToolExecTool(BaseTool):
     description = (
         "Run JavaScript to compose tools and filter results before showing them to the model. "
         "Use await tools.name(args), Promise.all/allSettled for independent calls, and text(value), image(image_block), or audio(audio_block) for selected output. "
+        "image() publishes selected tool image evidence; generatedImage({image_url, output_hint?}) publishes an image-generation result. "
         "audio accepts an audio data URL, {data, media_type}, or an MCP audio block. Audio is saved for user playback; it is not transcribed or heard by the model. "
         "Tool results expose content, status, is_error, images, audios and MCP structured_content. ALL_TOOLS lists names, descriptions and parameter schemas. "
         "Every nested call still requires the normal tool permission and budget. No filesystem, network, process or imports are available in JavaScript. "
@@ -107,7 +114,7 @@ class ToolExecTool(BaseTool):
             if error:
                 return ToolResult(error, is_error=True, status="failed")
         result = await context.run_context.code_execution.execute(args["code"], context, yield_time_ms=args.get("yield_time_ms", 10000))
-        return await _present_result(result, context, args.get("max_chars", 8000))
+        return await _present_result(result, context, args.get("max_chars", 8000), self.name)
 
 
 class ToolWaitTool(BaseTool):
@@ -135,4 +142,4 @@ class ToolWaitTool(BaseTool):
         if context is None or context.run_context is None or context.run_context.code_execution is None:
             return ToolResult("tool_wait requires a QueryEngine-owned code runtime.", is_error=True, status="failed")
         result = await context.run_context.code_execution.wait(args["cell_id"], yield_time_ms=args.get("yield_time_ms", 10000), terminate=args.get("terminate", False))
-        return await _present_result(result, context, args.get("max_chars", 8000))
+        return await _present_result(result, context, args.get("max_chars", 8000), self.name)

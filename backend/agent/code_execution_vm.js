@@ -54,7 +54,7 @@
     text(value) { emit({ kind: "text", text: typeof value === "string" ? value : stringify(value) ?? String(value) }); },
     image,
     audio,
-    generatedImage(value) { image(value.image_url); if (value.output_hint) globals.text(value.output_hint); },
+    generatedImage(value) { image(value.image_url); output[output.length - 1].source = "image_generation"; if (value.output_hint) globals.text(value.output_hint); },
     notify(value) { globals.text(value); yielded = true; },
     yield_control() { yielded = true; return Promise.resolve(); },
     exit() { done = true; throw EXIT; },

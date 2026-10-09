@@ -389,6 +389,8 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
       const normalizeDelegatedText = (candidate: unknown): string | undefined => {
         return maybeString(candidate as string | null | undefined);
       };
+      const currentTool = subagent.currentTool ?? subagent.current_tool ?? subagent.tool_name;
+      const lastProgressAt = subagent.lastProgressAt ?? subagent.last_progress_at;
       return {
         id: String(subagent.id ?? subagent.subagent_id ?? "").trim(),
         ...subagentModelPatch(subagent),
@@ -410,7 +412,8 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
           : typeof subagent.max_iterations === "number"
             ? subagent.max_iterations
             : undefined,
-        currentTool: maybeString((subagent.currentTool ?? subagent.tool_name) as string | null | undefined),
+        currentTool: typeof currentTool === "string" ? currentTool : undefined,
+        lastProgressAt: typeof lastProgressAt === "number" ? lastProgressAt : undefined,
         detail: normalizeDelegatedText(subagent.detail),
         nodeId: maybeString((subagent.nodeId ?? subagent.node_id) as string | null | undefined),
         taskId: maybeString((subagent.taskId ?? subagent.task_id) as string | null | undefined),

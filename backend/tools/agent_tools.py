@@ -2012,7 +2012,7 @@ class TaskTool(BaseTool):
             include_transcript: bool = True,
         ) -> bool:
             nonlocal emitted_transcript_seq, execution_metadata
-            if emit_event is None or not _accepts_current_incarnation(
+            if not _accepts_current_incarnation(
                 require_running=require_running
             ):
                 return False
@@ -2026,6 +2026,19 @@ class TaskTool(BaseTool):
                     execution_metadata = current_execution
                     if runtime is not None:
                         runtime.update_subagent_lifecycle(subagent_id, **subagent_fence, **execution_metadata)
+            if runtime is not None and event_type == "subagent.progress" and data.get("activity_kind") in {
+                "provider", "tool", "tool_result", "status", "failure",
+            }:
+                runtime.update_subagent_lifecycle(
+                    subagent_id, **subagent_fence,
+                    current_activity=data.get("current_activity"),
+                    current_tool=data.get("tool_name"),
+                    waiting_on=data.get("waiting_on"),
+                    iteration=data.get("iteration"),
+                    last_progress_at=data.get("last_progress_at"),
+                )
+            if emit_event is None:
+                return False
             # Progress/done constructors provide a generic lifecycle envelope;
             # this producer owns the actual coordination parent for the child.
             payload = {**data, **subagent_fence, **execution_metadata, "parent_run_id": parent_run_id}
@@ -2045,6 +2058,8 @@ class TaskTool(BaseTool):
         summary_parts: list[str] = []
         start_time = time.perf_counter()
         last_tool_name = ""
+        observed_runtime_events: set[tuple[Any, ...]] = set()
+        current_provider_span_id = ""
         terminal_status = "completed"
         terminal_reason = ""
         terminal_usage: dict[str, Any] = {}
@@ -2824,6 +2839,56 @@ class TaskTool(BaseTool):
                     ),
                 }
 
+            async def observe_child_runtime_event(event_type: str, data: dict[str, Any]) -> bool:
+                nonlocal current_provider_span_id
+                provider_progress = event_type == "agent.progress" and bool(
+                    data.get("provider_state") or data.get("providerState") or data.get("label") == "provider"
+                )
+                runtime_event = str(data.get("event") or "")
+                provider_span = event_type == "runtime.span" and runtime_event.startswith(("provider.", "recovery."))
+                if not provider_progress and not provider_span:
+                    return False
+                if not _accepts_current_incarnation():
+                    return True
+                # Runtime callbacks and yielded query events are two deliveries
+                # of the same source fact, not two independent child updates.
+                key = (event_type, current_provider_span_id if provider_progress else "",
+                    data.get("span_id") or data.get("id"), runtime_event,
+                    data.get("provider_state") or data.get("providerState"), data.get("status"),
+                    data.get("retry_attempt"), data.get("message"), data.get("error_message"))
+                if key in observed_runtime_events:
+                    return True
+                observed_runtime_events.add(key)
+                if runtime_event == "provider.request.started":
+                    current_provider_span_id = str(data["span_id"])
+                if journal is not None:
+                    _record_journal_events(journal.append("system", {
+                        **data, "lifecycle": "provider_progress" if provider_progress else "runtime_span",
+                        "provider_span_id": current_provider_span_id,
+                    }))
+                provider_state = str(data.get("provider_state") or data.get("providerState") or "")
+                message = _user_visible_progress_text(data.get("message") or data.get("summary"))
+                failure_notice = provider_progress and (
+                    provider_state == "failed" or bool(data.get("error_message"))
+                )
+                if provider_span and runtime_event not in {"provider.request.started", "recovery.retry.started"}:
+                    return True
+                waiting_on = "provider" if provider_state in {"reconnecting", "failed"} or runtime_event == "recovery.retry.started" else "model"
+                progress = AgentEvent.subagent_progress(
+                    subagent_id=subagent_id,
+                    iteration=sub_state.iterations,
+                    max_iterations=sub_settings.max_iterations,
+                    current_activity=message if failure_notice else description,
+                    waiting_on=waiting_on,
+                    last_progress_at=int(time.time() * 1000),
+                    activity_kind="provider", activity_summary=message if failure_notice else description,
+                    user_visible=failure_notice, **subagent_fence,
+                )
+                progress.data.update({"tool_name": "", "detail": message if failure_notice else "",
+                    "source_event_type": event_type})
+                await _emit_incarnation_event("subagent.progress", progress.data, include_transcript=failure_notice)
+                return True
+
             async def subagent_event_bridge(event_type: str, data: dict[str, Any]) -> None:
                 if event_type == "subagent.event":
                     # Coordination tools already committed the mailbox entry.
@@ -2831,13 +2896,13 @@ class TaskTool(BaseTool):
                     # fence, just like progress and completion.
                     await _emit_incarnation_event(event_type, data)
                     return
+                if await observe_child_runtime_event(event_type, data):
+                    return
                 if event_type not in {"tool_call", "agent.progress"}:
                     return
                 if not _subagent_event_is_user_visible(event_type, data):
                     return
                 if not _accepts_current_incarnation():
-                    return
-                if emit_event is None:
                     return
                 tool_name = str(data.get("tool_name") or data.get("name") or "")
                 tool_call_id = str(data.get("tool_call_id") or data.get("id") or "")
@@ -2900,6 +2965,7 @@ class TaskTool(BaseTool):
                 nonlocal last_tool_name, terminal_status, terminal_reason
                 nonlocal terminal_usage, terminal_provider_raw, last_error
                 nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls, child_model_snapshot, child_run_context
+                nonlocal current_provider_span_id
 
                 turn_run_id = new_run_id()
                 terminal_status = "completed"
@@ -2907,6 +2973,8 @@ class TaskTool(BaseTool):
                 terminal_usage = {}
                 terminal_provider_raw = {}
                 last_error = ""
+                observed_runtime_events.clear()
+                current_provider_span_id = ""
                 summary_parts.clear()
                 if journal is not None:
 
@@ -2985,6 +3053,7 @@ class TaskTool(BaseTool):
                         **subagent_fence,
                     )
                     progress_event.data["source_event_type"] = source_event_type
+                    progress_event.data["tool_name"] = ""
                     if incremental:
                         # The first fragment establishes the assistant identity.
                         # Subsequent fragments carry only text and the durable
@@ -3094,7 +3163,11 @@ class TaskTool(BaseTool):
                         if isinstance(item, BaseException):
                             raise item
                         event, pending_consumed = item
-                        if event.type == "item.completed":
+                        if await observe_child_runtime_event(event.type, event.data):
+                            continue
+                        if event.type == "agent.progress":
+                            await subagent_event_bridge(event.type, event.data)
+                        elif event.type == "item.completed":
                             message_item = (
                                 event.data.get("item")
                                 if isinstance(event.data.get("item"), dict)
@@ -3179,29 +3252,28 @@ class TaskTool(BaseTool):
                                         {"events": claimed_events}
                                     ),
                                 }
-                            if emit_event is not None:
-                                progress_event = AgentEvent.subagent_progress(
-                                    subagent_id=subagent_id,
-                                    iteration=turn_state.iterations,
-                                    max_iterations=sub_settings.max_iterations,
-                                    tool_name=tool_name,
-                                    detail="",
-                                    current_activity=description,
-                                    waiting_on="tool",
-                                    last_progress_at=int(time.time() * 1000),
-                                    activity_kind="tool",
-                                    activity_summary=description,
-                                    user_visible=bool(description),
-                                    **subagent_fence,
-                                )
-                                progress_event.data["source_event_type"] = "tool_call"
-                                if call_id:
-                                    progress_event.data["tool_call_id"] = call_id
-                                await _emit_incarnation_event(
-                                    "subagent.progress",
-                                    progress_event.data,
-                                    transcript_snapshot=tool_snapshot,
-                                )
+                            progress_event = AgentEvent.subagent_progress(
+                                subagent_id=subagent_id,
+                                iteration=turn_state.iterations,
+                                max_iterations=sub_settings.max_iterations,
+                                tool_name=tool_name,
+                                detail="",
+                                current_activity=description,
+                                waiting_on="tool",
+                                last_progress_at=int(time.time() * 1000),
+                                activity_kind="tool",
+                                activity_summary=description,
+                                user_visible=bool(description),
+                                **subagent_fence,
+                            )
+                            progress_event.data["source_event_type"] = "tool_call"
+                            if call_id:
+                                progress_event.data["tool_call_id"] = call_id
+                            await _emit_incarnation_event(
+                                "subagent.progress",
+                                progress_event.data,
+                                transcript_snapshot=tool_snapshot,
+                            )
                         elif (
                             event.type == "agent.item"
                             and event.data.get("kind") == "process_text"
@@ -3249,6 +3321,7 @@ class TaskTool(BaseTool):
                                     **subagent_fence,
                                 )
                                 progress_event.data["source_event_type"] = "agent.item"
+                                progress_event.data["tool_name"] = ""
                                 if item_id:
                                     progress_event.data["item_id"] = item_id
                                 await _emit_incarnation_event(
@@ -3256,6 +3329,14 @@ class TaskTool(BaseTool):
                                 )
                         elif event.type == "error":
                             last_error = str(event.data.get("message", ""))
+                            progress = AgentEvent.subagent_progress(
+                                subagent_id=subagent_id, iteration=turn_state.iterations,
+                                current_activity=last_error,
+                                activity_kind="failure", activity_summary=last_error,
+                                last_progress_at=int(time.time() * 1000), user_visible=True, **subagent_fence,
+                            )
+                            progress.data.update({"tool_name": "", "waiting_on": "", "source_event_type": "error"})
+                            await _emit_incarnation_event("subagent.progress", progress.data)
                         elif event.type == "tool_result":
                             call_id = str(
                                 event.data.get("tool_call_id")
@@ -3273,23 +3354,21 @@ class TaskTool(BaseTool):
                                     for persisted in journal.read_events()
                                 ]
                                 if _subagent_event_is_user_visible(event.type, event.data):
-                                    await _emit_incarnation_event(
-                                        "subagent.progress",
-                                        AgentEvent.subagent_progress(
-                                            subagent_id=subagent_id,
-                                            iteration=turn_state.iterations,
-                                            max_iterations=sub_settings.max_iterations,
-                                            tool_name=last_tool_name,
-                                            detail="",
-                                            current_activity=description,
-                                            waiting_on="tool",
-                                            last_progress_at=int(time.time() * 1000),
-                                            activity_kind="tool_result",
-                                            activity_summary=description,
-                                            user_visible=bool(description),
-                                            **subagent_fence,
-                                        ).data,
+                                    progress = AgentEvent.subagent_progress(
+                                        subagent_id=subagent_id,
+                                        iteration=turn_state.iterations,
+                                        max_iterations=sub_settings.max_iterations,
+                                        detail="",
+                                        current_activity=description,
+                                        waiting_on="model",
+                                        last_progress_at=int(time.time() * 1000),
+                                        activity_kind="tool_result",
+                                        activity_summary=description,
+                                        user_visible=bool(description),
+                                        **subagent_fence,
                                     )
+                                    progress.data["tool_name"] = ""
+                                    await _emit_incarnation_event("subagent.progress", progress.data)
                             try:
                                 from backend.agent.checkpoint import save_run_checkpoint
 

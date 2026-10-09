@@ -378,6 +378,11 @@ def _project_block(value: Any) -> dict[str, Any] | None:
             if raw is None:
                 snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
                 raw = value.get(snake_key)
+            if key in {"retryAttempt", "maxRetries", "retryAfterMs"}:
+                count = _nonnegative_int(raw)
+                if count is not None:
+                    block[key] = count
+                continue
             text = public_text(raw, max_chars=50_000 if key in {"content", "message", "detail", "summary"} else 2_048)
             if text:
                 block[key] = text
@@ -524,8 +529,31 @@ def _project_context_snapshot(value: Any) -> dict[str, Any]:
     return projected
 
 
+def _with_tool_artifact_ownership(message: Mapping[str, Any]) -> Mapping[str, Any]:
+    artifacts = message.get("artifacts", [])
+    if not isinstance(artifacts, list) or not any(isinstance(artifact, Mapping) and not artifact.get("source") for artifact in artifacts):
+        return message
+    blocks = message.get("blocks")
+    records = [block["record"] for block in blocks if isinstance(block, Mapping) and block.get("type") == "tool_call" and isinstance(block.get("record"), Mapping)] if isinstance(blocks, list) else []
+    calls = message.get("tool_calls")
+    if isinstance(calls, list):
+        records.extend(record for record in calls if isinstance(record, Mapping))
+    owners = {record.get("artifactId", record.get("artifact_id")): record for record in records
+              if record.get("artifactId", record.get("artifact_id")) and record.get("id") and record.get("name")}
+    projected = []
+    for artifact in artifacts:
+        owner = owners.get(artifact.get("artifactId", artifact.get("artifact_id"))) if isinstance(artifact, Mapping) else None
+        if owner and not artifact.get("source"):
+            artifact = {**artifact, "source": "image_generation" if owner.get("resultKind", owner.get("result_kind")) == "image_generation" else "tool",
+                        "toolCallId": owner["id"], "operation": owner["name"]}
+            if owner.get("callSource", owner.get("call_source")):
+                artifact["callSource"] = owner.get("callSource", owner.get("call_source"))
+        projected.append(artifact)
+    return {**message, "artifacts": projected}
+
+
 def project_public_transcript_message(value: Any) -> dict[str, Any]:
-    source = value if isinstance(value, Mapping) else {}
+    source = _with_tool_artifact_ownership(value) if isinstance(value, Mapping) else {}
     data_url_budget = [_MAX_PUBLIC_DATA_URL_CHARS]
     public_json_text_budget = [_MAX_PUBLIC_JSON_TEXT_CHARS]
     role = public_text(source.get("role"), max_chars=64, single_line=True)
@@ -754,6 +782,7 @@ def project_tool_items(message: dict[str, Any], *, before: int, limit: int = 40,
 
 def project_tool_window(message: dict[str, Any], *, limit: int = 40) -> dict[str, Any]:
     """Keep the answer/narration and latest completed tool steps on the first page."""
+    message = _with_tool_artifact_ownership(message)
     blocks = message.get("blocks", [])
     if not isinstance(blocks, list):
         return project_public_transcript_message(message)

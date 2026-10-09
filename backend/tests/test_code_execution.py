@@ -520,8 +520,22 @@ def test_only_selected_images_enter_model_context_and_artifacts_keep_the_owner(t
         previews = [event for event in events if event.type == "artifact.preview"]
         assert len(previews) == int(emit_image)
         if emit_image:
+            assert previews[0].data["source"] == "tool"
+            assert previews[0].data["tool_call_id"] == "script-parent"
+            assert previews[0].data["operation"] == "tool_exec"
             meta = ArtifactStore(storage_dir=tmp_path / "artifacts").get_meta(previews[0].data["artifact_id"], conversation_id="code-conv", workspace_root=tmp_path)
             assert meta is not None and meta.media_type == "image/png"
+    asyncio.run(scenario())
+
+
+def test_generated_image_helper_keeps_its_result_out_of_tool_evidence(tmp_path):
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jVZkAAAAASUVORK5CYII="
+    async def scenario():
+        state, _, _, events, _ = await run_model(tmp_path, ScriptModel('generatedImage({image_url:"data:image/png;base64,' + png + '"});'))
+        assert state.terminal_status == "completed"
+        preview = next(event.data for event in events if event.type == "artifact.preview")
+        assert preview["source"] == "image_generation"
+        assert preview["tool_call_id"] == "script-parent"
     asyncio.run(scenario())
 
 
@@ -544,6 +558,10 @@ def test_forwarded_leaf_images_keep_each_original_artifact_even_when_the_pixels_
         assert len(original_ids) == len(set(original_ids)) == 2
         ids = {event.data["artifact_id"] for event in events if event.type == "artifact.preview"}
         assert ids == set(original_ids)
+        previews = [event.data for event in events if event.type == "artifact.preview"]
+        leaves = [event.data for event in events if event.type == "tool_result" and event.data.get("artifact_id") in original_ids]
+        assert [event["tool_call_id"] for event in previews] == [event["id"] for event in leaves]
+        assert all(event["source"] == "tool" and event["operation"] == "picture" and event["call_source"]["kind"] == "code_mode" for event in previews)
         emitted = [image for message in builder._history for image in message.images]
         assert [image["artifact_id"] for image in emitted] == original_ids
         assert len(list((tmp_path / "artifacts").glob("art_*.meta.json"))) == 2

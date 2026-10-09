@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import aclosing
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any
 from uuid import uuid4
 
@@ -46,7 +46,7 @@ class CodeCell:
     error: str = ""
     discarded_calls: int = 0
     pending_tools: dict[str, str] = field(default_factory=dict)
-    image_artifacts: set[tuple[str, str, str]] = field(default_factory=set)
+    image_artifacts: dict[tuple[str, str, str], dict] = field(default_factory=dict)
 
 
 class CodeExecutionRuntime:
@@ -127,7 +127,7 @@ class CodeExecutionRuntime:
         contexts = list(cell.hook_context)
         cell.hook_context.clear()
         images = [{"media_type": item["media_type"], "data": item["data"],
-                   **({"artifact_id": item["artifact_id"]} if item.get("artifact_id") else {})}
+                   **{key: item[key] for key in ("artifact_id", "source", "tool_call_id", "call_source", "operation") if key in item}}
                   for item in output if item["kind"] == "image"]
         audios = [{"media_type": item["media_type"], "data": item["data"]} for item in output if item["kind"] == "audio"]
         text = [item["text"] for item in output if item["kind"] == "text"]
@@ -182,7 +182,7 @@ class CodeExecutionRuntime:
                     source = sources.get(call_id, ToolCallSource("code_mode", cell.parent.tool_call_id, cell.id))
                     await self._emit(cell, event, source)
                     if event.type == "tool_result":
-                        cell.pending_tools.pop(call_id)
+                        operation = cell.pending_tools.pop(call_id)
                         result = results.pop(call_id)
                         value = {item.name: getattr(result, item.name) for item in fields(result) if item.name != "runtime_metadata"}
                         if result.images:
@@ -191,7 +191,10 @@ class CodeExecutionRuntime:
                                 artifact_id = image.get("artifact_id") or (result.artifact_id if len(result.images) == 1 else None)
                                 value["images"].append({**image, **({"artifact_id": artifact_id} if artifact_id else {})})
                                 if artifact_id:
-                                    cell.image_artifacts.add((artifact_id, image["media_type"], image["data"]))
+                                    cell.image_artifacts[(artifact_id, image["media_type"], image["data"])] = {
+                                        "source": "image_generation" if result.result_kind == "image_generation" else "tool",
+                                        "tool_call_id": call_id, "call_source": asdict(source), "operation": operation,
+                                    }
                         mcp = result.runtime_metadata.get("mcp")
                         if isinstance(mcp, dict):
                             value["structured_content"] = mcp.get("structuredContent")
@@ -213,8 +216,11 @@ class CodeExecutionRuntime:
                 # are not provenance. Retain only this cell's original bytes.
                 for item in packet["output"]:
                     if item["kind"] == "image" and item.get("artifact_id"):
-                        if (item["artifact_id"], item["media_type"], item["data"]) not in cell.image_artifacts:
+                        ownership = cell.image_artifacts.get((item["artifact_id"], item["media_type"], item["data"]))
+                        if ownership is None:
                             item.pop("artifact_id")
+                        else:
+                            item.update(ownership)
                 cell.output.extend(packet["output"])
                 if packet["yielded"]:
                     cell.changed.set()

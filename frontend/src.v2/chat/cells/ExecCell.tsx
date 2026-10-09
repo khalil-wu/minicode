@@ -13,6 +13,7 @@ import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { toolCleanupNotice } from "../../lib/tool-call-reducer";
 import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { ToolArtifactImage } from "./ActivityCell";
 
 /**
  * A command has one compact lifecycle row and one optional output panel. The
@@ -22,10 +23,12 @@ import { useTranscriptReadingPreference } from "../transcriptReadingState";
 export function ExecCell({
   cell,
   onStop,
+  conversationId = "",
 }: {
   cell: ExecCellState;
   isActive?: boolean;
   onStop?: () => void;
+  conversationId?: string;
 }) {
   const status = execCellStatus(cell.status);
   const statusColor = cellStatusTone(status);
@@ -131,6 +134,7 @@ export function ExecCell({
             {stderr && <span className="exec-cell-output-stderr">{stderr}</span>}
             {!hasOutput && <span className="exec-cell-no-output">无输出</span>}
           </pre>
+          {cell.artifacts?.map((artifact) => <ToolArtifactImage key={artifact.artifactId} artifact={artifact} conversationId={conversationId} />)}
           <div className="exec-cell-output-status" data-status={status}>
             {cell.status === "success" && !cell.background && <Check size={13} aria-hidden="true" />}
             <span>{cell.background && cell.status === "success" ? "已在后台启动" : cell.status === "pending_approval" ? "等待批准" : cellStatusLabel(status)}</span>

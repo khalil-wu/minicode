@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.conversations.repository import ConversationRepository
+from backend.artifact.store import ArtifactStore
 from backend.ws.handlers.session import handle_session_sync
 from backend.ws.session_restore import SessionRestoreManager
 
@@ -39,17 +40,22 @@ def test_restore_reads_a_history_page_without_private_checkpoint(tmp_path, monke
     assert "private provider context" not in json.dumps(restored)
 
 
-@pytest.mark.parametrize("switch_during_page", [False, True])
-def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, monkeypatch, switch_during_page):
+@pytest.mark.parametrize("switch_during_page,switch_during_metadata", [(False, False), (True, False), (False, True)])
+def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, monkeypatch, switch_during_page, switch_during_metadata):
     repo = ConversationRepository(tmp_path)
     record = repo.create_conversation(transcript=_history(220))
     next_record = repo.create_conversation(transcript=_history(220))
+    store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    for owner in (record, next_record):
+        artifact_id = store.save("AA==", source="tool_exec.image", type="image", media_type="image/png", conversation_id=owner.id)
+        repo.upsert_transcript_message(owner.id, {**owner.transcript[-1], "artifacts": [{"artifactId": artifact_id, "kind": "image", "summary": "Old code image"}]})
     sent = []
 
     class Session:
         session_id = "session"
         active_conversation_id = record.id
         conversation_repo = repo
+        artifact_store = store
         selected_model = "model"
         provider = "custom"
         available_models = ["model"]
@@ -84,13 +90,25 @@ def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, mon
         return page
 
     monkeypatch.setattr(repo, "get_conversation_view", read_page)
+    get_meta = store.get_meta
+    metadata_reads = []
+    def read_metadata(artifact_id, **scope):
+        metadata_reads.append(scope["conversation_id"])
+        if switch_during_metadata and scope["conversation_id"] == record.id:
+            Session.active_conversation_id = next_record.id
+        return get_meta(artifact_id, **scope)
+    monkeypatch.setattr(store, "get_meta", read_metadata)
     asyncio.run(handle_session_sync(Session(), {}))
     assert [payload["type"] for payload in sent] == ["session.synced", "pending-state"]
     page = sent[0]["active_conversation"]
     assert len(page["transcript"]) == 80
     assert page["transcript_page"] == {"before_message_id": "message-140", "has_more": True, "total_messages": 220}
     assert page["id"] == sent[0]["active_conversation_id"] == sent[0]["session"]["active_conversation_id"]
-    assert reads == ([record.id, next_record.id] if switch_during_page else [record.id])
+    assert page["transcript"][-1]["artifacts"][0]["source"] == "tool"
+    assert reads == ([record.id, next_record.id] if switch_during_page or switch_during_metadata else [record.id])
+    assert metadata_reads == reads
+    assert "source" not in repo.get_conversation(page["id"]).transcript[-1]["artifacts"][0]
+    store.shutdown()
 
 
 def test_delete_uses_metadata_revision_even_if_history_is_unreadable(tmp_path):

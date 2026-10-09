@@ -269,6 +269,7 @@ const subagentMetadataPatch = (
   const objective = maybeString(value("objective")) ?? maybeString(value("prompt_summary"));
   const currentActivity = userVisibleSubagentProgress(maybeString(value("current_activity"))) || undefined;
   const waitingOn = userVisibleSubagentProgress(maybeString(value("waiting_on", "waitingOn"))) || undefined;
+  const currentTool = maybeString(value("current_tool", "currentTool"));
   const lastProgressAt = maybeNumber(value("last_progress_at", "lastProgressAt"));
   const order = maybeNumber(value("order"));
   const dependsOn = maybeStringList(value("depends_on"));
@@ -293,6 +294,7 @@ const subagentMetadataPatch = (
   if (objective) patch.objective = objective;
   if (currentActivity) patch.currentActivity = currentActivity;
   if (waitingOn) patch.waitingOn = waitingOn;
+  if (currentTool !== undefined) patch.currentTool = currentTool;
   if (typeof lastProgressAt === "number") patch.lastProgressAt = lastProgressAt;
   if (typeof order === "number") patch.order = order;
   if (dependsOn) patch.dependsOn = dependsOn;

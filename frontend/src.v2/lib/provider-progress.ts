@@ -4,7 +4,13 @@ import type { ProgressContentBlock } from "../stores/types";
 export type ProviderProgressSnapshot = Pick<
   ProgressContentBlock,
   "id" | "status" | "retryAttempt" | "maxRetries" | "message" | "providerState"
-> & Partial<Pick<ProgressContentBlock, "label" | "phase">>;
+> & Partial<Pick<ProgressContentBlock, "label" | "phase" | "errorMessage">>;
+
+/** A stream failure notification is evidence, even when its request retries. */
+const isProviderErrorNotice = (progress: ProviderProgressSnapshot | undefined): boolean =>
+  progress?.phase === "recover"
+  && Boolean(progress.errorMessage?.trim())
+  && ["reconnecting", "failed"].includes(progress.providerState || "");
 
 const PROVIDER_PROGRESS_STATUS_RANK: Record<string, number> = {
   "": 0,
@@ -78,6 +84,7 @@ export function isProviderRetryProgress(
 export function isProviderRequestProgress(
   progress: ProviderProgressSnapshot | undefined,
 ): boolean {
+  if (isProviderErrorNotice(progress)) return false;
   const id = String(progress?.id || "");
   return id.startsWith("provider-request:") || isProviderRetryProgress(progress)
     || (progress?.label === "provider" && ["model", "provider", "recover"].includes(progress.phase || ""));
@@ -125,6 +132,7 @@ export function providerRetryCounter(
 export function providerProgressLabel(
   progress: ProviderProgressSnapshot | undefined,
 ): string | undefined {
+  if (isProviderErrorNotice(progress)) return undefined;
   if (!isProviderRetryProgress(progress)) return undefined;
   const providerState = progress?.providerState;
   const status = String(progress?.status || "").toLowerCase();

@@ -768,6 +768,10 @@ export interface ArtifactPreview {
   url?: string;
   /** UTF-16 code-unit offset where the artifact appeared in assistant text. */
   textOffset?: number;
+  source?: "tool" | "image_generation";
+  toolCallId?: string;
+  callSource?: ToolCallRecord["callSource"];
+  operation?: string;
 }
 
 export interface Citation {

@@ -6,6 +6,16 @@ import {
 } from "./provider-progress";
 
 describe("providerProgressLabel", () => {
+  it("keeps source stream failure notifications visible while hiding ordinary request liveness", () => {
+    const notice = {
+      id: "provider:connection:child:iteration-2:error:reconnecting:1", status: "info" as const,
+      phase: "recover" as const, providerState: "reconnecting" as const, retryAttempt: 1, maxRetries: 2,
+      message: "连接中断，正在重连（第 1/2 次）", errorMessage: "stream closed before response.completed",
+    };
+    expect(isProviderRequestProgress(notice)).toBe(false);
+    expect(providerProgressLabel(notice)).toBeUndefined();
+    expect(isProviderRequestProgress({ ...notice, errorMessage: undefined, phase: "model", status: "running" })).toBe(true);
+  });
   it("uses the reconnect ladder only while the provider is reconnecting", () => {
     expect(providerProgressLabel({
       id: "provider:connection:run:iteration",

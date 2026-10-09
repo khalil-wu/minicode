@@ -158,6 +158,7 @@ async def dispatch_provider_event(
         return
 
     if event.type in {
+        StreamEventType.TRANSPORT_ACTIVITY,
         StreamEventType.THINKING_CHUNK,
         StreamEventType.IMAGE_CHUNK,
         StreamEventType.PROVIDER_ACTIVITY,

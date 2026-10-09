@@ -2236,7 +2236,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
     )
 
     class Repo:
-        def get_conversation(self, conversation_id: str):
+        def get_conversation_summary(self, conversation_id: str):
             return target if conversation_id == target.id else None
 
         def delete_conversation(self, conversation_id: str) -> bool:
@@ -2262,6 +2262,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
         ws_manager = None
         active_conversation_id = target.id
         conversation_repo = Repo()
+        lifecycle_lock = asyncio.Lock()
         terminal_manager = TerminalManager()
         background_manager = BackgroundManager()
         # The handler detaches the destructive work and hands the task to the
@@ -2283,6 +2284,9 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
 
         def track_command_task(self, task) -> None:
             type(self).command_tasks.append(task)
+
+        def conversation_lifecycle_lock(self):
+            return self.lifecycle_lock
 
         async def send_conversation_list(self) -> None:
             order.append("send-list")
@@ -2405,7 +2409,7 @@ def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancella
         class Repo:
             deleted = False
 
-            def get_conversation(self, conversation_id: str):
+            def get_conversation_summary(self, conversation_id: str):
                 return target if conversation_id == target.id else None
 
             def delete_conversation(self, _conversation_id: str) -> bool:

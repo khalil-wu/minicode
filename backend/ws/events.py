@@ -655,6 +655,10 @@ class ArtifactPreviewData(TypedDict, total=False):
     url: str
     conversation_id: str
     message_id: str
+    source: Literal["tool", "image_generation"]
+    tool_call_id: str
+    call_source: dict[str, Any]
+    operation: str
 
 
 class CommandAvailabilityData(TypedDict):

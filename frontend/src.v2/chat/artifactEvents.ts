@@ -63,6 +63,10 @@ export const projectArtifactPreviewEvent = (
       textOffset: typeof ev.text_offset === "number" && Number.isFinite(ev.text_offset)
         ? ev.text_offset
         : existing?.textOffset,
+      ...(ev.source ? { source: ev.source } : {}),
+      ...(ev.tool_call_id ? { toolCallId: ev.tool_call_id } : {}),
+      ...(ev.call_source ? { callSource: ev.call_source } : {}),
+      ...(ev.operation ? { operation: ev.operation } : {}),
     };
     const nextArtifacts = artifacts.slice();
     if (artifactIndex >= 0) nextArtifacts[artifactIndex] = artifact;

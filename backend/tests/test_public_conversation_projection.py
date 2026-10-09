@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from backend.conversations import public_projection
 from backend.conversations.repository import _normalize_loaded_transcript
+from backend.services.conversation_payload_service import restore_tool_artifact_sources
+from types import SimpleNamespace
 
 
 def test_message_projection_preserves_owned_turn_diff_without_exposing_arbitrary_metadata():
@@ -120,3 +122,36 @@ def test_loaded_transcript_treats_untyped_provider_thinking_as_legacy_raw() -> N
         "source": "provider",
         "provider_reasoning_type": "reasoning_summary_text",
     }]
+
+
+def test_legacy_tool_image_owner_is_retained_before_its_tool_page_loads():
+    record = {"id": "capture", "name": "browser_control", "args": {"action": "screenshot"}, "status": "success", "startedAt": 1,
+              "artifactId": "screen", "artifactKind": "image", "artifactMediaType": "image/png"}
+    message = {"id": "answer", "role": "assistant", "content": "Done", "terminal_status": "completed",
+               "artifacts": [{"artifactId": "screen", "kind": "image", "summary": "Code cell image"}],
+               "blocks": [{"type": "tool_call", "record": record}] + [
+                   {"type": "tool_call", "record": {"id": f"read-{index}", "name": "read_file", "args": {}, "status": "success", "startedAt": 2}}
+                   for index in range(45)]}
+    projected = public_projection.project_tool_window(message)
+    assert projected["artifacts"][0]["source"] == "tool"
+    assert projected["artifacts"][0]["toolCallId"] == "capture"
+    assert all(block["record"]["id"] != "capture" for block in projected["blocks"])
+    assert "source" not in message["artifacts"][0]
+
+
+def test_old_image_sources_are_read_from_owned_artifact_metadata_without_rewriting_transcript():
+    sources = {"screen": "browser_control.embedded_screenshot", "code": "tool_exec.image", "generated": "generated_image", "unknown": "custom"}
+    calls = []
+    class Store:
+        def get_meta(self, artifact_id, *, conversation_id, workspace_root):
+            calls.append((artifact_id, conversation_id, workspace_root))
+            return SimpleNamespace(source=sources[artifact_id])
+    payload = {"id": "owner", "workspace_root": "C:/project", "transcript": [{"id": "answer", "artifacts": [
+        {"artifactId": artifact_id, "kind": "image", "summary": "same label"} for artifact_id in sources]}]}
+    restored = restore_tool_artifact_sources(payload, Store())
+    artifacts = restored["transcript"][0]["artifacts"]
+    assert [artifact.get("source") for artifact in artifacts] == ["tool", "tool", "image_generation", None]
+    assert artifacts[0]["operation"] == "browser_control" and artifacts[1]["operation"] == "tool_exec"
+    assert all("toolCallId" not in artifact for artifact in artifacts)
+    assert calls == [(artifact_id, "owner", "C:/project") for artifact_id in sources]
+    assert all("source" not in artifact for artifact in payload["transcript"][0]["artifacts"])
