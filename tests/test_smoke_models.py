@@ -29,25 +29,6 @@ async def _raising_fetch_models(*args, **kwargs):
     raise RuntimeError("upstream blocked")
 
 
-class _ProxyLimitLLM(LLMAdapter):
-    def __init__(self) -> None:
-        self.simple_chat_calls = 0
-
-    async def stream_chat(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, object]] | None = None,
-    ) -> AsyncIterator[StreamEvent]:
-        yield StreamEvent(
-            type=StreamEventType.ERROR,
-            content="Concurrency limit exceeded for account, please retry later",
-        )
-
-    async def simple_chat(self, messages: list[LLMMessage]) -> str:
-        self.simple_chat_calls += 1
-        return "fallback should not run"
-
-
 class _BackupSuccessLLM(LLMAdapter):
     async def stream_chat(
         self,
@@ -62,7 +43,8 @@ class _BackupSuccessLLM(LLMAdapter):
 
 
 class _RetryThenSuccessLLM(LLMAdapter):
-    def __init__(self) -> None:
+    def __init__(self, *, retry_after: str | None = "0.125") -> None:
+        self.retry_after = retry_after
         self.stream_chat_calls = 0
         self.simple_chat_calls = 0
 
@@ -73,11 +55,11 @@ class _RetryThenSuccessLLM(LLMAdapter):
     ) -> AsyncIterator[StreamEvent]:
         self.stream_chat_calls += 1
         if self.stream_chat_calls == 1:
-            yield StreamEvent(
-                type=StreamEventType.ERROR,
-                content="LLM 流式响应异常: Concurrency limit exceeded for account, please retry later",
+            raise _ProviderHTTPError(
+                "Concurrency limit exceeded for account, please retry later",
+                status_code=529,
+                headers={"Retry-After": self.retry_after} if self.retry_after is not None else {},
             )
-            return
         yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="retry recovered")
         yield StreamEvent(type=StreamEventType.DONE)
 
@@ -346,6 +328,7 @@ class _ProviderHTTPError(RuntimeError):
         body: str = "",
         code: str = "",
         error_type: str = "",
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -353,6 +336,7 @@ class _ProviderHTTPError(RuntimeError):
         self.type = error_type
         self.response = SimpleNamespace(
             status_code=status_code,
+            headers=headers,
             text=body,
             content=body.encode("utf-8"),
         )
@@ -646,10 +630,6 @@ class _RecordingFetchPageTool(BaseTool):
 
         self.calls.append(dict(args))
         return ToolResult(content="## 北京天气\n来源: https://weather.example/beijing\n\n小雨\n\n11℃\n")
-
-
-async def _fake_sleep(*args, **kwargs):
-    pass
 
 
 async def _collect_events(stream):
@@ -1111,8 +1091,8 @@ def test_env_example_uses_official_openai_url_without_inventing_models() -> None
     assert "ANTHROPIC_MODEL=\n" in env_example
 
 
-def test_run_agent_loop_surfaces_proxy_limit_error_without_simple_chat_retry() -> None:
-    llm = _ProxyLimitLLM()
+def test_run_agent_loop_surfaces_proxy_limit_without_server_advice() -> None:
+    llm = _RetryThenSuccessLLM(retry_after=None)
 
     events = asyncio.run(
         _collect_events(
@@ -1122,13 +1102,7 @@ def test_run_agent_loop_surfaces_proxy_limit_error_without_simple_chat_retry() -
                 tool_registry=ToolRegistry(),
                 artifact_store=ArtifactStore(),
                 permission_checker=PermissionChecker(PermissionSettings()),
-                agent_settings=AgentSettings(
-                    max_iterations=1,
-                    # This case asserts immediate surfacing; the production
-                    # default intentionally retries transient busy responses.
-                    stream_max_attempts=0,
-                    stream_retry_delay_seconds=0,
-                ),
+                agent_settings=AgentSettings(max_iterations=1),
                 token_budget=TokenBudget(),
             )
         )
@@ -1138,12 +1112,19 @@ def test_run_agent_loop_surfaces_proxy_limit_error_without_simple_chat_retry() -
     assert error_events
     assert "繁忙" in error_events[0].data["message"]
     assert error_events[0].data["provider_error_type"] == "busy"
+    assert _final_events(events) == []
+    assert llm.stream_chat_calls == 1
     assert llm.simple_chat_calls == 0
 
 
 
-def test_run_agent_loop_retries_proxy_limit_before_surface(monkeypatch) -> None:
-    monkeypatch.setattr("backend.agent.loop_runtime_helpers.asyncio.sleep", _fake_sleep)
+def test_run_agent_loop_retries_server_advised_proxy_limit(monkeypatch) -> None:
+    waits = []
+
+    async def record_sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr("backend.agent.loop_runtime_helpers.asyncio.sleep", record_sleep)
     llm = _RetryThenSuccessLLM()
 
     events = asyncio.run(
@@ -1165,6 +1146,7 @@ def test_run_agent_loop_retries_proxy_limit_before_surface(monkeypatch) -> None:
 
     assert error_events == []
     assert "".join(str(event.data["item"]["text"]) for event in final_events) == "retry recovered"
+    assert waits == [0.125]
     assert llm.stream_chat_calls == 2
     assert llm.simple_chat_calls == 0
 

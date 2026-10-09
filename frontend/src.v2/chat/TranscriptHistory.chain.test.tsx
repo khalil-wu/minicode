@@ -5,6 +5,10 @@ import { useAppStore } from "../stores";
 import type { ChatMessage, ContentBlock } from "../stores/types";
 import { MessageList } from "./MessageList";
 import { loadEarlierConversationMessages, loadEarlierToolItems } from "./historyPagination";
+import { handleSessionEvent } from "./sessionEvents";
+import { hydrateMessages } from "./transcriptHydration";
+import type { ServerEvent } from "../protocol/events";
+import type { StreamBuffer } from "../lib/stream-buffer";
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), send: vi.fn(() => true), toast: vi.fn(), projections: [] as Array<{ owner?: string; root?: string; text?: string }> }));
 vi.mock("../protocol/api", async (importOriginal) => ({
@@ -44,6 +48,18 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+const streamBuffer = (): StreamBuffer => ({ push: vi.fn(), flush: vi.fn(), destroy: vi.fn() });
+const handleSession = (event: unknown) => handleSessionEvent(event as ServerEvent, {
+  textStreamBuffer: streamBuffer(), thinkingStreamBuffer: streamBuffer(),
+});
+const backendPagedMessage = (revision: string) => ({
+  ...backendPair("current")[1],
+  tool_page: { before: 10, remaining: 1, total: 2, revision },
+});
+const toolPageResponse = () => new Response(JSON.stringify({
+  message_id: "assistant-current", blocks: [tool("late-call", 0)],
+  tool_page: { before: 0, remaining: 0, total: 2, revision: "old" },
+}), { status: 200 });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -166,19 +182,74 @@ describe("tool item pagination", () => {
     expect(updated.toolPage?.remaining).toBe(0);
   });
 
-  it("drops a late tool page after that exact message is replaced", async () => {
-    const message = { ...pair("current")[1], toolPage: { before: 10, remaining: 1, total: 2, revision: "old" } };
+  it.each(["old", "new"])("drops a late tool page after an authoritative snapshot with revision %s", async (revision) => {
+    const message = hydrateMessages([backendPagedMessage("old")])[0];
     useAppStore.setState({ messages: [message] });
     const pending = deferred<Response>();
     mocks.fetch.mockReturnValueOnce(pending.promise);
     const request = loadEarlierToolItems("A", message.id);
-    const replacement = { ...message, content: "new authoritative answer" };
-    useAppStore.setState({ messages: [replacement] });
-    pending.resolve(new Response(JSON.stringify({
-      message_id: message.id, blocks: [tool("late-call", 0)],
-      tool_page: { before: 0, remaining: 0, total: 2 },
-    }), { status: 200 }));
+    handleSession({ type: "conversation.switched", conversation_id: "A", context_pending: true,
+      conversation: { id: "A", title: "A", transcript: [backendPagedMessage(revision)] },
+    });
+    const replacement = useAppStore.getState().messages[0];
+    expect(replacement.toolPage).not.toBe(message.toolPage);
+    expect(replacement.toolPage?.revision).toBe(revision);
+    expect(mocks.fetch.mock.calls[0][0].searchParams.get("revision")).toBe("old");
+    pending.resolve(toolPageResponse());
     await request;
     expect(useAppStore.getState().messages[0]).toBe(replacement);
+  });
+
+  it("keeps a late tool page with its cached conversation after switching to another owner", async () => {
+    const message = hydrateMessages([backendPagedMessage("old")])[0];
+    useAppStore.setState({ messages: [message] });
+    const pending = deferred<Response>();
+    mocks.fetch.mockReturnValueOnce(pending.promise);
+    const request = loadEarlierToolItems("A", message.id);
+    handleSession({ type: "conversation.switched", conversation_id: "B", context_pending: true,
+      conversation: { id: "B", title: "B", transcript: backendPair("B") },
+    });
+    const activeMessages = useAppStore.getState().messages;
+    pending.resolve(toolPageResponse());
+    await request;
+    expect(useAppStore.getState().conversationId).toBe("B");
+    expect(useAppStore.getState().messages).toBe(activeMessages);
+    expect(useAppStore.getState().conversationMessages.A[0].toolPage?.remaining).toBe(0);
+  });
+
+  it("does not restore deleted history after the inventory removes its conversation", async () => {
+    const message = hydrateMessages([backendPagedMessage("old")])[0];
+    useAppStore.setState({ messages: [message], conversationMessages: { A: [message] } });
+    const pending = deferred<Response>();
+    mocks.fetch.mockReturnValueOnce(pending.promise);
+    const request = loadEarlierToolItems("A", message.id);
+    handleSession({ type: "conversation.list", conversations: [{ id: "B", title: "B" }],
+      active_conversation_id: "B", active_conversation: { id: "B", title: "B", transcript: backendPair("B") },
+    });
+    const activeMessages = useAppStore.getState().messages;
+    pending.resolve(toolPageResponse());
+    await request;
+    expect(useAppStore.getState().conversationId).toBe("B");
+    expect(useAppStore.getState().messages).toBe(activeMessages);
+    expect(useAppStore.getState().conversationMessages.A).toBeUndefined();
+    expect(useAppStore.getState().conversationHistoryPages.A).toBeUndefined();
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("does not reload a fresh snapshot for a retired tool request's conflict", async () => {
+    const message = hydrateMessages([backendPagedMessage("old")])[0];
+    useAppStore.setState({ messages: [message] });
+    const pending = deferred<Response>();
+    mocks.fetch.mockReturnValueOnce(pending.promise);
+    const request = loadEarlierToolItems("A", message.id);
+    handleSession({ type: "conversation.switched", conversation_id: "A", context_pending: true,
+      conversation: { id: "A", title: "A", transcript: [backendPagedMessage("new")] },
+    });
+    const replacement = useAppStore.getState().messages[0];
+    pending.resolve(new Response(JSON.stringify({ detail: "The message changed" }), { status: 409 }));
+    await request;
+    expect(useAppStore.getState().messages[0]).toBe(replacement);
+    expect(mocks.send).not.toHaveBeenCalledWith({ type: "conversation.switch", conversation_id: "A" });
+    expect(mocks.toast).not.toHaveBeenCalled();
   });
 });

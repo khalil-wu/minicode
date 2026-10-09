@@ -27,6 +27,39 @@ class _Context:
         return object()
 
 
+class _MCPManager:
+    def __init__(self, workspace_root: Path) -> None:
+        self.workspace_root = workspace_root.resolve()
+
+    def get_all_status(self) -> list[dict]:
+        return []
+
+
+class _Bootstrap:
+    def __init__(self, old_root: Path, new_root: Path) -> None:
+        self.old_manager = _MCPManager(old_root)
+        self.new_manager = _MCPManager(new_root)
+        self.managers = {
+            self.old_manager.workspace_root: self.old_manager,
+            self.new_manager.workspace_root: self.new_manager,
+        }
+        self.begun: list[Path] = []
+        self.activated: list[Path] = []
+
+    async def begin_mcp_workspace_activation(self, workspace_root: Path):
+        self.begun.append(workspace_root)
+        manager = self.managers[workspace_root]
+
+        async def ready():
+            return manager
+
+        return manager, asyncio.create_task(ready())
+
+    async def activate_mcp_workspace(self, workspace_root: Path):
+        self.activated.append(workspace_root)
+        return self.managers[workspace_root]
+
+
 class _Session:
     def __init__(self, old_context: _Context) -> None:
         self.active_conversation_id = ""
@@ -35,6 +68,7 @@ class _Session:
         self.skill_manager = None
         self.permission_context = PermissionContext(mode="bypass")
         self.mcp_manager = None
+        self.registry_refreshes: list[tuple[Path | None, _MCPManager | None, bool]] = []
         self.restarted: list[Path] = []
         self.events = []
         self.payloads: list[dict] = []
@@ -42,6 +76,7 @@ class _Session:
         self.is_connected = True
         self.session_lifecycle = SessionLifecycle(self)
         self.session_lifecycle.workspace_context = old_context
+        self.session_lifecycle.workspace_root = Path(old_context.root_path).resolve()
         self.session_lifecycle.restart_file_watcher = self._record_file_watcher_restart
 
     async def _run_cwd_changed_hook(self, *, old_cwd: str, new_cwd: str) -> None:
@@ -75,8 +110,9 @@ class _Session:
         return None
 
     def refresh_tool_registry_if_mcp_changed(
-        self, *, allow_when_busy: bool = True
+        self, *, workspace_root: Path | None, allow_when_busy: bool = True
     ) -> bool:
+        self.registry_refreshes.append((workspace_root, self.mcp_manager, allow_when_busy))
         return False
 
 
@@ -88,6 +124,11 @@ def test_workspace_activation_failure_rolls_back_context_root_and_watcher(monkey
     old_context = _Context(old_root)
     new_context = _Context(new_root, fail=True)
     session = _Session(old_context)
+    bootstrap = _Bootstrap(old_root, new_root)
+    session.mcp_manager = bootstrap.old_manager
+    from backend.api import _state
+
+    monkeypatch.setattr(_state, "bootstrap", bootstrap)
     set_active_workspace_root(old_root)
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _path: True)
     monkeypatch.setattr(
@@ -109,8 +150,17 @@ def test_workspace_activation_failure_rolls_back_context_root_and_watcher(monkey
 
     assert result is False
     assert session.session_lifecycle.workspace_context is old_context
+    assert session.session_lifecycle.workspace_root == old_root.resolve()
+    assert session.mcp_manager is bootstrap.old_manager
     assert active_root == old_root.resolve()
     assert session.restarted == [new_root.resolve(), old_root.resolve()]
+    assert bootstrap.activated == [new_root.resolve(), old_root.resolve()]
+    assert bootstrap.begun == []
+    assert session.registry_refreshes == [
+        (new_root.resolve(), None, False),
+        (new_root.resolve(), bootstrap.new_manager, False),
+        (old_root.resolve(), bootstrap.old_manager, False),
+    ]
     assert session.events and "index failed" in session.events[-1].data["message"]
 
 
@@ -128,7 +178,7 @@ def test_failed_workspace_admission_preserves_previous_runtime_until_owner_chang
     previous_context = _Context(previous_root)
     session = _Session(previous_context)
     session.active_conversation_id = "conv-source"
-    previous_mcp = object()
+    previous_mcp = _MCPManager(previous_root)
     session.mcp_manager = previous_mcp
     stopped = []
     watcher = SimpleNamespace(stop=lambda: stopped.append(True))
@@ -146,6 +196,7 @@ def test_failed_workspace_admission_preserves_previous_runtime_until_owner_chang
     assert lifecycle.workspace_context is previous_context
     assert lifecycle.workspace_root == previous_root
     assert session.mcp_manager is previous_mcp
+    assert session.registry_refreshes == []
     assert lifecycle.file_watcher is watcher
     assert not stopped
     assert session.active_conversation_id == "conv-source"
@@ -178,19 +229,9 @@ def test_background_workspace_index_failure_keeps_the_committed_new_owner(
 
     from backend.api import _state
 
-    class _Bootstrap:
-        async def begin_mcp_workspace_activation(self, _workspace_root):
-            manager = object()
-
-            async def ready():
-                return manager
-
-            return manager, asyncio.create_task(ready())
-
-        async def activate_mcp_workspace(self, _workspace_root):
-            return object()
-
-    monkeypatch.setattr(_state, "bootstrap", _Bootstrap())
+    bootstrap = _Bootstrap(old_root, new_root)
+    session.mcp_manager = bootstrap.old_manager
+    monkeypatch.setattr(_state, "bootstrap", bootstrap)
 
     async def scenario() -> tuple[bool, Path | None]:
         result = await session.session_lifecycle.activate_workspace_path(
@@ -213,9 +254,18 @@ def test_background_workspace_index_failure_keeps_the_committed_new_owner(
 
     assert result is True
     assert session.session_lifecycle.workspace_context is new_context
+    assert session.session_lifecycle.workspace_root == new_root.resolve()
+    assert session.mcp_manager is bootstrap.new_manager
     # Workspace ownership is session-scoped. Global active-workspace state is
     # intentionally unchanged by activation, including the background index
     # path, so another session cannot observe this session's directory.
     assert active_root == old_root.resolve()
     assert session.restarted == [new_root.resolve()]
+    assert bootstrap.begun == [new_root.resolve()]
+    assert bootstrap.activated == []
+    assert session.registry_refreshes == [
+        (new_root.resolve(), None, False),
+        (new_root.resolve(), bootstrap.new_manager, False),
+        (new_root.resolve(), bootstrap.new_manager, False),
+    ]
     assert session.events and "index failed" in session.events[-1].data["message"]

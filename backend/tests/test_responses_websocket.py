@@ -13,6 +13,7 @@ from websockets.http11 import Response
 
 from backend.config import LLMSettings
 from backend.agent.provider_protocol import _safe_provider_request_summary
+from backend.agent.turn_kernel import TurnKernel
 from backend.llm.base import LLMMessage, StreamEventType
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.tests.test_committed_tool_scheduling import WorkTool, run_case
@@ -139,8 +140,16 @@ def test_responses_http_replays_sticky_turn_state_only_within_one_turn():
     asyncio.run(scenario())
 
 
-def test_last_retry_switches_repeated_websocket_failure_to_http(tmp_path, monkeypatch):
+def test_exhausted_websocket_retries_switch_to_http_with_a_new_attempt(tmp_path, monkeypatch):
     monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+    spans = []
+    emit_span = TurnKernel.emit_runtime_span
+
+    async def record_span(kernel, event, **kwargs):
+        spans.append({"event": event, **kwargs})
+        await emit_span(kernel, event, **kwargs)
+
+    monkeypatch.setattr(TurnKernel, "emit_runtime_span", record_span)
 
     async def scenario():
         http_requests = []
@@ -149,19 +158,31 @@ def test_last_retry_switches_repeated_websocket_failure_to_http(tmp_path, monkey
             socket.transport.close()
 
         def http_reply(request):
+            assert len(requests) == 3
             http_requests.append(json.loads(request.content))
-            body = "data: " + json.dumps(terminal("http-success")) + "\n\n"
+            body = "data: " + json.dumps(terminal("http-success", text="Recovered through HTTPS.")) + "\n\n"
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(http_reply)) as client:
             async with endpoint(disconnected, http_client=client) as (adapter, requests, connections):
                 state, _, events = await run_case(tmp_path, adapter, [], stream_max_attempts=2)
                 assert state.terminal_status == "completed"
-                assert len(requests) == 2
+                assert state.reply == "Recovered through HTTPS."
+                assert len(requests) == len(connections) == 3
                 assert len(http_requests) == 1
                 assert "previous_response_id" not in http_requests[0]
                 assert any("HTTPS" in str(event.data) for event in events)
                 assert adapter._responses_websocket.http_only
+                assert not any(event.type == "error" for event in events)
+
+                started = [span for span in spans if span["event"] == "provider.request.started"]
+                closed = [span for span in spans if span["event"] in {
+                    "provider.request.failed", "provider.request.completed",
+                }]
+                assert len(started) == len({span["span_id"] for span in started}) == 4
+                assert [span["data"]["retry_attempt"] for span in started] == [0, 1, 2, 0]
+                assert [span["span_id"] for span in closed] == [span["span_id"] for span in started]
+                assert [span["status"] for span in closed] == ["failed", "failed", "failed", "completed"]
 
     asyncio.run(scenario())
 

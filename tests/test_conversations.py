@@ -1445,23 +1445,38 @@ def test_websocket_restore_preserves_history_without_an_unavailable_workspace(
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_restore_unavailable") as ws:
             _receive_until_event(ws, "llm.model.updated")
+            from backend.api import _state
+
+            bootstrap = _state.bootstrap
+            assert bootstrap is not None
+            global_manager = bootstrap.get_mcp_manager_for_workspace(None)
+            assert global_manager is not None
+            assert global_manager.workspace_root is None
+            live_session = _state.ws_manager.get_session("session_test_restore_unavailable")
+            assert live_session is not None
+            previous_manager = None
             if warm_start:
                 ws.send_json({"type": "conversation.switch", "conversation_id": previous.id})
                 previous_switched = _receive_conversation_switched(ws, previous.id)
                 assert previous_switched["session"]["workspace_root"] == str(previous_root.resolve())
+                previous_manager = bootstrap.get_mcp_manager_for_workspace(previous_root)
+                assert previous_manager is not None
+                assert previous_manager is not global_manager
+                assert live_session.mcp_manager is previous_manager
             ws.send_json({"type": "session.restore", "last_conversation_id": target.id})
             restored = _receive_until_event(ws, "session.restored")
             switched = _receive_conversation_switched(ws, target.id)
             ws.send_json({"type": "session.sync"})
             synced = _receive_until_event(ws, "session.synced")
-            from backend.api import _state
-            live_session = _state.ws_manager.get_session("session_test_restore_unavailable")
-            assert live_session is not None
             assert live_session.session_lifecycle.workspace_context is None
             assert live_session.session_lifecycle.workspace_root is None
             assert live_session.session_lifecycle.current_workspace_root() is None
             assert live_session.session_lifecycle.file_watcher is None
-            assert live_session.mcp_manager is None
+            assert live_session.mcp_manager is global_manager
+            assert live_session.mcp_manager is not previous_manager
+            assert bootstrap.get_mcp_manager_for_workspace(None) is global_manager
+            assert live_session.tool_registry.get_tool("list_mcp_resources")._mcp_manager is global_manager
+            assert live_session.tool_registry.get_tool("read_mcp_resource")._mcp_manager is global_manager
             ws.send_json({"type": "terminal.list", "conversation_id": target.id})
             terminal_result = None
             for _attempt in range(60):

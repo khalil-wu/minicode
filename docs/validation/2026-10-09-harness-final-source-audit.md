@@ -46,6 +46,20 @@
 
 远端 CI 以该分支对应提交的 [GitHub Actions](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927) 为准，本地通过不代替远端结果。
 
+首轮远端 CI (`ef2f0933`) 的 Windows harness、桌面 smoke、Electron 集成通过；另外三个作业暴露 9 个过时的集成断言/替身。对应完整套件首次记录为 backend 4,775 通过/3 失败/49 跳过、root 1,707 通过/5 失败/51 跳过、frontend 3,523 通过/1 失败。
+
+修正保持已验证的生产行为，并加强实际链路断言：
+
+- 不可用项目恢复绑定真实 global MCP owner，明确排除旧项目 owner，两个资源工具使用相同 owner；保留历史/工作区/终端错误断言。
+- workspace activation 替身声明明确 scope，严格验证显式失败的 new→old 回退，以及后台索引失败保留已提交 new owner。
+- 容量恢复使用真实 HTTP 529 与 Retry-After，经 producer→owner 按精确 advice 重试；无 advice 使用默认预算仍只发一次请求并产生 typed BUSY。
+- WS 预算 2 对应 initial+2 retries 的 3 条真实连接，耗尽后再发 HTTP；验证真实最终答案和 4 个唯一且关闭的物理 span。
+- 工具历史竞态使用真实 conversation snapshot/hydrate 产生新 cursor，覆盖同 revision 新快照、新 revision、切换、删除和 retired 409；保留正常实时尾部合并。
+
+这些远端失败的纠正仅修改测试契约，未修改生产重试、作用域或分页逻辑；未降低原有隔离/准备次数断言，也未增设兼容兜底。
+
+纠正后集中检查：会话 16、workspace rollback/scope 27、模型/adapter 101 项通过；WS/owner/kernel 的 65 项通过，新增物理 span 断言改为从真实 owner 采集后单项通过；分页竞态 18 项通过。前端全套本机运行 3,507 项通过，Monaco 初始化 hook 超时导致其 21 项未运行；保留超时日志后以单 worker 复验该文件 21 项通过，未延长 hook 超时或修改生产代码。生产构建通过。最终远端结果仍以修正提交的 Actions 为准。
+
 ## 验证边界与发布
 
 102 个本地跳过项为：49 个符号链接权限、22 个沙箱/ACL 环境、23 个可选语言 grammar、5 个 Windows 打开句柄替换限制、3 个 Linux 特定行为。跳过未计入通过。真实模型任务使用明确的完全访问权限，不代表这些受限沙箱场景通过。
