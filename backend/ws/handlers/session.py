@@ -310,6 +310,11 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     # the runtime snapshot only after its page belongs to the current owner.
     while True:
         owner = session.active_conversation_id
+        if owner:
+            from backend.services.conversation_projection_service import recover_persisted_conversation_projections
+
+            async with session._conversation_projection_lock(owner):
+                await recover_persisted_conversation_projections(session.conversation_repo, conversation_id=owner)
         active_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner) if owner else None
         if active_view is not None:
             active_view = await asyncio.to_thread(restore_tool_artifact_sources, active_view, session.artifact_store)

@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from backend.conversations.repository import ConversationRepository
 from backend.workspace.path_utils import normalize_project_import_path
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from backend.agent.runtime import AgentRuntime
+
 
 class SessionRestoreManager:
     """Manages session restoration and synchronization."""
 
-    def __init__(self, conversation_repo: ConversationRepository):
+    def __init__(self, conversation_repo: ConversationRepository, *, agent_runtime: AgentRuntime | None = None):
+        from backend.agent.runtime import default_runtime_if_initialized
+
         self.conversation_repo = conversation_repo
+        self.agent_runtime = agent_runtime if agent_runtime is not None else default_runtime_if_initialized()
 
     async def restore_session(
         self,
@@ -47,6 +53,10 @@ class SessionRestoreManager:
         # Restore conversation
         if last_conversation_id:
             try:
+                from backend.services.conversation_projection_service import recover_persisted_conversation_projections
+
+                await recover_persisted_conversation_projections(self.conversation_repo, conversation_id=last_conversation_id,
+                                                                runtime=self.agent_runtime)
                 conversation = await asyncio.to_thread(
                     self.conversation_repo.get_conversation_view, last_conversation_id,
                 )

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import { reconcileRestoredEditorTabs, restoreWorkspaceEditorDrafts } from "../stores/shared-helpers";
 import { isDesktop, desktop, revealPath } from "../desktop/runtime";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
@@ -161,6 +162,11 @@ export const FileContextMenu = ({
       ? menu.path
       : `${parent && parent !== "." ? `${parent}/` : ""}${newName}`;
     try {
+      const restored = await restoreWorkspaceEditorDrafts(workingDirectory);
+      if (!continueMenuAction()) return;
+      useAppStore.setState((state) => ({
+        editorTabs: reconcileRestoredEditorTabs(state.editorTabs, restored, workingDirectory),
+      }));
       await renameWorkspacePath(menu.path, newPath, workingDirectory);
       useAppStore.getState().renameEditorPath(menu.path, newPath, workingDirectory);
       onRefresh();

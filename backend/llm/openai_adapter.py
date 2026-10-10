@@ -37,7 +37,7 @@ from backend.llm.responses_websocket import (
     responses_turn_state_from_headers,
 )
 from backend.llm.native_compaction import (
-    NATIVE_COMPACTION_TYPE, native_compaction_windows, require_native_context_origin,
+    NATIVE_COMPACTION_TYPE, native_compaction_windows,
     responses_context_origin, validate_compaction_window,
 )
 from backend.agent.lifecycle_errors import LifecycleStaleError
@@ -2440,10 +2440,9 @@ class OpenAIAdapter(LLMAdapter):
             reasoning_effort_levels=policy.wire_levels,
         )
 
-    def validate_context(self, messages: list[LLMMessage]) -> None:
-        self.validate_media_input(messages)
-        origin = responses_context_origin(_normalized_openai_base_url(self._settings.base_url)) if self._settings.wire_api == "responses" else ""
-        require_native_context_origin(messages, origin)
+    @property
+    def native_context_origin(self) -> str:
+        return responses_context_origin(_normalized_openai_base_url(self._settings.base_url)) if self._settings.wire_api == "responses" else ""
 
     async def compact_context(
         self, messages: list[LLMMessage], *, turn_context: LLMTurnContext | None = None,

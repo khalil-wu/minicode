@@ -127,7 +127,10 @@ class TurnIterationRuntime:
             if (target_budget.total < self.context._budget.total
                 and self.context.token_usage > target_budget.total - target_budget.reserved_response_tokens):
                 before = context_ledger_snapshot(self.context)
-                summary = await self.context.compact(restore_state=self.state, replacement_budget=target_budget)
+                summary = await self.context.compact(
+                    restore_state=self.state, replacement_budget=target_budget,
+                    replacement_llm=snapshot.llm,
+                )
                 model_events.append(build_context_compacted_event(summary, before, context_ledger_snapshot(self.context)))
         self.sync_active_session_model(snapshot)
         mcp_version, mcp_instructions = self.mcp_catalog(self.base_tool_registry)

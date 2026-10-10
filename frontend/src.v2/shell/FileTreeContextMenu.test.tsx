@@ -40,10 +40,13 @@ vi.mock("../protocol/workspace", () => ({
 
 import { FileContextMenu } from "./FileTreeContextMenu";
 import { useAppStore } from "../stores";
-import { clearEditorWorkspaceBufferCacheForTests } from "../stores/shared-helpers";
+import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, restoreWorkspaceEditorDrafts } from "../stores/shared-helpers";
+import { cachedEditorWorkspaceIndex, flushEditorDrafts, loadEditorDrafts, resetEditorDraftStorageForTests } from "../stores/editor-drafts";
 
 describe("FileContextMenu desktop deletion", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await flushEditorDrafts();
+    await resetEditorDraftStorageForTests();
     vi.resetAllMocks();
     mocks.isDesktop.mockReturnValue(true);
     clearEditorWorkspaceBufferCacheForTests();
@@ -53,10 +56,15 @@ describe("FileContextMenu desktop deletion", () => {
       activeEditorPath: null, editorOpenRequests: [],
       panelSlots: [{ id: "editor", kind: "editor", label: "Editor", focused: true }],
     });
+    await flushEditorDrafts();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await flushEditorDrafts();
+    await resetEditorDraftStorageForTests();
+    clearEditorWorkspaceBufferCacheForTests();
+    vi.restoreAllMocks();
   });
 
   it("retries a large directory deletion only after the second confirmation", async () => {
@@ -207,8 +215,74 @@ describe("FileContextMenu desktop deletion", () => {
     expect(state.editorTabs[0]).toMatchObject({ content: "unsaved", original: "disk", contentHash: "disk hash", loading: false });
     expect(state.activeTabPath).toBe("renamed/main.ts");
     expect(state.activeEditorPath).toBe("renamed/main.ts");
-    expect(JSON.parse(localStorage.getItem("minicode.editor.tabs:c:/repo")!)).toEqual(["renamed/main.ts", "renamed/nested/child.ts", "src-other/keep.ts"]);
+    await flushEditorDrafts();
+    expect(cachedEditorWorkspaceIndex("c:/repo")?.paths).toEqual(["renamed/main.ts", "renamed/nested/child.ts", "src-other/keep.ts"]);
     expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("recovers a cold v2 directory draft before renaming, with a workspace switch during recovery=%s", async (switchDuringRecovery) => {
+    const draft = { id: "cold-draft", path: "src/main.ts", content: "cold unsaved", original: "disk", loading: false };
+    useAppStore.setState({ editorTabs: [draft], activeTabPath: draft.path, activeEditorPath: draft.path });
+    await flushEditorDrafts();
+    await resetEditorDraftStorageForTests(true);
+    clearEditorWorkspaceBufferCacheForTests();
+    // A fresh renderer has no in-memory tabs or localStorage index for this root.
+    useAppStore.setState({ workingDirectory: "C:/cold-start", editorTabs: [], activeTabPath: null, activeEditorPath: null });
+    await flushEditorDrafts();
+    expect(localStorage.getItem("minicode.editor.tabs:c:/repo")).toBeNull();
+    expect(cachedEditorWorkspaceIndex("c:/repo")).toBeUndefined();
+    let resume!: () => void;
+    let observed!: () => void;
+    const released = new Promise<void>((resolve) => { resume = resolve; });
+    const reading = new Promise<void>((resolve) => { observed = resolve; });
+    const getAll = IDBIndex.prototype.getAll;
+    const read = vi.spyOn(IDBIndex.prototype, "getAll").mockImplementationOnce(function (...args) {
+      const request = getAll.apply(this, args);
+      Object.defineProperty(request, "onsuccess", { set(callback) {
+        request.addEventListener("success", (event) => { observed(); void released.then(() => callback.call(request, event)); });
+      } });
+      return request;
+    });
+    const onRefresh = vi.fn();
+    mocks.showPrompt.mockResolvedValueOnce("renamed");
+    mocks.renameWorkspacePath.mockResolvedValueOnce(undefined);
+    try {
+      act(() => useAppStore.getState().setWorkingDirectory("C:/repo"));
+      await reading;
+      expect(useAppStore.getState().editorTabs).toEqual([]);
+      render(<FileContextMenu menu={{ path: "C:/repo/src", isDir: true, x: 0, y: 0 }} workingDirectory="C:/repo" onRefresh={onRefresh} onClose={vi.fn()} />);
+      fireEvent.click(screen.getByRole("menuitem", { name: "重命名…" }));
+      await waitFor(() => expect(mocks.showPrompt).toHaveBeenCalled());
+      expect(mocks.renameWorkspacePath).not.toHaveBeenCalled();
+      if (switchDuringRecovery) act(() => useAppStore.getState().setWorkingDirectory("C:/switched-while-recovering"));
+      resume();
+      await act(async () => {
+        await restoreWorkspaceEditorDrafts("C:/repo");
+        await flushEditorDrafts();
+      });
+      if (switchDuringRecovery) {
+        expect(mocks.renameWorkspacePath).not.toHaveBeenCalled();
+        expect(onRefresh).not.toHaveBeenCalled();
+        expect(useAppStore.getState().workingDirectory).toBe("C:/switched-while-recovering");
+        expect(editorStateForWorkspace("C:/repo").editorTabs).toEqual([expect.objectContaining({ path: "src/main.ts", content: "cold unsaved" })]);
+      } else {
+        await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+        await flushEditorDrafts();
+        expect(mocks.renameWorkspacePath).toHaveBeenCalledWith("C:/repo/src", "C:/repo/renamed", "C:/repo");
+        expect(useAppStore.getState().editorTabs).toEqual([expect.objectContaining({ path: "renamed/main.ts", content: "cold unsaved", original: "disk" })]);
+      }
+      await resetEditorDraftStorageForTests(true);
+      clearEditorWorkspaceBufferCacheForTests();
+      const saved = await loadEditorDrafts("c:/repo", [], "minicode.editor.drafts:c:/repo");
+      const expectedPath = switchDuringRecovery ? "src/main.ts" : "renamed/main.ts";
+      expect([...saved.keys()]).toEqual([expectedPath]);
+      expect(saved.get(expectedPath)?.content).toBe("cold unsaved");
+      expect(cachedEditorWorkspaceIndex("c:/repo")?.paths).toEqual([expectedPath]);
+    } finally {
+      resume();
+      read.mockRestore();
+      await flushEditorDrafts();
+    }
   });
 
   it("keeps the original buffer and presents the server's rename error", async () => {

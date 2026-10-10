@@ -100,7 +100,7 @@ def test_fuzzy_index_excludes_the_actual_application_state_path(tmp_path, monkey
     store.mkdir()
     (store / "audit-fixture-receipt.py").write_text("receipt = True", encoding="utf-8")
     (tmp_path / "audit-fixture-source.py").write_text("source = True", encoding="utf-8")
-    monkeypatch.setattr("backend.security.sensitive_files.application_state_roots", lambda: (store,))
+    monkeypatch.setattr("backend.config.DATA_ROOT", store)
     paths = [match.path.name for match in FuzzySearchEngine(tmp_path).search("audit-fixture")]
     assert paths == ["audit-fixture-source.py"]
 

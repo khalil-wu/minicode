@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,41 @@ def _manual_manager(monkeypatch, tmp_path) -> MCPServerManager:
     monkeypatch.setattr(manager, "_load_plugin_configs", lambda **_kwargs: [])
     monkeypatch.setattr(manager, "_load_project_configs", lambda: [])
     return manager
+
+
+@pytest.mark.parametrize("difference", [
+    {"env": {"ACCOUNT": "second"}}, {"cwd": "second-workspace"},
+    {"transport": "http", "command": None, "url": "https://mcp.example/mcp"},
+])
+def test_distinct_plugin_execution_contexts_are_not_deduplicated(monkeypatch, tmp_path, difference):
+    first = MCPServerConfig(name="plugin:first:docs", command="python", args=["server.py"], source="plugin:first")
+    second = replace(first, name="plugin:second:docs", source="plugin:second", **difference)
+    manager = _manual_manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_load_plugin_configs", lambda **kwargs: [first, second])
+    assert [config.name for config in manager.load_config()] == [first.name, second.name]
+
+
+@pytest.mark.parametrize("difference", [{}, {"headers": {"Authorization": "Bearer other-account"}},
+    {"headers_helper": "account-headers"}, {"oauth_client_id": "other-client"}, {"oauth_callback_port": 8400}])
+def test_remote_plugin_accounts_keep_separate_server_identity(monkeypatch, tmp_path, difference):
+    first = MCPServerConfig(name="plugin:first:docs", transport="http", url="https://mcp.example/mcp", source="plugin:first")
+    second = replace(first, name="plugin:second:docs", source="plugin:second", **difference)
+    manager = _manual_manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_load_plugin_configs", lambda **kwargs: [first, second])
+    assert [config.name for config in manager.load_config()] == [first.name, second.name]
+
+
+def test_equivalent_stdio_declarations_keep_manual_then_plugin_precedence(monkeypatch, tmp_path):
+    config_path = tmp_path / ".mcp.json"
+    config_path.write_text(json.dumps({"servers": {"manual": {"transport": "stdio", "command": "python", "args": ["server.py"]}}}), encoding="utf-8")
+    manager = _manual_manager(monkeypatch, tmp_path)
+    manual, = manager._load_local_configs()
+    first = replace(manual, name="plugin:first:docs", source="plugin:first")
+    second = replace(manual, name="plugin:second:docs", source="plugin:second")
+    monkeypatch.setattr(manager, "_load_plugin_configs", lambda **kwargs: [first, second])
+    assert [config.name for config in manager.load_config()] == ["manual"]
+    config_path.unlink()
+    assert [config.name for config in manager.load_config()] == [first.name]
 
 
 def test_transport_preserves_the_explicit_minicode_config(monkeypatch, tmp_path) -> None:

@@ -212,6 +212,7 @@ class ConversationRecord:
     content_revision: int = 0
     content_updated_at: str = ""
     model_selection: dict[str, str] = field(default_factory=dict)
+    creation_command_id: str = ""
     conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
     memory_mode: ConversationMemoryMode = "enabled"
     memory_polluted: bool = False
@@ -300,6 +301,7 @@ class ConversationRecord:
         return cls(
             id=str(payload["id"]),
             title=str(payload.get("title") or "New chat"),
+            creation_command_id=str(payload.get("creation_command_id") or ""),
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
             revision=_normalize_revision(payload.get("revision")),

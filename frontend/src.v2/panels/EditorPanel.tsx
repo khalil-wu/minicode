@@ -5,7 +5,7 @@ import { fileGlyphColor, fileIcon } from "../lib/file-icons";
 import { defaultUrlTransform } from "react-markdown";
 import { useAppStore } from "../stores";
 import type { EditorOpenRequest, EditorTab } from "../stores/types";
-import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace, loadEditorViewState, persistEditorViewState } from "../stores/shared-helpers";
+import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace, loadEditorViewState, persistEditorViewState, restoreWorkspaceEditorDrafts, mergeRestoredEditorTabs } from "../stores/shared-helpers";
 import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
@@ -652,6 +652,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   };
 
   const loadFileContent = async (tab: EditorTab) => {
+    if (tab.recoveryPending) return;
     const path = tab.path;
     const directory = workingDirectory;
     const epochKey = tab.id;
@@ -1013,8 +1014,15 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   };
 
   const handleCloseTab = async (path: string) => {
-    const state = useAppStore.getState();
+    let state = useAppStore.getState();
     if (!workspaceRootsEqual(state.workingDirectory, workingDirectory)) return false;
+    if (state.editorTabs.some(tab => editorPathsEqual(tab.path, path, workingDirectory) && tab.recoveryPending)) {
+      const restored = await restoreWorkspaceEditorDrafts(workingDirectory);
+      useAppStore.setState(current => workspaceRootsEqual(current.workingDirectory, workingDirectory)
+        ? { editorTabs: mergeRestoredEditorTabs(current.editorTabs, restored, workingDirectory) } : {});
+      state = useAppStore.getState();
+      if (!workspaceRootsEqual(state.workingDirectory, workingDirectory)) return false;
+    }
     const tab = state.editorTabs.find((t) => editorPathsEqual(t.path, path, workingDirectory));
     if (tab && tab.content !== tab.original) {
       const { showConfirm } = await import("../overlays/DialogService");

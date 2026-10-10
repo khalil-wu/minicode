@@ -12,7 +12,7 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
@@ -336,9 +336,11 @@ class JournalEvent:
 class ExecutionJournal:
     """Per-agent append-only JSONL journal."""
 
-    def __init__(self, agent_id: str, *, base_dir: Path | None = None) -> None:
+    def __init__(self, agent_id: str, *, base_dir: Path | None = None,
+                 terminal_record_reader: Callable[[str], dict[str, Any] | None] | None = None) -> None:
         self.agent_id = validate_storage_id(agent_id, field_name="agent_id")
         self.base_dir = base_dir
+        self._terminal_record_reader = terminal_record_reader
         self.path = get_journal_path(self.agent_id, base_dir=base_dir)
         self._process_lock = _process_lock_for(self.path)
         self._event_cache: list[JournalEvent] | None = None
@@ -1297,8 +1299,10 @@ class ExecutionJournal:
 
         events = self.read_events()
         covered_ids: set[tuple[str, str]] = set()
-        for event in events:
+        for event in self._expanded_projection_events(events):
             lifecycle = str(event.payload.get("lifecycle") or "")
+            if event.payload.get("partial"):
+                continue
             if lifecycle in {"conversation_projection_pending", "conversation_projection_delta"}:
                 message = event.payload.get("assistant_message") or {"id": event.payload.get("message_id")}
                 if isinstance(message, dict):
@@ -1336,6 +1340,22 @@ class ExecutionJournal:
                 superseded = str(event.payload.get("supersedes_terminal_intent_event_id") or "").strip()
                 if superseded:
                     superseded_intent_ids.add(superseded)
+
+        # The exact intent is committed in the same CAS as the run terminal.
+        # A crash before the observational journal receipt cannot erase it.
+        if self._terminal_record_reader is not None:
+            unresolved_run_ids = {
+                str(intent.payload.get("run_id") or "") for intent in intents.values()
+                if (str((intent.payload.get("assistant_message") or {}).get("id") or intent.payload.get("message_id") or ""),
+                    str(intent.payload.get("run_id") or "")) not in covered_ids
+            }
+            for run_id in unresolved_run_ids:
+                record = self._terminal_record_reader(run_id)
+                if record is not None and record["status"] != "running" and record.get("terminal_intent_event_id"):
+                    intent_id = record["terminal_intent_event_id"]
+                    committed_run_ids.add(run_id)
+                    committed_intent_ids.add(intent_id)
+                    receipt_intents_by_run[run_id] = intent_id
 
         # A later explicit failure always wins over an earlier/malformed receipt.
         committed_run_ids.difference_update(failed_run_ids)

@@ -99,6 +99,7 @@ class SessionRunManager:
         self._turn_input_queues: dict[str, TurnInputQueue] = wait_state.turn_input_queues
         self._terminal_statuses: dict[str, str] = {}
         self._delivery_complete: set[tuple[str, str]] = set()
+        self._last_delivery_complete: dict[str, str] = {}
         self._watched_notification_conversations: set[str] = set()
         self._notification_request_generation: dict[str, int] = {}
         self._notification_attempt_generation: dict[str, int] = {}
@@ -177,9 +178,14 @@ class SessionRunManager:
         )
 
     def mark_delivery_complete(self, conversation_id: str, run_id: str = "") -> None:
-        conversation_id = str(conversation_id or "").strip()
+        conversation_id, run_id = self._delivery_key(conversation_id, run_id)
         if conversation_id:
-            self._delivery_complete.add(self._delivery_key(conversation_id, run_id))
+            self._delivery_complete.add((conversation_id, run_id))
+            current_run = self.run_task_ids.get(conversation_id, "")
+            if not run_id or current_run == run_id or (
+                not current_run and conversation_id not in self._last_delivery_complete
+            ):
+                self._last_delivery_complete[conversation_id] = run_id
 
     def is_delivery_complete(self, conversation_id: str, run_id: str = "") -> bool:
         conversation_id, run_id = self._delivery_key(conversation_id, run_id)
@@ -194,10 +200,11 @@ class SessionRunManager:
             return (
                 (conversation_id, run_id) in self._delivery_complete
                 or (conversation_id, "") in self._delivery_complete
+                or self._last_delivery_complete.get(conversation_id) in {run_id, ""}
             )
         # With no registered run, reconnect can still inspect the last
         # terminal delivery. Old run-scoped markers never release a new run.
-        return any(
+        return conversation_id in self._last_delivery_complete or any(
             owner == conversation_id
             for owner, _owned_run_id in self._delivery_complete
         )
@@ -602,6 +609,7 @@ class SessionRunManager:
         self._delivery_complete = {
             key for key in self._delivery_complete if key[0] != owner
         }
+        self._last_delivery_complete.pop(owner, None)
         self._terminal_statuses.pop(owner, None)
         self.run_tasks.pop(owner, None)
         self.run_task_ids.pop(owner, None)
@@ -776,6 +784,8 @@ class SessionRunManager:
             # not let it satisfy this conversation's new run.
             self._delivery_complete.discard((conversation_id, ""))
             self._delivery_complete.discard((conversation_id, task_id))
+            if self._last_delivery_complete.get(conversation_id) == "":
+                self._last_delivery_complete.pop(conversation_id)
             self.run_tasks[conversation_id] = task
             if run_context is not None:
                 self._run_contexts[conversation_id] = run_context
@@ -1159,8 +1169,7 @@ class SessionRunManager:
             )
         registered_task = self.run_tasks.get(conversation_id) if conversation_id else None
         newer_run_registered = registered_task is not None and registered_task is not task
-        if newer_run_registered:
-            self._delivery_complete.discard((conversation_id, task_id))
+        self._delivery_complete.discard((conversation_id, task_id))
         if conversation_id and registered_task is task:
             self.run_tasks.pop(conversation_id, None)
             self._run_contexts.pop(conversation_id, None)

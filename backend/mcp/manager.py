@@ -546,14 +546,14 @@ class MCPServerManager:
                 inactive_project_configs[config.name] = config
 
         # Plugin keys are namespaced, so name collisions cannot suppress a
-        # manually configured server. A manual declaration owns a matching
-        # command/URL; between plugins, the first declaration owns it.
+        # manually configured server. A manual declaration owns an equivalent
+        # execution/credential context; between plugins, the first owns it.
         manual_signatures = {
             signature
             for config in manual.values()
             if (signature := _mcp_server_signature(config))
         }
-        plugin_signatures: set[str] = set()
+        plugin_signatures: set[tuple[Any, ...]] = set()
         merged: dict[str, MCPServerConfig] = {}
         for config in plugin_configs:
             signature = _mcp_server_signature(config)
@@ -2048,16 +2048,11 @@ def _mcp_catalog_sort_key(config: MCPServerConfig) -> tuple[int, int, str, str]:
     return (rank, config.priority, config.name.casefold(), config.name)
 
 
-def _mcp_server_signature(config: MCPServerConfig) -> str | None:
-    """Return MiniCode's identity for duplicate MCP process declarations."""
-    if config.transport == "stdio":
-        return "stdio:" + json.dumps(
-            [config.command, *config.args],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    url = str(config.url or "").strip()
-    return f"url:{url}" if url else None
+def _mcp_server_signature(config: MCPServerConfig) -> tuple[Any, ...] | None:
+    """Compare transport and credentials independently of declaration scope."""
+    if config.transport != "stdio" and not config.url:
+        return None
+    return _mcp_server_identity(config, include_scope=False)
 
 
 def _record_operation_failure(
@@ -2121,13 +2116,17 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
     )
 
 
-def _mcp_server_identity(config: MCPServerConfig) -> tuple[Any, ...]:
-    return (
+def _mcp_server_identity(config: MCPServerConfig, *, include_scope: bool = True) -> tuple[Any, ...]:
+    identity = (
         config.transport, config.command, tuple(config.args), config.cwd,
         tuple(sorted(config.env.items())), config.url,
         tuple(sorted(config.headers.items())), config.headers_helper,
-        config.oauth_client_id, config.source, config.project_workspace,
+        config.oauth_client_id, config.oauth_callback_port,
+        # HTTP OAuth credentials are stored by server name; headers helpers
+        # also receive that name and can return different account credentials.
+        config.name if config.transport != "stdio" else "",
     )
+    return (*identity, config.source, config.project_workspace) if include_scope else identity
 
 
 def _resolve_plugin_relative_path(plugin_root: Path, value: str) -> Path | None:

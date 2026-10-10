@@ -123,21 +123,21 @@ def _externalize_large_subagent_result(
     *,
     subagent_id: str,
     content: str,
+    conversation_id: str,
+    workspace_root: str,
 ) -> tuple[str, str]:
     """Keep large delegated reports out of the parent model context."""
 
     text = str(content or "")
     if len(text.encode("utf-8")) <= _SUBAGENT_RESULT_ARTIFACT_THRESHOLD_BYTES:
         return text, ""
-    try:
-        artifact_id = artifact_store.save(
-            content=text,
-            source=f"subagent:{subagent_id}",
-            type="subagent_result",
-        )
-    except Exception as exc:
-        logger.warning("large subagent result artifact save failed id=%s: %s", subagent_id, exc)
-        return text, ""
+    artifact_id = artifact_store.save(
+        content=text,
+        source=f"subagent:{subagent_id}",
+        type="subagent_result",
+        conversation_id=conversation_id,
+        workspace_root=workspace_root,
+    )
     compact, _ = compact_subagent_result(text)
     return (
         "\n".join(

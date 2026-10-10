@@ -78,6 +78,107 @@ def test_invalidation_during_scan_is_not_lost(tmp_path, monkeypatch):
     assert [match.path.name for match in engine.search("created")] == ["created.txt"]
 
 
+def test_fuzzy_scan_resolves_application_roots_once_without_exposing_state(tmp_path, monkeypatch):
+    import backend.workspace.fuzzy_search as fuzzy
+
+    state_root = tmp_path / "application-state"
+    for relative in ("data/project.py", "src/source.py", "application-state/internal.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture", encoding="utf-8")
+    scans = []
+
+    def roots():
+        scans.append(state_root)
+        return (state_root,)
+
+    monkeypatch.setattr(fuzzy, "application_state_roots", roots)
+    engine = FuzzySearchEngine(tmp_path)
+    assert {match.path.relative_to(tmp_path).as_posix() for match in engine.search(".py")} == {
+        "data/project.py", "src/source.py",
+    }
+    engine.search("source")
+    assert len(scans) == 2
+    engine.invalidate_cache()
+    engine.search("source")
+    assert len(scans) == 3
+
+
+def test_fuzzy_search_checks_ranked_targets_until_the_requested_allowed_results_are_full(tmp_path, monkeypatch):
+    import backend.workspace.fuzzy_search as fuzzy
+
+    for number in range(1000):
+        (tmp_path / f"source_{number:04d}.py").write_text("fixture", encoding="utf-8")
+    checked = []
+    protected = fuzzy.is_protected_write_path
+
+    def recorded(path, **kwargs):
+        checked.append(path.name)
+        return protected(path, **kwargs)
+
+    monkeypatch.setattr(fuzzy, "is_protected_write_path", recorded)
+    engine = FuzzySearchEngine(tmp_path)
+    matches = engine.search("source", max_results=20, is_allowed=lambda path: path.name >= "source_0003.py")
+    assert [match.path.name for match in matches] == [f"source_{number:04d}.py" for number in range(3, 23)]
+    assert checked == [f"source_{number:04d}.py" for number in range(23)]
+
+
+def test_fuzzy_search_rechecks_live_protected_targets_after_the_index_was_built(tmp_path, monkeypatch):
+    import backend.config as config
+
+    workspace = tmp_path / "workspace"
+    state_root = tmp_path / "application-state"
+    workspace.mkdir()
+    state_root.mkdir()
+    folder = workspace / "source"
+    folder.mkdir()
+    original = folder / "document.py"
+    original.write_text("public fixture", encoding="utf-8")
+    (state_root / "document.py").write_text("private fixture", encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_ROOT", state_root)
+    engine = FuzzySearchEngine(workspace)
+    assert [match.path for match in engine.search("document")] == [original]
+    original.unlink()
+    folder.rmdir()
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(folder), str(state_root)], check=True, capture_output=True)
+    else:
+        folder.symlink_to(state_root, target_is_directory=True)
+    assert engine.search("document") == []
+
+
+def test_fuzzy_scan_resolves_a_directory_replaced_by_a_protected_junction(tmp_path, monkeypatch):
+    import backend.config as config
+
+    workspace = tmp_path / "workspace"
+    state_root = tmp_path / "application-state"
+    workspace.mkdir()
+    state_root.mkdir()
+    admitted = workspace / "admitted"
+    admitted.mkdir()
+    (state_root / "private-state.py").write_text("private fixture", encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_ROOT", state_root)
+    scandir = os.scandir
+    replaced = False
+
+    def replace_before_enumeration(path):
+        nonlocal replaced
+        if Path(path) == admitted and not replaced:
+            admitted.rmdir()
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(admitted), str(state_root)], check=True, capture_output=True)
+            else:
+                admitted.symlink_to(state_root, target_is_directory=True)
+            replaced = True
+        return scandir(path)
+
+    with monkeypatch.context() as context:
+        context.setattr(os, "scandir", replace_before_enumeration)
+        assert FuzzySearchEngine(workspace).search("private-state") == []
+    assert replaced
+    assert FuzzySearchEngine(workspace).search("private-state") == []
+
+
 @pytest.mark.parametrize("kind", ["file", "folder"])
 def test_search_prunes_ignored_trees_and_applies_nested_ignore_rules(tmp_path, monkeypatch, kind):
     for name in ("node_modules/package", "generated/deep", "src/private", "src/public"):

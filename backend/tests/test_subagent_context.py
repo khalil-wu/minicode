@@ -864,9 +864,14 @@ def test_large_subagent_result_is_externalized_to_artifact(tmp_path) -> None:
         store,
         subagent_id="researcher",
         content=raw,
+        conversation_id="owner",
+        workspace_root=str(tmp_path),
     )
 
     assert artifact_id
     assert len(compact) < len(raw)
     assert f"artifact_id: {artifact_id}" in compact
-    assert store.get(artifact_id) == raw
+    assert store.get(artifact_id, conversation_id="owner", workspace_root=tmp_path) == raw
+    assert store.get(artifact_id, conversation_id="another", workspace_root=tmp_path) is None
+    assert store.delete_for_conversation("owner") == 1
+    assert store.get(artifact_id) is None

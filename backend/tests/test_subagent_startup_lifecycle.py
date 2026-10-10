@@ -234,6 +234,43 @@ async def _launch(case, delivery: str, **arguments):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery, isolated, projectless", [("foreground", False, False), ("background", False, False),
+    ("teammate", False, False), ("background", True, False), ("foreground", False, True)])
+async def test_long_child_results_are_readable_and_deleted_in_the_parent_scope(startup_case, delivery, isolated, projectless):
+    from backend.tools.agent_artifact_tools import ReadArtifactTool
+    from backend.tools.base import MAX_TOOL_RESULT_BYTES
+
+    case = startup_case
+    if projectless:
+        case.context = replace(case.context, workspace_root=None)
+    if isolated:
+        _prepare_git(case.workspace)
+    raw = "delegated evidence\n" + "evidence\n" * (MAX_TOOL_RESULT_BYTES // 8) + "result-tail"
+
+    class LongResultModel(_RecordingLLM):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=raw, phase="final_answer")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    case.tool._llm_provider = LongResultModel()
+    child_id, launched = await _launch(case, delivery, **({"isolation": "worktree"} if isolated else {}))
+    if delivery != "foreground":
+        assert await case.runtime.wait_for_subagent(child_id, timeout=5)
+        await asyncio.gather(*case.workers)
+    else:
+        assert not launched.is_error, launched.content
+    snapshot = case.runtime.get_subagent_snapshot(child_id, include_result=True)
+    assert snapshot["status"] == "completed", snapshot
+    artifact_id = snapshot["result"]["artifact_id"]
+    store = case.tool._artifact_store
+    result = await ReadArtifactTool(store).execute({"artifact_id": artifact_id, "offset": len(raw.splitlines()), "limit": 1}, context=case.context)
+    assert not result.is_error and "result-tail" in result.content
+    assert store.get(artifact_id, conversation_id="other-conversation", workspace_root=case.workspace) is None
+    assert store.delete_for_conversation(case.context.conversation_id) == 1
+    assert store.get(artifact_id) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("delivery", ["foreground", "background", "teammate"])
 @pytest.mark.parametrize("agent_type", ["general-purpose", "explore", "plan"])
 @pytest.mark.parametrize("denied_web", [False, True])

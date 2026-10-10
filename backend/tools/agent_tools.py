@@ -60,7 +60,7 @@ from backend.tools.agent_control_plane import (
     normalize_agent_fork_turns,
     normalize_agent_task_name,
 )
-from backend.tools.base import MAX_TOOL_RESULT_BYTES, BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.base import MAX_TOOL_RESULT_BYTES, BaseTool, PermissionLevel, ToolResult, ToolSchema, artifact_owner_workspace_root
 from backend.tools.registry import ToolRegistry
 from backend.tools.agent_artifact_tools import ReadArtifactTool as ReadArtifactTool
 from backend.tools.agent_user_tools import AskUserTool as AskUserTool
@@ -2473,11 +2473,7 @@ class TaskTool(BaseTool):
             # is projected through the parent conversation. Keep the parent
             # conversation's workspace as the artifact owner so a later raw/read
             # request can satisfy the same composite owner scope.
-            artifact_owner_workspace = str(
-                parent_metadata.get("artifact_owner_workspace_root")
-                or (context.workspace_root if context is not None else "")
-                or ""
-            ).strip()
+            artifact_owner_workspace = artifact_owner_workspace_root(context)
             subagent_metadata_payload = {
                 **inherited_subagent_metadata,
                 "parent_run_id": parent_run_id,
@@ -3899,6 +3895,8 @@ class TaskTool(BaseTool):
                 self._artifact_store,
                 subagent_id=subagent_id,
                 content=result_text,
+                conversation_id=context.conversation_id,
+                workspace_root=artifact_owner_workspace,
             )
             result_record = None
             completed_record = None

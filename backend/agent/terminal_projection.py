@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.agent.turn_kernel import _set_terminal_reason
+from backend.agent.turn_kernel import PermissionContextRefreshError, _set_terminal_reason
 from backend.llm.base import UsageInfo
+from backend.llm.native_compaction import NativeContextCompatibilityError
+from backend.sandbox.runner import SandboxUnavailableError
 
 
 def _snapshot_usage(usage: UsageInfo) -> UsageInfo:
@@ -78,6 +80,24 @@ class TurnTerminalProjection:
         if checkpoint is not None:
             event.data["checkpoint"] = dict(checkpoint)
         return event
+
+
+def terminal_failure_event(exc: Exception) -> tuple[str, AgentEvent]:
+    """Project an execution failure without changing its terminal authority."""
+    recoverable = isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError, NativeContextCompatibilityError))
+    if isinstance(exc, SandboxUnavailableError):
+        reason, error_type, error_code = "sandbox_unavailable", "permission", "sandbox.unavailable"
+        message = "当前任务要求的命令沙箱不可用。请配置满足当前策略的隔离后端后重试；权限未被降级，已有执行结果请查看记录。"
+    elif isinstance(exc, NativeContextCompatibilityError):
+        reason, error_type, error_code = "provider_capability", "provider_capability", exc.code
+        message = str(exc)
+    elif isinstance(exc, PermissionContextRefreshError):
+        reason, error_type, error_code = "runtime_error", "permission", "permission_context_refresh_failed"
+        message = str(exc)
+    else:
+        reason, error_type, error_code = "runtime_error", "agent_loop", "agent_loop.runtime_error"
+        message = "MiniCode agent loop failed unexpectedly."
+    return reason, AgentEvent.error(message, recoverable=recoverable, error_type=error_type, error_code=error_code)
 
 
 def terminal_status_and_reason(

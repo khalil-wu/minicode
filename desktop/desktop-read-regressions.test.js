@@ -78,6 +78,7 @@ function browserFixture() {
   class View {
     constructor() { this.webContents = new Contents(); }
     getBounds() { return { width: 10, height: 10 }; }
+    setBounds() {}
     setVisible() {}
   }
   const browser = loadProduction("embedded-browser-manager.js", {
@@ -88,6 +89,7 @@ function browserFixture() {
   browser.init({
     getMainWindow: () => ({
       isDestroyed: () => false, webContents: { send() {} },
+      getContentBounds: () => ({ width: 800, height: 600 }),
       contentView: {
         addChildView(view) { children.push(view); },
         removeChildView(view) { children.splice(children.indexOf(view), 1); },

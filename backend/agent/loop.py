@@ -33,7 +33,6 @@ from backend.agent.state import AgentState
 from backend.agent.loop_session import AgentLoopSessionContext
 from backend.agent.stream_sanitizer import scrub_thinking_tags as _scrub_thinking_tags
 from backend.agent.turn_kernel import (
-    PermissionContextRefreshError,
     TurnKernel,
     _set_terminal_reason,
 )
@@ -53,6 +52,7 @@ from backend.agent.stream_attempt import StreamTextState
 from backend.agent.terminal_projection import (
     TurnTerminalProjection,
     terminal_boundary_events,
+    terminal_failure_event,
     terminal_status_and_reason,
 )
 from backend.artifact.store import ArtifactStore
@@ -60,7 +60,6 @@ from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter, LLMTurnContext
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
-from backend.sandbox.runner import SandboxUnavailableError
 from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -458,27 +457,14 @@ async def run_agent_loop(
         # An unexpected admission, provider, tool, or final-answer exception must
         # therefore become one canonical failed terminal transition instead of
         # escaping with a permanently running record and no public done event.
-        if isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)):
-            logger.warning("Stopping turn after permission or sandbox failure: %s", exc)
+        reason, failure_event = terminal_failure_event(exc)
+        if failure_event.data["recoverable"]:
+            logger.warning("Stopping turn after execution authority or provider context failure: %s", exc)
         else:
             logger.exception("Unhandled MiniCode agent-loop failure")
         if not turn_kernel.completion_emitted:
-            reason = "sandbox_unavailable" if isinstance(exc, SandboxUnavailableError) else "runtime_error"
             _set_terminal_reason(state, reason, status="failed")
-            yield AgentEvent.error(
-                "当前任务要求的命令沙箱不可用。请配置满足当前策略的隔离后端后重试；权限未被降级，已有执行结果请查看记录。"
-                if isinstance(exc, SandboxUnavailableError)
-                else str(exc) if isinstance(exc, PermissionContextRefreshError)
-                else "MiniCode agent loop failed unexpectedly.",
-                recoverable=isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)),
-                error_type=("permission" if isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)) else "agent_loop"),
-                error_code=(
-                    "sandbox.unavailable" if isinstance(exc, SandboxUnavailableError)
-                    else "permission_context_refresh_failed"
-                    if isinstance(exc, PermissionContextRefreshError)
-                    else "agent_loop.runtime_error"
-                ),
-            )
+            yield failure_event
             for event in await terminal_boundary_events(
                 turn_kernel=turn_kernel,
                 session_id=session_id,

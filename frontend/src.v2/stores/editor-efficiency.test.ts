@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "./index";
+import { flushEditorDrafts } from "./editor-drafts";
 import { clearEditorWorkspaceBufferCacheForTests, loadPersistedEditorTabs, persistEditorTabs } from "./shared-helpers";
 import { applyWorkbenchPreferences, defaultWorkbenchPreferences } from "../lib/workbench-preferences";
 import { EditorNavigation } from "../panels/editorNavigation";
@@ -11,7 +12,7 @@ beforeEach(() => {
     editorOpenRequests: [], workbenchPreferences: { ...defaultWorkbenchPreferences } });
 });
 describe("editor workspace efficiency", () => {
-  it("replaces clean preview tabs, keeps modified buffers and persists pin metadata", () => {
+  it("replaces clean preview tabs, keeps modified buffers and persists pin metadata", async () => {
     const store = useAppStore.getState();
     store.openEditorTab("a.py", { preview: true }); store.markTabLoaded("a.py", "a = 1");
     store.openEditorTab("b.py", { preview: true }); store.markTabLoaded("b.py", "b = 1");
@@ -20,6 +21,7 @@ describe("editor workspace efficiency", () => {
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["b.py", "c.py"]);
     store.pinEditorTab("c.py", true);
     persistEditorTabs(useAppStore.getState().editorTabs, "/editor-test");
+    await flushEditorDrafts();
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "c.py")).toMatchObject({ pinned: true, preview: false });
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "b.py")).toMatchObject({ content: "b = 2", original: "b = 1" });
   });
@@ -43,12 +45,13 @@ describe("editor workspace efficiency", () => {
     expect(JSON.parse(localStorage.getItem("minicode.workbench.preferences")!)).toMatchObject({ proseSize: 18, tabSize: 2, formatOnSave: true,
       speechModel: "saved-speech-model", snippets: legacy.snippets });
   });
-  it("persists a file's chosen language with its unchanged draft and restores automatic mode", () => {
+  it("persists a file's chosen language with its unchanged draft and restores automatic mode", async () => {
     const store = useAppStore.getState();
     store.openEditorTab("example.txt");
     store.markTabLoaded("example.txt", "// saved comment\nint answer = 42;");
     store.updateTabContent("example.txt", "// unsaved comment\nint answer = 43;");
     store.setEditorTabLanguage("example.txt", "cpp");
+    await flushEditorDrafts();
     const before = useAppStore.getState().editorTabs[0];
     clearEditorWorkspaceBufferCacheForTests();
     const restored = loadPersistedEditorTabs("/editor-test");

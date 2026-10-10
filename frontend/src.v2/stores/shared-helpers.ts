@@ -13,6 +13,7 @@ import type {
 import { clamp } from "../lib/clamp";
 import { clampTextScale } from "../lib/text-scale";
 import { safeJsonParse } from "../lib/safe-parse";
+import { cachedEditorDrafts, cachedEditorWorkspaceIndex, loadEditorDrafts, persistEditorDrafts, type EditorWorkspaceIndex } from "./editor-drafts";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import {
   isTerminalToolCallStatus,
@@ -316,10 +317,6 @@ export const renameEditorViewState = (workspace: string, path: string, newPath: 
   }
 };
 
-export const persistEditorLocation = (state: Pick<AppStore, "workingDirectory" | "activeTabPath" | "activeEditorPath">): void => {
-  writeLS(editorLocationStorageKey(state.workingDirectory), JSON.stringify({ activeTabPath: state.activeTabPath, activeEditorPath: state.activeEditorPath }));
-};
-
 export const agentEditReviewScope = (workspace: string, conversationId: string, turnId: string, path: string): string =>
   JSON.stringify([editorWorkspaceKey(workspace), conversationId, turnId, editorPathComparisonKey(path, workspace)]);
 
@@ -417,17 +414,16 @@ export const clearEditorWorkspaceBufferCacheForTests = () => {
   editorWorkspaceBuffers.clear();
 };
 
-export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
-  try {
+const legacyEditorWorkspaceIndex = (workspace?: string | null): EditorWorkspaceIndex | undefined => {
     const storageKey = editorTabsStorageKey(workspace);
     const legacyStorageKey = legacyEditorTabsStorageKey(workspace);
     const canonicalRaw = readLS(storageKey);
     const scopedRaw = canonicalRaw
       ?? (legacyStorageKey !== storageKey ? readLS(legacyStorageKey) : null);
     const raw = scopedRaw ?? (editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
-    if (!raw) return [];
+    if (!raw) return undefined;
     const parsed = safeJsonParse<unknown>(raw, []);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) return undefined;
     const paths = parsed.filter((path): path is string => typeof path === "string");
     const seen = new Set<string>();
     const normalizedPaths = paths
@@ -439,23 +435,28 @@ export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] 
         seen.add(key);
         return true;
       });
-    const normalizedRaw = JSON.stringify(normalizedPaths);
-    if (canonicalRaw == null || normalizedRaw !== JSON.stringify(paths)) {
-      writeLS(storageKey, normalizedRaw);
-    }
-    const drafts = safeJsonParse<EditorTab[]>(readLS(editorDraftsStorageKey(workspace)) ?? "[]", []);
-    const tabMeta = safeJsonParse<Record<string, Pick<EditorTab, "pinned" | "preview" | "lastActivated" | "language">>>(readLS(storageKey + ":meta") ?? "{}", {});
-    return normalizedPaths.map((path) => {
-      const draft = drafts.find((entry) => editorPathsEqual(entry.path, path, workspace ?? ""));
-      return { ...(draft ? { ...draft, path, loading: true, error: null, draftRestorePending: true, draftRestored: true } : blankEditorTab(path)),
-        ...tabMeta[editorPathComparisonKey(path, workspace ?? "")] };
-    });
-  } catch {
-    return [];
-  }
+    const tabMeta = safeJsonParse<EditorWorkspaceIndex["metadata"]>(readLS(storageKey + ":meta") ?? "{}", {});
+    const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(editorLocationStorageKey(workspace)) ?? "{}", {});
+    return { workspace: editorWorkspaceKey(workspace), paths: normalizedPaths,
+      metadata: Object.fromEntries(normalizedPaths.map(path => [path, tabMeta[editorPathComparisonKey(path, workspace ?? "")] ?? {}])),
+      activeTabPath: location.activeTabPath ?? null, activeEditorPath: location.activeEditorPath ?? null };
 };
 
-export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) => {
+export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
+    const index = cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyEditorWorkspaceIndex(workspace);
+    if (!index) return [];
+    const savedDrafts = cachedEditorDrafts(editorWorkspaceKey(workspace));
+    const drafts = savedDrafts ? [...savedDrafts.values()] : legacyEditorDrafts(workspace);
+    return index.paths.map((path) => {
+      const metadata = index.metadata[path];
+      const draft = drafts.find((entry) => editorPathsEqual(entry.path, metadata?.recoveryPath ?? path, workspace ?? ""));
+      return { ...(draft ? { ...draft, path, loading: true, error: null, draftRestorePending: true, draftRestored: true } : blankEditorTab(path)),
+        recoveryPending: savedDrafts === undefined,
+        ...metadata, language: metadata?.language };
+    });
+};
+
+export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null, location?: Pick<AppStore, "activeTabPath" | "activeEditorPath">) => {
   const seen = new Set<string>();
   const paths = tabs.flatMap((tab) => {
     const path = normalizeEditorPath(tab.path, workspace ?? "");
@@ -464,13 +465,53 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) 
     seen.add(key);
     return [path];
   });
-  writeLS(editorTabsStorageKey(workspace), JSON.stringify(paths));
-  writeLS(editorTabsStorageKey(workspace) + ":meta", JSON.stringify(Object.fromEntries(tabs.map((tab) => [
-    editorPathComparisonKey(tab.path, workspace ?? ""), { pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated, language: tab.language },
-  ]))));
-  const drafts = tabs.filter((tab) => !tab.readOnly && !tab.largeFile && tab.content !== tab.original);
-  writeLS(editorDraftsStorageKey(workspace), JSON.stringify(drafts));
+  const legacyIndex = legacyEditorWorkspaceIndex(workspace);
+  const previous = cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyIndex;
+  const index: EditorWorkspaceIndex = { workspace: editorWorkspaceKey(workspace), paths,
+    metadata: Object.fromEntries(tabs.map(tab => [normalizeEditorPath(tab.path, workspace ?? ""), {
+      pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated, language: tab.language, recoveryPath: tab.recoveryPath,
+    }])), activeTabPath: location ? location.activeTabPath : previous?.activeTabPath ?? null,
+    activeEditorPath: location ? location.activeEditorPath : previous?.activeEditorPath ?? null };
+  persistEditorDrafts(editorWorkspaceKey(workspace), tabs.map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") })),
+    legacyEditorDrafts(workspace), editorDraftsStorageKey(workspace), index, legacyIndex);
 };
+
+const legacyEditorDrafts = (workspace?: string | null): EditorTab[] =>
+  safeJsonParse<EditorTab[]>(readLS(editorDraftsStorageKey(workspace)) ?? "[]", [])
+    .map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") }));
+
+export function mergeRestoredEditorTabs(tabs: EditorTab[], restored: EditorTab[], workspace: string) {
+  return tabs.flatMap(tab => {
+    if (!tab.recoveryPending) return tab;
+    const saved = restored.find(entry => editorPathsEqual(entry.path, tab.path, workspace)
+      || editorPathsEqual(entry.recoveryPath ?? entry.path, tab.recoveryPath ?? tab.path, workspace));
+    return saved ? [{ ...tab, ...saved, id: tab.id, path: tab.path,
+      recoveryPending: false, recoveryPath: undefined }] : [];
+  });
+}
+
+export function reconcileRestoredEditorTabs(tabs: EditorTab[], restored: EditorTab[], workspace: string) {
+  const merged = mergeRestoredEditorTabs(tabs, restored, workspace);
+  return [...merged, ...restored.filter(tab => !merged.some(current => editorPathsEqual(current.path, tab.path, workspace)))];
+}
+
+export const editorWorkspaceRecoveryLocation = (workspace: string | null | undefined) =>
+  cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyEditorWorkspaceIndex(workspace);
+
+export async function restoreWorkspaceEditorDrafts(workspace: string, initialLocation?: Pick<AppStore, "activeTabPath" | "activeEditorPath">) {
+  const initialCache = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  const initial = initialLocation ?? { activeTabPath: initialCache?.activeTabPath ?? null, activeEditorPath: initialCache?.activeEditorPath ?? null };
+  await loadEditorDrafts(editorWorkspaceKey(workspace), legacyEditorDrafts(workspace), editorDraftsStorageKey(workspace), legacyEditorWorkspaceIndex(workspace));
+  const restored = loadPersistedEditorTabs(workspace);
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  if (cached) {
+    const location = editorWorkspaceRecoveryLocation(workspace);
+    cached.tabs = reconcileRestoredEditorTabs(cached.tabs, restored, workspace);
+    if (cached.activeTabPath === initial.activeTabPath) cached.activeTabPath = location?.activeTabPath ?? restored[0]?.path ?? null;
+    if (cached.activeEditorPath === initial.activeEditorPath) cached.activeEditorPath = location?.activeEditorPath ?? null;
+  }
+  return restored;
+}
 
 export const editorStateForWorkspace = (workspace: string | null | undefined) => {
   const cached = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
@@ -487,11 +528,11 @@ export const editorStateForWorkspace = (workspace: string | null | undefined) =>
     };
   }
   const editorTabs = loadPersistedEditorTabs(workspace);
-  const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(editorLocationStorageKey(workspace)) ?? "{}", {});
+  const location = editorWorkspaceRecoveryLocation(workspace);
   return {
     editorTabs,
-    activeTabPath: editorTabs.find((tab) => location.activeTabPath && editorPathsEqual(tab.path, location.activeTabPath, workspace ?? ""))?.path ?? editorTabs[0]?.path ?? null,
-    activeEditorPath: editorTabs.find((tab) => location.activeEditorPath && editorPathsEqual(tab.path, location.activeEditorPath, workspace ?? ""))?.path ?? null,
+    activeTabPath: editorTabs.find((tab) => location?.activeTabPath && editorPathsEqual(tab.path, location.activeTabPath, workspace ?? ""))?.path ?? editorTabs[0]?.path ?? null,
+    activeEditorPath: editorTabs.find((tab) => location?.activeEditorPath && editorPathsEqual(tab.path, location.activeEditorPath, workspace ?? ""))?.path ?? null,
     editorOpenRequests: [],
     activeEditorOpenRequestId: null,
   };

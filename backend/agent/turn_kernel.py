@@ -271,6 +271,7 @@ class TurnKernel:
         summary: str = "",
         terminal_reason: str = "",
         error: str = "",
+        terminal_intent_event_id: str = "",
     ) -> AgentEvent | None:
         if self._terminal_commit_failure_event is not None:
             return None
@@ -294,6 +295,7 @@ class TurnKernel:
                 summary=summary,
                 terminal_reason=terminal_reason,
                 error=error,
+                terminal_intent_event_id=terminal_intent_event_id,
             )
         except TerminalCommitError as exc:
             return self._record_terminal_commit_failure(exc)

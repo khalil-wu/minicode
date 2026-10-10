@@ -20,7 +20,7 @@ from typing import Callable, Literal, Optional
 
 from pathspec.gitignore import GitIgnoreSpec
 
-from backend.security.sensitive_files import is_protected_write_path
+from backend.security.sensitive_files import application_state_roots, is_protected_write_path
 from backend.workspace.path_filters import is_windows_reserved_path
 
 logger = logging.getLogger(__name__)
@@ -166,8 +166,6 @@ class FuzzySearchEngine:
             # 快速检查：查询中的所有字符是否都在路径中
             if not query_chars.issubset(path_chars):
                 continue
-            if is_allowed is not None and not is_allowed(path):
-                continue
             match = self._score_match(path, query_lower, path_str=path_str)
             if match is not None:
                 if self._is_test_file(path):
@@ -179,7 +177,20 @@ class FuzzySearchEngine:
 
         # 按分数降序排序，取 top-k
         matches.sort(key=lambda m: (-m.score, m.path.as_posix()))
-        return matches[:max_results]
+        # Resolve live targets at the result boundary, in ranking order. Indexing
+        # every Windows file paid that cost even for paths no query would return,
+        # and an index-time permission decision went stale when links changed.
+        application_roots = application_state_roots()
+        permitted_matches: list[FuzzyMatch] = []
+        for match in matches:
+            if len(permitted_matches) == max_results:
+                break
+            if is_protected_write_path(match.path, application_roots=application_roots):
+                continue
+            if is_allowed is not None and not is_allowed(match.path):
+                continue
+            permitted_matches.append(match)
+        return permitted_matches[:max_results]
 
     def invalidate_cache(self) -> None:
         """使文件缓存失效"""
@@ -189,10 +200,13 @@ class FuzzySearchEngine:
     def _refresh_file_cache(self) -> tuple[_IndexedFile, ...]:
         """Publish a complete index; invalidation during a scan remains effective."""
         generation = self._generation
+        prefix_length = len(self.workspace_root.as_posix().rstrip("/") + "/")
         files: list[_IndexedFile] = []
         for path, is_dir in iter_search_paths(self.workspace_root):
-            if not is_dir and not is_protected_write_path(path):
-                normalized = path.relative_to(self.workspace_root).as_posix()
+            if not is_dir:
+                # The walker constructs lexical descendants of this canonical
+                # root. This display key does not make an authorization decision.
+                normalized = path.as_posix()[prefix_length:]
                 files.append((path, normalized, frozenset(normalized.lower())))
         snapshot = tuple(files)
         self._file_cache = (generation, snapshot)

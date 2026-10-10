@@ -570,25 +570,37 @@ async def handle_conversation_create(
             return True
         workspace_root = str(workspace.project_path)
     git_branch = await asyncio.to_thread(session.git_branch_for, Path(workspace_root)) if workspace_root and not request.git_isolated else ""
-    created = session.conversation_repo.create_conversation(
-        conversation_id=request.conversation_id,
-        title=request.title,
-        conversation_type=request.conversation_type,
-        reuse_existing=request.conversation_type == "side_chat",
-        memory_mode=request.memory_mode,
-        permission_mode=request.permission_mode,
-        summary="",
-        context_snapshot={},
-        workspace_root=workspace_root,
-        git_branch=git_branch,
-        git_isolated=request.git_isolated,
-        model_selection=(
-            {"provider": session.provider, "model": session.selected_model,
-             "reasoning_effort": str(session.config.llm.reasoning_effort or "")}
-            if not session.active_conversation_id and getattr(session, "_model_override_active", False)
-            else None
-        ),
-    )
+    from backend.conversations.repository import ConversationCreationUnavailableError
+
+    try:
+        created = session.conversation_repo.create_conversation(
+            conversation_id=request.conversation_id,
+            title=request.title,
+            conversation_type=request.conversation_type,
+            reuse_existing=request.conversation_type == "side_chat",
+            creation_command_id=(
+                f"{session.session_id}:{session.event_outbox.client_command_id}"
+                if session.event_outbox.client_command_id else ""
+            ),
+            memory_mode=request.memory_mode,
+            permission_mode=request.permission_mode,
+            summary="",
+            context_snapshot={},
+            workspace_root=workspace_root,
+            git_branch=git_branch,
+            git_isolated=request.git_isolated,
+            model_selection=(
+                {"provider": session.provider, "model": session.selected_model,
+                 "reasoning_effort": str(session.config.llm.reasoning_effort or "")}
+                if not session.active_conversation_id and getattr(session, "_model_override_active", False)
+                else None
+            ),
+        )
+    except ConversationCreationUnavailableError as exc:
+        from backend.ws.command_results import emit_command_error
+
+        await emit_command_error(session, command, exc, data={"conversation_id": request.conversation_id or ""})
+        return True
     if request.git_isolated and not created.worktree_path:
         isolated = await session.create_isolated_conversation_worktree(created)
         if isolated is None:
@@ -893,6 +905,10 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     from backend.conversations.models import ConversationRecord
 
     conversation_id = str(data.get("conversation_id", ""))
+    from backend.services.conversation_projection_service import recover_persisted_conversation_projections
+
+    async with session._conversation_projection_lock(conversation_id):
+        await recover_persisted_conversation_projections(session.conversation_repo, conversation_id=conversation_id)
     view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, conversation_id)
     if view is None:
         await emit_conversation_not_found(session, conversation_id)

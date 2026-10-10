@@ -47,7 +47,7 @@ from backend.llm.base import (
     estimate_tool_schema_tokens,
 )
 from backend.llm.capabilities import capabilities_for_adapter
-from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE, native_compaction_windows, validate_compaction_window
+from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE, native_compaction_windows, require_native_context_origin, validate_compaction_window
 from backend.skills.manager import SkillManager
 from backend.skills.executor import SkillExecutor
 from backend.agent.prompting import (
@@ -1136,8 +1136,7 @@ class ContextBuilder:
         prompt_parts: PromptParts | None = None,
     ) -> list[LLMMessage]:
         """One provider projection shared by sending and budget accounting."""
-        if any(native_compaction_windows(message) for message in self._history):
-            self._llm.validate_context(self._history)
+        has_native_context = any(native_compaction_windows(message) for message in self._history)
         prompt_parts = prompt_parts or self._build_prompt_parts(state, workspace_root)
         messages: list[LLMMessage] = []
         system_content = prompt_parts.render_system()
@@ -1229,6 +1228,8 @@ class ContextBuilder:
                 ] or [unsupported_image_hint("Image")]
                 message = replace(message, images=[], content=message.content + "\n\n" + "\n".join(hints))
             messages.append(message)
+        if has_native_context:
+            self._llm.validate_context(messages)
         return messages
 
     @staticmethod
@@ -3288,11 +3289,30 @@ class ContextBuilder:
     async def compact(
         self, focus: str = "", restore_state: AgentState | None = None,
         *, replacement_budget: TokenBudget | None = None,
+        replacement_llm: LLMAdapter | None = None,
     ) -> str:
         """Summarize older entries while preserving a token-bounded recent tail."""
+        if replacement_llm is not None:
+            require_native_context_origin(
+                self._history, replacement_llm.native_context_origin,
+                allow_images=capabilities_for_adapter(replacement_llm).vision is not False,
+            )
         clear_system_prompt_sections()
-        if capabilities_for_adapter(self._llm).native_compaction:
-            return await self._compact_native_context(focus, restore_state, replacement_budget=replacement_budget)
+        use_native = capabilities_for_adapter(self._llm).native_compaction and (
+            replacement_llm is None
+            or (
+                self._llm.native_context_origin == replacement_llm.native_context_origin
+                and (
+                    capabilities_for_adapter(replacement_llm).vision is not False
+                    or not any(message.images for message in self._history)
+                )
+            )
+        )
+        if use_native:
+            return await self._compact_native_context(
+                focus, restore_state, replacement_budget=replacement_budget,
+                replacement_llm=replacement_llm,
+            )
         # A local summary can compact newer readable history, but may not
         # rewrite or discard an already-installed encrypted provider window.
         pinned_end = next((index + 1 for index in range(len(self._history) - 1, -1, -1)
@@ -3361,12 +3381,18 @@ class ContextBuilder:
         )
         return compressed_summary
 
-    async def _compact_native_context(self, focus: str, restore_state: AgentState | None, *, replacement_budget: TokenBudget | None = None) -> str:
+    async def _compact_native_context(
+        self, focus: str, restore_state: AgentState | None, *,
+        replacement_budget: TokenBudget | None = None,
+        replacement_llm: LLMAdapter | None = None,
+    ) -> str:
         state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
         messages = self._render_prompt_messages(state, self._workspace_root_for_state(state))
         if focus:
             messages.insert(0, LLMMessage(role="system", content=f"Compaction focus requested by the user: {focus}"))
         replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
+        if replacement_llm is not None:
+            replacement_llm.validate_context([replacement])
         # References preserve access to originals without duplicating the
         # provider's returned media or trying to interpret encrypted content.
         refs = {ref["artifact_id"]: ref for message in self._history for ref in message.attachment_refs}

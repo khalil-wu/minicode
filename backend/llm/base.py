@@ -1058,10 +1058,19 @@ class LLMAdapter(ABC):
         """Return a complete provider-native replacement window when supported."""
         raise NotImplementedError("This adapter does not support native compaction")
 
+    @property
+    def native_context_origin(self) -> str:
+        """Provider endpoint whose encrypted continuation this adapter accepts."""
+        return ""
+
     def validate_context(self, messages: list[LLMMessage]) -> None:
         self.validate_media_input(messages)
+        from backend.llm.capabilities import capabilities_for_adapter
         from backend.llm.native_compaction import require_native_context_origin
-        require_native_context_origin(messages)
+        require_native_context_origin(
+            messages, self.native_context_origin,
+            allow_images=capabilities_for_adapter(self).vision is not False,
+        )
 
     def validate_media_input(self, messages: list[LLMMessage]) -> None:
         from backend.llm.capabilities import capabilities_for_adapter

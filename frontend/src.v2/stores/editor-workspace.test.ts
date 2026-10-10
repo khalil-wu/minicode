@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "./index";
+import { cachedEditorWorkspaceIndex, flushEditorDrafts } from "./editor-drafts";
 import { clearEditorWorkspaceBufferCacheForTests } from "./shared-helpers";
 
 vi.mock("../protocol/ws-outbox", () => ({
@@ -56,13 +57,14 @@ describe("editor workspace isolation", () => {
     });
   });
 
-  it("keeps open editor tabs scoped to the active workspace", () => {
+  it("keeps open editor tabs scoped to the active workspace", async () => {
     useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
     useAppStore.getState().openEditorTab("src/alpha.ts");
     useAppStore.setState({ activeEditorPath: "src/alpha.ts" });
 
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["src/alpha.ts"]);
-    expect(storage.get("minicode.editor.tabs:c:/projects/alpha")).toBe(JSON.stringify(["src/alpha.ts"]));
+    await flushEditorDrafts();
+    expect(cachedEditorWorkspaceIndex("c:/projects/alpha")?.paths).toEqual(["src/alpha.ts"]);
 
     useAppStore.getState().setWorkingDirectory("C:\\projects\\beta");
 
@@ -73,7 +75,8 @@ describe("editor workspace isolation", () => {
     useAppStore.getState().openEditorTab("src/beta.ts");
 
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["src/beta.ts"]);
-    expect(storage.get("minicode.editor.tabs:c:/projects/beta")).toBe(JSON.stringify(["src/beta.ts"]));
+    await flushEditorDrafts();
+    expect(cachedEditorWorkspaceIndex("c:/projects/beta")?.paths).toEqual(["src/beta.ts"]);
 
     useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
 
@@ -82,7 +85,7 @@ describe("editor workspace isolation", () => {
     expect(useAppStore.getState().activeEditorPath).toBe("src/alpha.ts");
   });
 
-  it("migrates persisted workspace-local absolute tab paths", () => {
+  it("migrates persisted workspace-local absolute tab paths", async () => {
     storage.set(
       "minicode.editor.tabs:C:\\Desktop\\MiniCode",
       JSON.stringify(["C:\\Desktop\\MiniCode\\README.md"]),
@@ -91,10 +94,11 @@ describe("editor workspace isolation", () => {
     useAppStore.getState().setWorkingDirectory("C:\\Desktop\\MiniCode");
 
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["README.md"]);
-    expect(storage.get("minicode.editor.tabs:c:/desktop/minicode")).toBe(JSON.stringify(["README.md"]));
+    await flushEditorDrafts();
+    expect(cachedEditorWorkspaceIndex("c:/desktop/minicode")?.paths).toEqual(["README.md"]);
   });
 
-  it("preserves editor state across equivalent Windows workspace spellings", () => {
+  it("preserves editor state across equivalent Windows workspace spellings", async () => {
     useAppStore.getState().setWorkingDirectory("C:\\Projects\\Demo");
     useAppStore.getState().openEditorTab("src/app.ts");
     useAppStore.setState({ workspaceGit: { branch: "main", isRepo: true } as never });
@@ -103,7 +107,8 @@ describe("editor workspace isolation", () => {
 
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["src/app.ts"]);
     expect(useAppStore.getState().workspaceGit).toMatchObject({ branch: "main", isRepo: true });
-    expect(storage.get("minicode.editor.tabs:c:/projects/demo")).toBe(JSON.stringify(["src/app.ts"]));
+    await flushEditorDrafts();
+    expect(cachedEditorWorkspaceIndex("c:/projects/demo")?.paths).toEqual(["src/app.ts"]);
   });
 
   it("resets editor state when POSIX workspace case changes", () => {

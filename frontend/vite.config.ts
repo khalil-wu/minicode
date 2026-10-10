@@ -40,6 +40,7 @@ const devCspRelaxPlugin = {
 };
 
 export default defineConfig(async ({ command, mode }) => {
+  const desktopRelease = mode === "desktop-release";
   // Always resolve env files from the frontend project directory.
   const env = loadEnv(mode, __dirname, "");
   const isVitest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
@@ -121,10 +122,10 @@ export default defineConfig(async ({ command, mode }) => {
       },
     },
     build: {
-      outDir: "dist",
+      outDir: desktopRelease ? ".tmp/desktop-release" : "dist",
       // An open desktop renderer may still import its previous hashed chunks.
       // Retain them until that window reloads into the newly built index.
-      emptyOutDir: false,
+      emptyOutDir: desktopRelease,
       chunkSizeWarningLimit: 1000,
       modulePreload: {
         resolveDependencies(_filename, dependencies) {

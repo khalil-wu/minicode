@@ -218,10 +218,10 @@ class QueryTerminalTransaction:
                 exc_info=True,
             )
 
-        completion_event = self._commit_runtime(status=status, reason=reason)
+        completion_event = self._commit_runtime(status=status, reason=reason,
+            terminal_intent_event_id=(self.journal.terminal_intent_event_id
+                if self.turn_ctx.turn_kernel is not None and not journal_errors else ""))
         commit_failed = terminal_commit_failed(completion_event)
-        if not commit_failed:
-            await self._finalize_completed_checkpoint(status)
 
         try:
             if completion_event is not None:
@@ -235,6 +235,9 @@ class QueryTerminalTransaction:
                 exc,
                 exc_info=True,
             )
+
+        if not commit_failed and not journal_errors:
+            await self._finalize_completed_checkpoint(status)
 
         if journal_errors:
             evidence_events.append(terminal_journal_failure_event(journal_errors[0]))
@@ -325,7 +328,7 @@ class QueryTerminalTransaction:
         self._apply_status(terminal_event, status, reason)
         return status, reason
 
-    def _commit_runtime(self, *, status: str, reason: str) -> AgentEvent | None:
+    def _commit_runtime(self, *, status: str, reason: str, terminal_intent_event_id: str) -> AgentEvent | None:
         turn_kernel = self.turn_ctx.turn_kernel
         if turn_kernel is None:
             return None
@@ -344,6 +347,7 @@ class QueryTerminalTransaction:
             summary=reason,
             terminal_reason=reason,
             error=reason if run_status == "failed" else "",
+            terminal_intent_event_id=terminal_intent_event_id,
         )
         return event or turn_kernel.completion_event
 

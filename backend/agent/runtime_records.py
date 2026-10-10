@@ -62,6 +62,7 @@ class AgentRunRecord:
     session_id: str = ""
     summary: str = ""
     terminal_reason: str = ""
+    terminal_intent_event_id: str = ""
     error: str = ""
     runtime_instance_id: str = ""
     runtime_process_id: int = 0
@@ -593,6 +594,7 @@ def _agent_run_from_dict(data: dict[str, Any]) -> AgentRunRecord:
         session_id=str(data.get("session_id") or ""),
         summary=str(data.get("summary") or ""),
         terminal_reason=terminal_reason,
+        terminal_intent_event_id=str(data.get("terminal_intent_event_id") or ""),
         error=error,
         runtime_instance_id=str(data.get("runtime_instance_id") or ""),
         runtime_process_id=int(data.get("runtime_process_id") or 0),

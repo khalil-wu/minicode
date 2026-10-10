@@ -10,6 +10,12 @@ if TYPE_CHECKING:
 NATIVE_COMPACTION_TYPE = "responses_compaction"
 
 
+class NativeContextCompatibilityError(ValueError):
+    """A selected model cannot consume the existing encrypted provider state."""
+
+    code = "native_context_incompatible"
+
+
 def responses_context_origin(base_url: str) -> str:
     return hashlib.sha256(base_url.rstrip("/").encode("utf-8")).hexdigest()
 
@@ -33,12 +39,27 @@ def native_compaction_windows(message: LLMMessage) -> list[dict[str, Any]]:
     return [item for item in message.provider_items if item.get("type") == NATIVE_COMPACTION_TYPE]
 
 
-def require_native_context_origin(messages: list[LLMMessage], origin: str = "") -> None:
+def require_native_context_origin(
+    messages: list[LLMMessage], origin: str = "", *, allow_images: bool = True,
+) -> None:
     for message in messages:
         for window in native_compaction_windows(message):
             if window["origin"] != origin:
-                raise ValueError(
+                raise NativeContextCompatibilityError(
                     "This context contains an encrypted Responses compaction window. "
                     "Continue with a Responses model on the original provider endpoint; "
                     "it cannot be converted to another provider protocol."
                 )
+            if not allow_images:
+                for item in window["output"]:
+                    if item["type"] == "input_image" or (
+                        any(
+                            isinstance(blocks, list)
+                            and any(isinstance(part, dict) and part.get("type") == "input_image" for part in blocks)
+                            for blocks in (item.get("content"), item.get("output"))
+                        )
+                    ):
+                        raise NativeContextCompatibilityError(
+                            "This encrypted Responses context retains image inputs. "
+                            "Continue with an image-capable Responses model on the original provider endpoint."
+                        )

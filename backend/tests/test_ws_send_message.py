@@ -13,6 +13,7 @@ from backend.llm.base import LLMAdapter, LLMMessage, StreamEvent, StreamEventTyp
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.agent_tools import TaskTool
+from backend.tools.agent_artifact_tools import ReadArtifactTool
 from backend.tools.base import BaseTool, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 from backend.tools.registry import ToolRegistry
@@ -177,6 +178,8 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
     tmp_path,
     reopen,
 ) -> None:
+    raw_result = "evidence\n" * 8000 + "resumed-result-tail"
+
     class _ResumeLLM(LLMAdapter):
         def __init__(self) -> None:
             self.tool_names: list[list[str]] = []
@@ -185,7 +188,7 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
             self.tool_names.append(
                 [str((schema.get("function") or {}).get("name") or "") for schema in (tools or [])]
             )
-            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="resumed")
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=raw_result, phase="final_answer")
             yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
 
         async def simple_chat(
@@ -257,6 +260,10 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
                 context=parent_context,
             )
             assert initial.status == "completed"
+            initial_read = await ReadArtifactTool(task_tool._artifact_store).execute(
+                {"artifact_id": initial.artifact_id, "offset": 8001, "limit": 1}, context=parent_context,
+            )
+            assert not initial_read.is_error and "resumed-result-tail" in initial_read.content
             starts = [
                 payload
                 for event_type, payload in emitted
@@ -287,6 +294,14 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
                 if resumed is not None and resumed.status == "completed":
                     assert resumed.session_id == session.session_id
                     assert resumed.mailbox_epoch > previous_epoch
+                    artifact_id = runtime.get_subagent_snapshot(subagent_id, include_result=True)["result"]["artifact_id"]
+                    result = await ReadArtifactTool(task_tool._artifact_store).execute(
+                        {"artifact_id": artifact_id, "offset": 8001, "limit": 1}, context=parent_context,
+                    )
+                    assert not result.is_error and "resumed-result-tail" in result.content
+                    assert task_tool._artifact_store.delete_for_conversation("conversation-1") == 2
+                    assert task_tool._artifact_store.get(initial.artifact_id) is None
+                    assert task_tool._artifact_store.get(artifact_id) is None
                     return handled, subagent_id
                 await asyncio.sleep(0.01)
             raise AssertionError(runtime.get_subagent_snapshot(subagent_id, include_result=True))

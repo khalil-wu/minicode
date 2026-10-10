@@ -7,6 +7,7 @@ import { fsListTree, fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop
 import { compareWriteWorkspaceFile, listWorkspaceTree, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
+import { flushEditorDrafts } from "../stores/editor-drafts";
 import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, loadPersistedEditorTabs, persistEditorTabs } from "../stores/shared-helpers";
 import { EditorPanel } from "./EditorPanel";
 import type { CodeSelectionRange } from "../stores/types";
@@ -294,6 +295,7 @@ describe("EditorPanel", () => {
     input.scrollTop = 140;
     fireEvent.scroll(input);
     first.unmount();
+    await flushEditorDrafts();
     clearEditorWorkspaceBufferCacheForTests();
     useAppStore.setState({ editorTabs: loadPersistedEditorTabs("C:/projects/demo") });
     render(<EditorPanel />);

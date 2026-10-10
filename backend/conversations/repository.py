@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from contextlib import contextmanager
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -70,6 +71,10 @@ class ConversationStorageCorruptError(RuntimeError):
     """Raised when committed conversation metadata exists but is unreadable."""
 
 
+class ConversationCreationUnavailableError(ValueError):
+    """A durable creation command addresses a deleted or occupied lifecycle."""
+
+
 class ConversationRepository:
     _MAX_RECORD_CACHE = 64
 
@@ -117,6 +122,7 @@ class ConversationRepository:
         branch_kind: str = "",
         model_selection: dict[str, str] | None = None,
         reuse_existing: bool = False,
+        creation_command_id: str = "",
     ) -> ConversationRecord:
         requested_id = str(conversation_id or "").strip()
         initial_transcript = project_public_transcript(transcript or [])
@@ -142,8 +148,22 @@ class ConversationRepository:
             requested_id if requested_id and _CONVERSATION_ID_PATTERN.fullmatch(requested_id)
             else f"conv_{uuid.uuid4().hex[:12]}"
         )
+        command_conversation_id = (
+            "conv_" + hashlib.sha256(creation_command_id.encode("utf-8")).hexdigest()[:24]
+            if creation_command_id else ""
+        )
+        if creation_command_id and candidate_id != requested_id:
+            candidate_id = command_conversation_id
         # Creation owns ID allocation, including replacement of an occupied ID.
         with self._store_lock():
+            if creation_command_id:
+                for owned_id in dict.fromkeys((candidate_id, command_conversation_id)):
+                    existing = self._load_record(owned_id)
+                    if existing is not None and existing.creation_command_id == creation_command_id:
+                        return existing
+                    manifest = self._read_manifest(owned_id, log_errors=False)
+                    if manifest is not None and manifest.get("creation_command_id") == creation_command_id:
+                        raise ConversationCreationUnavailableError("The conversation created by this command has been deleted")
             if reuse_existing:
                 if not requested_id or candidate_id != requested_id:
                     raise ValueError("Reusing a conversation requires its valid explicit id")
@@ -162,7 +182,12 @@ class ConversationRepository:
                 self._manifest_path_for(candidate_id).exists()
                 or self._load_record(candidate_id) is not None
             ):
-                candidate_id = f"conv_{uuid.uuid4().hex[:12]}"
+                if creation_command_id:
+                    if candidate_id == command_conversation_id:
+                        raise ConversationCreationUnavailableError("The creation command's conversation identity is already occupied")
+                    candidate_id = command_conversation_id
+                else:
+                    candidate_id = f"conv_{uuid.uuid4().hex[:12]}"
             record = ConversationRecord(
                 id=candidate_id,
                 title=(title or "New chat").strip() or "New chat",
@@ -186,6 +211,7 @@ class ConversationRepository:
                 fork_id=str(fork_id or ""),
                 branch_kind=str(branch_kind or ""),
                 model_selection=dict(model_selection or {}),
+                creation_command_id=creation_command_id,
             )
             self._commit_record(record)
             self._cache_record(record)
@@ -319,6 +345,7 @@ class ConversationRepository:
                 return None
             clone = copy.deepcopy(source)
             clone.id = f"conv_{uuid.uuid4().hex[:12]}"
+            clone.creation_command_id = ""
             clone.revision = 0
             clone.created_at = utc_now_iso()
             clone.updated_at = clone.created_at
@@ -579,6 +606,10 @@ class ConversationRepository:
 
             known_generations = self._manifest_generations(manifest or {})
             loaded = self._load_record(conversation_id) if manifest is None else None
+            creation_command_id = (
+                manifest.get("metadata", {}).get("creation_command_id", "") if manifest is not None
+                else loaded.creation_command_id if loaded is not None else ""
+            )
             last_generation = max(
                 [*known_generations, self._manifest_revision(manifest or {}), int(getattr(loaded, "revision", 0) or 0)],
                 default=0,
@@ -591,6 +622,7 @@ class ConversationRepository:
                 "deleted": True,
                 "deleted_at": utc_now_iso(),
                 "deletion_generation": deletion_generation,
+                "creation_command_id": creation_command_id,
             }
 
             # The atomic tombstone replacement is the delete commit point.

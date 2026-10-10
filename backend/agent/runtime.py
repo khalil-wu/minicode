@@ -710,6 +710,7 @@ class AgentRuntime:
         summary: str = "",
         terminal_reason: str = "",
         error: str = "",
+        terminal_intent_event_id: str = "",
     ) -> AgentRunRecord:
         """Commit a terminal record or raise without mutating local state.
 
@@ -757,6 +758,7 @@ class AgentRuntime:
             terminal_reason=terminal_reason,
             error=error,
         )
+        candidate.terminal_intent_event_id = terminal_intent_event_id
         try:
             persisted = self._swarm_store.upsert_agent_run(
                 candidate.to_dict(),
@@ -2735,7 +2737,8 @@ class AgentRuntime:
         with self._execution_journal_lock:
             journal = self._execution_journals.get(agent_id)
             if journal is None:
-                journal = ExecutionJournal(agent_id, base_dir=self._journal_root)
+                journal = ExecutionJournal(agent_id, base_dir=self._journal_root,
+                    terminal_record_reader=self._swarm_store.get_agent_run)
                 self._execution_journals[agent_id] = journal
             return journal
 

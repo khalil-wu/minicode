@@ -20,6 +20,7 @@ import {
 import { isPreviewableMediaPath } from "../lib/media-types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { safeJsonParse } from "../lib/safe-parse";
+import { cachedEditorDrafts } from "./editor-drafts";
 import { applyWorkbenchPreferences, defaultWorkbenchPreferences, type WorkbenchPreferences } from "../lib/workbench-preferences";
 
 const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
@@ -44,7 +45,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
       if (workspaceRootsEqual(workspaceRoot, state.workingDirectory)) return update(state);
       const cached = editorStateForWorkspace(workspaceRoot);
       const next = { ...cached, ...update(cached) };
-      persistEditorTabs(next.editorTabs, workspaceRoot);
+      persistEditorTabs(next.editorTabs, workspaceRoot, next);
       cacheEditorStateForWorkspace(workspaceRoot, next.editorTabs, next.activeTabPath, next.activeEditorPath);
       return {};
     });
@@ -89,7 +90,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     queueEditorBufferTransaction: (path, transaction, original, contentHash, workspaceRoot) => updateWorkspace(workspaceRoot, (state) => {
       const existing = state.editorTabs.find((tab) => editorPathsEqual(tab.path, path, workspaceRoot));
       const tab = existing ?? { id: uniqueMessageId("editor"), path, content: transaction.before, original, contentHash, loading: false, error: null };
-      const updated = { ...tab, content: transaction.after, preview: false, pendingBufferTransactions: [...(tab.pendingBufferTransactions ?? []), transaction] };
+      const updated = { ...tab, content: transaction.after, recoveryPending: false, preview: false, pendingBufferTransactions: [...(tab.pendingBufferTransactions ?? []), transaction] };
       return { editorTabs: existing ? state.editorTabs.map((entry) => entry === existing ? updated : entry) : [...state.editorTabs, updated] };
     }),
     consumeEditorBufferTransactions: (path, workspaceRoot) => updateWorkspace(workspaceRoot, (state) => ({
@@ -129,6 +130,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           content: "",
           original: "",
           loading: true,
+          recoveryPending: cachedEditorDrafts(editorWorkspaceKey(s.workingDirectory)) === undefined,
           error: null,
           largeFile: false,
           loadWarning: null,
@@ -215,7 +217,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const editorTabs = state.editorTabs.map((tab) => {
           const path = renamedPath(tab.path);
           if (path !== tab.path) renameEditorViewState(workspaceRoot, tab.path, path);
-          return path === tab.path ? tab : { ...tab, path };
+          return path === tab.path ? tab : { ...tab, path, recoveryPath: tab.recoveryPending ? tab.recoveryPath ?? tab.path : undefined };
         });
         persistEditorTabs(editorTabs, workspaceRoot);
         return {
@@ -258,7 +260,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
           editorTabs: s.editorTabs.map((t) =>
-            editorPathsEqual(t.path, normalizedPath, s.workingDirectory) && !t.readOnly ? { ...t, content, preview: content !== t.original ? false : t.preview, draftRestored: t.draftRestored && content !== t.original } : t
+            editorPathsEqual(t.path, normalizedPath, s.workingDirectory) && !t.readOnly ? { ...t, content, recoveryPending: false, preview: content !== t.original ? false : t.preview, draftRestored: t.draftRestored && content !== t.original } : t
           ),
         };
       }),
@@ -269,7 +271,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           const path = normalizeEditorPath(change.path, workspaceRoot);
           const existing = editorTabs.find((tab) => editorPathsEqual(tab.path, path, workspaceRoot));
           if (existing) {
-            editorTabs = editorTabs.map((tab) => tab === existing ? { ...tab, content: change.content, preview: change.content !== tab.original ? false : tab.preview, draftRestored: tab.draftRestored && change.content !== tab.original } : tab);
+            editorTabs = editorTabs.map((tab) => tab === existing ? { ...tab, content: change.content, recoveryPending: false, preview: change.content !== tab.original ? false : tab.preview, draftRestored: tab.draftRestored && change.content !== tab.original } : tab);
           } else if (change.content !== change.original) {
             editorTabs = [...editorTabs, {
               id: uniqueMessageId("editor"), path, content: change.content, original: change.original,
@@ -289,6 +291,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
             ? {
                 ...t,
+                recoveryPending: false,
                 content: t.draftRestorePending ? t.content : content,
                 original: t.draftRestorePending ? t.original : content,
                 contentHash: t.draftRestorePending && content !== t.original ? t.contentHash : contentHash,

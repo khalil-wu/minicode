@@ -1989,6 +1989,8 @@ export interface EditorTab {
   sizeBytes?: number;
   readOnly?: boolean;
   draftRestorePending?: boolean;
+  recoveryPending?: boolean;
+  recoveryPath?: string;
   draftRestored?: boolean;
   pendingBufferTransactions?: import("../panels/applyWorkspaceBufferEdits").WorkspaceBufferTransaction[];
 }

@@ -12,7 +12,10 @@ import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
 import { applyWorkbenchPreferences } from "../lib/workbench-preferences";
-import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, persistEditorTabs, persistEditorLocation } from "./shared-helpers";
+import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
+import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
+import { workspaceRootsEqual } from "../lib/workspace-path";
+import { pushToast } from "../overlays/ToastContainer";
 
 export const useAppStore = create<AppStore>()(
   subscribeWithSelector((...a) => ({
@@ -31,10 +34,36 @@ export const useAppStore = create<AppStore>()(
 useAppStore.subscribe(
   (state) => [state.workingDirectory, state.editorTabs, state.activeTabPath, state.activeEditorPath] as const,
   ([workingDirectory, editorTabs, activeTabPath, activeEditorPath], previous) => {
-    if (workingDirectory !== previous[0] || editorTabs !== previous[1]) persistEditorTabs(editorTabs, workingDirectory);
-    persistEditorLocation({ workingDirectory, activeTabPath, activeEditorPath });
+    // A cold workspace's initially unknown empty UI is not a Close All action.
+    if (workingDirectory !== previous[0] && !cachedEditorDrafts(editorWorkspaceKey(workingDirectory))
+      && !editorTabs.some(tab => !tab.recoveryPending && tab.content !== tab.original)) return;
+    persistEditorTabs(editorTabs, workingDirectory, { activeTabPath, activeEditorPath });
   },
   { equalityFn: (left, right) => left.every((value, index) => value === right[index]) },
+);
+
+const restoringWorkspaces = new Set<string>();
+useAppStore.subscribe(
+  state => [state.workingDirectory, state.editorTabs] as const,
+  ([workspace, tabs]) => {
+    if ((!tabs.some(tab => tab.recoveryPending) && cachedEditorDrafts(editorWorkspaceKey(workspace))) || restoringWorkspaces.has(workspace)) return;
+    restoringWorkspaces.add(workspace);
+    const initial = useAppStore.getState();
+    void restoreWorkspaceEditorDrafts(workspace, initial).then(restored => {
+      const location = editorWorkspaceRecoveryLocation(workspace);
+      useAppStore.setState(state => workspaceRootsEqual(state.workingDirectory, workspace)
+        ? { editorTabs: reconcileRestoredEditorTabs(state.editorTabs, restored, workspace),
+            activeTabPath: state.activeTabPath === initial.activeTabPath ? location?.activeTabPath ?? restored[0]?.path ?? null : state.activeTabPath,
+            activeEditorPath: state.activeEditorPath === initial.activeEditorPath ? location?.activeEditorPath ?? null : state.activeEditorPath } : {});
+    }).catch(error => {
+      console.error("Editor draft recovery load failed", error);
+      useAppStore.setState(state => workspaceRootsEqual(state.workingDirectory, workspace)
+        ? { editorTabs: state.editorTabs.map(tab => tab.recoveryPending && tab.draftRestorePending
+            ? { ...tab, loading: false } : tab) } : {});
+      pushToast(`无法读取编辑器恢复草稿：${error instanceof Error ? error.message : String(error)}。`, "error");
+    }).finally(() => restoringWorkspaces.delete(workspace));
+  },
+  { fireImmediately: true, equalityFn: (left, right) => left.every((value, index) => value === right[index]) },
 );
 
 export const syncSystemTheme = () => {
@@ -130,6 +159,15 @@ useAppStore.subscribe(
 );
 
 if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", event => {
+    if (!hasPendingEditorDrafts()) return;
+    event.preventDefault();
+    event.returnValue = "";
+    const desktop = window.__MINICODE_RUNTIME__?.desktop;
+    if (desktop) void flushEditorDrafts().then(() => desktop.windowControls.close()).catch(error => {
+      console.error("Window remains open because editor recovery did not commit", error);
+    });
+  });
   (window as typeof window & { __zustandStore?: typeof useAppStore }).__zustandStore = useAppStore;
   const initialResolvedTheme = applyTheme(useAppStore.getState().themeMode);
   if (useAppStore.getState().resolvedTheme !== initialResolvedTheme) {
