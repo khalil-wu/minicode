@@ -21,6 +21,7 @@ vi.mock("../hooks/useFocusTrap", () => ({
 
 import { QuickOpen } from "./QuickOpen";
 import { useAppStore } from "../stores";
+import { resetEditorDraftStorageForTests } from "../stores/editor-drafts";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -35,7 +36,8 @@ const deferred = <T,>() => {
 describe("QuickOpen", () => {
   beforeEach(() => {
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
-    vi.useFakeTimers();
+    // Fake the search debounce while leaving IndexedDB's tasks runnable.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     mocks.searchWorkspaceFiles.mockReset();
     mocks.fsSearchFiles.mockReset();
     useAppStore.setState({
@@ -49,8 +51,10 @@ describe("QuickOpen", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await resetEditorDraftStorageForTests();
+    vi.clearAllTimers();
     vi.useRealTimers();
   });
 

@@ -360,18 +360,6 @@ class QueryEngine:
         try:
             try:
                 deadline = submission.runtime.deadline_controller.turn_deadline
-                is_child = bool(turn_ctx.turn_kernel.run_record.parent_run_id)
-                write_scope = tuple(turn_ctx.metadata.get("write_scope") or ()) if is_child else None
-                if turn_ctx.state.workspace_root is not None and (not is_child or (write_scope and not turn_ctx.metadata.get("read_only"))):
-                    from backend.agent.workspace_turn_changes import WorkspaceTurnChanges
-                    from backend.security.sensitive_files import application_state_roots
-
-                    turn_ctx.run_context.workspace_turn_changes = await await_preflight(
-                        to_thread_cancel_safe(WorkspaceTurnChanges.capture, turn_ctx.state.workspace_root,
-                            application_roots=application_state_roots(turn_ctx.run_context), write_scope=write_scope),
-                        deadline=deadline, cancel_event=turn_ctx.cancel_event,
-                        run_context=turn_ctx.run_context, llm=session.llm,
-                    )
                 await await_preflight(
                     self._publish_system_prompt(turn_ctx),
                     deadline=deadline,
@@ -722,7 +710,6 @@ class QueryEngine:
         # Build metadata from session_context.
         metadata: dict[str, Any] = dict(sc.metadata or {})
         run_context = sc.run_context or RunContext()
-        run_context.workspace_turn_changes = None
         run_context.turn_diff_tracker = None
         run_context.model_owner_task = asyncio.current_task()
         run_context.active_model_execution = run_context.model_execution

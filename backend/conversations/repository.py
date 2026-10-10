@@ -303,27 +303,47 @@ class ConversationRepository:
         self, conversation_id: str, message_id: str, *, before: int, limit: int = 40, revision: str = "",
     ) -> dict[str, Any] | None:
         with self._store_lock(conversation_id):
-            cached = self._record_cache.get(conversation_id)
-            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
-                message = next((item for item in cached.transcript if item["id"] == message_id), None)
-            else:
-                manifest = self._read_manifest(conversation_id, log_errors=False)
-                if manifest is not None and self._manifest_is_deleted(manifest):
-                    return None
-                try:
-                    metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"]) if manifest else {}
-                    if metadata.get("transcript_index_version") == 1:
-                        message = self._load_partial_projection(conversation_id, manifest).get("assistant_message")
-                        if message is None or message.get("id") != message_id:
-                            path = self._generation_paths(conversation_id, manifest["current_generation"])[1]
-                            message = read_indexed_message(path, metadata["transcript_index"], message_id)
-                    else:
-                        record = self._load_record(conversation_id)
-                        message = next((item for item in record.transcript if item["id"] == message_id), None) if record else None
-                except (ConversationStorageCorruptError, OSError, UnicodeDecodeError, json.JSONDecodeError, TranscriptIndexError):
-                    record = self._load_record(conversation_id)
-                    message = next((item for item in record.transcript if item["id"] == message_id), None) if record else None
+            message = self._get_transcript_message(conversation_id, message_id)
             return project_tool_items(message, before=before, limit=limit, revision=revision) if message is not None else None
+
+    def _get_transcript_message(self, conversation_id: str, message_id: str) -> dict[str, Any] | None:
+        """Read one indexed message under the caller's conversation lock."""
+        cached = self._record_cache.get(conversation_id)
+        if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+            return next((item for item in cached.transcript if item["id"] == message_id), None)
+        manifest = self._read_manifest(conversation_id, log_errors=False)
+        if manifest is not None and self._manifest_is_deleted(manifest):
+            return None
+        try:
+            metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"]) if manifest else {}
+            if metadata.get("transcript_index_version") == 1:
+                message = self._load_partial_projection(conversation_id, manifest).get("assistant_message")
+                if message is None or message.get("id") != message_id:
+                    path = self._generation_paths(conversation_id, manifest["current_generation"])[1]
+                    message = read_indexed_message(path, metadata["transcript_index"], message_id)
+                return message
+        except (ConversationStorageCorruptError, OSError, UnicodeDecodeError, json.JSONDecodeError, TranscriptIndexError):
+            # The existing generation reader owns damaged-index recovery.
+            logger.warning("Indexed message read failed for %s; loading the committed generation", conversation_id, exc_info=True)
+        record = self._load_record(conversation_id)
+        return next((item for item in record.transcript if item["id"] == message_id), None) if record else None
+
+    def get_message_turn_diff(
+        self, conversation_id: str, message_id: str, *, turn_id: str, revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        with self._store_lock(conversation_id):
+            message = self._get_transcript_message(conversation_id, message_id)
+            if message is None:
+                return None
+            payload = message.get("metadata", {}).get("turn_diff")
+            if not isinstance(payload, dict):
+                return None
+            if (payload.get("thread_id") != conversation_id or payload.get("conversation_id") != conversation_id
+                    or payload.get("message_id") != message_id or payload.get("turn_id") != turn_id
+                    or revision is not None and payload.get("revision") != revision):
+                raise ValueError("The turn diff owner or revision changed; reload the conversation.")
+            projected = project_public_transcript_message({"id": message_id, "role": "assistant", "metadata": {"turn_diff": payload}})
+            return {"conversation_id": conversation_id, "message_id": message_id, **projected["metadata"]["turn_diff"]}
 
     def clone_conversation(
         self,

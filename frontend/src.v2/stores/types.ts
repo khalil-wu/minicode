@@ -253,6 +253,7 @@ export interface DiffReviewState {
   selectedPath?: string;
   status: "pending" | "submitted" | "approved" | "rejected" | "error" | "viewing";
   mode?: "approval" | "view";
+  truncated?: boolean;
   error?: string;
   fileDecisions: Record<string, "approved" | "rejected">;
   lineComments?: DiffLineComment[];
@@ -316,6 +317,10 @@ export interface TurnDiffState {
   messageId?: string;
   taskId?: string;
   diff: string | null;
+  deferred?: boolean;
+  files?: GitChangeFile[];
+  truncated?: boolean;
+  source?: string;
   revision?: number;
   toolCallId?: string;
   updatedAt: number;

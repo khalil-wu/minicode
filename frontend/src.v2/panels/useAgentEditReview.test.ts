@@ -82,6 +82,14 @@ describe("useAgentEditReview", () => {
     expect(result.current.total).toBe(1);
   });
 
+  it.each([{ source: "workspace_snapshot" }, { truncated: true }])("does not expose a historical workspace comparison or incomplete patch as an undoable assistant edit (%j)", (metadata) => {
+    const { editor, state } = fakeEditor(content.split("\n"));
+    const { result } = renderHook(() => useAgentEditReview({ editorRef: { current: editor }, path: "src/app.ts", content,
+      readOnly: false, turnDiff: { ...turnDiffFor("src/app.ts", patch), ...metadata }, workingDirectory: WORKDIR, editorEpoch: 1 }));
+    expect(result.current.total).toBe(0);
+    expect(state.decorations).toEqual([]);
+  });
+
   it("ignores diffs that do not touch the active file", () => {
     const { editor } = fakeEditor(content.split("\n"));
     const editorRef = { current: editor };

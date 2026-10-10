@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.websockets import WebSocketState
 
+from backend.agent.message import UserCommand
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.event_outbox import EventOutbox
 
@@ -110,5 +111,50 @@ async def test_dispatcher_owner_does_not_borrow_active_workspace(tmp_path, data,
     dispatcher._handle_command = handle
     await dispatcher._dispatch_client_command(SimpleNamespace(type="owned", data=data), 1)
     assert (socket.messages[0]["conversation_id"], socket.messages[0]["workspace_root"]) == expected
+    await events.drain_delivery()
+    await events.drain_persistence()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_type,event_type", [
+    ("session.restore", "session.restored"),
+    ("session.sync", "session.synced"),
+])
+async def test_rejected_restore_projection_reports_correlated_command_failure(tmp_path, command_type, event_type):
+    events, socket = outbox(tmp_path)
+    host = SimpleNamespace(active_conversation_id="conversation-a", event_outbox=events,
+        ws_manager=None, connection_generation=1,
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: "/workspace-a"))
+    lifecycle_lock = asyncio.Lock()
+    host.conversation_lifecycle_lock = lambda: lifecycle_lock
+
+    async def send_event(event):
+        return await events.send_payload(event.to_ws_message(), log_context=event.type)
+
+    async def handle_inner(command):
+        await events.send_payload({
+            "type": event_type,
+            "session": {"session_id": "command-owner", "capabilities": {"bad": ("tuple",)}},
+        }, log_context=event_type)
+
+    host.send_event = send_event
+    dispatcher = SessionCommandDispatcher.__new__(SessionCommandDispatcher)
+    dispatcher._session = host
+    dispatcher._user_message_admissions = {}
+    dispatcher._command_semaphore = asyncio.Semaphore(1)
+    dispatcher._handle_command_inner = handle_inner
+
+    assert await dispatcher._dispatch_client_command(UserCommand(command_type, {
+        "client_command_id": "cmd-restore-failed",
+    }), 1) is False
+    assert len(socket.messages) == 1
+    expected = {
+        "type": "command.result", "command": command_type, "level": "error",
+        "client_command_id": "cmd-restore-failed", "client_command_type": command_type,
+        "conversation_id": "conversation-a", "workspace_root": "/workspace-a",
+    }
+    assert {key: socket.messages[0][key] for key in expected} == expected
+    assert "non-JSON value" in socket.messages[0]["message"]
+    assert socket.messages[0]["seq"] == 1
     await events.drain_delivery()
     await events.drain_persistence()

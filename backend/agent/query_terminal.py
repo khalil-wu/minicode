@@ -178,33 +178,6 @@ class QueryTerminalTransaction:
             reason=reason,
         )
 
-        workspace_changes = self.turn_ctx.run_context.workspace_turn_changes
-        workspace_diff_error: AgentEvent | None = None
-        if workspace_changes is not None:
-            try:
-                diff = await to_thread_cancel_safe(workspace_changes.unified_diff)
-            except OSError as exc:
-                # Workspace inspection is derived evidence; a locked or
-                # unreadable file must not prevent the accepted turn's terminal
-                # transaction. Preserve the actual collection failure.
-                diff = None
-                logger.warning("Unable to collect turn workspace diff: %s", exc, exc_info=True)
-                workspace_diff_error = AgentEvent.error(
-                    str(exc), recoverable=True, error_type="workspace_diff",
-                    error_code="workspace.diff_unavailable",
-                )
-                evidence_events.append(workspace_diff_error)
-            tracker = self.turn_ctx.run_context.turn_diff_tracker
-            revision = tracker.revision + 1 if tracker is not None else 1
-            if diff is not None and (diff or (tracker is not None and tracker.revision)):
-                change_event = AgentEvent.turn_diff_updated(
-                    thread_id=str(self.turn_ctx.state.conversation_id or self.turn_ctx.metadata.get("conversation_id") or ""),
-                    turn_id=str(self.turn_ctx.metadata.get("run_id") or ""), diff=diff, revision=revision,
-                )
-                change_event.data.update(source="workspace_snapshot", workspace_root=str(workspace_changes.workspace_root))
-                evidence_events.append(change_event)
-                await to_thread_cancel_safe(self.journal.record_event, change_event)
-
         journal_errors: list[BaseException] = []
         terminal_event.data.update(self.turn_ctx.run_context.lifecycle_cleanup_evidence())
         try:
@@ -241,11 +214,6 @@ class QueryTerminalTransaction:
 
         if journal_errors:
             evidence_events.append(terminal_journal_failure_event(journal_errors[0]))
-
-        if workspace_diff_error is not None:
-            failure = await to_thread_cancel_safe(self.record_post_commit_event, workspace_diff_error)
-            if failure is not None:
-                evidence_events.append(failure)
 
         if commit_failed:
             status = "failed"

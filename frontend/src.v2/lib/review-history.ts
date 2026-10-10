@@ -2,9 +2,12 @@ import type { ChatMessage, TurnDiffState } from "../stores/types";
 import { getToolCallsFromMessage } from "./content-blocks";
 import { summarizeTurnDiff } from "./turn-diff";
 import { extractFilePathFromDiff, parseUnifiedDiffLines } from "./unified-diff";
+import type { DeferredTurnDiffOwner } from "../chat/loadMessageTurnDiff";
 
 export interface HistoryDiffFile {
   path: string;
+  additions?: number;
+  deletions?: number;
   revisions: { id: string; name: string; diff: string }[];
 }
 
@@ -12,6 +15,9 @@ export interface HistoryDiffTurn {
   id: string;
   label: string;
   files: HistoryDiffFile[];
+  source?: string;
+  truncated?: boolean;
+  deferredDiff?: DeferredTurnDiffOwner;
 }
 
 /** The tool's turn identity takes precedence over its enclosing transcript message. */
@@ -64,20 +70,37 @@ export function buildReviewHistory(messages: ChatMessage[], turnDiff?: TurnDiffS
     const persisted = message.turnDiff;
     if (persisted && persisted.turnId === messageTurnId && (!conversationId || persisted.threadId === conversationId)) {
       const turn = ensureTurn(messageTurnId, userLabel);
+      turn.source = persisted.source;
+      turn.truncated = persisted.truncated;
+      turn.deferredDiff = persisted.deferred && persisted.messageId ? {
+        conversationId: persisted.threadId, messageId: persisted.messageId,
+        turnId: persisted.turnId, revision: persisted.revision,
+      } : undefined;
       const summary = summarizeTurnDiff(persisted);
       if (persisted.diff === "") turn.files = [];
-      if (summary) turn.files = summary.files.map((file) => ({ path: file.path,
-        revisions: [{ id: `turn-${persisted.turnId}:${file.path}`, name: "本轮修改", diff: file.patch! }] }));
+      if (summary) turn.files = summary.files.map((file) => ({ path: file.path, additions: file.additions, deletions: file.deletions,
+        revisions: file.patch ? [{ id: `turn-${persisted.turnId}:${file.path}`,
+          name: persisted.source === "workspace_snapshot" ? "工作区比较" : "本轮修改", diff: file.patch }] : [] }));
     }
   }
   // The runtime's final turn patch is the aggregate result, rather than a list of intermediate edits.
   if (turnDiff && (!conversationId || turnDiff.threadId === conversationId) && turns.has(turnDiff.turnId)
     && (!turnDiff.messageId || messages.some((message) => message.role === "assistant" && message.id === turnDiff.messageId && message.turnId === turnDiff.turnId))) {
     const summary = summarizeTurnDiff(turnDiff);
+    const turn = turns.get(turnDiff.turnId)!;
+    turn.source = turnDiff.source;
+    turn.truncated = turnDiff.truncated;
+    turn.deferredDiff = turnDiff.deferred && turnDiff.messageId ? {
+      conversationId: turnDiff.threadId, messageId: turnDiff.messageId,
+      turnId: turnDiff.turnId, revision: turnDiff.revision,
+    } : undefined;
     if (turnDiff.diff === "") turns.get(turnDiff.turnId)!.files = [];
     if (summary) turns.get(turnDiff.turnId)!.files = summary.files.map((file) => ({
       path: file.path,
-      revisions: [{ id: `turn-${turnDiff.turnId}:${file.path}`, name: "本轮修改", diff: file.patch! }],
+      additions: file.additions,
+      deletions: file.deletions,
+      revisions: file.patch ? [{ id: `turn-${turnDiff.turnId}:${file.path}`,
+        name: turnDiff.source === "workspace_snapshot" ? "工作区比较" : "本轮修改", diff: file.patch }] : [],
     }));
   }
   return [...turns.values()].reverse();

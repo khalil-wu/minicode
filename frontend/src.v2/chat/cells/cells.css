@@ -2030,6 +2030,16 @@
   border-top: 0;
 }
 
+.diff-cell-history-note,
+.diff-cell-history-error {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.diff-cell-history-error {
+  color: var(--state-danger);
+}
+
 .diff-cell-more-files {
   display: inline-flex;
   align-items: center;

@@ -342,10 +342,17 @@ class _MutatingBatchTool(_BatchTool):
 
 
 @pytest.mark.parametrize("status", ["failed", "timeout", "blocked"])
-def test_partial_mutation_failure_invalidates_the_live_turn_diff(tmp_path, status):
+def test_partial_mutation_failure_preserves_committed_edit_diff_and_invalidates_read_cache(tmp_path, status):
     async def scenario():
+        from backend.workspace.file_state_cache import get_global_file_cache
+
         path = tmp_path / "tracked.txt"
         path.write_text("edited\n", encoding="utf-8")
+        cached_path = tmp_path / "cached.txt"
+        cached_path.write_text("cached evidence\n", encoding="utf-8")
+        cache = get_global_file_cache()
+        cache.put(cached_path, "cached evidence\n", stat_result=cached_path.stat())
+        assert cache.get(cached_path) is not None
         tracker = TurnDiffTracker()
         tracker.track_change(old_path=str(path), new_path=str(path),
             old_content="old\n", new_content="edited\n")
@@ -375,21 +382,28 @@ def test_partial_mutation_failure_invalidates_the_live_turn_diff(tmp_path, statu
             permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
             approval_handler=None, skill_manager=None, permission_context=permission,
             tool_ctx=context)]
-        assert next(event for event in events if event.type == "tool_result").data["is_error"]
+        result = next(event for event in events if event.type == "tool_result")
+        assert result.data["is_error"] and result.data["status"] == status
+        # An arbitrary workspace mutation refreshes read views even on partial
+        # failure. An unchanged sibling proves this is explicit cache clearing,
+        # rather than the cache's own stat-based stale-entry rejection.
+        assert cache.get(cached_path) is None
         updates = [payload for kind, payload in emitted if kind == "turn.diff.updated"]
+        assert tracker.snapshot() == original
+        assert updates == []
         if status == "blocked":
             assert path.read_text(encoding="utf-8") == "edited\n"
-            assert tracker.snapshot() == original
-            assert updates == []
         else:
             assert path.read_text(encoding="utf-8") == "partial\n"
-            assert tracker.get_unified_diff() is None
-            assert tracker.revision == original.revision + 1
-            assert len(updates) == 1 and updates[0]["diff"] is None
-            # A later exact edit must not revive an aggregate with a stale base.
+            # The tracker retains the first editing-tool baseline and latest
+            # committed editing delta. Unknown command effects add no receipt
+            # and do not make the existing editing history disappear.
             tracker.track_change(old_path=str(path), new_path=str(path),
                 old_content="partial\n", new_content="later\n")
-            assert tracker.get_unified_diff() is None
+            assert tracker.revision == original.revision + 1
+            diff = tracker.get_unified_diff()
+            assert "-old\n" in diff and "+later\n" in diff
+            assert "+partial\n" not in diff and "-partial\n" not in diff
 
     asyncio.run(scenario())
 

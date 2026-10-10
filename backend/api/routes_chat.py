@@ -149,6 +149,25 @@ async def conversation_message_tools(
     return page
 
 
+@router.get("/api/conversations/{conversation_id}/messages/{message_id}/turn-diff")
+async def conversation_message_turn_diff(
+    conversation_id: str, message_id: str,
+    session_id: str = Query(..., min_length=1), turn_id: str = Query(..., min_length=1, max_length=1_024),
+    revision: int | None = Query(None, ge=0),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        result = await run_in_threadpool(session.conversation_repo.get_message_turn_diff,
+                                        conversation_id, message_id, turn_id=turn_id, revision=revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Turn diff not found")
+    return result
+
+
 @router.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """Synchronous REST chat endpoint for simple calls and tests."""

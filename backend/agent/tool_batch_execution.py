@@ -38,7 +38,7 @@ from backend.agent.tool_execution import (
     _emit_tool_runtime_span,
     _execution_exception_result,
     _final_tool_request_digest,
-    _invalidate_turn_diff_after_inexact_mutation,
+    _invalidate_workspace_views_after_mutation,
     _permission_decision_denial,
     _remember_hook_model_context,
     _tool_hook_manager,
@@ -998,11 +998,9 @@ async def _flush_queue(
                     )
                 except Exception as exc:
                     result = _execution_exception_result(exc)
-                await _invalidate_turn_diff_after_inexact_mutation(
+                _invalidate_workspace_views_after_mutation(
                     tc,
-                    result,
                     tool_registry=tool_registry,
-                    tool_ctx=tool_ctx,
                 )
                 return result
 
@@ -1279,11 +1277,9 @@ async def _flush_queue(
                     tool_ctx,
                     iteration_id=iteration_id,
                 )
-                await _invalidate_turn_diff_after_inexact_mutation(
+                _invalidate_workspace_views_after_mutation(
                     tc,
-                    result,
                     tool_registry=tool_registry,
-                    tool_ctx=tool_ctx,
                 )
                 async for event in _finalize_tool_result(
                     tc,
@@ -2205,11 +2201,9 @@ async def execute_serial(
             tc, tool_registry, tool_ctx, iteration_id=iteration_id
         )
 
-    await _invalidate_turn_diff_after_inexact_mutation(
+    _invalidate_workspace_views_after_mutation(
         tc,
-        result,
         tool_registry=tool_registry,
-        tool_ctx=tool_ctx,
     )
 
     async for event in _finalize_tool_result(

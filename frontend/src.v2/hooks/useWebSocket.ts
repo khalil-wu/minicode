@@ -1136,6 +1136,43 @@ export const useWebSocketConnection = () => {
             pongTimeout = null;
           }
         }
+        if (
+          parsed.type === "command.result"
+          && (parsed.command === "session.restore" || parsed.command === "session.sync")
+          && (parsed.level === "error" || parsed.level === "failed")
+          && !isReplayedEvent(parsed)
+          && parsed.client_command_id
+          && parsed.client_command_id === latestProjectionCommandIds.get("session-state")
+        ) {
+          // The request result terminates recovery even when earlier durable
+          // events are still buffered. Resolve its caller without advancing the
+          // conversation cursor past history that was never restored.
+          handleCommandResultEvent(parsed);
+          for (const sub of subscribers) sub(parsed);
+          clearHeartbeatTimers();
+          heartbeatCleanup = () => {};
+          reconnectExhausted = true;
+          awaitingSessionRestore = false;
+          recoverySnapshotPending = false;
+          recoveryReplayPending = false;
+          recoverySwitchPending = false;
+          recoverySwitchWillRefreshCatalog = false;
+          bufferedRecoveryEvents = [];
+          discardBufferedCommandType("session.restore");
+          discardBufferedCommandType("session.sync");
+          const message = `会话恢复失败：${normalizeAgentErrorMessage(parsed.message)}`;
+          useAppStore.getState().setConnectionState("failed", {
+            attempt: reconnectAttempt.current,
+            maxAttempts: null,
+            error: message,
+          });
+          connectionFailureToast = pushToast(message, "error", 0);
+          // Keep queued commands, composer drafts and unfinished turns intact.
+          // A new explicit connection must restore the owner before delivery.
+          ref.current = null;
+          ws.close();
+          return;
+        }
         if (awaitingSessionRestore && shouldAdvanceReplayCursor(parsed)) {
           if (bufferedRecoveryEvents.length >= MAX_RECOVERY_BUFFERED_EVENTS) {
               closeWebSocketForResync(ws, "session recovery buffer exceeded");

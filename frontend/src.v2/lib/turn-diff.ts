@@ -12,6 +12,11 @@ export interface TurnDiffSummary {
 const DIFF_HEADER = /^diff --git a\/(.+) b\/(.+)$/;
 
 export function summarizeTurnDiff(state: TurnDiffState | null | undefined): TurnDiffSummary | null {
+  if (state?.deferred && state.files?.length) return {
+    files: state.files,
+    additions: state.files.reduce((sum, file) => sum + file.additions, 0),
+    deletions: state.files.reduce((sum, file) => sum + file.deletions, 0),
+  };
   if (!state?.diff) return null;
   const chunks = state.diff.split(/(?=^diff --git )/m).filter((chunk) => chunk.startsWith("diff --git "));
   const files: GitChangeFile[] = [];
@@ -54,7 +59,7 @@ export const applyAuthoritativeTurnDiff = (
     && (!turnDiff.messageId || turn.id === turnDiff.messageId));
   if (index < 0) return turns;
   const turn = turns[index];
-  if (turnDiff.diff === null) {
+  if (turnDiff.diff === null && !turnDiff.deferred) {
     const next = turns.slice();
     next[index] = { ...turn, committedCells: turn.committedCells.map((cell) =>
       cell.kind === "diff" ? { ...cell, historical: true } : cell,
@@ -74,6 +79,12 @@ export const applyAuthoritativeTurnDiff = (
     kind: "diff",
     id: `turn-diff-${turnDiff.turnId}`,
     status: "updated",
+    source: turnDiff.source,
+    truncated: turnDiff.truncated,
+    ...(turnDiff.deferred && turnDiff.messageId ? { deferredDiff: {
+      conversationId: turnDiff.threadId, messageId: turnDiff.messageId,
+      turnId: turnDiff.turnId, revision: turnDiff.revision,
+    } } : {}),
     files: summary.files.map((file) => ({
       path: file.path,
       oldPath: file.oldPath,
@@ -83,6 +94,7 @@ export const applyAuthoritativeTurnDiff = (
       changeType: file.oldPath && file.oldPath !== file.path ? "renamed"
         : diffFileChangeType(file),
       isLarge: file.additions + file.deletions > 200,
+      isTruncated: turnDiff.truncated,
     })),
     summary: {
       added: summary.additions,

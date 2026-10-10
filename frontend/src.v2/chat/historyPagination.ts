@@ -6,6 +6,7 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { pushToast } from "../overlays/ToastContainer";
 import { hydrateMessages, normalizeContentBlocks } from "./transcriptHydration";
 import type { ToolHistoryPage } from "../stores/types";
+import { hasValidHistoricalTurnDiffMetadata } from "../protocol/server-event-validation";
 
 export async function loadEarlierConversationMessages(
   conversationId: string,
@@ -24,6 +25,7 @@ export async function loadEarlierConversationMessages(
     const response = await fetchWithTimeout(url, { headers: authHeaders() });
     if (!response.ok) throw new ApiError(response.status, errorMessageFromResponseText(await response.text(), response.statusText));
     payload = await response.json();
+    if (!payload.transcript.every((message) => hasValidHistoricalTurnDiffMetadata(message, conversationId))) throw new Error("历史消息的文件差异摘要无效");
   } catch (error) {
     const current = useAppStore.getState();
     if (current.conversationHistoryPages[conversationId] !== pending) return;

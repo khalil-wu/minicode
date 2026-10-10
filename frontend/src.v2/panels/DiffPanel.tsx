@@ -18,6 +18,7 @@ import { returnToBrowserPage } from "../chat/openWebInBrowser";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { parseUnifiedDiffLines } from "../lib/unified-diff";
 import { pushToast } from "../overlays/ToastContainer";
+import { loadMessageTurnDiff } from "../chat/loadMessageTurnDiff";
 import "./DiffPanel.css";
 
 type DiffViewMode = "unified" | "split";
@@ -176,7 +177,9 @@ export const DiffPanel = () => {
   const totals = useMemo(() => {
     const files: { patch?: string | null; additions?: number; deletions?: number }[] = visibleScope === "review"
       ? diffReview?.files.length ? diffReview.files : [{ patch: diffReview?.diff }]
-      : visibleScope === "history" ? historyTurn?.files.flatMap((file) => file.revisions.map((revision) => ({ patch: revision.diff }))) ?? []
+      : visibleScope === "history" ? historyTurn?.files.flatMap<{ patch?: string; additions?: number; deletions?: number }>((file) => file.revisions.length
+        ? file.revisions.map((revision) => ({ patch: revision.diff }))
+        : [{ additions: file.additions, deletions: file.deletions }]) ?? []
       : [...gitChanges.staged, ...gitChanges.workingTree];
     return files.reduce((sum, file) => {
       const lines = parseUnifiedDiff(file.patch ?? "");
@@ -867,6 +870,8 @@ const ReadOnlyReviewTab = ({ review, viewMode }: { review: DiffReviewState; view
     if (review.selectedPath) setOpenPaths((current) => new Set([...current, selected]));
   }, [review.selectedPath]);
   return <div className="mc-diff-file-sections mc-diff-review-sections">
+    {review.toolName === "工作区比较" && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>工作区比较</div>}
+    {review.truncated && <div role="note" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>不完整历史Diff：保存的差异已截断，无法撤销。</div>}
     {files.slice(0, visibleFileLimit).map((file) => <ReadOnlyReviewFile key={file.path}
       file={file} review={review} viewMode={viewMode} open={openPaths.has(file.path)}
       onToggle={() => {
@@ -1133,8 +1138,37 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
 // ── History Tab ──────────────────────────────────────────────────
 
 const HistoryTab = ({ turn, turnNumber, viewMode }: { turn?: HistoryDiffTurn; turnNumber: number; viewMode: DiffViewMode }) => {
-  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(turn?.files.slice(0, 1).map((file) => file.path)));
-  useEffect(() => { setOpenPaths(new Set(turn?.files.slice(0, 1).map((file) => file.path))); }, [turn?.id]);
+  const conversationId = useAppStore((state) => state.conversationId);
+  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(turn?.deferredDiff ? [] : turn?.files.slice(0, 1).map((file) => file.path)));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setOpenPaths(new Set(turn?.deferredDiff ? [] : turn?.files.slice(0, 1).map((file) => file.path)));
+    setLoading(false); setError("");
+    return () => { request.current?.abort(); request.current = null; };
+  }, [turn?.id, conversationId]);
+  const toggleFile = async (path: string) => {
+    if (turn?.deferredDiff) {
+      if (request.current) return;
+      const pending = new AbortController();
+      request.current = pending;
+      setLoading(true); setError("");
+      try {
+        const loaded = await loadMessageTurnDiff(turn.deferredDiff, pending.signal);
+        if (!loaded || pending.signal.aborted) return;
+      } catch (failure) {
+        if (pending.signal.aborted) return;
+        setError(failure instanceof Error ? failure.message : "无法加载历史差异");
+        return;
+      } finally {
+        if (request.current === pending) { request.current = null; setLoading(false); }
+      }
+    }
+    setOpenPaths((current) => {
+      const next = new Set(current); next.has(path) ? next.delete(path) : next.add(path); return next;
+    });
+  };
   if (!turn) return <div className="flex-1 grid place-items-center p-4">
     <EmptyState compact icon={<GitCompare size={20} />} title="暂无轮次记录" hint="完成对话后，可以按轮次查看修改。" />
   </div>;
@@ -1142,10 +1176,12 @@ const HistoryTab = ({ turn, turnNumber, viewMode }: { turn?: HistoryDiffTurn; tu
     <EmptyState compact icon={<GitCompare size={20} />} title="这一轮没有文件修改" hint="可以选择其他轮次查看。" />
   </div>;
   return <div className="mc-diff-file-sections">
+    {turn.source === "workspace_snapshot" && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>工作区比较</div>}
+    {turn.truncated && <div role="note" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>不完整历史Diff：保存的差异已截断，无法撤销。</div>}
+    {loading && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>正在加载历史差异…</div>}
+    {error && <div role="alert" style={{ color: "var(--state-danger)" }}>{error}</div>}
     {turn.files.map((file) => <HistoryFileDiff key={`${turn.id}:${file.path}`} file={file} turnNumber={turnNumber}
-      viewMode={viewMode} open={openPaths.has(file.path)} onToggle={() => setOpenPaths((current) => {
-        const next = new Set(current); next.has(file.path) ? next.delete(file.path) : next.add(file.path); return next;
-      })} />)}
+      viewMode={viewMode} open={openPaths.has(file.path)} onToggle={() => void toggleFile(file.path)} />)}
   </div>;
 };
 
@@ -1158,7 +1194,7 @@ const HistoryFileDiff = ({ file, turnNumber, viewMode, open, onToggle }: {
     sum.minus += revision.lines.filter((line) => line.kind === "del").length;
     return sum;
   }, { plus: 0, minus: 0 });
-  return <DiffFileSection path={file.path || "未标注文件路径"} additions={totals.plus} deletions={totals.minus}
+  return <DiffFileSection path={file.path || "未标注文件路径"} additions={file.additions ?? totals.plus} deletions={file.deletions ?? totals.minus}
     open={open} onToggle={onToggle} actions={file.path && <button type="button" title="在编辑器中打开文件"
       aria-label={`在编辑器中打开 ${file.path}`} onClick={() => useAppStore.getState().openEditorFile(file.path, file.path.split(/[/\\]/).pop(), { exact: true })}><ExternalLink size={14} /></button>}>
     {revisions.map((revision, index) => <div key={revision.id}>

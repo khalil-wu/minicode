@@ -1064,7 +1064,7 @@ const isConversationRecordPayload = (
       maxStringCharacters: 4_194_304,
       maxArrayItems: 8_192,
       maxObjectItems: 4_096,
-    })) return false;
+    }) || !value[field].every((message) => hasValidHistoricalTurnDiffMetadata(message, String(value.id)))) return false;
   }
   if ("permission_deny_rules" in value && value.permission_deny_rules !== undefined && value.permission_deny_rules !== null) {
     if (!Array.isArray(value.permission_deny_rules)
@@ -1083,6 +1083,29 @@ const isConversationRecordPayload = (
       maxObjectItems: 4_096,
     }))) return false;
   return true;
+};
+
+export const isHistoricalTurnDiffPayload = (value: unknown): value is Record<string, unknown> => {
+  if (!isRecord(value) || !isNonEmptyString(value.thread_id) || value.conversation_id !== value.thread_id
+    || !isNonEmptyString(value.message_id) || !isNonEmptyString(value.turn_id)
+    || (typeof value.diff !== "string" && value.diff !== null)) return false;
+  if ("revision" in value && !isNonNegativeSafeInteger(value.revision)) return false;
+  if ("source" in value && typeof value.source !== "string") return false;
+  for (const field of ["deferred", "truncated"]) if (field in value && typeof value[field] !== "boolean") return false;
+  if ("files" in value && (!Array.isArray(value.files) || !value.files.every((file) => isRecord(file)
+    && isNonEmptyString(file.path) && isNonNegativeSafeInteger(file.additions) && isNonNegativeSafeInteger(file.deletions)
+    && (!("old_path" in file) || typeof file.old_path === "string")
+    && (!("is_binary" in file) || typeof file.is_binary === "boolean")))) return false;
+  return value.deferred !== true || (value.diff === null && Array.isArray(value.files));
+};
+
+export const hasValidHistoricalTurnDiffMetadata = (message: Record<string, unknown>, conversationId?: string): boolean => {
+  if (!isRecord(message.metadata) || !("turn_diff" in message.metadata)) return true;
+  const diff = message.metadata.turn_diff;
+  return isHistoricalTurnDiffPayload(diff) && diff.message_id === message.id
+    && (!conversationId || diff.conversation_id === conversationId)
+    && (!("turn_id" in message) || message.turn_id === diff.turn_id)
+    && (!("turnId" in message) || message.turnId === diff.turn_id);
 };
 
 const isSessionWorkspacePayload = (value: unknown): boolean => {
@@ -1616,7 +1639,8 @@ const hasValidSemanticPayload = (
         maxStringCharacters: 4_194_304,
         maxArrayItems: 8_192,
         maxObjectItems: 4_096,
-      }))
+      }) && value.messages.every((message) => hasValidHistoricalTurnDiffMetadata(message,
+        typeof activeId === "string" ? activeId : conversationId || activeConversationId || undefined)))
       && (!('error' in value) || value.error === null || isBoundedString(value.error, MAX_EVENT_SUMMARY_CHARS, { allowEmpty: true }))
       && (!('missed_events' in value) || typeof value.missed_events === "boolean")
       && (!('event_log_gap' in value) || typeof value.event_log_gap === "boolean")

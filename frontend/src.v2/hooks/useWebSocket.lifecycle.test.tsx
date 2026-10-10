@@ -23,6 +23,7 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn(), dismissToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { resetEditorDraftStorageForTests } from "../stores/editor-drafts";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
 import { sendClientCommandAwaitResult, sendPromptResponseCommand } from "../protocol/ws-outbox";
@@ -117,7 +118,8 @@ const Harness = () => {
 
 describe("useWebSocketConnection socket ownership", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    // Own the transport clock; IndexedDB's setImmediate tasks must complete.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
     localStorage.clear();
@@ -138,8 +140,9 @@ describe("useWebSocketConnection socket ownership", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await resetEditorDraftStorageForTests();
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -626,6 +629,97 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(sentCommandCount(socket, "session.restore")).toBe(1);
     expect(useAppStore.getState().connectionPhase).toBe("connected");
     expect(useAppStore.getState().isConnected).toBe(true);
+  });
+
+  it("ends a rejected restore without releasing queued work or losing drafts and the replay cursor", async () => {
+    const messages = [{ id: "unfinished", role: "assistant" as const, content: "partial answer",
+      timestamp: 1, artifacts: [], isStreaming: true }];
+    const attachments = [{ id: "draft-image", name: "draft.png", type: "image/png", size: 10 }];
+    useAppStore.setState({ conversationId: "conv-rejected-restore", messages,
+      isStreaming: true, conversationStreaming: { "conv-rejected-restore": true },
+      draft: "unsent user instruction", attachments });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    await flushQueuedCommands();
+    const restore = sentCommands(socket).find((command) => command.type === "session.restore")!;
+
+    act(() => {
+      expect(getWebSocket()?.send({ type: "user_message", content: "queued instruction",
+        conversation_id: "conv-rejected-restore", client_command_id: "queued-before-rejection" })).toBe(true);
+      socket.emitMessage({ type: "agent.progress", conversation_id: "conv-rejected-restore",
+        seq: 10, previous_replay_seq: 0, stage: "running", message: "buffered" });
+      socket.emitMessage({ type: "command.result", command: "session.restore", level: "error",
+        message: "session.capabilities contains a non-JSON value (tuple)",
+        client_command_id: restore.client_command_id, client_command_type: "session.restore",
+        conversation_id: "conv-rejected-restore", workspace_root: "", seq: 11, previous_replay_seq: 10 });
+    });
+    expect(useAppStore.getState()).toMatchObject({ connectionPhase: "failed", isConnected: false,
+      draft: "unsent user instruction", attachments, messages, isStreaming: true });
+    expect(useAppStore.getState().connectionError).toContain("non-JSON value");
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
+    expect(sentCommandCount(socket, "user_message")).toBe(0);
+    expect(getWebSocket()?.send({ type: "conversation.list" })).toBe(false);
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("会话恢复失败"), "error", 0);
+
+    act(() => {
+      socket.emit("close", 1000);
+      vi.advanceTimersByTime(100_000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(1);
+    act(() => getWebSocket()?.reconnect());
+    const resumed = MockWebSocket.instances[1];
+    act(() => resumed.emit("open"));
+    await flushQueuedCommands();
+    expect(sentCommandCount(resumed, "user_message")).toBe(0);
+    act(() => resumed.emitMessage({ type: "session.restored", active_conversation_id: "conv-rejected-restore",
+      conversation_switched_follows: false, last_seq: 0, current_seq: 11, replayed_events: 0,
+      session: { active_conversation_id: "conv-rejected-restore" } }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().connectionPhase).toBe("connected");
+    expect(sentCommands(resumed).filter((command) => command.client_command_id === "queued-before-rejection")).toHaveLength(1);
+    expect(sentCommandCount(resumed, "session.restore")).toBe(1);
+  });
+
+  it.each(["session.restore", "session.sync"] as const)("reports a current %s failure to its caller and ignores late success", async (command) => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    await flushQueuedCommands();
+    const pending = sendClientCommandAwaitResult({ type: command, client_command_id: "current-recovery" }, command);
+    act(() => socket.emitMessage({ type: "command.result", command, level: "error", message: "projection failed",
+      client_command_id: "current-recovery", client_command_type: command }));
+    await expect(pending).resolves.toMatchObject({ level: "error", message: "projection failed" });
+    expect(useAppStore.getState().connectionPhase).toBe("failed");
+    act(() => socket.emitMessage({ type: command === "session.restore" ? "session.restored" : "session.synced",
+      active_conversation_id: null, conversation_switched_follows: false,
+      session: { active_conversation_id: null }, client_command_id: "current-recovery", client_command_type: command }));
+    expect(useAppStore.getState().connectionPhase).toBe("failed");
+  });
+
+  it("keeps recovery pending when an older request or replayed restore reports failure", async () => {
+    useAppStore.setState({ conversationId: "conv-current-restore" });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    await flushQueuedCommands();
+    const restore = sentCommands(socket).find((command) => command.type === "session.restore")!;
+    act(() => {
+      socket.emitMessage({ type: "command.result", command: "session.restore", level: "error", message: "older failure",
+        client_command_id: "obsolete-restore", client_command_type: "session.restore" });
+      socket.emitMessage({ type: "command.result", command: "session.restore", level: "error", message: "replayed failure",
+        client_command_id: restore.client_command_id, client_command_type: "session.restore", replayed: true });
+    });
+    expect(useAppStore.getState().connectionPhase).toBe("connecting");
+    expect(socket.close).not.toHaveBeenCalled();
+    act(() => socket.emitMessage({ type: "session.restored", active_conversation_id: "conv-current-restore",
+      conversation_switched_follows: false, session: { active_conversation_id: "conv-current-restore" },
+      client_command_id: restore.client_command_id, client_command_type: "session.restore" }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().connectionPhase).toBe("connected");
   });
 
   it("waits for the canonical conversation switch before refreshing a restored catalog", async () => {

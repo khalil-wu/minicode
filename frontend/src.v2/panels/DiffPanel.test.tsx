@@ -8,6 +8,8 @@ import { sendClientCommand, sendClientCommandAwaitResult, sendPromptResponseComm
 import { showConfirm } from "../overlays/DialogService";
 import { DiffPanel } from "./DiffPanel";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
+import * as deferredTurnDiff from "../chat/loadMessageTurnDiff";
+import type { TurnDiffState } from "../stores/types";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -70,6 +72,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   useAppStore.setState({ diffReview: null, messages: [], gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
   vi.mocked(sendClientCommand).mockReset();
   vi.mocked(sendClientCommandAwaitResult).mockReset();
@@ -78,6 +81,40 @@ afterEach(() => {
 });
 
 describe("DiffPanel", () => {
+  it("keeps deferred history files visible and only fetches after a file is selected", async () => {
+    const persisted: TurnDiffState = { threadId: "conv-diff", turnId: "turn", messageId: "answer", diff: null,
+      deferred: true, revision: 2, updatedAt: 1, source: "workspace_snapshot",
+      files: [{ path: "src/a.ts", additions: 1, deletions: 1 }, { path: "src/b.ts", additions: 1, deletions: 1 }] };
+    const answer = { id: "answer", turnId: "turn", role: "assistant" as const, content: "Done", artifacts: [], timestamp: 1, turnDiff: persisted };
+    const load = vi.spyOn(deferredTurnDiff, "loadMessageTurnDiff").mockImplementation(async () => {
+      const loaded = { ...persisted, deferred: false, diff: "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-oldA\n+newA\n"
+        + "diff --git a/src/b.ts b/src/b.ts\n@@ -1 +1 @@\n-oldB\n+newB\n" };
+      useAppStore.setState({ messages: [{ ...answer, turnDiff: loaded }] });
+      return loaded;
+    });
+    useAppStore.setState({ diffReview: null, messages: [answer] });
+    render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+    fireEvent.click(screen.getByRole("option", { name: /上一轮/ }));
+    expect(screen.getByText("工作区比较")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "src/b.ts", exact: true }).getAttribute("aria-expanded")).toBe("false");
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "src/b.ts", exact: true }));
+    await waitFor(() => expect(screen.getByText("newB")).toBeTruthy());
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load.mock.calls[0][0]).toEqual({ conversationId: "conv-diff", messageId: "answer", turnId: "turn", revision: 2 });
+    expect(screen.getByRole("button", { name: "src/a.ts", exact: true })).toBeTruthy();
+  });
+
+  it("shows incomplete workspace history explicitly in read-only review", () => {
+    const patch = "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    useAppStore.setState({ diffReview: { requestId: "history", conversationId: "conv-diff", mode: "view", status: "viewing",
+      toolName: "工作区比较", truncated: true, diff: patch, files: [{ path: "src/a.ts", patch }], fileDecisions: {}, lineComments: [] } });
+    render(<DiffPanel />);
+    expect(screen.getByText("工作区比较")).toBeTruthy();
+    expect(screen.getByRole("note").textContent).toContain("不完整历史Diff");
+    expect(screen.queryByRole("button", { name: /撤销|全部接受|全部拒绝/ })).toBeNull();
+  });
   it.each(["review", "history", "git"] as const)("keeps %s diff rows free of chat and question affordances in both layouts", (scope) => {
     const patch = "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -10 +10 @@\n-old\n+new";
     useAppStore.setState({ draft: "Keep the draft", selectedMentions: [], diffReview: scope === "review" ? {

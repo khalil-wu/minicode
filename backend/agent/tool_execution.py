@@ -383,19 +383,15 @@ def _read_time_hashes(tool_ctx: ToolExecutionContext) -> dict[str, str] | None:
 _EXACT_TURN_DIFF_TOOLS = frozenset({"write_file", "edit_file", "apply_patch", "notebook_edit"})
 
 
-async def _invalidate_turn_diff_after_inexact_mutation(
+def _invalidate_workspace_views_after_mutation(
     tc: ToolCallEvent,
-    result: ToolResult,
     *,
     tool_registry: ToolRegistry,
-    tool_ctx: ToolExecutionContext,
 ) -> None:
-    """Any executed non-exact mutation invalidates the turn diff.
+    """Refresh read caches for tools that can mutate arbitrary workspace files.
 
-    Exact file tools publish their own committed before/after deltas. Commands,
-    git/worktree, MCP and other workspace/external mutations cannot
-    provide that proof, including when they fail after partial effects. Clear
-    the aggregate instead of presenting a stale authoritative snapshot.
+    The turn diff records committed editing-tool deltas. Other mutations have
+    no exact delta to add; they do not erase those existing editing receipts.
     """
 
     if tc.name in _EXACT_TURN_DIFF_TOOLS:
@@ -414,43 +410,11 @@ async def _invalidate_turn_diff_after_inexact_mutation(
     # even for an error result: a command can partially mutate before failing.
     tool = tool_registry.get_tool(tc.name)
     if bool(getattr(tool, "mutates_workspace", False)):
-        try:
-            from backend.tools.file_tools_common import invalidate_workspace_file_caches
+        from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-            invalidate_workspace_file_caches(
-                file_tree_changed=True,
-                clear_file_state=True,
-            )
-        except Exception:
-            logger.debug(
-                "workspace cache invalidation failed for %s", tc.name, exc_info=True
-            )
-
-    if result.status == "blocked":
-        return
-    tracker = getattr(tool_ctx, "turn_diff_tracker", None)
-    if tracker is None or not hasattr(tracker, "lock"):
-        return
-    emit = getattr(tool_ctx, "emit_event", None)
-    async with tracker.lock:
-        # The lock is the commit-order boundary. An executed mutation whose
-        # exact before/after content is unknown always invalidates everything
-        # committed before it. Exact file mutations that acquire the lock later
-        # see the invalid tracker and cannot recreate a misleading partial diff.
-        tracker.invalidate()
-        if emit is None:
-            return
-        await emit(
-            "turn.diff.updated",
-            AgentEvent.turn_diff_updated(
-                thread_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
-                turn_id=_tool_turn_id(tool_ctx),
-                # Unknown current contents are not an exact empty change set.
-                # Keep committed tool receipts available as historical edits.
-                diff=None,
-                revision=tracker.revision,
-                tool_call_id=tc.id,
-            ).data,
+        invalidate_workspace_file_caches(
+            file_tree_changed=True,
+            clear_file_state=True,
         )
 
 

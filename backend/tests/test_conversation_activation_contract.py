@@ -13,9 +13,11 @@ from backend.ws.handlers import conversation
 
 
 def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
+    projection_lock = asyncio.Lock()
     session = SimpleNamespace(
         active_conversation_id=active_id,
         conversation_repo=repo,
+        _conversation_projection_lock=lambda _owner: projection_lock,
         ws_manager=None,
         switch_workspace_for_conversation=AsyncMock(return_value=True),
         reconcile_persisted_ui_agent_state=AsyncMock(return_value=None),

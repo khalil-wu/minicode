@@ -4938,7 +4938,7 @@ class SessionAgentRunnerMixin:
             nonlocal latest_turn_diff
             owner = str(payload.get("thread_id") or payload.get("conversation_id") or "")
             if owner == conversation.id:
-                latest_turn_diff = dict(payload)
+                latest_turn_diff = {**payload, "truncated": False}
 
         async def _persist_partial_turn(*, force: bool = False) -> None:
             """Coalesce the derived conversation view behind the durable journal."""

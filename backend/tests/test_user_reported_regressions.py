@@ -395,6 +395,8 @@ def test_conversation_create_emits_authoritative_switch_for_the_new_task(
 
     session = SimpleNamespace(
         active_conversation_id="conv-old-task",
+        # This unit test calls the handler without a durable dispatcher claim.
+        event_outbox=SimpleNamespace(client_command_id=""),
         artifact_store=artifacts,
         conversation_repo=SimpleNamespace(
             create_conversation=Mock(return_value=created),

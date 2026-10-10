@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from backend.tools.registry import ToolRegistry
     from backend.workspace.context import WorkspaceContext
     from backend.agent.turn_diff_tracker import TurnDiffTracker
-    from backend.agent.workspace_turn_changes import WorkspaceTurnChanges
 
 
 @dataclass(slots=True)
@@ -88,7 +87,6 @@ class RunContext:
     publish_nested_event: Callable[[AgentEvent], Awaitable[None]] | None = None
     code_store: CodeExecutionStore | None = None
     turn_diff_tracker: TurnDiffTracker | None = None
-    workspace_turn_changes: WorkspaceTurnChanges | None = None
 
     def retain_lifecycle_task(
         self, task: asyncio.Task, *, label: str, llm: Any = None,

@@ -120,6 +120,9 @@ export interface DiffCellState {
   id: string;
   status: "created" | "updated";
   historical?: boolean;
+  source?: string;
+  truncated?: boolean;
+  deferredDiff?: { conversationId: string; messageId: string; turnId: string; revision?: number };
   files: DiffFileChange[];
   summary: {
     added: number;

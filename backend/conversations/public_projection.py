@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import re
 import json
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
@@ -552,7 +553,45 @@ def _with_tool_artifact_ownership(message: Mapping[str, Any]) -> Mapping[str, An
     return {**message, "artifacts": projected}
 
 
-def project_public_transcript_message(value: Any) -> dict[str, Any]:
+_INLINE_TURN_DIFF_MAX_CHARS = 65_536
+
+
+def turn_diff_file_summaries(diff: str) -> list[dict[str, Any]]:
+    """Read file headers and hunk counts without retaining a second patch body."""
+    files: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    in_hunk = False
+    for line in diff.split("\n"):
+        if line.startswith("diff --git "):
+            match = re.fullmatch(r"diff --git a/(.+) b/(.+)", line)
+            current = None if match is None else {"path": match[2], "old_path": match[1], "additions": 0, "deletions": 0}
+            if current is not None:
+                files.append(current)
+            in_hunk = False
+        elif current is not None:
+            if not in_hunk and line.startswith("--- a/"):
+                current["old_path"] = line[6:]
+            elif not in_hunk and line.startswith("+++ b/"):
+                current["path"] = line[6:]
+            elif not in_hunk and line.startswith("rename from "):
+                current["old_path"] = line[12:]
+            elif not in_hunk and line.startswith("rename to "):
+                current["path"] = line[10:]
+            elif not in_hunk and line.startswith(("Binary files ", "GIT binary patch")):
+                current["is_binary"] = True
+            elif line.startswith("@@ "):
+                in_hunk = True
+            elif in_hunk and line.startswith("+"):
+                current["additions"] += 1
+            elif in_hunk and line.startswith("-"):
+                current["deletions"] += 1
+    for file in files:
+        if file["old_path"] == file["path"]:
+            del file["old_path"]
+    return files
+
+
+def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = False) -> dict[str, Any]:
     source = _with_tool_artifact_ownership(value) if isinstance(value, Mapping) else {}
     data_url_budget = [_MAX_PUBLIC_DATA_URL_CHARS]
     public_json_text_budget = [_MAX_PUBLIC_JSON_TEXT_CHARS]
@@ -715,7 +754,25 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
                 turn_diff[key] = text
         diff = source_diff.get("diff")
         if isinstance(diff, str) or diff is None:
-            turn_diff["diff"] = public_text(diff, max_chars=4_194_304) if isinstance(diff, str) else None
+            # Persistence retains the whole committed patch. Only wire pages
+            # defer large bodies; the indexed message remains their read owner.
+            text = public_text(diff, max_chars=len(diff)) if isinstance(diff, str) else None
+            legacy_truncated = isinstance(diff, str) and len(diff) == 4_194_304 and diff.endswith("...")
+            turn_diff["truncated"] = bool(source_diff.get("truncated", legacy_truncated))
+            if defer_turn_diff and text and (len(text) > _INLINE_TURN_DIFF_MAX_CHARS or source_diff.get("source") == "workspace_snapshot"):
+                turn_diff.update(diff=None, deferred=True, files=turn_diff_file_summaries(text))
+            else:
+                turn_diff["diff"] = text
+        if source_diff.get("deferred") is True:
+            turn_diff["deferred"] = True
+            turn_diff["files"] = [
+                {**{key: public_text(file[key], max_chars=4_096, single_line=True)
+                    for key in ("path", "old_path") if isinstance(file.get(key), str)},
+                 **{key: number for key in ("additions", "deletions")
+                    if (number := _nonnegative_int(file.get(key))) is not None},
+                 **({"is_binary": file["is_binary"]} if isinstance(file.get("is_binary"), bool) else {})}
+                for file in source_diff.get("files", []) if isinstance(file, Mapping)
+            ]
         revision = _nonnegative_int(source_diff.get("revision"))
         if revision is not None:
             turn_diff["revision"] = revision
@@ -785,16 +842,16 @@ def project_tool_window(message: dict[str, Any], *, limit: int = 40) -> dict[str
     message = _with_tool_artifact_ownership(message)
     blocks = message.get("blocks", [])
     if not isinstance(blocks, list):
-        return project_public_transcript_message(message)
+        return project_public_transcript_message(message, defer_turn_diff=True)
     positions = [index for index, block in enumerate(blocks)
                  if isinstance(block, Mapping) and block.get("type") == "tool_call" and isinstance(block.get("record"), Mapping)]
     if (message.get("terminal_status", message.get("terminalStatus")) != "completed"
             or len(positions) <= limit or "tool_page" in message
             or any((blocks[index].get("record") or {}).get("status") in {"running", "pending"} for index in positions)):
-        return project_public_transcript_message(message)
+        return project_public_transcript_message(message, defer_turn_diff=True)
     first = positions[-limit]
     projected = project_public_transcript_message({key: value for key, value in message.items()
-                                                  if key not in {"blocks", "tool_calls", "toolCalls"}})
+                                                  if key not in {"blocks", "tool_calls", "toolCalls"}}, defer_turn_diff=True)
     projected["blocks"] = [
         {**block, "transcriptIndex": index}
         for index, source in enumerate(blocks)
@@ -885,7 +942,8 @@ def project_public_conversation(
             projected["parent_message_index"] = count
     if include_transcript:
         if transcript_limit is None:
-            transcript = project_public_transcript(source.get("transcript"))
+            transcript = [project_public_transcript_message(message, defer_turn_diff=True)
+                          for message in source.get("transcript", []) if isinstance(message, Mapping)]
             projected["transcript"] = transcript
             projected["message_count"] = len(transcript)
         else:

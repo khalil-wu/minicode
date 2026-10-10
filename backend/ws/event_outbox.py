@@ -255,17 +255,7 @@ class EventOutbox:
             details = payload.get("data") or {}
             for key, value in zip(("conversation_id", "workspace_root"), owner):
                 payload.setdefault(key, details.get(key, value))
-        try:
-            validate_session_projection_payload(payload)
-        except ValueError as exc:
-            logger.warning(
-                "Dropping invalid session/conversation websocket payload before sanitization: "
-                "type=%s session=%s error=%s",
-                event_type,
-                self.session_id,
-                exc,
-            )
-            return False
+        validate_session_projection_payload(payload)
         payload = sanitize_ws_live_payload(payload)
         event_type = str(payload.get("type") or "").strip()
         if is_hidden_provider_reasoning_event(payload):

@@ -12,11 +12,16 @@ import { showConfirm } from "../../overlays/DialogService";
 import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../../lib/workspace-path";
 import "./cells.css";
 import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { loadMessageTurnDiff } from "../loadMessageTurnDiff";
+import { summarizeTurnDiff } from "../../lib/turn-diff";
 
 export function DiffCell({ cell, showActions = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; conversationId?: string; workspaceRoot?: string }) {
   const [showAllFiles, setShowAllFiles, userChangedFiles] = useTranscriptReadingPreference(`diff-files:${cell.id}`, false);
   const [reverting, setReverting] = useState(false);
   const [reverted, setReverted] = useState(false);
+  const [loadingDiff, setLoadingDiff] = useState(false);
+  const [diffError, setDiffError] = useState("");
+  const diffRequest = useRef<AbortController | null>(null);
   const activeWorkspace = useAppStore((state) => state.workingDirectory);
   const activeConversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
@@ -26,7 +31,10 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   useEffect(() => {
     setReverting(false);
     setReverted(false);
-  }, [cell.id, ownerConversationId, normalizeWorkspaceRoot(workingDirectory)]);
+    setLoadingDiff(false);
+    setDiffError("");
+    return () => { diffRequest.current?.abort(); diffRequest.current = null; };
+  }, [cell.id, ownerConversationId, activeConversationId, normalizeWorkspaceRoot(workingDirectory)]);
   const files = useMemo(() => cell.files.map((file) => ({
     ...file,
     path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
@@ -36,17 +44,21 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   })), [cell.files, workingDirectory]);
   const visibleFiles = showAllFiles ? files : files.slice(0, 3);
   const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
-  const canRevert = files.length > 0 && files.every((file) => file.patch && !file.isTruncated);
+  const canRevert = !cell.deferredDiff && !cell.truncated && cell.source !== "workspace_snapshot"
+    && files.length > 0 && files.every((file) => file.patch && !file.isTruncated);
 
-  const openDiffReview = (path?: string) => {
-    const reviewableFiles = files.filter((file) => Boolean(file.patch));
+  const showDiffReview = (reviewFiles: DiffFileChange[], path?: string, truncated = cell.truncated) => {
+    const reviewableFiles = reviewFiles.filter((file) => Boolean(file.patch));
     if (reviewableFiles.length === 0) return;
     const selectedPath = path ?? reviewableFiles[0].path;
     useAppStore.setState({ gitReviewRequest: null });
     useAppStore.getState().setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
       conversationId: ownerConversationId ?? undefined,
-      toolName: "助手修改",
+      turnId: cell.deferredDiff?.turnId,
+      messageId: cell.deferredDiff?.messageId,
+      toolName: cell.source === "workspace_snapshot" ? "工作区比较" : "助手修改",
+      truncated,
       diff: initialDiffReviewPatch(reviewableFiles.map((file) => ({
         path: file.path,
         patch: file.patch ?? "",
@@ -66,6 +78,32 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
       lineComments: [],
     });
     useAppStore.getState().setRightStackTab("diff");
+  };
+
+  const openDiffReview = async (path?: string) => {
+    if (!cell.deferredDiff) { showDiffReview(files, path); return; }
+    if (diffRequest.current) return;
+    const request = new AbortController();
+    diffRequest.current = request;
+    setLoadingDiff(true);
+    setDiffError("");
+    try {
+      const loaded = await loadMessageTurnDiff(cell.deferredDiff, request.signal);
+      if (!loaded || request.signal.aborted) return;
+      const summary = summarizeTurnDiff(loaded);
+      if (!summary) throw new Error("这一轮没有可用的历史差异");
+      showDiffReview(summary.files.map((file) => ({ ...file,
+        path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+        isTruncated: loaded.truncated,
+      })), path, loaded.truncated);
+    } catch (error) {
+      if (request.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "无法加载历史差异";
+      setDiffError(message);
+      pushToast(message, "error");
+    } finally {
+      if (diffRequest.current === request) { diffRequest.current = null; setLoadingDiff(false); }
+    }
   };
 
   const revertDiffFiles = async () => {
@@ -142,17 +180,20 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
             <button
               type="button"
               className="diff-cell-action-button diff-cell-action-button-accent"
-              onClick={() => openDiffReview()}
-              disabled={!files.some((file) => Boolean(file.patch))}
+              onClick={() => void openDiffReview()}
+              disabled={loadingDiff || (!cell.deferredDiff && !files.some((file) => Boolean(file.patch)))}
               title="在审核面板查看更改"
             >
-              <span>查看变更</span>
+              <span>{loadingDiff ? "正在加载差异…" : "查看变更"}</span>
             </button>
           </div>
         )}
       </div>
+      {cell.truncated && <span className="diff-cell-history-note">不完整历史Diff：保存的差异已截断，无法撤销。</span>}
+      {diffError && <span className="diff-cell-history-error" role="alert">{diffError}</span>}
       <div className="diff-cell-files">
-        {visibleFiles.map((file, index) => <DiffFileSection key={file.path || index} file={file} onOpen={showActions && file.patch ? () => openDiffReview(file.path) : undefined} />)}
+        {visibleFiles.map((file, index) => <DiffFileSection key={file.path || index} file={file} disabled={loadingDiff}
+          onOpen={showActions && (file.patch || cell.deferredDiff) ? () => void openDiffReview(file.path) : undefined} />)}
       </div>
       {files.length > 3 && (
         <button
@@ -169,7 +210,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   );
 }
 
-function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () => void }) {
+function DiffFileSection({ file, onOpen, disabled }: { file: DiffFileChange; onOpen?: () => void; disabled?: boolean }) {
   const changeType = diffFileChangeType(file);
   const displayPath = changeType === "renamed" && file.oldPath
     ? `${file.oldPath.split(/[\\/]/).pop()} → ${file.path.split(/[\\/]/).pop()}`
@@ -177,7 +218,7 @@ function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () =
   return <section className="diff-file-section">
     <div className="diff-file-section-header">
       {onOpen
-        ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen}>{displayPath}</button>
+        ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen} disabled={disabled}>{displayPath}</button>
         : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}
       <span className="diff-cell-stats"><RollingNumber value={file.additions} prefix="+" className="diff-cell-added" /><RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" /></span>
     </div>

@@ -222,6 +222,33 @@ def _conversation_summary(value: Any, field: str) -> dict[str, Any]:
     return record
 
 
+def _transcript_message(value: Any, field: str) -> None:
+    record = _record(value, field)
+    metadata = record.get("metadata")
+    turn_diff = metadata.get("turn_diff") if isinstance(metadata, dict) else None
+    if not isinstance(turn_diff, dict):
+        return
+    for name in ("deferred", "truncated"):
+        if name in turn_diff and not isinstance(turn_diff[name], bool):
+            raise ValueError(f"{field}.metadata.turn_diff.{name} must be boolean")
+    if turn_diff.get("deferred"):
+        if turn_diff.get("diff") is not None:
+            raise ValueError(f"{field}.metadata.turn_diff.diff must be null when deferred")
+        files = turn_diff.get("files")
+        if not isinstance(files, list) or len(files) > 4_096:
+            raise ValueError(f"{field}.metadata.turn_diff.files must be a bounded list")
+        for index, file in enumerate(files):
+            path = f"{field}.metadata.turn_diff.files[{index}]"
+            if not isinstance(file, dict):
+                raise ValueError(f"{path} must be an object")
+            _text(file.get("path"), f"{path}.path", 4_096, required=True)
+            _optional_text(file.get("old_path"), f"{path}.old_path", 4_096)
+            for name in ("additions", "deletions"):
+                _non_negative_int(file.get(name), f"{path}.{name}")
+            if "is_binary" in file and not isinstance(file["is_binary"], bool):
+                raise ValueError(f"{path}.is_binary must be boolean")
+
+
 def _conversation_record(value: Any, field: str) -> dict[str, Any]:
     record = _conversation_summary(value, field)
     for name in ("transcript", "messages"):
@@ -231,7 +258,7 @@ def _conversation_record(value: Any, field: str) -> dict[str, Any]:
         if not isinstance(messages, list) or len(messages) > MAX_TRANSCRIPT_MESSAGES:
             raise ValueError(f"{field}.{name} is too large")
         for index, message in enumerate(messages):
-            _record(message, f"{field}.{name}[{index}]")
+            _transcript_message(message, f"{field}.{name}[{index}]")
     if "permission_deny_rules" in record and record["permission_deny_rules"] is not None:
         rules = record["permission_deny_rules"]
         if not isinstance(rules, list) or len(rules) > 512:
@@ -577,7 +604,7 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
             if not isinstance(messages, list) or len(messages) > MAX_TRANSCRIPT_MESSAGES:
                 raise ValueError("messages is too large")
             for index, message in enumerate(messages):
-                _record(message, f"messages[{index}]")
+                _transcript_message(message, f"messages[{index}]")
         if payload.get("error") is not None:
             _optional_text(payload["error"], "error", 65_536)
         _sequence_fields(payload)

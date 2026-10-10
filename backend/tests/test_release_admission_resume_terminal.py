@@ -9,7 +9,6 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from backend.agent.message import AgentEvent
-from backend.agent.workspace_turn_changes import WorkspaceTurnChanges
 from backend.conversations.repository import ConversationRepository
 from backend.tests.test_ws_recovered_command_owner_chain import _session, _drain
 from backend.ws.command_dispatcher import SessionCommandDispatcher
@@ -147,32 +146,9 @@ async def test_first_input_owner_waits_for_prior_selection_without_blocking_inte
         queue.close()
 
 
-def test_workspace_file_disappearing_during_enumeration_is_an_actual_removal(tmp_path, monkeypatch):
-    from backend.agent import workspace_turn_changes as module
-
-    removed = tmp_path / "temporary.py"
-    removed.write_text("temporary = True\n", encoding="utf-8")
-    retained = tmp_path / "retained.py"
-    retained.write_text("value = 1\n", encoding="utf-8")
-    baseline = WorkspaceTurnChanges.capture(tmp_path, application_roots=())
-    retained.write_text("value = 2\n", encoding="utf-8")
-    original = module.iter_search_paths
-
-    def raced_paths(*args, **kwargs):
-        for path, directory in original(*args, **kwargs):
-            if path == removed:
-                removed.unlink()
-            yield path, directory
-
-    monkeypatch.setattr(module, "iter_search_paths", raced_paths)
-    diff = baseline.unified_diff()
-    assert "--- a/temporary.py\n+++ /dev/null" in diff
-    assert "-value = 1" in diff and "+value = 2" in diff
-
-
 @pytest.mark.asyncio
-async def test_unreadable_workspace_diff_still_commits_the_accepted_terminal(tmp_path, monkeypatch):
-    from backend.tests.test_workspace_turn_changes import _NoProvider
+async def test_terminal_does_not_read_unrelated_locked_workspace_files(tmp_path, monkeypatch):
+    from backend.tests.test_committed_turn_changes import _NoProvider
     from backend.agent.context import ContextBuilder
     from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
     from backend.agent.loop_session import AgentLoopSessionContext
@@ -194,10 +170,18 @@ async def test_unreadable_workspace_diff_still_commits_the_accepted_terminal(tmp
         execution_journal=ExecutionJournal("terminal-owner", base_dir=tmp_path / "journals"))
     state = AgentState(user_message="inspect", workspace_root=workspace, conversation_id="owner")
 
-    def unreadable_diff(_self):
-        raise PermissionError("locked plot.svg")
+    locked = workspace / "plot.svg"
+    locked.write_text("<svg />", encoding="utf-8")
+    original_read = Path.read_bytes
+    reads = []
 
-    monkeypatch.setattr(WorkspaceTurnChanges, "unified_diff", unreadable_diff)
+    def read_locked_file(self):
+        if self == locked:
+            reads.append(self)
+            raise PermissionError("locked plot.svg")
+        return original_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_locked_file)
 
     async def accepted_runner(**_kwargs):
         state.reply = "Inspection completed."
@@ -215,10 +199,11 @@ async def test_unreadable_workspace_diff_still_commits_the_accepted_terminal(tmp
             runtime=AgentLoopSessionContext(workspace_root=workspace, run_context=context)))]
         assert [event.data["status"] for event in events if event.type == "done"] == ["completed"]
         assert state.terminal_status == "completed" and not session.active_turn
-        assert any(event.type == "error" and event.data["error_code"] == "workspace.diff_unavailable" for event in events)
+        assert reads == []
+        assert not any(event.type == "error" for event in events)
         journal_events = context.execution_journal.read_events()
         assert sum(event.event_type == "terminal" for event in journal_events) == 1
-        assert any(event.payload.get("error_code") == "workspace.diff_unavailable" for event in journal_events)
+        assert not any(event.event_type == "error" for event in journal_events)
         assert not any(event.type == "turn.diff.updated" for event in events)
     finally:
         await session.aclose()

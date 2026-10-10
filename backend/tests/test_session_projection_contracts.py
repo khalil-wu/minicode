@@ -535,17 +535,17 @@ def test_transport_allows_global_task_snapshot_and_stamps_command_owner(tmp_path
 def test_transport_rejects_invalid_session_projection_before_wire(tmp_path: Path) -> None:
     session, websocket = _transport_session(tmp_path)
 
-    sent = asyncio.run(session.send_payload(
-        {
-            "type": "session.restored",
-            "session": {"session_id": "session-1", "capabilities": {"bad": ("tuple",)}},
-        },
-        connection_generation=1,
-        log_context="test",
-        envelope=False,
-    ))
+    with pytest.raises(ValueError, match="non-JSON value"):
+        asyncio.run(session.send_payload(
+            {
+                "type": "session.restored",
+                "session": {"session_id": "session-1", "capabilities": {"bad": ("tuple",)}},
+            },
+            connection_generation=1,
+            log_context="test",
+            envelope=False,
+        ))
 
-    assert sent is False
     assert websocket.sent == []
 
 

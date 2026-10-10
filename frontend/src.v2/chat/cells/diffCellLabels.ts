@@ -14,5 +14,6 @@ export function diffFileChangeType(file: DiffFileChange): DiffChangeType {
 }
 
 export function diffCellTitle(cell: DiffCellState): string {
+  if (cell.source === "workspace_snapshot") return "工作区比较";
   return cell.historical ? "编辑记录" : "已编辑";
 }

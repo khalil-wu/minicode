@@ -50,6 +50,7 @@ def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, mon
         artifact_id = store.save("AA==", source="tool_exec.image", type="image", media_type="image/png", conversation_id=owner.id)
         repo.upsert_transcript_message(owner.id, {**owner.transcript[-1], "artifacts": [{"artifactId": artifact_id, "kind": "image", "summary": "Old code image"}]})
     sent = []
+    projection_lock = asyncio.Lock()
 
     class Session:
         session_id = "session"
@@ -62,6 +63,9 @@ def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, mon
         models_source = "test"
         session_lifecycle = SimpleNamespace(current_workspace_root=lambda: None)
         event_outbox = SimpleNamespace(current_replay_seq=0, replay_log_degraded=False)
+
+        def _conversation_projection_lock(self, _owner):
+            return projection_lock
 
         @property
         def active_conversation(self):

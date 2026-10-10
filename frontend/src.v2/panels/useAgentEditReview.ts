@@ -75,7 +75,7 @@ const patchForActiveFile = (
   path: string | undefined,
   workingDirectory: string,
 ): string | null => {
-  if (!turnDiff?.diff || !path) return null;
+  if (!turnDiff?.diff || !path || turnDiff.source === "workspace_snapshot" || turnDiff.truncated) return null;
   const summary = summarizeTurnDiff(turnDiff);
   if (!summary) return null;
   const file = summary.files.find((entry) => workspaceFilePathsEqual(entry.path, path, workingDirectory));

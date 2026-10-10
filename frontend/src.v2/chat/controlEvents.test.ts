@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleControlEvent } from "./controlEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
-import { isDesktop, ptyKillConversation, ptyList, embeddedBrowserCloseConversation, embeddedBrowserList } from "../desktop/runtime";
+import { isDesktop, ptyKillConversation, ptyList, embeddedBrowserCloseConversation, embeddedBrowserList, fsWriteFile } from "../desktop/runtime";
 import { sendPromptResponseCommand } from "../protocol/ws-outbox";
 
 vi.mock("../desktop/runtime", () => ({
@@ -11,6 +11,7 @@ vi.mock("../desktop/runtime", () => ({
   ptyList: vi.fn(async () => []),
   embeddedBrowserCloseConversation: vi.fn(async () => 0),
   embeddedBrowserList: vi.fn(async () => []),
+  fsWriteFile: vi.fn(async () => undefined),
 }));
 vi.mock("../protocol/ws-outbox", () => ({ sendPromptResponseCommand: vi.fn(async () => true) }));
 
@@ -44,8 +45,10 @@ describe("handleControlEvent", () => {
     expect(ptyKillConversation).toHaveBeenCalledExactlyOnceWith("archive-owner", true);
     expect(embeddedBrowserCloseConversation).toHaveBeenCalledExactlyOnceWith("archive-owner");
     expect(embeddedBrowserList).toHaveBeenCalledExactlyOnceWith("archive-owner");
-    expect(useAppStore.getState().editorTabs).toBe(tabs);
+    expect(fsWriteFile).not.toHaveBeenCalled();
+    expect(useAppStore.getState().editorTabs).toEqual(tabs);
     expect(useAppStore.getState().conversationId).toBe("other-owner");
+    expect(useAppStore.getState().workingDirectory).toBe("C:/A");
   });
 
   it("does not acknowledge successful archive cleanup while an owned shell remains alive", async () => {

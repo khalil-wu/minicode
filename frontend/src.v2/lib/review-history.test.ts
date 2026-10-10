@@ -12,6 +12,16 @@ const assistant = (id: string, turnId: string | undefined, edits: { path: string
 });
 
 describe("review history turn ownership", () => {
+  it("retains deferred historical file summaries without inventing revisions", () => {
+    const answer = assistant("answer", "turn", []);
+    answer.turnDiff = { threadId: "conv", turnId: "turn", messageId: "answer", revision: 4, updatedAt: 1,
+      source: "workspace_snapshot", deferred: true, diff: null, truncated: true,
+      files: [{ path: "src/a.ts", additions: 1, deletions: 1 }, { path: "src/b.ts", additions: 2, deletions: 0 }] };
+    const [history] = buildReviewHistory([user("1"), answer], undefined, "conv");
+    expect(history).toMatchObject({ source: "workspace_snapshot", truncated: true,
+      deferredDiff: { conversationId: "conv", messageId: "answer", turnId: "turn", revision: 4 },
+      files: [{ path: "src/a.ts", revisions: [] }, { path: "src/b.ts", revisions: [] }] });
+  });
   it("restores shell and child changes for every persisted parent turn without tool receipts", () => {
     const first = assistant("a1", "t1", []);
     first.turnDiff = { threadId: "conv", turnId: "t1", messageId: "a1", updatedAt: 1,

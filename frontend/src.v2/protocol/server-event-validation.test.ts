@@ -8,6 +8,40 @@ it("distinguishes an unavailable turn diff from an exact empty diff", () => {
   expect(normalizeInboundServerEvent(event)).toBeNull();
 });
 
+describe("historical turn diff summaries at the network boundary", () => {
+  const summary = {
+    conversation_id: "conversation-1", thread_id: "conversation-1", message_id: "answer", turn_id: "turn",
+    diff: null, deferred: true, truncated: false, revision: 3, source: "workspace_snapshot",
+    files: [{ path: "src/new.ts", old_path: "src/old.ts", additions: 1, deletions: 2, is_binary: false }],
+  };
+  const wrap = (where: "conversation" | "messages", diff: unknown) => {
+    const message = { id: "answer", role: "assistant", turn_id: "turn", metadata: { turn_diff: diff } };
+    return where === "conversation" ? { type: "conversation.switched", conversation_id: "conversation-1",
+      conversation: { id: "conversation-1", transcript: [message] } }
+      : { type: "session.restored", active_conversation_id: "conversation-1", messages: [message] };
+  };
+  it.each(["conversation", "messages"] as const)("accepts a typed file summary through %s", (where) => {
+    expect(normalizeInboundServerEvent(wrap(where, summary))).not.toBeNull();
+  });
+  it.each(["conversation", "messages"] as const)("rejects malformed metadata summaries through %s", (where) => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const invalid = [null, { ...summary, deferred: "yes" }, { ...summary, truncated: 1 },
+      { ...summary, revision: -1 }, { ...summary, source: {} }, { ...summary, message_id: "other" },
+      { ...summary, thread_id: "foreign", conversation_id: "foreign" }, { ...summary, turn_id: "foreign" },
+      { ...summary, files: null }, { ...summary, files: [null] }, { ...summary, files: [123] },
+      { ...summary, files: [{ path: 12, additions: 1, deletions: 0 }] },
+      { ...summary, files: [{ path: "src/a.ts", additions: 1.5, deletions: 0 }] },
+      { ...summary, files: [{ path: "src/a.ts", additions: 1, deletions: -1 }] },
+      { ...summary, files: [{ path: "src/a.ts", additions: Number.MAX_SAFE_INTEGER + 1, deletions: 0 }] },
+      { ...summary, files: [{ path: "src/a.ts", additions: 1, deletions: 0, old_path: {} }] },
+      { ...summary, files: [{ path: "src/a.ts", additions: 1, deletions: 0, is_binary: "false" }] },
+      { ...summary, diff: "deferred patch must remain null" },
+    ];
+    for (const value of invalid) expect(normalizeInboundServerEvent(wrap(where, value))).toBeNull();
+    vi.restoreAllMocks();
+  });
+});
+
 const checkpointEvent = (overrides: Record<string, unknown> = {}) => ({
   type: "checkpoint.created",
   id: "cp-1",

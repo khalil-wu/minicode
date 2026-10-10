@@ -226,6 +226,10 @@ const messageTurnDiff = (metadata: unknown, messageId: string, turnId?: string):
     || (turnId && ownerTurnId !== turnId) || (typeof raw.diff !== "string" && raw.diff !== null)) return undefined;
   return {
     threadId, turnId: ownerTurnId, messageId, diff: raw.diff as string | null,
+    source: stringValue(raw.source), deferred: raw.deferred === true, truncated: raw.truncated === true,
+    files: (raw.files as { path: string; old_path?: string; additions: number; deletions: number; is_binary?: boolean }[] | undefined)
+      ?.map((file) => ({ path: file.path, oldPath: file.old_path, additions: file.additions,
+        deletions: file.deletions, isBinary: file.is_binary })),
     taskId: stringValue(raw.task_id), toolCallId: stringValue(raw.tool_call_id),
     revision: nonNegativeNumberValue(raw.revision), updatedAt: toTimestamp(raw.timestamp),
   };
@@ -999,6 +1003,7 @@ export const hydrateMessages = (
       && !message.replyAttachments?.length
       && !message.contextRefs?.length
       && !message.turnDiff?.diff
+      && !(message.turnDiff?.deferred && message.turnDiff.files?.length)
       && !message.quotedMessage
       && !(message.role === "assistant" && message.terminalStatus)
     ) continue;

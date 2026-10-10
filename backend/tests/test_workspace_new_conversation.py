@@ -24,6 +24,8 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     request.addfinalizer(artifacts.shutdown)
     session = SimpleNamespace(
         active_conversation_id=old.id, conversation_repo=repo,
+        # Direct handler calls have no durable client-command claim.
+        event_outbox=SimpleNamespace(client_command_id=""),
         artifact_store=artifacts,
         git_branch_for=Mock(return_value="main"), switch_workspace_for_conversation=AsyncMock(return_value=True),
         load_active_conversation_snapshot=Mock(return_value=False), sync_permission_mode_with_active_conversation=Mock(),
@@ -62,6 +64,7 @@ def test_failed_workspace_initialization_keeps_previous_owner(monkeypatch, tmp_p
         return False
     session = SimpleNamespace(
         active_conversation_id=old.id, conversation_repo=repo,
+        event_outbox=SimpleNamespace(client_command_id=""),
         git_branch_for=Mock(return_value="main"), switch_workspace_for_conversation=fail_activation,
         send_payload=AsyncMock(), load_active_conversation_snapshot=Mock(),
     )
