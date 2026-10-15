@@ -427,7 +427,7 @@ def test_run_command_tool_allows_relative_cwd_inside_workspace(tmp_path: Path) -
     nested = workspace / 'nested'
     nested.mkdir(parents=True)
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
-    result = asyncio.run(execute_command(tool, {'command': _python_command("import os; print(os.path.basename(os.getcwd()))"), 'cwd': 'nested'}, context=_native_command_context(tool, workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))))
+    result = asyncio.run(execute_command(tool, {'command': 'pwd', 'cwd': 'nested'}, context=_native_command_context(tool, workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))))
     if sys.platform == 'win32' and result.is_error and ('拒绝访问' in result.content or 'sandbox is unavailable' in result.content.lower()):
         pytest.skip('MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host')
     if result.is_error and 'workspace sandbox is unavailable on this host' in result.content.lower():
