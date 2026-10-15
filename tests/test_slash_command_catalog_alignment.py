@@ -1,7 +1,9 @@
 import asyncio
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import backend.commands.catalog as command_catalog
@@ -10,6 +12,7 @@ from backend.commands.catalog import (
     get_file_command_catalog,
 )
 from backend.commands.registry import CommandRegistry
+from backend.conversations.repository import ConversationRepository
 from backend.permissions.context import PermissionContext
 from backend.commands.slash_commands import (
     SKILL_DIR_TOKEN,
@@ -92,8 +95,19 @@ def test_catalog_commands_are_registered_as_slash_commands() -> None:
         assert registry.dispatch_slash_sync(command_name)
 
 
-def test_template_slash_expands_prompt_with_extra_context() -> None:
+def test_template_slash_expands_prompt_with_extra_context(tmp_path) -> None:
     session = _FakeSession()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    (workspace / "review.py").write_text("value = 1\n", encoding="utf-8")
+    session.conversation_repo = ConversationRepository(tmp_path / "conversations")
+    session.active_conversation_id = session.conversation_repo.create_conversation(
+        workspace_root=str(workspace)
+    ).id
+    session.session_lifecycle = SimpleNamespace(
+        workspace_root_for_conversation=lambda owner: Path(owner.execution_cwd)
+    )
     register_all_slash_commands(session.command_registry)
 
     handled, next_content = _dispatch_slash(
@@ -109,8 +123,11 @@ def test_template_slash_expands_prompt_with_extra_context() -> None:
         if str(entry.get("command", "")).strip().lower() == "review"
     )
     assert next_content.startswith(review_template)
-    assert "ARGUMENTS: focus websocket runtime state" in next_content
+    assert next_content.endswith("Please review my uncommitted changes\n\nfocus websocket runtime state")
     assert session.command_results[-1]["command"] == "review"
+    assert session.command_results[-1]["data"]["code_review"] == {
+        "mode": "uncommitted", "cwd": str(workspace), "gitRoot": str(workspace),
+    }
 
 
 def test_skill_dir_token_expands_without_warning() -> None:

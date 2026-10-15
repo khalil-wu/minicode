@@ -1335,7 +1335,7 @@ def test_openai_responses_stream_emits_nonfinal_tool_call_when_arguments_done() 
     tool_events = [event for event in events if event.type == StreamEventType.TOOL_CALL]
     assert [event.tool_calls_final for event in tool_events] == [False, True]
     assert tool_events[0].tool_calls == [
-        ToolCallEvent(id="call_pwd", name="run_command", arguments={"command": "pwd"})
+        ToolCallEvent(id="call_pwd", name="run_command", arguments={"command": "pwd"}, native_name="run_command")
     ]
     assert tool_events[1].tool_calls == tool_events[0].tool_calls
     done = next(event for event in events if event.type == StreamEventType.DONE)
@@ -2072,7 +2072,7 @@ def test_weather_text_does_not_hide_model_tools_or_inject_intent_guidance() -> N
         )
     )
 
-    assert llm.tool_names == []
+    assert llm.tool_names == ["mcp__websearch__search"]
     assert tool_registry.get_tool_spec("mcp__websearch__search").exposure == "deferred"
     assert "missing a city, area, or physical location" not in llm.message_text
     assert not [event for event in events if event.type == "tool_call"]
@@ -2136,7 +2136,7 @@ def test_question_like_reply_does_not_hide_unrelated_tools() -> None:
         )
     )
 
-    assert set(llm.tool_names) == {"read_file"}
+    assert set(llm.tool_names) == {"mcp__websearch__search", "read_file"}
     assert tool_registry.get_tool_spec("mcp__websearch__search").exposure == "deferred"
 
 

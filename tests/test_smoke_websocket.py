@@ -128,6 +128,9 @@ def _install_llm_factory(monkeypatch, factory=_fake_llm_factory) -> None:
 
     monkeypatch.setattr("backend.main._create_session_llm", canonical_factory)
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", canonical_factory)
+    # The installed loops produce foreground admission/terminal events.
+    # Memory consolidation uses a separate producer with separate contracts.
+    monkeypatch.setattr("backend.memory.generation.schedule_memory_startup", lambda **_kwargs: None)
 
 
 async def _admit_fake_turn(kwargs) -> None:
@@ -443,7 +446,11 @@ def test_websocket_emits_control_requests_for_approvals_and_elicitations(monkeyp
     assert ask["request"]["subtype"] == "elicitation"
 
 
-def test_conversation_switch_reemits_pending_prompts_for_target_conversation(monkeypatch) -> None:
+def test_conversation_switch_reemits_pending_prompts_for_target_conversation(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    trust_file = tmp_path / "desktop-trust.json"
+    trust_file.write_text(json.dumps([str(tmp_path)]), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_file)
     _install_llm_factory(monkeypatch)
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", _fake_control_request_loop)
 
@@ -836,8 +843,8 @@ def test_read_artifact_tool_can_fall_back_to_persisted_attachments(tmp_path) -> 
     )
 
     assert result.is_error is False
-    assert "persisted attachment body" in result.content
-    assert result.content_preview == "persisted attachment body"
+    assert result.content == "persisted attachment body"
+    assert result.content_preview is None
     assert result.display_summary == "Read artifact art_uploaded_note"
 
 
@@ -993,7 +1000,8 @@ def test_websocket_rejects_unknown_session_model(monkeypatch) -> None:
     assert "deepseek-v4" not in updated["available_models"]
 
 
-def test_task_model_choice_survives_creation_switch_and_new_connection(monkeypatch) -> None:
+def test_task_model_choice_survives_creation_switch_and_new_connection(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
     monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4,gpt-5.4-mini")

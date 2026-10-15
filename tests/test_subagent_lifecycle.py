@@ -22,7 +22,7 @@ from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_tools import TaskTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.subagent_support import _SubagentLifecycleOwner
-from backend.tools.swarm_tools import SendMessageTool, TaskUpdateTool
+from backend.tools.swarm_tools import FollowupTaskTool, SendMessageTool, TaskUpdateTool
 
 
 def _runtime(tmp_path: Path) -> AgentRuntime:
@@ -43,7 +43,7 @@ class _TwoAnswerLLM(LLMAdapter):
         messages: list[LLMMessage],
         tools: list[dict[str, object]] | None = None,
     ):
-        self.prompts.append(messages[-1].content)
+        self.prompts.append("\n".join(str(message.content) for message in messages))
         answer = self._answers.pop(0)
         yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=answer)
         yield StreamEvent(type=StreamEventType.DONE)
@@ -333,9 +333,12 @@ def test_named_teammate_keeps_mailbox_identity_across_query_turns(
     )
     registry.register(tool)
     events: list[tuple[str, dict[str, Any]]] = []
+    idle_projection = asyncio.Event()
 
     async def emit(event_type: str, payload: dict[str, Any]) -> None:
         events.append((event_type, payload))
+        if event_type == "subagent.progress" and payload.get("waiting_on") == "message":
+            idle_projection.set()
 
     context = ToolExecutionContext(
         permission=checker.build_context(mode="bypass"),
@@ -358,11 +361,30 @@ def test_named_teammate_keeps_mailbox_identity_across_query_turns(
             }, context=context)
             assert launched.status == "teammate_spawned"
             if trigger == "mailbox":
-                await asyncio.wait_for(hooks.idle.wait(), timeout=5)
+                await asyncio.wait_for(idle_projection.wait(), timeout=5)
+                assert runtime.get_subagent(agent_id).is_idle
                 sent = await SendMessageTool().execute({
-                    "recipient": agent_id, "message": "Answer the next audit step."
+                    "recipient": agent_id, "message": "Queued coordination context."
                 }, context=context)
                 assert not sent.is_error
+                queued = next(message for message in runtime.list_swarm_messages(
+                    participant_id=agent_id, conversation_id="conversation")
+                    if message.message_id == sent.runtime_metadata["message_id"])
+                assert queued.delivery_mode == "queue_only"
+                assert queued.recipient_mailbox_epoch == 1
+                assert runtime.claim_swarm_messages(participant_id=agent_id, mailbox_epoch=1,
+                    conversation_id="conversation", trigger_turn_only=True) == []
+                assert len(llm.prompts) == 1
+                assert not hooks.finished_gate.is_set()
+                followup = await FollowupTaskTool().execute({
+                    "target": agent_id, "message": "Answer the next audit step."
+                }, context=context)
+                assert not followup.is_error
+                triggered = next(message for message in runtime.list_swarm_messages(
+                    participant_id=agent_id, conversation_id="conversation")
+                    if message.message_id == followup.runtime_metadata["message_id"])
+                assert triggered.delivery_mode == "trigger_turn"
+                assert triggered.recipient_mailbox_epoch == queued.recipient_mailbox_epoch
             # Two query turns precede the terminal seal. Observe their real
             # final gate before checking runtime completion, as cold startup
             # shares the backend worker pool during the full test suite.

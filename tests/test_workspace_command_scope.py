@@ -9,9 +9,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.config import PermissionSettings
+from backend.artifact.store import ArtifactStore
+from backend.attachments.store import AttachmentStore
+from backend.conversations.repository import ConversationRepository
 from backend.permissions.checker import PermissionChecker
-from backend.services.workspace_service import resolve_requested_workspace
+from backend.services.workspace_service import resolve_requested_workspace, resolve_workspace_cwd
 from backend.ws.command_scope import resolve_command_scope
+from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.handlers import preview, terminal
 from backend.ws.handlers import diff
 from backend.ws.command_dispatcher import SessionCommandDispatcher
@@ -52,7 +56,7 @@ def _session(workspace: Path | None, bound_workspace: str = "") -> SimpleNamespa
     ("diff.git_unstage_all", diff.handle_diff_git_unstage_all),
     ("diff.git_revert_file", diff.handle_diff_git_revert_file),
 ])
-def test_workspace_commands_reject_missing_mount_before_accessing_the_server_cwd(
+def test_workspace_commands_resolve_the_conversation_execution_owner(
     tmp_path: Path, monkeypatch, bound: bool, command: str, handler,
 ) -> None:
     server = tmp_path / "server"
@@ -64,12 +68,66 @@ def test_workspace_commands_reject_missing_mount_before_accessing_the_server_cwd
     start = AsyncMock()
     monkeypatch.setattr("backend.services.terminal_service.run_terminal_exec_command", execute)
     monkeypatch.setattr("backend.preview.start_preview_launch", start)
+    projectless_terminal = not bound and command in {"terminal.create", "terminal.exec"}
+    requested_cwd = server
+    if projectless_terminal:
+        # Creating/executing a terminal is an execution boundary. Bind the
+        # actual cwd through the real repository/lifecycle before resolving
+        # the requested child directory; a client path cannot establish root.
+        repository = ConversationRepository(tmp_path / "conversations")
+        conversation = repository.create_conversation(title="Projectless terminal")
+        session.active_conversation_id = conversation.id
+        session.conversation_repo = repository
+        session.attachment_store = AttachmentStore(tmp_path / "attachments")
+        session.artifact_store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+        lifecycle = SessionLifecycle(session)
+        session.session_lifecycle = lifecycle
+        session.resolve_requested_workspace = lambda requested: resolve_requested_workspace(
+            lifecycle.current_workspace_root(), requested,
+        )
+        session.resolve_workspace_cwd = lambda cwd: resolve_workspace_cwd(lifecycle.current_workspace_root(), cwd)
+        session.emit_command_result = AsyncMock()
+        requested_cwd = server / "child"
+        requested_cwd.mkdir()
+        session.terminal_manager.create_session.return_value = SimpleNamespace(
+            session_id="projectless-terminal", pid=42, shell="fixture-shell",
+            _initial_cwd=str(requested_cwd), terminal_mode="pty", conversation_id=conversation.id,
+        )
+        execute.return_value = {"type": "terminal.output", "output": "fixture", "exit_code": 0,
+            "conversation_id": conversation.id}
 
     asyncio.run(handler(session, {
         "conversation_id": session.active_conversation_id,
         "command": "pwd",
-        "cwd": str(server),
+        "cwd": str(requested_cwd),
     }))
+
+    if projectless_terminal:
+        persisted = repository.get_conversation(conversation.id)
+        assert persisted.workspace_root == ""
+        assert persisted.execution_cwd == str(server)
+        assert lifecycle.current_workspace_root() == server
+        session.send_event.assert_not_awaited()
+        session.send_payload.assert_awaited_once()
+        payload = session.send_payload.await_args.args[0]
+        assert payload["conversation_id"] == conversation.id
+        if command == "terminal.create":
+            session.terminal_manager.create_session.assert_awaited_once()
+            assert session.terminal_manager.create_session.await_args.kwargs["cwd"] == str(requested_cwd)
+            assert session.terminal_manager.create_session.await_args.kwargs["conversation_id"] == conversation.id
+            assert payload["type"] == "terminal.created"
+            assert payload["workspace_root"] == payload["execution_cwd"] == str(server)
+            session.emit_command_result.assert_awaited_once()
+            execute.assert_not_awaited()
+        else:
+            execute.assert_awaited_once()
+            assert execute.await_args.args == ("pwd", str(requested_cwd))
+            assert execute.await_args.kwargs["context"].workspace_root == server
+            assert execute.await_args.kwargs["context"].conversation_id == conversation.id
+            assert payload["type"] == "terminal.output"
+            session.terminal_manager.create_session.assert_not_awaited()
+        start.assert_not_awaited()
+        return
 
     session.send_event.assert_awaited_once()
     event = session.send_event.await_args.args[0]

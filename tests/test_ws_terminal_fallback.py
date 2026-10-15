@@ -33,6 +33,7 @@ class _FakeWebSocket:
 
 
 def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "backend.ws.handler.CONVERSATION_DATA_DIR",
         tmp_path / "conversations",
@@ -125,6 +126,9 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
 ) -> None:
     async def scenario() -> list[dict[str, object]]:
         session = _session(tmp_path, monkeypatch)
+        # This oracle owns one foreground terminal transaction. Memory jobs
+        # have their own model transport and completion contracts.
+        monkeypatch.setattr("backend.memory.generation.schedule_memory_startup", lambda **_kwargs: None)
 
         class FinalReplyModel(LLMAdapter):
             def __init__(self, settings):
@@ -142,7 +146,9 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
         # only the model transport is controlled. The session factory seam
         # returns this captured model for the real run-scoped binding.
         session.llm = FinalReplyModel(session.config.llm)
-        conversation = session.conversation_repo.create_conversation(title="Canonical terminal")
+        conversation = session.conversation_repo.create_conversation(
+            title="Canonical terminal", permission_mode="bypass",
+        )
         task_id = await session.start_agent_run(
             "hello",
             conversation_id=conversation.id,
@@ -184,9 +190,10 @@ def test_start_agent_run_cancellation_emits_one_cancelled_done_and_idle(
         session = _session(tmp_path, monkeypatch)
         started = asyncio.Event()
 
-        async def wait_forever(*_args, **_kwargs) -> None:
+        async def wait_forever(*_args, **kwargs) -> None:
             started.set()
-            await asyncio.Event().wait()
+            await kwargs["cancel_event"].wait()
+            raise asyncio.CancelledError
 
         session._run_agent_locked = wait_forever  # type: ignore[method-assign]
         start_task = asyncio.create_task(
@@ -296,9 +303,10 @@ def test_second_run_is_refused_instead_of_orphaning_the_first(
         session = _session(tmp_path, monkeypatch)
         first_started = asyncio.Event()
 
-        async def wait_forever(*_args, **_kwargs) -> None:
+        async def wait_forever(*_args, **kwargs) -> None:
             first_started.set()
-            await asyncio.Event().wait()
+            await kwargs["cancel_event"].wait()
+            raise asyncio.CancelledError
 
         session._run_agent_locked = wait_forever  # type: ignore[method-assign]
         first_start_task = asyncio.create_task(

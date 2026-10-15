@@ -154,7 +154,7 @@ def test_context_and_control_typed_dicts_match_wire_requiredness() -> None:
     )
     assert required_and_optional(ControlElicitationRequestData) == (
         {"subtype", "tool_use_id", "prompt", "question"},
-        {"schema", "options", "choices", "allowed_values"},
+        {"schema", "options", "choices", "allowed_values", "mode", "mcp_server_name", "url", "elicitation_id", "_meta"},
     )
     assert required_and_optional(ControlProviderAuthPromptRequestData) == (
         {"subtype", "prompt", "provider", "prompt_type", "allow_empty", "allow_custom"},

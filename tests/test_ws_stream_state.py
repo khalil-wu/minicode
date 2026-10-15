@@ -376,8 +376,9 @@ def test_agent_item_delta_extends_the_running_process_block() -> None:
         "status": "running", "source": "commentary",
     })
     _project(state, "agent.item.delta", {"item_id": "it:model-output:commentary", "delta": " second"})
-    blocks = [b for b in state["content_blocks"] if b.get("type") == "process"]
+    blocks = [b for b in get_stream_content_blocks(state) if b.get("type") == "process"]
     assert [b["content"] for b in blocks] == ["first second"]
+    assert "_text_parts" not in blocks[0]
     # A delta for an unknown item is ignored rather than inventing a block.
     _project(state, "agent.item.delta", {"item_id": "unknown", "delta": "x"})
-    assert len([b for b in state["content_blocks"] if b.get("type") == "process"]) == 1
+    assert [b["content"] for b in get_stream_content_blocks(state) if b.get("type") == "process"] == ["first second"]

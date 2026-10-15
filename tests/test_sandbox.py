@@ -224,26 +224,42 @@ def test_protected_write_path_blocks_gitconfig() -> None:
 # ── Command reads outside workspace fail ──
 
 
-def test_command_cwd_outside_workspace_rejected(tmp_path: Path) -> None:
+def test_unfrozen_external_cwd_is_rejected_and_native_capture_retains_sandbox(tmp_path: Path, monkeypatch) -> None:
     from backend.tools.command_tool import RunCommandTool
     from backend.artifact.store import ArtifactStore
+    from backend.permissions.context import PermissionContext, ToolExecutionContext
+    from backend.tests.native_command_harness import configure_command_context, authorize_command_call
+    from backend.llm.base import ToolCallEvent
+    from unittest.mock import AsyncMock
 
-    class FakeContext:
-        workspace_root = str(tmp_path / "workspace")
-        cancel_event = None
-        stream_callback = None
-        allow_network = False
-
-    (tmp_path / "workspace").mkdir()
+    workspace, outside = tmp_path / "workspace", tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-    result = asyncio.run(
-        tool.execute(
-            {"command": "echo hi", "cwd": str(tmp_path / "outside")},
-            context=FakeContext(),
-        )
-    )
+    policy = SandboxPolicy(workspace_root=workspace, permission_profile=PermissionProfile.managed(
+        FileSystemSandboxPolicy.restricted([
+            FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+            FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
+        ])))
+    context = configure_command_context(tool, ToolExecutionContext(PermissionContext(), workspace_root=workspace),
+        sandbox_policy=policy)
+    foreground, background = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(tool, "_execute_foreground", foreground)
+    monkeypatch.setattr(tool, "_execute_background", background)
+    args = {"command": "echo hi", "cwd": str(outside)}
+    result = asyncio.run(tool.execute(args, context=context))
     assert result.is_error
-    assert "workspace" in result.content.lower()
+    assert "no frozen native execution-policy request" in result.content
+    foreground.assert_not_awaited()
+    background.assert_not_awaited()
+    authorization = authorize_command_call(ToolCallEvent(id="outside-cwd", name=tool.name, arguments=args), context)
+    assert not authorization.error, authorization.error
+    native = authorization.request.exec_policy
+    assert native.command.cwd == outside.resolve()
+    # Source accepts an explicit workdir. The captured filesystem profile
+    # retains its workspace authority and does not grant that cwd write access.
+    assert native.command.policy.resolve(cwd=outside).resolve_access(workspace / "inside.txt") is FileSystemAccessMode.WRITE
+    assert not native.command.policy.resolve(cwd=outside).resolve_access(outside / "escape.txt").can_write
 
 
 # ── Filesystem boundary tests ──

@@ -138,7 +138,11 @@ def test_status_endpoint_exposes_capability_snapshot() -> None:
     assert summary["commands"] == len(payload["capabilities"]["commands"])
     assert summary["skills"] == len(payload["capabilities"]["skills"])
     assert summary["mcp_resource_bridge"] is True
-    assert summary["deferred_bridge"] is True
+    available_tools = {
+        view["name"] for view in payload["capabilities"]["tool_views"]
+        if view["schema_available"]
+    }
+    assert summary["deferred_bridge"] is ("tool_search" in available_tools)
     assert summary["skill_catalog"] is bool(payload["capabilities"]["skills"])
     assert any(
         command.get("name") == "conversation.list"
@@ -174,7 +178,11 @@ def test_doctor_endpoint_exposes_agent_capability_summary() -> None:
     summary = payload["capabilities"]["summary"]
     assert summary["tools_total"] >= summary["direct_tools"] >= 1
     assert summary["mcp_resource_bridge"] is True
-    assert summary["deferred_bridge"] is True
+    available_tools = {
+        view["name"] for view in payload["capabilities"]["tool_views"]
+        if view["schema_available"]
+    }
+    assert summary["deferred_bridge"] is ("tool_search" in available_tools)
     assert summary["skill_catalog"] is bool(payload["capabilities"]["skills"])
 
 

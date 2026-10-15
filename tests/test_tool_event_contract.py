@@ -370,7 +370,7 @@ class TestMCPProxyContract:
         assert result.is_error
         assert "Tool call timed out" in result.content
 
-    def test_open_world_mcp_tool_requires_confirmation_even_when_read_only(self):
+    def test_open_world_mcp_read_hint_is_independent_of_auto_approval(self):
         class _Client:
             connected = True
 
@@ -388,10 +388,12 @@ class TestMCPProxyContract:
             _Client(),  # type: ignore[arg-type]
         )
 
-        assert proxy.is_read_only({}) is False
-        assert proxy.permission == PermissionLevel.CONFIRM
+        assert proxy.is_read_only({}) is True
+        assert proxy.open_world is True
+        assert proxy.approval_snapshot()["approval_mode"] == "auto"
+        assert proxy.permission == PermissionLevel.AUTO
 
-    def test_server_name_and_annotations_cannot_make_open_world_tool_read_only(self):
+    def test_server_name_does_not_override_the_declared_mcp_read_hint(self):
         class _ExtensionClient:
             connected = True
             _command = "node"
@@ -411,8 +413,10 @@ class TestMCPProxyContract:
             _ExtensionClient(),  # type: ignore[arg-type]
         )
 
-        assert proxy.is_read_only({"url": "https://example.com"}) is False
-        assert proxy.permission == PermissionLevel.CONFIRM
+        assert proxy.is_read_only({"url": "https://example.com"}) is True
+        assert proxy.open_world is True
+        assert proxy.approval_snapshot()["approval_mode"] == "auto"
+        assert proxy.permission == PermissionLevel.AUTO
 
     def test_destructive_mcp_tool_requires_confirmation_even_when_read_only(self):
         class _Client:
@@ -432,7 +436,8 @@ class TestMCPProxyContract:
             _Client(),  # type: ignore[arg-type]
         )
 
-        assert proxy.is_read_only({}) is False
+        assert proxy.is_read_only({}) is True
+        assert proxy.get_side_effect_kind({}) == "destructive"
         assert proxy.permission == PermissionLevel.CONFIRM
 
     def test_closed_world_read_only_mcp_tool_can_auto_run(self):

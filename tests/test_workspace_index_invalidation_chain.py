@@ -83,7 +83,8 @@ async def test_real_dependency_write_notifies_mounted_session_without_fabricatin
         delivered.set()
         return True
 
-    session = SimpleNamespace(session_id="owned-index-session", active_conversation_id="owned-conversation", send_payload=send_payload)
+    session = SimpleNamespace(session_id="owned-index-session", active_conversation_id="owned-conversation",
+        is_connected=True, send_payload=send_payload)
     lifecycle = SessionLifecycle(session)
     current_root = [tmp_path]
     lifecycle.workspace_root_for_conversation = lambda: current_root[0]

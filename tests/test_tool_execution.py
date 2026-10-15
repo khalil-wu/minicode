@@ -30,7 +30,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.artifact.store import ArtifactStore
-from backend.config import PermissionSettings, TokenBudget
+from backend.config import PermissionSettings, TokenBudget, permission_settings_from_config
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -1232,8 +1232,8 @@ def test_execute_tool_batch_preserves_blocked_evidence_after_budget_exhaustion(
     assert [event["id"] for event in results] == ["budget-1", "budget-2", "budget-3"]
     assert [event["status"] for event in results] == ["success", "blocked", "blocked"]
     assert [event["display_summary"] for event in results[1:]] == [
-        "Tool-call budget exhausted",
-        "Tool-call budget exhausted",
+        "budget_counting_tool",
+        "budget_counting_tool",
     ]
     assert [event["summary"] for event in results[1:]] == [
         "Per-turn tool-call budget reached.",
@@ -1322,7 +1322,8 @@ def test_execute_tool_batch_streams_command_output_with_tool_id(tmp_path) -> Non
 
     async def collect():
         events = []
-        permission = PermissionContext(mode="bypass", source="test")
+        checker = PermissionChecker(permission_settings_from_config({"permissions": {"auto_allow": ["run_command"]}}), tmp_path)
+        permission = checker.build_context(mode="bypass", source="test")
         async for event in execute_tool_batch(
             [
                 ToolCallEvent(
@@ -1334,9 +1335,7 @@ def test_execute_tool_batch_streams_command_output_with_tool_id(tmp_path) -> Non
             ctx=ctx,
             state=state,
             tool_registry=registry,
-            permission_checker=PermissionChecker(
-                PermissionSettings(auto_allow=["run_command"]), tmp_path
-            ),
+            permission_checker=checker,
             approval_handler=None,
             skill_manager=None,
             permission_context=permission,

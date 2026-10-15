@@ -337,7 +337,7 @@ def test_managed_read_deny_cannot_be_reopened_by_user_allow_read(tmp_path: Path)
     assert policy.resolve(cwd=tmp_path).resolve_access(denied) is FileSystemAccessMode.DENY
 
 
-def test_auto_allow_commands_never_auto_allows_excluded_or_escalated_commands(
+def test_legacy_command_flags_do_not_replace_frozen_source_authority(
     tmp_path: Path,
 ) -> None:
     policy = sandbox_policy_from_config_snapshot(
@@ -348,28 +348,31 @@ def test_auto_allow_commands_never_auto_allows_excluded_or_escalated_commands(
             "excludedCommands": ["docker:*"],
         },
     )
-    context = PermissionContext(
+    from backend.permissions.context import ToolExecutionContext
+    from backend.llm.base import ToolCallEvent
+    from backend.tests.native_command_harness import configure_command_context, authorize_command_call
+
+    permission = PermissionContext(
         sandbox_auto_allow_commands=policy.auto_allow_commands_if_sandboxed,
         sandbox_excluded_commands=policy.excluded_commands,
         allow_unsandboxed_commands=policy.allow_unsandboxed_commands,
     )
-
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    context = configure_command_context(tool, ToolExecutionContext(permission, workspace_root=tmp_path), sandbox_policy=policy)
     assert policy.auto_allow_commands_if_sandboxed is True
-    assert RunCommandTool.check_permission(
-        RunCommandTool,
-        {"command": "python -V"},
-        context,
-    ) is PermissionLevel.AUTO
-    assert RunCommandTool.check_permission(
-        RunCommandTool,
-        {"command": "docker ps"},
-        context,
-    ) is PermissionLevel.CONFIRM
-    assert RunCommandTool.check_permission(
-        RunCommandTool,
-        {"command": "python -V", "with_escalated_permissions": True},
-        context,
-    ) is PermissionLevel.CONFIRM
+    assert policy.excluded_commands == ("docker:*",)
+    for command in ("python -V", "docker ps"):
+        captured = authorize_command_call(ToolCallEvent(id="sandboxed-command", name=tool.name, arguments={"command": command}), context)
+        assert not captured.error, captured.error
+        assert captured.request.exec_policy.kind == "skip"
+        assert captured.permission_decision.permission_level is PermissionLevel.AUTO
+        assert captured.request.exec_policy.command.sandbox_permissions == "use_default"
+        assert captured.request.exec_policy.command.policy.resolve(cwd=tmp_path).resolve_access(tmp_path / "inside").can_write
+    escalated = authorize_command_call(ToolCallEvent(id="escalated-command", name=tool.name,
+        arguments={"command": "python -V", "sandbox_permissions": "require_escalated"}), context)
+    assert not escalated.error, escalated.error
+    assert escalated.request.exec_policy.kind == "needs_approval"
+    assert escalated.permission_decision.permission_level is PermissionLevel.CONFIRM
 
 
 def test_auto_allow_command_requires_approval_when_network_is_not_isolated(tmp_path, monkeypatch) -> None:
@@ -402,24 +405,51 @@ def test_auto_allow_command_requires_approval_when_network_is_not_isolated(tmp_p
     assert isolated.decision == "allow"
 
 
-def test_managed_unsandboxed_false_blocks_escalation_before_execution(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_managed_unsandboxed_false_blocks_escalation_before_execution(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from backend.agent.context import ContextBuilder
+    from backend.agent.state import AgentState
+    from backend.agent.tool_batch_runner import ToolBatchRunner
+    from backend.llm.base import ToolCallEvent
+    from backend.permissions.context import ToolExecutionContext
+    from backend.tests.native_command_harness import configure_command_context
+
     policy = sandbox_policy_from_config_snapshot(
         tmp_path,
         sandbox_mode="workspace-write",
         sandbox_settings={"enabled": True},
         managed_sandbox_settings={"allowUnsandboxedCommands": False},
     )
-    context = PermissionContext(
+    permission = PermissionContext(
         allow_unsandboxed_commands=policy.allow_unsandboxed_commands,
         sandbox_auto_allow_commands=policy.auto_allow_commands_if_sandboxed,
     )
-
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    context = configure_command_context(tool, ToolExecutionContext(permission, workspace_root=tmp_path), sandbox_policy=policy)
+    foreground, background = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(tool, "_execute_foreground", foreground)
+    monkeypatch.setattr(tool, "_execute_background", background)
+    approvals = []
+    async def approve(call_id):
+        approvals.append(call_id)
+        return {"action": "approve", "decision": "approved"}
+    builder = ContextBuilder()
+    builder.bind_tool_context(context)
+    state = AgentState(user_message="Inspect the command policy")
+    batch = ToolBatchRunner(ctx=builder, state=state, tool_registry=context.tool_registry,
+        permission_checker=context.permission_checker, approval_handler=approve, skill_manager=None,
+        permission_context=permission, tool_ctx=context)
+    events = [event async for event in batch.run([ToolCallEvent(id="managed-escalation", name=tool.name,
+        arguments={"command": "echo original", "sandbox_permissions": "require_escalated"})])]
     assert policy.allow_unsandboxed_commands is False
-    assert RunCommandTool.check_permission(
-        RunCommandTool,
-        {"command": "python -V", "with_escalated_permissions": True},
-        context,
-    ) is PermissionLevel.ALWAYS_DENY
+    assert approvals == ["managed-escalation"]
+    assert len([event for event in events if event.type == "approval_request"]) == 1
+    assert state.tool_calls[-1].status == "failed"
+    assert state.tool_calls[-1].error_kind == "execution_error"
+    assert any(event.type == "tool_result" and "Managed sandbox policy does not allow" in str(event.data.get("summary")) for event in events)
+    foreground.assert_not_awaited()
+    background.assert_not_awaited()
 
 
 def test_dialog_authored_content_rules_reach_the_sandbox_filesystem_policy(tmp_path: Path) -> None:
