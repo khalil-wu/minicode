@@ -9,6 +9,7 @@ import pytest
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import execution_journal_owner, turn_input_consumption_id
 from backend.agent.runtime import AgentRuntime
+from backend.agent.run_context import RunContext
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.turn_input import TurnInput
 from backend.agent.turn_state import AgentTurnState
@@ -103,7 +104,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
             reasoning_batcher=ReasoningEventBatcher(), reasoning_flush_lock=asyncio.Lock(),
             _persist_partial_turn=persist_partial_turn,
             _accepts_projection_events=lambda: True, partial_persist_lock=asyncio.Lock(),
-            run_context=SimpleNamespace(execution_journal=journal, agent_runtime=runtime),
+            run_context=RunContext(execution_journal=journal, agent_runtime=runtime),
         )
         # Keep the actual partial writer's nonlocal state in a real closure.
         factory = ast.parse('def make_callbacks():\n    last_partial_persisted_at = 0.0\n    partial_history_revision = None\n').body[0]

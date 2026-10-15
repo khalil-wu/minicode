@@ -725,6 +725,12 @@ class LLMMessage:
     # Skills, hook feedback, generated media and summaries also use that role.
     # Provider adapters ignore this durable provenance field.
     is_user_input: bool = False
+    # Host acceptance facts are independent of later provider wrapping and
+    # queued delivery. Only model item ID/turn/content kinds project to Responses;
+    # public message ID, acceptance order and body spans stay private.
+    accepted_input: dict[str, Any] | None = field(default=None, repr=False)
+    # Source verified skill invocations are runtime-only and turn-matched.
+    invoked_user_owned_skill_paths: tuple[str, ...] = field(default=(), repr=False)
 
     # Pi's native transcript carries a message timestamp.  It is assigned once
     # when a message enters the durable MiniCode history and then replayed on

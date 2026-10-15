@@ -263,6 +263,11 @@ def test_archive_pause_retains_history_and_stops_only_the_conversation_runs(monk
     monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduled_tasks.json")
     project = tmp_path / "project"
     project.mkdir()
+    from backend.conversations.repository import ConversationRepository
+
+    repository = ConversationRepository()
+    owner = repository.create_conversation(workspace_root=str(project))
+    other = repository.create_conversation(workspace_root=str(project))
 
     async def scenario() -> None:
         started = set()
@@ -271,7 +276,7 @@ def test_archive_pause_retains_history_and_stops_only_the_conversation_runs(monk
 
         async def on_fire(task, run):
             if task.name == "Standalone":
-                scheduler.bind_run_conversation(run.id, "archive-owner")
+                scheduler.bind_run_conversation(run.id, owner.id)
             started.add(task.id)
             if len(started) == 3:
                 ready.set()
@@ -279,13 +284,13 @@ def test_archive_pause_retains_history_and_stops_only_the_conversation_runs(monk
             return {"status": "completed"}
 
         scheduler = TaskScheduler(on_fire=on_fire)
-        bound = scheduler.add_task("Bound", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id="archive-owner")
-        unrelated = scheduler.add_task("Other", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id="other-owner")
+        bound = scheduler.add_task("Bound", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id=owner.id)
+        unrelated = scheduler.add_task("Other", "Inspect", "0 * * * *", workspace_root=str(project), conversation_id=other.id)
         standalone = scheduler.add_task("Standalone", "Inspect", "0 * * * *", workspace_root=str(project))
         runs = [scheduler.run_now(task.id) for task in (bound, unrelated, standalone)]
         await asyncio.wait_for(ready.wait(), timeout=1)
 
-        assert await scheduler.pause_for_conversation("archive-owner") == 1
+        assert await scheduler.pause_for_conversation(owner.id) == 1
         restored = TaskScheduler()
         assert restored._tasks[bound.id].enabled is False
         assert restored._tasks[bound.id].next_run_at is None

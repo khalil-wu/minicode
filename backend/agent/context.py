@@ -49,6 +49,7 @@ from backend.llm.base import (
 )
 from backend.llm.capabilities import capabilities_for_adapter
 from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE, native_compaction_windows, require_native_context_origin, validate_compaction_window
+from backend.ids import new_uuid7
 from backend.skills.manager import SkillManager
 from backend.skills.executor import SkillExecutor
 from backend.agent.prompting import (
@@ -929,6 +930,33 @@ class ContextBuilder:
     def record_turn_admission(self, message_id: str, boundary: dict[str, Any]) -> None:
         self._turn_admissions[message_id] = dict(boundary)
 
+    def record_admitted_user_input(self, message: LLMMessage, *, text: str, turn_id: str,
+        message_id: str | None, acceptance_order: int) -> None:
+        single_text = (message.accepted_input or {}).get("single_text", not (message.images or message.documents or message.attachment_refs))
+        projected = self._strip_trusted_runtime_context(message)
+        model_item_id = (message.accepted_input or {}).get("model_item_id") or f"msg_{new_uuid7()}"
+        message.accepted_input = {"message_id": message_id, "turn_id": turn_id, "order": acceptance_order,
+            "model_item_id": model_item_id,
+            "text_start": len(projected) - len(text) if single_text else 0,
+            "text_length": len(text) if single_text else len(projected), "single_text": single_text}
+        self.guardian_evidence.record_accepted_message("user", text, turn_id=turn_id, message_id=message_id,
+            acceptance_order=acceptance_order, origin=message.input_origin, complete=single_text, single_text=single_text,
+            model_item_id=model_item_id)
+        for path in message.invoked_user_owned_skill_paths:
+            self.guardian_evidence.record_trusted_skill(turn_id, path)
+
+    def latest_admitted_turn_id(self) -> str | None:
+        admitted = [message.accepted_input for message in self._history if message.is_user_input
+            and message.accepted_input is not None and "order" in message.accepted_input]
+        return max(admitted, key=lambda item: item["order"])["turn_id"] if admitted else None
+
+    def admitted_user_text(self, message: LLMMessage) -> str:
+        text = self._strip_trusted_runtime_context(message)
+        facts = message.accepted_input or {}
+        if "text_start" in facts:
+            return text[facts["text_start"]:facts["text_start"] + facts["text_length"]]
+        return text
+
     @property
     def hook_manager(self) -> Any | None:
         return self._hook_manager
@@ -1018,7 +1046,7 @@ class ContextBuilder:
             hook_manager=self._hook_manager,
         )
 
-    def _consume_skill_injections(self, state: AgentState) -> list[str]:
+    def _consume_skill_injections(self, state: AgentState, *, invoked_paths: list[str] | None = None) -> list[str]:
         """Render explicit skills as contextual user fragments."""
         prompt_context = (
             state.prompt_context if isinstance(state.prompt_context, dict) else {}
@@ -1039,6 +1067,12 @@ class ContextBuilder:
             self._invoked_skill_payloads.pop(path, None)
             self._invoked_skill_payloads[path] = normalized
             current_payloads.append(normalized)
+            if invoked_paths is not None:
+                from backend.agent.guardian.skills import verified_skill_path
+
+                verified = verified_skill_path(path)
+                if verified is not None:
+                    invoked_paths.append(verified)
         return [
             self._render_skill_payload(payload)
             for payload in current_payloads
@@ -1182,7 +1216,8 @@ class ContextBuilder:
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
             return
-        skill_injections = self._consume_skill_injections(state)
+        invoked_paths = []
+        skill_injections = self._consume_skill_injections(state, invoked_paths=invoked_paths)
         workspace_root = self._workspace_root_for_state(state)
         await self._ensure_git_status_context(workspace_root)
         prompt_parts = self._build_prompt_parts(state, workspace_root)
@@ -1237,6 +1272,8 @@ class ContextBuilder:
             attachment_refs=self._snapshot_attachment_refs(state.attachments),
             runtime_context=runtime_context,
             is_user_input=True,
+            accepted_input={"single_text": not bool(state.attachments)},
+            invoked_user_owned_skill_paths=tuple(invoked_paths),
         )
         self._history_store.append(admitted_message, raw_content=user_turn_content)
         self._compact_old_user_runtime_context_for_cache(
@@ -4069,6 +4106,7 @@ class ContextBuilder:
                 # provider-visible message differently.
                 "runtime_context": str(message.runtime_context or ""),
                 **({"is_user_input": True} if message.is_user_input else {}),
+                **({"accepted_input": deepcopy(message.accepted_input)} if message.accepted_input is not None else {}),
                 "timestamp_ms": (
                     int(message.timestamp_ms)
                     if message.timestamp_ms is not None
@@ -4462,6 +4500,7 @@ class ContextBuilder:
                     ),
                     runtime_context=str(raw.get("runtime_context") or ""),
                     is_user_input=raw["is_user_input"],
+                    accepted_input=deepcopy(raw.get("accepted_input")),
                     timestamp_ms=parsed_timestamp,
                 )
             )

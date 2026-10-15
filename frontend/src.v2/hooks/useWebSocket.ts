@@ -32,6 +32,7 @@ import { handlePeripheralEvent } from "../chat/peripheralEvents";
 import { handleCommandResultEvent } from "../chat/commandResultEvents";
 import { handlePreviewEvent } from "../chat/previewEvents";
 import { handleDiffEvent } from "../chat/diffEvents";
+import { createHeartbeatRendererObserver } from "../chat/heartbeatRendererState";
 import { handleNoticeEvent } from "../chat/noticeEvents";
 import { handleControlPlaneProjectionEvent } from "../chat/controlPlaneEvents";
 import { createStreamBuffer } from "../lib/stream-buffer";
@@ -232,6 +233,7 @@ const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
   "mcp_status",
   "pong",
   "runtime.capabilities",
+  "scheduler.heartbeat.renderer_state.request",
   "session.restored",
   "session.synced",
   "stream_event",
@@ -521,7 +523,7 @@ const hasPendingClientCommand = (clientCommandId: string): boolean =>
 export const getPendingClientCommandCountForTests = (): number => pendingClientCommands.size;
 
 export const shouldTrackClientCommandAck = (cmd: ClientCommand): boolean =>
-  cmd.type !== "ping";
+  cmd.type !== "ping" && cmd.type !== "scheduler.heartbeat.renderer_state";
 
 const clearPendingClientCommandAck = (clientCommandId: string) => {
   pendingClientCommands.delete(clientCommandId);
@@ -798,6 +800,15 @@ export const useWebSocketConnection = () => {
       let awaitingPong = false;
       let connectionRecoveryCompleted = false;
       let announceReconnectAfterRecovery = false;
+      const rendererObserver = createHeartbeatRendererObserver(
+        useAppStore,
+        () => awaitingSessionRestore,
+        (command) => {
+          if (!alive || ref.current !== ws || ws.readyState !== WebSocket.OPEN) return false;
+          ws.send(JSON.stringify(command));
+          return true;
+        },
+      );
 
       const clearHeartbeatTimers = () => {
         if (pingInterval !== null) {
@@ -810,7 +821,7 @@ export const useWebSocketConnection = () => {
         }
         awaitingPong = false;
       };
-      heartbeatCleanup = clearHeartbeatTimers;
+      heartbeatCleanup = () => { clearHeartbeatTimers(); rendererObserver.dispose(); };
 
       const completeConnectionRecovery = (): void => {
         if (connectionRecoveryCompleted || !alive || ref.current !== ws) return;
@@ -824,6 +835,9 @@ export const useWebSocketConnection = () => {
           maxAttempts: null,
           error: null,
         });
+        const activeConversationId = useAppStore.getState().conversationId;
+        if (activeConversationId) rendererObserver.observe(activeConversationId);
+        else rendererObserver.refresh();
         if (announceReconnectAfterRecovery) {
           pushToast("已重新连接", "success", 2000);
         }
@@ -845,6 +859,7 @@ export const useWebSocketConnection = () => {
         recoverySwitchPending = false;
         recoverySwitchWillRefreshCatalog = false;
         bufferedRecoveryEvents = [];
+        rendererObserver.start();
         if (awaitingSessionRestore) {
           textStreamBuffer.destroy();
           thinkingStreamBuffer.destroy();
@@ -889,7 +904,7 @@ export const useWebSocketConnection = () => {
 
       ws.addEventListener("close", (event) => {
         if (!alive || ref.current !== ws) return;
-        clearHeartbeatTimers();
+        heartbeatCleanup();
         withdrawUnconfirmedPromptResponses();
         heartbeatCleanup = () => {};
         ref.current = null;
@@ -989,6 +1004,13 @@ export const useWebSocketConnection = () => {
           return false;
         }
         if (handled) {
+          if (parsed.type === "conversation.switched" && parsed.conversation_id) {
+            // The reducer may reject a superseded switch. Observe only the
+            // canonical owner actually accepted by the store.
+            if (useAppStore.getState().conversationId === parsed.conversation_id) {
+              rendererObserver.observe(parsed.conversation_id);
+            }
+          }
           for (const sub of subscribers) sub(parsed);
         }
         return handled;
@@ -1028,6 +1050,7 @@ export const useWebSocketConnection = () => {
         }
 
         awaitingSessionRestore = false;
+        rendererObserver.refresh();
         refreshAfterSessionProjection(recoverySwitchWillRefreshCatalog);
         recoverySwitchWillRefreshCatalog = false;
         completeConnectionRecovery();
@@ -1067,6 +1090,12 @@ export const useWebSocketConnection = () => {
         }
         if (!parsed) return;
         if (isSupersededCommandProjection(parsed)) return;
+        if (parsed.type === "scheduler.heartbeat.renderer_state.request") {
+          if (!isReplayedEvent(parsed) && deliverInboundEvent(parsed)) {
+            rendererObserver.request(parsed.conversation_id);
+          }
+          return;
+        }
         if (
           parsed.type === "error"
           && !parsed.conversation_id
@@ -1075,7 +1104,7 @@ export const useWebSocketConnection = () => {
           && parsed.error_code?.startsWith("connection.")
         ) {
           const message = normalizeAgentErrorMessage(parsed.message);
-          clearHeartbeatTimers();
+          heartbeatCleanup();
           heartbeatCleanup = () => {};
           stopReconnecting(message, message);
           ref.current = null;
@@ -1102,7 +1131,7 @@ export const useWebSocketConnection = () => {
           // conversation cursor past history that was never restored.
           handleCommandResultEvent(parsed);
           for (const sub of subscribers) sub(parsed);
-          clearHeartbeatTimers();
+          heartbeatCleanup();
           heartbeatCleanup = () => {};
           reconnectExhausted = true;
           awaitingSessionRestore = false;
@@ -1151,6 +1180,10 @@ export const useWebSocketConnection = () => {
           if (awaitingSessionRestore) {
             finishSessionRecovery();
           } else {
+            const snapshot = useAppStore.getState();
+            if (snapshot.conversationId && snapshot.conversationHistoryPages[snapshot.conversationId]) {
+              rendererObserver.observe(snapshot.conversationId);
+            }
             refreshAfterSessionProjection(false);
           }
           return;
@@ -1358,6 +1391,7 @@ const TRANSPORT_EVENT_TYPES = new Set<string>([
   "pong",
   "client.command.ack",
   "session.replay",
+  "scheduler.heartbeat.renderer_state.request",
 ]);
 
 // Assert disjoint ownership once at module load so a duplicate registration

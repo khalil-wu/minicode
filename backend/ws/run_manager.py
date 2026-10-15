@@ -27,7 +27,7 @@ from backend.agent.conversation_query_guard import (
     conversation_query_guards,
 )
 from backend.agent.model_execution import ModelExecutionSnapshot
-from backend.agent.turn_input import TurnInput, TurnInputQueue
+from backend.agent.turn_input import ScheduledInputCommand, TurnInput, TurnInputQueue
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     await_with_deadline,
@@ -407,7 +407,7 @@ class SessionRunManager:
                     "conversation_id": cid,
                     "message_id": str(data.get("assistant_message_id") or ""),
                     "user_message_id": str(data.get("user_message_id") or ""),
-                    "content": str(data.get("content") or ""),
+                    "content": command.public_content if isinstance(command, ScheduledInputCommand) else str(data.get("content") or ""),
                     "attachments": [dict(item) for item in data.get("attachments", [])],
                     **{key: data[key] for key in USER_INPUT_METADATA_KEYS if key in data},
                     "position": position,
@@ -497,6 +497,9 @@ class SessionRunManager:
         queue = self._turn_input_queues.get(conversation_id)
         if queue is None or queue.sealed:
             return None
+        context = self._run_contexts.get(conversation_id)
+        if context is not None and context.turn_terminal_receipt is not None and context.turn_terminal_receipt.done():
+            return None
         return queue.enqueue_command(
             command,
             mode="steer",
@@ -521,6 +524,9 @@ class SessionRunManager:
         queue = self._turn_input_queues.get(conversation_id)
         if queue is None or queue.sealed:
             return None
+        context = self._run_contexts.get(conversation_id)
+        if context is not None and context.turn_terminal_receipt is not None and context.turn_terminal_receipt.done():
+            return None
         return queue.enqueue_command(
             command,
             mode="steer",
@@ -532,6 +538,15 @@ class SessionRunManager:
                 },
             ),
         )
+
+    def enqueue_scheduled_input(self, conversation_id: str, command: ScheduledInputCommand) -> TurnInput | None:
+        conversation = self._session.conversation_repo.get_conversation(conversation_id)
+        host = self._session.guardian_host_for_conversation(conversation_id,
+            evidence_checkpoint=conversation.context_snapshot.get("guardian_evidence"))
+        command.data["_guardian_acceptance_order"] = host.evidence.reserve_order()
+        queue = self._turn_input_queues.get(conversation_id)
+        return self.enqueue_user_message_as_steer(conversation_id, command,
+            target_message_id=queue.turn_id if queue is not None else "")
 
     def pending_turn_input_snapshot(self) -> list[dict[str, Any]]:
         """Return non-destructive turn-local input state for session restore."""
@@ -546,7 +561,7 @@ class SessionRunManager:
                     "message_id": item.message_id,
                     "user_message_id": item.user_message_id,
                     "target_message_id": item.target_message_id,
-                    "content": item.content,
+                    "content": item.original_command.public_content if isinstance(item.original_command, ScheduledInputCommand) else item.content,
                     "attachments": [dict(attachment) for attachment in item.attachments],
                     **{key: item.original_command.data[key] for key in USER_INPUT_METADATA_KEYS
                        if key in item.original_command.data},

@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
+    "content_item_kinds": True,
     "default_mode_request_user_input": False,
     "token_budget": False,
     "request_permissions_tool": False,

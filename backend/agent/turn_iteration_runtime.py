@@ -346,9 +346,9 @@ class TurnIterationRuntime:
                 order = accepted_input.get("_guardian_acceptance_order")
                 if order is None:
                     order = evidence.reserve_order()
-                evidence.record_accepted_message("user", boundary_input.content,
-                    turn_id=str(self.metadata["turn_id"]), message_id=accepted_id,
-                    origin=origin, acceptance_order=order)
+                self.context.record_admitted_user_input(admitted_message,
+                    text=boundary_input.content, turn_id=str(self.metadata["turn_id"]),
+                    message_id=accepted_id, acceptance_order=order)
                 commit_turn_admission = self.metadata.get("commit_turn_admission")
                 if callable(commit_turn_admission):
                     committed = commit_turn_admission(

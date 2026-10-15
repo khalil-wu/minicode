@@ -408,6 +408,8 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
 
 
 def _bind_config_model_request_policy(adapter: LLMAdapter, config: "AppConfig", model: str) -> LLMAdapter:
+    if isinstance(adapter, OpenAIAdapter):
+        adapter.configure_content_item_kinds(config.feature_flags.enabled("content_item_kinds"))
     effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
     definition = adapter.provider_adapter_spec.model if adapter.provider_adapter_spec is not None else None
     policy = config.model_request_policy or resolve_model_request_policy(config, model=model, definition=definition,

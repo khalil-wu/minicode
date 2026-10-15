@@ -1,6 +1,6 @@
 # 新会话、项目操作与 CI 修复
 
-当前状态：本地分区验证和真实桌面检查已完成，普通客户端已运行该前端；GitHub 整体 CI 仍在收敛，不能据此宣布整个产品完成。旧 8311 项 snapshot 在确认过期取消 fixture 无限等待后已中止，未记通过；其未执行的 675 项 Root 尾段单独验证中，不重跑旧完整 snapshot。最新已冻结修复与各自证据见 `2026-10-15-ci-source-contract-round03.md`。用户要求先把 CI 修好，再继续 `2026-10-15-source-internal-evidence-delivery.md` 的剩余工作，后续按该顺序推进。官方账号功能仍排除，字体保留现状。
+当前状态：`18e8bd8dc097aa892c76ede818beb15d9b8659f1` 的 GitHub run `38749202449` 七项全部通过，最新收尾及失败前后证据见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`。bundled 3.11 新会话与项目按钮已实机核对，普通客户端曾运行该前端并在 21:05 正常退出。旧 8311 项 snapshot 的中止记录保留，未把中止当通过；其原未执行尾段已分区补齐并纳入后续完整 CI。现在按用户指定顺序继续 `2026-10-15-source-internal-evidence-delivery.md` 的剩余工作，后续实现须单独验证，不能据本次绿色基线宣布整款产品等价。官方账号功能仍排除，字体保留现状。
 
 ## 用户报告的问题
 
@@ -36,7 +36,7 @@ kernel/protocol/duplicate-tools/module-size、3.11 compileall 与 diff check 均
 
 第一批 `878b2721` 之后，`2146695c` 已包含实际验证的 Electron multi-agent E2E 和 context-window WS fixture；两者原来暂缓提交的状态仅属于历史第一批。multi-agent E2E 在隔离原生 Electron 中 1 passed / 0 failed / 0 skipped，前序失败保留，见 `output/playwright/ci-repair-multi-agent-20261015/repair-delivery.json`。
 
-最新已完成结果来自 GitHub run `38726756627`，HEAD `2146695c`：前端、Electron 集成、Windows harness、Linux 原生策略构建成功；Linux backend 为 6332 passed / 147 failed / 27 skipped（6506 tests），Root suite 尚在运行；Desktop 在配置 sandbox helper 时失败。原始 backend XML/log 下载于 `output/ci-repair-20261015/github-2146695c-backend/`，失败明细为 `github-2146695c-backend-failures.json`。本地分区修复正在逐项处理这份真实失败列表，不降低门槛或将 skip 计入通过。
+历史分区起点来自 GitHub run `38726756627`，HEAD `2146695c`：前端、Electron 集成、Windows harness、Linux 原生策略构建成功；Linux backend 为 6332 passed / 147 failed / 27 skipped（6506 tests），Root suite 尚在运行；Desktop 在配置 sandbox helper 时失败。原始 backend XML/log 下载于 `output/ci-repair-20261015/github-2146695c-backend/`，失败明细为 `github-2146695c-backend-failures.json`。本地分区修复正在逐项处理这份真实失败列表，不降低门槛或将 skip 计入通过。
 
 Electron 43 的模块在首次 `require("electron")` 时才下载可执行文件，CI 的 `npm ci` 后尚无 `dist/chrome-sandbox`。配置步骤现先实际加载 Electron，再从模块返回的可执行路径定位 sandbox helper，保留 root:root/4755；没有关闭 sandbox。该修复的实际 Ubuntu 结果仍待后续 run。
 

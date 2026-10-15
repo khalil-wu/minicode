@@ -1,6 +1,6 @@
 # CI 生命周期与 Linux mount target 收尾
 
-本记录对应 `3ab0f797b102e1bd18c6b43bed8a1912baa90a19` 之后的修复批，尚待新的 GitHub 完整 CI；不代表全绿。新会话和项目行按钮已在此前批次修复，不能用本批测试数重复计算。
+本记录对应 `3ab0f797b102e1bd18c6b43bed8a1912baa90a19` 之后的修复批。冻结基线 `18e8bd8dc097aa892c76ede818beb15d9b8659f1` 的 GitHub run `38749202449` 已七项全部成功。新会话和项目行按钮已在此前批次修复，不能用本批测试数重复计算。
 
 ## 真实 CI 取证
 
@@ -33,6 +33,8 @@ Root 审阅还发现 generic missing DENY 文件漏了 Source 的 `--perms 000`�
 
 取消 fixture 已改验精确 cancelled/exit/无错误/无 cleanup pending、原进程 returncode/wait 和真实文件保全，并补一场跨平台真实子进程取消回执验证。本文件本地 8 passed、9 Linux skipped；两个 Linux 取消节点仍等下一轮 CI。上轮实际环境为 Linux 6.17.0-1022-azure、Git 2.55.0、bubblewrap 0.9.0、Python 3.11.17，原 job 日志另存 `github-d0912a5c-backend-job.log`。
 
+最终真实 Linux run `38749202449`：Backend 6536 tests、6509 passed、27 skipped、0 failed/error；本专项 17/17 passed，含全部 9 个 Linux 实机节点以及两个此前失败的取消节点。真实原 XML/log 位于 `github-18e8bd8d-backend/`，逐条 Linux 输出为 `github-18e8bd8d-mount-target-results.json`，七项 job 的原始状态与精确 HEAD 为 `github-18e8bd8d-green-state.json`。没有把 Windows 的平台 skip 或旧失败重新标成通过。
+
 ## 桌面 smoke 正常退出
 
 旧 HTTP peer 没有提供真实关闭必经的 `POST /api/workspace/language/lifecycle`。生产窗口资源释放收到 404 后正确拒绝报告关闭成功；测试却等三秒后强杀，并在仅收到主进程 exit 后删除仍可能被 Chromium 写入的 profile，造成 Linux ENOTEMPTY。
@@ -49,4 +51,4 @@ Windows CI 原 fixture 以固定三秒等待进入 authentication refresh；这�
 
 ## 顺序与边界
 
-最新提交的七项 GitHub job 全部通过后，才继续 `2026-10-15-source-internal-evidence-delivery.md` 中已确认的 heartbeat、Memory Phase 1 可选 WS 与 remote 范围。只读审计不计实现，官方账号及依赖账号的 hosted 服务继续排除。手动旧产物清理脚本仍留给用户执行，当前 dist、会话、草稿、附件和未保存编辑内容不在清理范围。
+七项 GitHub job 全部通过后，已开始继续 `2026-10-15-source-internal-evidence-delivery.md` 中确认的 heartbeat、Memory Phase 1 可选 WS 与 remote 范围；这些后续修改须单独验证，不借本次绿色基线宣称交付。只读审计不计实现，官方账号及依赖账号的 hosted 服务继续排除。手动旧产物清理脚本仍留给用户执行，当前 dist、会话、草稿、附件和未保存编辑内容不在清理范围。

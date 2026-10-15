@@ -112,6 +112,7 @@ ServerEventType = Literal[
     "git.pr_status",
     # Scheduler
     "scheduler.list",
+    "scheduler.heartbeat.renderer_state.request",
     # Checkpoints
     "checkpoint.created",
     "checkpoint.list",
@@ -353,6 +354,7 @@ ClientCommandType = Literal[
     "git.pr_automation.set",
     # Scheduler
     "scheduler.list",
+    "scheduler.heartbeat.renderer_state",
     "scheduler.add",
     "scheduler.update",
     "scheduler.history",

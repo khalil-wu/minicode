@@ -17,6 +17,7 @@ type FieldKind = "array" | "boolean" | "number" | "record" | "string" | "nullabl
 const REQUIRED_ROUTING_FIELDS: Partial<
   Record<ServerEventType, Readonly<Record<string, FieldKind>>>
 > = {
+  "scheduler.heartbeat.renderer_state.request": { conversation_id: "string" },
   "workspace.project_index.invalidated": { conversation_id: "string", workspace_root: "string", index_instance_id: "string", revision: "number" },
   "item.started": { conversation_id: "string", item: "record" },
   "agent_message.delta": { item_id: "string", delta: "string" },
@@ -244,6 +245,7 @@ const REQUIRED_ROUTING_FIELDS: Partial<
 };
 
 const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
+  "scheduler.heartbeat.renderer_state.request",
   "item.started",
   "agent_message.delta",
   "item.completed",

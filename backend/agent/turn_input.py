@@ -21,8 +21,20 @@ from threading import RLock
 from time import time
 from typing import Any, Literal
 
+from backend.agent.message import UserCommand
+
 
 TurnInputMode = Literal["steer"]
+
+
+@dataclass
+class ScheduledInputCommand(UserCommand):
+    """An actual scheduler input, never constructed by the public WS parser."""
+
+    turn_trigger: str = ""
+    public_content: str = ""
+    task_id: str = ""
+    scheduled_run_id: str = ""
 
 
 def user_input_origin_from_trigger(trigger: str | None) -> Literal["user", "heartbeat"]:
@@ -105,6 +117,8 @@ class TurnInput:
             target_message_id=str(target_message_id or "").strip(),
             original_command=command,
             queued_at_ms=int(time() * 1000),
+            input_origin=(user_input_origin_from_trigger(command.turn_trigger)
+                if isinstance(command, ScheduledInputCommand) else "user"),
         )
 
 
@@ -270,7 +284,7 @@ class TurnInputQueue:
     ) -> TurnInput | None:
         waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
         with self._lock:
-            if self._phase is not MailboxDeliveryPhase.CURRENT_TURN:
+            if self._phase is MailboxDeliveryPhase.SEALED:
                 return None
             item = TurnInput.from_command(
                 command,
@@ -282,6 +296,9 @@ class TurnInputQueue:
             if before_publish is not None:
                 before_publish(item)
             self._steering.append(item)
+            # Source pending UserInput reopens mailbox delivery on the same
+            # active Regular turn; NEXT_TURN alone only defers late mail.
+            self._phase = MailboxDeliveryPhase.CURRENT_TURN
             self._activity_seq += 1
             waiters = tuple(self._activity_waiters)
         self._notify_activity_waiters(waiters)

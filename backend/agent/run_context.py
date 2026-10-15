@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from backend.agent.execution_journal import ExecutionJournal
     from backend.agent.provider_lifecycle import ProviderLifecycleRuntime
     from backend.agent.runtime import AgentRuntime
-    from backend.agent.turn_input import TurnInputQueue
+    from backend.agent.turn_input import ScheduledInputCommand, TurnInputQueue
     from backend.conversations.repository import ConversationRepository
     from backend.hooks.manager import HookManager
     from backend.llm.base import LLMTurnContext
@@ -90,6 +90,17 @@ class RunContext:
     teammate_plan_approval_requester: Callable[..., Any] | None = None
     conversation_repository: ConversationRepository | None = None
     turn_input_queue: TurnInputQueue | None = None
+    # These are the real owner and canonical terminal, shared by host input
+    # submission. They never come from public command metadata.
+    turn_kind: str = "regular"
+    turn_owner_task: asyncio.Task | None = None
+    accept_scheduled_input: Callable[..., Any] | None = None
+    turn_terminal_receipt: asyncio.Future[dict[str, Any]] | None = None
+    turn_started_receipt: asyncio.Future[dict[str, Any]] | None = None
+    active_final_output_json_schema: dict[str, Any] | None = None
+    conversation_revision: int | None = None
+    close_turn_inputs: Callable[[], None] | None = None
+    initial_scheduled_input: ScheduledInputCommand | None = None
     persist_consumed_turn_input: Callable[..., Any] | None = None
     acknowledge_consumed_turn_input: Callable[..., Any] | None = None
     previous_turn_aborted: bool = False
@@ -112,6 +123,27 @@ class RunContext:
     user_stop_receipt: dict[str, Any] | None = None
     user_stop_acceptance: asyncio.Future[None] | None = None
     exec_policy_owner: Any | None = None
+
+    def prepare_turn_owner(self) -> None:
+        self.turn_owner_task = asyncio.current_task()
+        self.turn_terminal_receipt = asyncio.get_running_loop().create_future()
+        self.turn_started_receipt = asyncio.get_running_loop().create_future()
+
+    def publish_turn_started(self, turn_id: str) -> None:
+        receipt = self.turn_started_receipt
+        if receipt is not None and not receipt.done():
+            receipt.set_result({"status": "started", "turn_id": turn_id})
+
+    def publish_turn_terminal(self, result: dict[str, Any]) -> None:
+        receipt = self.turn_terminal_receipt
+        if receipt is not None and not receipt.done():
+            receipt.set_result(result)
+
+    async def wait_for_turn_release(self) -> None:
+        if self.turn_owner_task is not asyncio.current_task():
+            await asyncio.shield(self.turn_owner_task)
+        while pending := {task for task in self.lifecycle_cleanup_tasks if not task.done()}:
+            await asyncio.wait(pending)
 
     def retain_lifecycle_task(
         self, task: asyncio.Task, *, label: str, llm: Any = None,

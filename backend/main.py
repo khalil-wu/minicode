@@ -173,6 +173,7 @@ async def lifespan(app: FastAPI):
         logger.info("MiniCode Backend startup complete")
         yield
     finally:
+        bootstrap.begin_drain()
         try:
             await _state.ws_manager.shutdown(reason="application_shutdown")
         finally:

@@ -9,6 +9,7 @@ from typing import Any
 from backend.agent.guardian.action import GuardianAction
 from backend.agent.guardian.contract import GUARDIAN_OUTPUT_CONTRACT, GuardianReviewError
 from backend.agent.guardian.retained import GuardianEvidenceSnapshot, role_lines
+from backend.agent.guardian.heartbeat import selected_transcript
 from backend.agent.guardian.node_repl import NodeReplEvidenceMode, MAX_RESULT_TOKENS
 from backend.agent.guardian.truncation import source_token_estimate, truncate_guardian_text
 from backend.llm.base import LLMMessage, estimate_llm_message_tokens
@@ -114,9 +115,7 @@ def build_guardian_prompt(snapshot: GuardianEvidenceSnapshot, action: GuardianAc
     reviewed_node_repl_sequence: int = 0) -> GuardianPrompt:
     if action.environment_id is not None and len(action.environment_id.encode("utf-8")) > 256:
         raise GuardianReviewError("prompt_build", "approval environment id exceeds Guardian's 256-byte limit")
-    use_current_window = loaded_parent_checkpoint or snapshot.context_mode == "thread_owned"
-    transcript = (snapshot.parent_window_transcript if use_current_window and snapshot.parent_window_transcript is not None else
-        snapshot.transcript[snapshot.checkpoint_transcript_start:] if loaded_parent_checkpoint else snapshot.transcript)
+    transcript = selected_transcript(snapshot, loaded_parent_checkpoint)
     delta = previous_cursor is not None and previous_cursor.parent_history_version == snapshot.history_version and previous_cursor.transcript_entry_count <= len(transcript)
     offset = previous_cursor.transcript_entry_count if delta else 0
     entries = transcript[offset:]

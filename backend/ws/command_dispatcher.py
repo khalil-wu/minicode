@@ -390,6 +390,12 @@ class SessionCommandDispatcher:
                 )
                 continue
 
+            if command.type == "scheduler.heartbeat.renderer_state":
+                self._session.ws_manager.record_heartbeat_renderer_state(
+                    self._session, connection_generation, command.data,
+                )
+                continue
+
             if command.type == "user_message":
                 for field in ("_client_queue_key", "_legacy_user_message_identity", "_queued_user_message_dispatch", "_submitted_content", "_guardian_acceptance_order"):
                     command.data.pop(field, None)
@@ -1374,6 +1380,12 @@ class SessionCommandDispatcher:
                 for key in ("primary_file", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
+            from backend.agent.turn_input import ScheduledInputCommand, user_input_origin_from_trigger
+
+            if isinstance(command, ScheduledInputCommand):
+                message_metadata["input_origin"] = user_input_origin_from_trigger(command.turn_trigger)
+                message_metadata["_source_responses_metadata"] = {"turn_trigger": command.turn_trigger}
+                message_metadata["_host_scheduled_input"] = command
             message_metadata.update(input_metadata)
             if command.data.get("_client_queue_key"):
                 message_metadata["_client_queue_key"] = command.data["_client_queue_key"]
@@ -1685,7 +1697,9 @@ class SessionCommandDispatcher:
                     accepted_conversation = self._session.conversation_repo.get_conversation(target_conversation_id)
                     guardian_order = self._session.guardian_host_for_conversation(target_conversation_id,
                         evidence_checkpoint=accepted_conversation.context_snapshot.get("guardian_evidence")).evidence.reserve_order()
-                    queued_command = UserCommand(
+                    from dataclasses import replace
+
+                    queued_command = replace(command,
                         type="user_message",
                         data={
                             **command.data,

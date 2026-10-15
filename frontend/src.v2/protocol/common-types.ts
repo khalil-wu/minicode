@@ -29,6 +29,7 @@ export type CommonServerEventType =
   | "mcp.progress"
   // Scheduler
   | "scheduler.list"
+  | "scheduler.heartbeat.renderer_state.request"
   // Session / control plane
   | "session.restored"
   | "session.replay"
@@ -89,6 +90,7 @@ export type CommonClientCommandType =
   | "scheduler.run_now"
   | "scheduler.retry"
   | "scheduler.cancel"
+  | "scheduler.heartbeat.renderer_state"
   // Session inspection
   | "session.tasks.inspect"
   | "session.status.inspect"
@@ -327,6 +329,18 @@ export interface SchedulerListEvent {
   request_id?: string;
   tasks?: { id: string; name: string; prompt: string; schedule: string; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
   runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string; message_id?: string; completion_notification?: CompletionNotification | null }[];
+}
+
+export interface HeartbeatRendererStateRequestEvent {
+  type: "scheduler.heartbeat.renderer_state.request";
+  conversation_id: string;
+}
+
+export interface HeartbeatRendererStateCommand {
+  type: "scheduler.heartbeat.renderer_state";
+  conversation_id: string;
+  is_eligible: boolean;
+  reason: string | null;
 }
 
 export interface SkillsListEvent {

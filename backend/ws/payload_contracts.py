@@ -386,6 +386,7 @@ LIVE_ONLY_EVENT_TYPES = frozenset({
 # replay filter on its bridge; a single definition here prevents the three
 # hand-maintained lists from drifting apart.
 NON_REPLAYABLE_EVENT_TYPES = frozenset({
+    "scheduler.heartbeat.renderer_state.request",
     "artifact_content",
     "conversation.list",
     "conversation.switched",

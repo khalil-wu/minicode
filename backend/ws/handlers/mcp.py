@@ -1265,7 +1265,7 @@ async def handle_scheduler_run_now(session: "WebSocketSession", data: dict[str, 
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = run_scheduled_task_now(scheduler, data, workspace_root=scope.workspace_root)
+        result = await run_scheduled_task_now(scheduler, data, workspace_root=scope.workspace_root)
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.run_now", exc)
         return True
@@ -1289,7 +1289,7 @@ async def handle_scheduler_retry(session: "WebSocketSession", data: dict[str, An
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = retry_scheduled_task_run(scheduler, data, workspace_root=scope.workspace_root)
+        result = await retry_scheduled_task_run(scheduler, data, workspace_root=scope.workspace_root)
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.retry", exc)
         return True

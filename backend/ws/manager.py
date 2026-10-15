@@ -5,11 +5,12 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from weakref import WeakKeyDictionary, WeakValueDictionary
+from weakref import ReferenceType, WeakKeyDictionary, WeakValueDictionary, ref
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -138,6 +139,59 @@ class WebSocketManager:
         self._shutting_down = False
         self._conversation_observers: WeakKeyDictionary[WebSocketSession, set[str]] = WeakKeyDictionary()
         self._conversation_stream_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._heartbeat_renderer_states: dict[str, tuple[ReferenceType, int, bool, str | None, float]] = {}
+        self._heartbeat_renderer_requests: dict[tuple[str, int], set[str]] = {}
+
+    def record_heartbeat_renderer_state(self, session: WebSocketSession, generation: int, data: dict[str, Any]) -> bool:
+        if (self._shutting_down or self._sessions.get(session.session_id) is not session
+                or not session.is_connected or session.connection_generation != generation):
+            return False
+        conversation_id = data["conversation_id"]
+        allowed = (conversation_id == session.active_conversation_id
+            or conversation_id in self._conversation_observers.get(session, ())
+            or conversation_id in self._heartbeat_renderer_requests.get((session.session_id, generation), ()))
+        if not allowed:
+            return False
+        self._heartbeat_renderer_states[conversation_id] = (
+            ref(session), generation, data["is_eligible"], data["reason"], time.time(),
+        )
+        return True
+
+    def heartbeat_renderer_block_reason(self, conversation_id: str) -> str | None:
+        state = self._heartbeat_renderer_states.get(conversation_id)
+        if state is None:
+            return None
+        reporter, generation, eligible, reason, received_at = state
+        session = reporter()
+        if (session is None or time.time() - received_at > 120 or self._sessions.get(session.session_id) is not session
+                or not session.is_connected or session.connection_generation != generation):
+            self._heartbeat_renderer_states.pop(conversation_id)
+            return None
+        return None if eligible else reason or "renderer_ineligible"
+
+    def _discard_heartbeat_reporter(self, session: WebSocketSession, generation: int) -> None:
+        self._heartbeat_renderer_requests.pop((session.session_id, generation), None)
+        for conversation_id, state in tuple(self._heartbeat_renderer_states.items()):
+            if state[0]() is session and state[1] == generation:
+                self._heartbeat_renderer_states.pop(conversation_id)
+
+    def request_heartbeat_renderer_state(self, conversation_id: str, *, workspace_root: str) -> None:
+        from backend.async_cleanup import retain_cleanup_task
+        from backend.services.workspace_service import main_worktree_root
+
+        for session in tuple(self._sessions.values()):
+            if not session.is_connected or session.session_lifecycle.is_shutting_down:
+                continue
+            observed = conversation_id == session.active_conversation_id or conversation_id in self._conversation_observers.get(session, ())
+            current_root = session.session_lifecycle.current_workspace_root()
+            if not observed and (current_root is None or main_worktree_root(current_root) != main_worktree_root(Path(workspace_root))):
+                continue
+            generation = session.connection_generation
+            self._heartbeat_renderer_requests.setdefault((session.session_id, generation), set()).add(conversation_id)
+            task = asyncio.create_task(session.event_outbox.send_payload({
+                "type": "scheduler.heartbeat.renderer_state.request", "conversation_id": conversation_id,
+            }, connection_generation=generation, log_context="scheduler.heartbeat.renderer_state.request", wait_for_delivery=False))
+            retain_cleanup_task(task, session.cleanup_tasks)
 
     def conversation_stream_lock(self, conversation_id: str) -> asyncio.Lock:
         lock = self._conversation_stream_locks.get(conversation_id)
@@ -756,6 +810,7 @@ class WebSocketManager:
                     logger.info(f"Cancelled disconnect cleanup task for session {session_id} due to reconnection")
 
                 if session is not None:
+                    self._discard_heartbeat_reporter(session, session.connection_generation)
                     previous_ws, generation = session.attach_websocket(websocket,
                         window_instance_id=window_instance_id, window_owner_id=window_owner_id,
                         window_binding_token=window_binding_token)
@@ -835,6 +890,7 @@ class WebSocketManager:
             return
         if connection_generation is not None and session.connection_generation != connection_generation:
             return
+        self._discard_heartbeat_reporter(session, session.connection_generation)
         session.mark_disconnected()
         self._remove_transport_subscriptions(session)
         _invalidate_runtime_status_cache()
@@ -1122,6 +1178,11 @@ class WebSocketManager:
         self._execution_host_shutdown_tasks.clear()
         self.execution_contexts = ConversationExecutionRegistry()
         self._shutting_down = False
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        conversation_query_guards().open_admission()
+        self._heartbeat_renderer_states.clear()
+        self._heartbeat_renderer_requests.clear()
         for task in list(self._conversation_delete_tasks):
             if not task.done():
                 task.cancel()

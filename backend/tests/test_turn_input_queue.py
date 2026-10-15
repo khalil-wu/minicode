@@ -115,7 +115,7 @@ def test_turn_input_snapshot_is_non_destructive_and_preserves_target_identity() 
     assert queue.pop_steer() is queued
 
 
-def test_turn_owner_defers_late_mail_and_reopens_on_next_turn() -> None:
+def test_explicit_user_input_reopens_mailbox_in_same_turn_and_next_turn_changes_epoch() -> None:
     queue = TurnInputQueue()
 
     first_epoch = queue.begin_turn("run-1")
@@ -123,7 +123,11 @@ def test_turn_owner_defers_late_mail_and_reopens_on_next_turn() -> None:
     assert queue.defer_mailbox_to_next_turn("run-1") is True
     assert queue.mailbox_phase is MailboxDeliveryPhase.NEXT_TURN
     assert queue.mailbox_deliverable("run-1") is False
-    assert queue.enqueue_command(_command("late-steer", "too late")) is None
+    late_input = queue.enqueue_command(_command("late-steer", "new explicit input"))
+    assert late_input is not None
+    assert queue.mailbox_phase is MailboxDeliveryPhase.CURRENT_TURN
+    assert queue.turn_epoch == first_epoch
+    assert queue.pop_steer() is late_input
 
     second_epoch = queue.begin_turn("run-2")
     assert second_epoch == first_epoch + 1
@@ -578,7 +582,7 @@ def test_runtime_queue_snapshot_is_frontend_replayable() -> None:
 def test_direct_steer_rejects_closed_turn_without_losing_follow_up() -> None:
     manager = SessionRunManager(SimpleNamespace())
     turn_queue = manager.turn_input_queue("conv-a")
-    turn_queue.defer_mailbox_to_next_turn()
+    turn_queue.seal_and_drain_commands()
     command = _command("assistant-late", "late steer")
 
     assert manager.enqueue_user_message_as_steer("conv-a", command) is None

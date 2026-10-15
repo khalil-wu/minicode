@@ -9,8 +9,9 @@ import json
 from backend.agent.guardian.manual_approval import MANUAL_APPROVAL_DEVELOPER_PREFIX
 from backend.agent.guardian.context import GuardianParentCheckpoint
 from backend.agent.guardian.retained import (
-    MAX_RENDER_TOKENS, GuardianEvidenceOwner, GuardianEvidenceSnapshot, GuardianTranscriptEntry, _json_bytes,
+    MAX_RENDER_TOKENS, GuardianEvidenceOwner, GuardianEvidenceSnapshot, GuardianTranscriptEntry, RetainedMessage, _json_bytes,
 )
+from backend.agent.guardian.skills import bounded_skill_paths
 from backend.agent.guardian.service import GuardianReviewService
 from backend.agent.guardian.node_repl import NodeReplReviewEvidence
 from backend.agent.guardian.truncation import truncate_guardian_text
@@ -26,6 +27,43 @@ def _output_text(output) -> str:
     return "\n".join(part["text"] for part in output if part["type"] in {"input_text", "output_text", "text"})
 
 
+def live_user_messages(builder: ContextBuilder):
+    accepted_sources = _accepted_transcript_sources(builder)
+    for message in builder._history:
+        if not message.is_user_input:
+            windows = native_compaction_windows(message)
+            items = [item for window in windows for item in window["output"]]
+            for item in items:
+                if item["type"] != "message" or item["role"] != "user":
+                    continue
+                metadata = item.get("internal_chat_message_metadata_passthrough") or {}
+                source = accepted_sources.get((item.get("id"), metadata.get("turn_id") or ""))
+                if source is None:
+                    continue
+                content = item["content"]
+                single = source.single_text and isinstance(content, list) and len(content) == 1 and content[0]["type"] == "input_text"
+                if source.input_origin == "heartbeat":
+                    single = single and metadata.get("content_item_kinds") == ["user.heartbeat"]
+                origin = "user" if source.input_origin == "heartbeat" and not single else source.input_origin
+                yield (source.acceptance_order if not source.inherited else None,
+                    RetainedMessage(source.turn_id, source.message_id,
+                        truncate_guardian_text(_output_text(content), MAX_RENDER_TOKENS), False, origin))
+            continue
+        if message.input_origin == "agent":
+            continue
+        facts = message.accepted_input or {}
+        text = builder.admitted_user_text(message)
+        origin = "user" if message.input_origin == "heartbeat" and not facts.get("single_text", False) else message.input_origin or "user"
+        yield (facts.get("order") if not facts.get("inherited", False) else None,
+            RetainedMessage(facts.get("turn_id", ""), facts.get("message_id"),
+                truncate_guardian_text(text, MAX_RENDER_TOKENS), False, origin))
+
+
+def _accepted_transcript_sources(builder):
+    return {(entry.model_item_id, entry.turn_id): entry for entry in builder.guardian_evidence.transcript
+        if entry.kind == "user" and entry.model_item_id is not None and entry.acceptance_order is not None}
+
+
 def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscriptEntry, ...]:
     """Source loaded-checkpoint evidence comes from the current model window.
 
@@ -34,13 +72,25 @@ def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscrip
     """
     entries = []
     tool_names = {}
+    retained = builder.guardian_evidence.retained
+    stable_order = len({entry.key for _, entry in retained.ordered_entries()}) == len(retained.ordered_entries())
+    accepted_sources = _accepted_transcript_sources(builder)
 
-    def append_text(kind, text, *, message_id=None, turn_id="", protected_assistant=False):
+    def append_text(kind, text, *, message_id=None, turn_id="", protected_assistant=False, facts=None, input_origin="user", model_item_id=None,
+        source_allowed=True):
         if text.strip():
-            entries.append(GuardianTranscriptEntry(kind, text, turn_id=turn_id, message_id=message_id,
-                protected_assistant=protected_assistant))
+            facts = facts or {}
+            source = next((entry for entry in retained.user_messages if source_allowed and stable_order and kind == "user" and message_id is not None
+                and entry.value.message_id == message_id and entry.value.turn_id == turn_id
+                and entry.value.complete and entry.value.text == text), None)
+            single_text = facts.get("single_text", False)
+            origin = "user" if input_origin == "heartbeat" and not single_text else input_origin
+            entries.append(GuardianTranscriptEntry(kind, text, source_order=source.label if source is not None else None,
+                source_revision=source.revision if source is not None else None, turn_id=turn_id, message_id=message_id,
+                protected_assistant=protected_assistant, input_origin=origin, single_text=single_text,
+                acceptance_order=facts.get("order"), inherited=facts.get("inherited", False), model_item_id=model_item_id))
 
-    def append_item(item):
+    def append_item(item, *, native_window=False):
         kind = item["type"]
         if kind == "message":
             role = item["role"]
@@ -48,8 +98,16 @@ def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscrip
             if role not in {"user", "assistant"} and not (role == "developer" and text.startswith(MANUAL_APPROVAL_DEVELOPER_PREFIX)):
                 return
             metadata = item.get("internal_chat_message_metadata_passthrough") or {}
-            append_text(role, text, message_id=item.get("id"), turn_id=metadata.get("turn_id") or "",
-                protected_assistant=role == "assistant" and item.get("phase") != "commentary")
+            original = accepted_sources.get((item.get("id"), metadata.get("turn_id") or "")) if native_window else None
+            single = original is not None and original.single_text and isinstance(item["content"], list) and len(item["content"]) == 1 and item["content"][0]["type"] == "input_text"
+            if original is not None and original.input_origin == "heartbeat":
+                single = single and metadata.get("content_item_kinds") == ["user.heartbeat"]
+            facts = ({"single_text": single, "order": original.acceptance_order,
+                "inherited": original.inherited} if original is not None else {})
+            append_text(role, text, message_id=original.message_id if original is not None else item.get("id"), turn_id=metadata.get("turn_id") or "",
+                protected_assistant=role == "assistant" and item.get("phase") != "commentary", facts=facts,
+                input_origin=original.input_origin if original is not None else "user",
+                model_item_id=original.model_item_id if original is not None else None, source_allowed=original is not None)
         elif kind == "agent_message":
             if any(part["type"] == "encrypted_content" for part in item["content"]):
                 if _json_bytes(item) <= 5000 * 4:
@@ -93,15 +151,18 @@ def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscrip
         if windows:
             for window in windows:
                 for item in window["output"]:
-                    append_item(item)
+                    append_item(item, native_window=True)
             continue
         text = builder._strip_trusted_runtime_context(message)
         native_messages = any(item["type"] in {"message", "agent_message"} for item in message.provider_items)
         if not native_messages and message.role in {"user", "assistant"}:
-            message_id, turn_id = user_sources.get(index, (None, ""))
+            facts = message.accepted_input or {}
+            message_id, turn_id = ((facts.get("message_id"), facts.get("turn_id", "")) if "order" in facts
+                else user_sources.get(index, (None, "")))
             role = "assistant" if message.role == "user" and message.input_origin == "agent" else message.role
-            append_text(role, text, message_id=message_id, turn_id=turn_id,
-                protected_assistant=role == "assistant" and message.role == "assistant" and message.phase != "commentary")
+            append_text(role, builder.admitted_user_text(message) if message.is_user_input else text, message_id=message_id, turn_id=turn_id,
+                protected_assistant=role == "assistant" and message.role == "assistant" and message.phase != "commentary",
+                facts=facts, input_origin=message.input_origin or "user", model_item_id=facts.get("model_item_id"))
         elif message.role == "developer" and text.startswith(MANUAL_APPROVAL_DEVELOPER_PREFIX):
             append_text("developer", text)
         elif message.role == "tool":
@@ -219,8 +280,12 @@ class GuardianHostState:
     def snapshot(self) -> GuardianEvidenceSnapshot:
         owner = self.evidence
         root = self.root_source() if self.root_source is not None else None
+        context = self.builder._tool_execution_context if self.builder is not None else None
+        current_turn_id = (context.turn_id if context is not None else self.builder.latest_admitted_turn_id()
+            if self.builder is not None else owner.reconciled_context().latest_user_turn_id)
+        skills = bounded_skill_paths((*owner.skills_for_turn(current_turn_id), *(root.trusted_skill_paths if root is not None else ())))
         snapshot = owner.snapshot(root_versions=root.root_versions if root is not None else None,
-            root_messages=root.root_messages if root is not None else ())
+            root_messages=root.root_messages if root is not None else (), trusted_skill_paths=skills)
         snapshot = replace(snapshot, node_repl=self.node_repl_review_evidence.snapshot_since(0))
         return replace(snapshot, parent_window_transcript=parent_window_transcript(self.builder)) if self.builder is not None else snapshot
 
@@ -228,12 +293,14 @@ class GuardianHostState:
         if self.root_source is not None:
             return self.root_source()
         owner = self.evidence
-        messages, complete = owner.root_projection()
+        reconciled = owner.reconciled_context(live_user_messages(self.builder) if self.builder is not None else None)
+        messages, complete = owner.root_projection(reconciled=reconciled)
         root_versions = (
             self.root_thread_id, owner.history_reset_version, owner.user_message_revision,
             owner.review_context_revision, complete,
         )
-        return owner.snapshot(root_versions=root_versions, root_messages=messages)
+        return owner.snapshot(root_versions=root_versions, root_messages=messages,
+            trusted_skill_paths=owner.skills_for_turn(reconciled.latest_user_turn_id))
 
     async def aclose(self) -> None:
         await self.async_service.aclose()

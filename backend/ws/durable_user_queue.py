@@ -25,6 +25,7 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from backend.agent.message import UserCommand
+from backend.agent.turn_input import ScheduledInputCommand
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.ws.client_command_log import _clean_command_id
 
@@ -198,7 +199,13 @@ class DurableUserMessageQueue:
         except (TypeError, ValueError):
             logger.warning("Skipping non-serializable queued user command")
             return None
-        return {"type": command.type, "data": data}
+        result = {"type": command.type, "data": data}
+        if isinstance(command, ScheduledInputCommand):
+            result["host_scheduled_input"] = {
+                "turn_trigger": command.turn_trigger, "public_content": command.public_content,
+                "task_id": command.task_id, "scheduled_run_id": command.scheduled_run_id,
+            }
+        return result
 
     @staticmethod
     def _dict_to_command(payload: Any) -> UserCommand | None:
@@ -207,6 +214,9 @@ class DurableUserMessageQueue:
         data = payload.get("data")
         if not isinstance(data, dict):
             return None
+        host_input = payload.get("host_scheduled_input")
+        if host_input is not None:
+            return ScheduledInputCommand(type="user_message", data=dict(data), **host_input)
         return UserCommand(type="user_message", data=dict(data))
 
     @staticmethod

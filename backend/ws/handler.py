@@ -1043,6 +1043,7 @@ class WebSocketSession(
         )
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
+        run_context.initial_scheduled_input = run_metadata.pop("_host_scheduled_input", None)
         if run_metadata.get("client_command_id") and not run_metadata.get("_client_queue_key"):
             run_metadata["_client_queue_key"] = self.run_manager.durable_client_commands.path.stem
         run_metadata["window_instance_id"] = self.window_instance_id

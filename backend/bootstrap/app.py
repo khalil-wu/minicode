@@ -79,6 +79,9 @@ class AppBootstrap:
         self._sandbox_probe_task: asyncio.Task[bool] | None = None
 
     async def startup(self) -> None:
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        conversation_query_guards().open_admission()
         from backend.permissions.profiles import refresh_native_os_sandbox
 
         # Capability discovery may invoke a container CLI. Warm its cache in
@@ -171,6 +174,7 @@ class AppBootstrap:
         try:
             from backend.tasks.scheduler import get_global_scheduler
             self.task_scheduler = get_global_scheduler(on_fire=self._run_scheduled_task)
+            self.task_scheduler.set_heartbeat_gate(self._heartbeat_block_reason)
             self.task_scheduler.set_on_change(self._broadcast_scheduled_task_state)
             await self.task_scheduler.start()
             logger.info("Task scheduler is ready")
@@ -188,6 +192,16 @@ class AppBootstrap:
             bootstrap=self,
             bind_conversation=self.task_scheduler.bind_run_conversation,
         )
+
+    def _heartbeat_block_reason(self, task: Any, *, manual: bool) -> str | None:
+        from backend.services.scheduled_task_runner import heartbeat_block_reason
+
+        return heartbeat_block_reason(task, bootstrap=self, manual=manual)
+
+    def begin_drain(self) -> None:
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        conversation_query_guards().begin_drain()
 
     async def _broadcast_scheduled_task_state(self) -> None:
         if self.task_scheduler is None:
@@ -254,6 +268,7 @@ class AppBootstrap:
                 logger.debug("PR automation poll failed", exc_info=True)
 
     async def shutdown(self) -> None:
+        self.begin_drain()
         try:
             if self._sandbox_probe_task is not None:
                 if not self._sandbox_probe_task.done():

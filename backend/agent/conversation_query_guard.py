@@ -1,11 +1,4 @@
-"""Process-wide query ownership using the Claude Code/Pi lifecycle contract.
-
-Claude Code's QueryGuard synchronously transitions idle -> running, rejects a
-second start, and uses a generation to fence stale cleanup. Pi likewise rejects
-prompt() while activeRun exists and requires steer()/followUp() for queued input.
-MiniCode applies that same state machine at process scope because WebSocket,
-REST, and scheduled entry points can address the same durable conversation.
-"""
+"""Actual conversation owners and Source-style atomic start-or-steer admission."""
 
 from __future__ import annotations
 
@@ -13,9 +6,13 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from backend.async_cleanup import retain_cleanup_task
+
+if TYPE_CHECKING:
+    from backend.agent.run_context import RunContext
+    from backend.agent.turn_input import ScheduledInputCommand, TurnInput
 
 
 @dataclass
@@ -23,6 +20,16 @@ class _QueryState:
     status: str = "idle"
     generation: int = 0
     owner_id: str = ""
+    owner: RunContext | None = None
+
+
+@dataclass(frozen=True)
+class TurnInputSubmission:
+    mode: str
+    claim: ConversationQueryClaim | None = None
+    owner: RunContext | None = None
+    item: TurnInput | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -50,29 +57,107 @@ class ConversationQueryGuardRegistry:
         # call it from different worker threads. Guard the check-and-transition
         # as one atomic operation so two entry points cannot both observe idle.
         self._lock = RLock()
+        self._admission_closed = False
+        self._admission_generation = 1
+
+    def begin_drain(self) -> None:
+        with self._lock:
+            self._admission_closed = True
+            self._admission_generation += 1
+
+    def open_admission(self) -> None:
+        """Begin the actual host lifecycle without resetting any live claim."""
+        with self._lock:
+            self._admission_closed = False
+            self._admission_generation += 1
+
+    @property
+    def admission_generation(self) -> int:
+        with self._lock:
+            return self._admission_generation
+
+    @property
+    def admission_closed(self) -> bool:
+        with self._lock:
+            return self._admission_closed
 
     def try_start(
         self,
         conversation_id: str,
         *,
         owner_id: str,
+        owner: RunContext | None = None,
     ) -> ConversationQueryClaim | None:
         conversation_id = str(conversation_id or "").strip()
         owner_id = str(owner_id or "").strip() or "anonymous"
-        if not conversation_id:
-            return ConversationQueryClaim("", owner_id, 0)
         with self._lock:
+            if self._admission_closed:
+                return None
+            if not conversation_id:
+                return ConversationQueryClaim("", owner_id, 0)
             state = self._states.setdefault(conversation_id, _QueryState())
             if state.status == "running" or conversation_id in self._transitions:
                 return None
             state.status = "running"
             state.generation += 1
             state.owner_id = owner_id
+            state.owner = owner
             return ConversationQueryClaim(
                 conversation_id=conversation_id,
                 owner_id=owner_id,
                 generation=state.generation,
             )
+
+    def active_owner(self, conversation_id: str) -> RunContext | None:
+        with self._lock:
+            state = self._states.get(conversation_id)
+            return state.owner if state is not None and state.status == "running" else None
+
+    def bind_owner(self, claim: ConversationQueryClaim, owner: RunContext) -> None:
+        with self._lock:
+            if not self.owns(claim):
+                raise RuntimeError("The turn no longer owns its conversation generation")
+            self._states[claim.conversation_id].owner = owner
+
+    def start_or_steer(
+        self, conversation_id: str, *, owner_id: str, owner: RunContext,
+        command: ScheduledInputCommand,
+        required_final_output_json_schema: dict[str, Any] | None = None,
+        expected_admission_generation: int | None = None,
+    ) -> TurnInputSubmission:
+        """Resolve the post-gate race against the actual existing owner.
+
+        Close, claim replacement, and queue acceptance share this boundary.
+        A returned steer is already durable; it never creates another engine.
+        """
+        with self._lock:
+            if self._admission_closed:
+                return TurnInputSubmission("not_submitted", reason="server_draining")
+            if expected_admission_generation is not None and expected_admission_generation != self._admission_generation:
+                return TurnInputSubmission("not_submitted", reason="server_draining")
+            if conversation_id in self._transitions:
+                return TurnInputSubmission("not_submitted", reason="conversation_transition")
+            state = self._states.get(conversation_id)
+            if state is None or state.status != "running":
+                claim = self.try_start(conversation_id, owner_id=owner_id, owner=owner)
+                return TurnInputSubmission("started", claim=claim, owner=owner)
+            current = state.owner
+            if current is None:
+                return TurnInputSubmission("not_submitted", reason="active_owner_unavailable")
+            if current.turn_kind != "regular":
+                return TurnInputSubmission("not_submitted", reason="active_turn_not_steerable")
+            if current.turn_terminal_receipt is not None and current.turn_terminal_receipt.done():
+                return TurnInputSubmission("not_submitted", reason="no_active_turn")
+            if (required_final_output_json_schema is not None
+                    and current.active_final_output_json_schema != required_final_output_json_schema):
+                return TurnInputSubmission("not_submitted", reason="active_turn_output_schema_mismatch")
+            queue = current.turn_input_queue
+            if queue is None or not queue.turn_id or current.accept_scheduled_input is None:
+                return TurnInputSubmission("not_submitted", reason="active_owner_unavailable")
+            item = current.accept_scheduled_input(command)
+            if item is None:
+                return TurnInputSubmission("not_submitted", reason="no_active_turn")
+            return TurnInputSubmission("steered", owner=current, item=item)
 
     def try_transition(
         self, conversation_id: str, *, owner_id: str, replacing_owner_id: str = "",
@@ -83,6 +168,8 @@ class ConversationQueryGuardRegistry:
         Other entry points cannot start in the gap before the replacement query.
         """
         with self._lock:
+            if self._admission_closed:
+                return None
             state = self._states.setdefault(conversation_id, _QueryState())
             if conversation_id in self._transitions:
                 return None
@@ -103,6 +190,8 @@ class ConversationQueryGuardRegistry:
     def handoff(self, transition: ConversationTransition, *, owner_id: str) -> ConversationQueryClaim:
         """Transfer the reserved mutation directly to its replacement query."""
         with self._lock:
+            if self._admission_closed:
+                raise RuntimeError("The execution host is draining")
             state = self._states[transition.conversation_id]
             if self._transitions.get(transition.conversation_id) != transition or state.status != "idle":
                 raise RuntimeError("Conversation transition has not finished draining its previous query")
@@ -137,6 +226,7 @@ class ConversationQueryGuardRegistry:
                 return False
             state.status = "idle"
             state.owner_id = ""
+            state.owner = None
             return True
 
     def active_claim(self, conversation_id: str) -> ConversationQueryClaim | None:

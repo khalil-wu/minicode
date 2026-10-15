@@ -1,10 +1,12 @@
 # 当前 Source 对齐工作记录（总任务尚未完成）
 
-## 当前优先项：修复 GitHub CI、新会话与项目动作
+## 当前优先项：CI 已通过，继续剩余 Source 行为
 
-最新收尾见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`：Root、前端和桌面等五项在诊断 run `38743267369` 通过，Backend 的三个 closed-loop 失败已由真实创建栈定位到原测试发源；Windows 的认证取消 fixture 进入等待也已复现并修正。Linux mount target/FD、真实桌面 close 和这两类 fixture 正在合批，尚待下一次七项完整 CI。先前普通客户端已于 21:05 正常退出；当前源码及后续构建不能用旧窗口或历史 wheel 身份代指。
+最新收尾见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`：提交 `18e8bd8dc097aa892c76ede818beb15d9b8659f1` 的 run `38749202449` 七项全部通过；Backend 6509 passed、27 skipped、0 failed/error，新增 9 个真实 Linux 场景全部通过。新会话、文件夹动作及所有已定位 CI 根因已闭合，现在实施后续 heartbeat、Memory Phase 1 WS 与已确认 remote 范围，尚未把这些后续代码计为交付。先前普通客户端已于 21:05 正常退出；当前源码及后续构建不能用旧窗口或历史 wheel 身份代指。
 
-2026-10-15 最新状态以 `2026-10-15-ci-new-chat-repair.md`、`2026-10-15-ci-source-contract-round03.md` 为准：bundled Python 3.11 新会话的 `is_junction` 根因与文件夹旁的菜单/新聊天按钮已修复、实机核对，前端 `index-srAOTZkG.js` 已在普通 MiniCode 中运行且 `/health` ready。后续已闭合 REST 私有包装记录、LSP 正常退出、未知模型提示词字节来源和冻结审批生命周期；各范围按冻结清单和真实 XML 分别记录。GitHub 尚未全绿，旧 8311 snapshot 明确中止、不计通过，原来未执行的 675 项 Root 尾段正单独验证。完成 CI 后才继续下述 heartbeat、remote executor 和 Memory Phase 1 可选 WS。下方“最终前端/最终 wheel/冻结输入”描述均属于此前交付批，不代表后续修改后的当前源码或安装包。
+后续 heartbeat/Memory 检查点已完成本地专项验证，当前正在提交完整 CI：H1–H3 最新节点去重 391/391、H4 最新节点去重 130/130、Memory WS 最终一次 83/83、前端 observer 123/123，均无跳过。真实 `/compact` 请求携带 host native item ID/turn，并按原接受顺序恢复；不以文本匹配或公开 metadata 推断信任。各范围重叠不相加，原始失败保留。稳定报告为 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md`、`2026-10-15-memory-phase1-websocket-transport.md`；本地 remote 完整消费链仍未闭合。
+
+此前 CI 修复阶段记录见 `2026-10-15-ci-new-chat-repair.md`、`2026-10-15-ci-source-contract-round03.md`：bundled Python 3.11 新会话的 `is_junction` 根因与文件夹旁的菜单/新聊天按钮已修复、实机核对，前端 `index-srAOTZkG.js` 曾在普通 MiniCode 中运行且 `/health` ready。后续已闭合 REST 私有包装记录、LSP 正常退出、未知模型提示词字节来源和冻结审批生命周期；各范围按冻结清单和真实 XML 分别记录。旧 8311 snapshot 明确中止、不计通过；当时未执行的 Root 尾段已完成，最新 GitHub 状态以上一段的 18e8 七项绿灯为准。下方“最终前端/最终 wheel/冻结输入”描述均属于此前交付批，不代表后续修改后的当前源码或安装包。
 
 ## 最新状态：原生命令活动投影与内部证据链本批已交付
 
@@ -25,9 +27,9 @@
 - Memory Phase1归因已闭合：实际启动A持有请求身份，被分析B/C只保留各自durable输出；真实启动caller、协调/提取、重试稳定UUID7、独立usage与未知来源均核对。42个不同case全过无跳过，实际standalone Responses为HTTP，不借其它链声称Phase1 WS通过。见 `2026-10-15-memory-phase1-request-provenance.md`。
 - 本批最终wheel `py3-none-win_amd64` SHA `5fa1d189f3ddaa48d503f41f97854c6a972f12806bc0bc3b7c5204aa17b30ace`，大小7543989，1144个冻结输入未变，1129个backend成员与源码及全新安装字节一致；新node_repl/images/ids模块实际入包。bundled Python -I/Temp cwd/System32 PATH真实consumer冷验14/14；Pillow正式声明/lock12.2.0已安装，独立安装backend的native decoder/capture/render smoke通过并保留original。此smoke不冒充新增MCP或完整runtime重建；早期候选94e8…因direct回调缺口停止交付，没有记冷验通过。见最终交付报告与JSON。
 
-当前明确剩余边界：heartbeat重复合并/完整transcript引用/busy自动注入及相关gate未由输入origin批完成；本地可配置远程executor仍缺registry/connection/thread selection/filesystem/tools与生命周期，不因官方账号排除而划掉，见 `2026-10-15-local-remote-environment-scope-audit.md`。先核实际桌面入口再实现，不能因Source API存在自创按钮；旧“高级review”笼统待办须区分实际桌面Markdown/code-comments与可选Rust ReviewTask，不继续盲派。其它旧待办以下均为历史记录，须用最新报告确认，不能按测试数推测整款完成率。
+此前原 input_origin 批明确留下的 heartbeat重复合并/完整transcript引用/busy自动注入及相关gate，现由本页顶部的新检查点补齐，不归入旧批。当前明确剩余边界仍是本地可配置远程executor的完整registry/connection/thread selection/filesystem/tools与生命周期，不因官方账号排除而划掉，见 `2026-10-15-local-remote-environment-scope-audit.md`。先核实际桌面入口再实现，不能因Source API存在自创按钮；旧“高级review”笼统待办须区分实际桌面Markdown/code-comments与可选Rust ReviewTask，不继续盲派。其它旧待办以下均为历史记录，须用最新报告确认，不能按测试数推测整款完成率。
 
-最终只读终审另确认一条窄差异：Phase1启动归因/HTTP已完成，但Source stage-one走ModelClientSession按provider capability/session fallback选WS，无官方账号gate；Mini `_simple_responses_api`未传websocket_request，第三方/API-key启用Responses WS时Phase1仍固定HTTP。该可选分支尚未实现/实测，不用主回合或Phase2 WS通过替代；精确调用见最终交付报告“仍需后续对齐”。
+此前只读终审确认的 Phase1 可选 WS 差异已在顶部的新检查点独立接通并实测，完整证据见 `2026-10-15-memory-phase1-websocket-transport.md`。原归因/HTTP批结果保持历史身份，不借主回合或 Phase2 WS 通过替代。
 
 此前本次续做的阶段记录（以上述最终生产/实机结果为准）：
 

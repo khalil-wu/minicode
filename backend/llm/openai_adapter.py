@@ -38,6 +38,7 @@ from backend.llm.responses_websocket import (
     TURN_STATE_HEADER,
     responses_turn_state_from_headers,
 )
+from backend.llm.responses_input import admitted_response_items, prepare_content_item_kinds
 from backend.llm.native_compaction import (
     NATIVE_COMPACTION_TYPE, native_compaction_windows,
     responses_context_origin, validate_compaction_window,
@@ -2440,6 +2441,7 @@ class OpenAIAdapter(LLMAdapter):
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._settings = settings
+        self._content_item_kinds_enabled = True
         self._default_headers = {
             str(key): str(value)
             for key, value in tuple(getattr(settings, "default_headers", ()) or ())
@@ -2448,6 +2450,7 @@ class OpenAIAdapter(LLMAdapter):
         self._owns_http_client = http_client is None
         self._closed = False
         self._responses_websocket = ResponsesWebSocketPool()
+        self._responses_side_pools: set[ResponsesWebSocketPool] = set()
         self._responses_turn_states: dict[tuple[str, ...], str] = {}
         self._http_client: httpx.AsyncClient | None = http_client
         # Optional chat fields this gateway answered 400 for. Remembered so the
@@ -2463,6 +2466,9 @@ class OpenAIAdapter(LLMAdapter):
             else:
                 http_client = httpx.AsyncClient(trust_env=False)
             self._http_client = http_client
+
+    def configure_content_item_kinds(self, enabled: bool) -> None:
+        self._content_item_kinds_enabled = enabled
 
     def try_fallback_transport(self) -> bool:
         if self._settings.wire_api != "responses" or not self._settings.responses_websocket or self._responses_websocket.http_only:
@@ -2494,7 +2500,10 @@ class OpenAIAdapter(LLMAdapter):
             return
         self._closed = True
         self._responses_turn_states.clear()
-        await self._responses_websocket.aclose()
+        await asyncio.gather(
+            self._responses_websocket.aclose(),
+            *(pool.aclose() for pool in tuple(self._responses_side_pools)),
+        )
         if not self._owns_http_client:
             return
         http_client = self._http_client
@@ -3263,7 +3272,7 @@ class OpenAIAdapter(LLMAdapter):
         metadata: dict[str, Any] | None, wire_payload_sink: dict[str, Any] | None,
     ) -> AsyncIterator[Any]:
         base_headers = self._responses_headers()
-        if not self._responses_websocket.http_only:
+        if not request.pool.http_only:
             base_headers.setdefault("OpenAI-Beta", WEBSOCKET_BETA)
         sent_payload, headers = await self._prepare_http_request(
             payload, metadata=metadata, base_headers=base_headers,
@@ -3273,7 +3282,7 @@ class OpenAIAdapter(LLMAdapter):
         async def handshake(status: int, response_headers: dict[str, str]) -> None:
             self._remember_responses_turn_state(metadata, response_headers)
             await emit_provider_lifecycle_response(metadata, status, response_headers)
-        if not self._responses_websocket.http_only:
+        if not request.pool.http_only:
             events = request.events(
                 sent_payload, url=ws_url, headers=headers,
                 proxy=_proxy_url_for_base_url(self._responses_url(), self._settings.proxy_mode) or None,
@@ -3297,14 +3306,14 @@ class OpenAIAdapter(LLMAdapter):
                     raise
                 # No response.create was sent: switching to HTTP cannot
                 # repeat model generation or a committed tool operation.
-                self._responses_websocket.unavailable_status = status
+                request.pool.unavailable_status = status
             finally:
                 await _close_async_iterator(events)
         if headers.get("OpenAI-Beta") == WEBSOCKET_BETA:
             headers = {key: value for key, value in headers.items() if key != "OpenAI-Beta"}
         request.info.update({
-            "mode": "http", "fallback_status": self._responses_websocket.unavailable_status,
-            "fallback_reason": "websocket_retries" if self._responses_websocket.fallback_to_http else "handshake",
+            "mode": "http", "fallback_status": request.pool.unavailable_status,
+            "fallback_reason": "websocket_retries" if request.pool.fallback_to_http else "handshake",
             "input_items_logical_len": len(sent_payload.get("input", [])),
             "input_items_sent_len": len(sent_payload.get("input", [])),
         })
@@ -5335,10 +5344,22 @@ class OpenAIAdapter(LLMAdapter):
 
         self._apply_model_request_options(kwargs, model=model, responses=True,
             disable_reasoning=side_options is not None and side_options.disable_reasoning)
+        side_pool = None
+        websocket_options = {}
+        if context is not None and self._settings.responses_websocket:
+            if self._closed:
+                raise RuntimeError("Responses WebSocket adapter is closed")
+            # Source creates a ModelClient/ModelClientSession for each detached
+            # extraction. Its transport state must not lease the main turn's
+            # idle socket or inherit that turn's HTTP fallback.
+            side_pool = ResponsesWebSocketPool()
+            self._responses_side_pools.add(side_pool)
+            websocket_options["websocket_request"] = side_pool.request(None)
         try:
             stream = await self._create_responses_request(
                 kwargs,
                 metadata=context.request_metadata() if context is not None else None,
+                **websocket_options,
             )
             try:
                 return await self._collect_simple_responses_stream(
@@ -5353,6 +5374,13 @@ class OpenAIAdapter(LLMAdapter):
         except Exception as exc:
             logger.error("Responses API simple_chat 失败: %s", _safe_provider_diagnostic_text(exc, limit=len(str(exc))))
             raise
+        finally:
+            if side_pool is not None:
+                context.record["transport"] = dict(websocket_options["websocket_request"].info)
+                try:
+                    await side_pool.aclose()
+                finally:
+                    self._responses_side_pools.discard(side_pool)
 
     async def _collect_simple_responses_stream(
         self,
@@ -5520,19 +5548,19 @@ class OpenAIAdapter(LLMAdapter):
                                 "file_data": f"data:{media_type};base64,{data}",
                             }
                         )
-                    result.append(
+                    result.extend(admitted_response_items(msg,
                         {
                             "role": "user",
                             "content": parts,
                         }
-                    )
+                    ))
                 else:
-                    result.append(
+                    result.extend(admitted_response_items(msg,
                         {
                             "role": "user",
                             "content": _message_content_text(msg.content),
                         }
-                    )
+                    ))
             elif role == "assistant":
                 provider_items = [
                     dict(item)
@@ -5583,7 +5611,7 @@ class OpenAIAdapter(LLMAdapter):
                     output_item.pop("status", None)
                 result.append(output_item)
 
-        return result
+        return prepare_content_item_kinds(result, enabled=self._content_item_kinds_enabled)
 
     @staticmethod
     def _convert_tools_to_responses_format(

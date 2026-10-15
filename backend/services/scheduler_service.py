@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+import asyncio
+
+HEARTBEAT_START_TIMEOUT_SECONDS = 30
 
 
 class SchedulerServiceError(ValueError):
@@ -47,7 +50,9 @@ def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
     from backend.tasks.scheduler import is_valid_timezone, next_run_after
 
     name = _required_field(data.get("name"), "Task name is required")
-    prompt = _required_field(data.get("prompt"), "Task prompt is required")
+    prompt = str(data.get("prompt") or "")
+    if not prompt.strip():
+        raise SchedulerServiceError("Task prompt is required")
     schedule = _required_field(data.get("schedule"), "Task schedule is required")
     permission_mode = scheduled_permission_mode(data.get("permission_mode"), reject_unsafe=True)
     timezone = str(data.get("timezone") or "UTC").strip() or "UTC"
@@ -124,20 +129,33 @@ def toggle_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_roo
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
 
 
-def run_scheduled_task_now(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
+async def run_scheduled_task_now(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
     task_id = _task_id_from_payload(data)
     run = scheduler.run_now(task_id, workspace_root=workspace_root)
     if run is None:
         raise SchedulerServiceError(f"Task '{task_id}' not found")
+    if scheduler._tasks[run.task_id].kind == "heartbeat":
+        await _wait_for_heartbeat_start(run)
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
 
 
-def retry_scheduled_task_run(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
+async def retry_scheduled_task_run(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
     run_id = _required_field(data.get("run_id") or data.get("id"), "Run ID is required")
     run = scheduler.retry_run(run_id, workspace_root=workspace_root)
     if run is None:
         raise SchedulerServiceError(f"Scheduled run '{run_id}' not found")
+    if scheduler._tasks[run.task_id].kind == "heartbeat":
+        await _wait_for_heartbeat_start(run)
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+
+
+async def _wait_for_heartbeat_start(run: Any) -> None:
+    try:
+        receipt = await asyncio.wait_for(asyncio.shield(run.start_receipt), HEARTBEAT_START_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
+        raise SchedulerServiceError("Timed out waiting for heartbeat automation to start.") from exc
+    if receipt["status"] == "not_started":
+        raise SchedulerServiceError(receipt["error"])
 
 
 def cancel_scheduled_task_run(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:

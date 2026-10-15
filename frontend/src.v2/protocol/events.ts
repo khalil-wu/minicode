@@ -253,6 +253,7 @@ export type {
   McpLifecycleEvent,
   McpProgressEvent,
   SchedulerListEvent,
+  HeartbeatRendererStateRequestEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
   CommandAvailabilityPayload,
@@ -287,6 +288,7 @@ export type {
   SkillsMarketplaceListCommand,
   SkillsInstallCommand,
   SchedulerListCommand,
+  HeartbeatRendererStateCommand,
   SchedulerAddCommand,
   SchedulerUpdateCommand,
   SchedulerHistoryCommand,
@@ -411,6 +413,7 @@ export interface UntypedServerEvent {
     | "diff.git_unstage_all"
     | "diff.git_revert_file"
     | "scheduler.list"
+    | "scheduler.heartbeat.renderer_state.request"
     | "workspace.recent.list"
     | "workspace.imported"
     | "checkpoint.created"
@@ -522,6 +525,7 @@ export interface UntypedClientCommand {
   | "scheduler.run_now"
     | "scheduler.retry"
     | "scheduler.cancel"
+    | "scheduler.heartbeat.renderer_state"
     | "mcp.add"
     | "mcp.update"
     | "mcp.project.approve"
@@ -699,6 +703,7 @@ import type {
   McpLifecycleEvent,
   McpProgressEvent,
   SchedulerListEvent,
+  HeartbeatRendererStateRequestEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
   CommandsListEvent,
@@ -797,6 +802,7 @@ type ServerEventPayload =
   | PermissionModeUpdatedEvent
   | PermissionRulesUpdatedEvent
   | SchedulerListEvent
+  | HeartbeatRendererStateRequestEvent
   | FileChangedEvent
   | WorkspaceProjectIndexInvalidatedEvent
   | TerminalOutputEvent
@@ -934,6 +940,7 @@ import type {
   SkillsMarketplaceListCommand,
   SkillsInstallCommand,
   SchedulerListCommand,
+  HeartbeatRendererStateCommand,
   SchedulerAddCommand,
   SchedulerUpdateCommand,
   SchedulerHistoryCommand,
@@ -1003,6 +1010,7 @@ type ClientCommandPayload =
   | SkillsMarketplaceListCommand
   | SkillsInstallCommand
   | SchedulerListCommand
+  | HeartbeatRendererStateCommand
   | SchedulerAddCommand
   | SchedulerUpdateCommand
   | SchedulerHistoryCommand
@@ -1174,6 +1182,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "mcp_status",
   "mcp.lifecycle",
   "mcp.progress",
+  "scheduler.heartbeat.renderer_state.request",
   "scheduler.list",
   "session.restored",
   "session.replay",
@@ -1344,6 +1353,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "git.pr_status",
   "git.pr_automation.set",
   // Scheduler
+  "scheduler.heartbeat.renderer_state",
   "scheduler.list",
   "scheduler.add",
   "scheduler.update",

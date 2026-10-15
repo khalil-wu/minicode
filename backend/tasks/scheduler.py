@@ -123,15 +123,20 @@ class ScheduledTaskRun:
     workspace_root: str = ""
     result_summary: str = ""
     message_id: str = ""
+    actual_turn_id: str = ""
     completion_notification: dict[str, Any] | None = None
     error: str = ""
     cleanup_pending: bool = False
     cleanup_reason: str = ""
     cleanup_requested_at: str | None = None
     cleanup_completed_at: str | None = None
+    host_admission_generation: int = field(default=0, repr=False, compare=False, metadata={"runtime": True})
+    start_receipt: asyncio.Future[dict[str, Any]] | None = field(default=None, repr=False, compare=False, metadata={"runtime": True})
+    scheduler_wait_elapsed: bool = field(default=False, repr=False, compare=False, metadata={"runtime": True})
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {name: getattr(self, name) for name, descriptor in self.__dataclass_fields__.items()
+            if not descriptor.metadata.get("runtime")}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScheduledTaskRun":
@@ -313,7 +318,7 @@ TaskFireCallback = Callable[..., Coroutine[Any, Any, dict[str, Any] | None]]
 
 
 class TaskScheduler:
-    """In-memory scheduler that checks tasks every 60s."""
+    """Durable schedule claims with the Source 30-second host controller."""
 
     def __init__(
         self,
@@ -327,6 +332,8 @@ class TaskScheduler:
         self._on_change = on_change
         self._loop_task: asyncio.Task[None] | None = None
         self._running = False
+        self._heartbeat_gate: Callable[..., str | None] | None = None
+        self._heartbeat_target_runs: dict[str, str] = {}
         # Structured evidence for the most recent corrupt state-file read and
         # for tasks whose stored schedule could not be recomputed.
         self.last_load_error: dict[str, str] | None = None
@@ -699,6 +706,7 @@ class TaskScheduler:
             active_run = self._runs.get(run_id)
             if active_run is not None and active_run.task_id == task_id and not worker.done():
                 return active_run
+        self._require_manual_heartbeat_eligible(task)
         return self._schedule_fire(task, datetime.now(UTC), consume_schedule=False)
 
     def retry_run(self, run_id: str, *, workspace_root: str | None = None) -> ScheduledTaskRun | None:
@@ -711,6 +719,7 @@ class TaskScheduler:
         active = self._active_run_for_task(task.id)
         if active is not None:
             return active
+        self._require_manual_heartbeat_eligible(task)
         # A one-shot schedule is hidden after its first claim, but its saved
         # definition and run history still own an explicit retry. Reuse the
         # prior conversation so a retry can continue from its saved context.
@@ -871,21 +880,27 @@ class TaskScheduler:
         logger.info("TaskScheduler stopped")
 
     async def _run_loop(self) -> None:
-        """Main scheduler loop - checks tasks every 60 seconds."""
+        """Source controller checks at 30 seconds, with at most three per tick."""
         try:
             while self._running:
                 self._tick(datetime.now(UTC))
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)
         except asyncio.CancelledError:
             pass
 
     def _tick(self, now: datetime) -> None:
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        if conversation_query_guards().admission_closed:
+            return
         self._sweep_expired(now)
-        for task in list(self._tasks.values()):
+        considered = 0
+        for task in sorted(self._tasks.values(), key=lambda item: _parse_last_run_at(item.next_run_at) or datetime.max.replace(tzinfo=UTC)):
+            active = self._active_run_for_task(task.id)
             if (
                 task.deleted_at is not None
                 or not task.enabled
-                or self._active_run_for_task(task.id) is not None
+                or (active is not None and not active.scheduler_wait_elapsed)
             ):
                 continue
             if task.id in self._unusable_schedule_ids:
@@ -904,10 +919,60 @@ class TaskScheduler:
                 continue
             if not due_points:
                 continue
+            if considered == 3:
+                break
+            considered += 1
+            last_run = _parse_last_run_at(task.last_run_at)
+            if last_run is not None and last_run + timedelta(seconds=60) > now:
+                self._defer_heartbeat(task, now, until=last_run + timedelta(seconds=60))
+                continue
+            if task.kind == "heartbeat":
+                reason = self._heartbeat_block_reason(task, manual=False)
+                if reason is not None:
+                    self._defer_heartbeat(task, now)
+                    logger.debug("Heartbeat %s deferred: %s", task.id, reason)
+                    continue
             try:
                 self._schedule_fire(task, due_points[-1], consume_schedule=True)
             except OSError:
                 logger.error("Failed to durably claim scheduled task %s", task.id, exc_info=True)
+
+    def set_heartbeat_gate(self, callback: Callable[..., str | None]) -> None:
+        self._heartbeat_gate = callback
+
+    def _heartbeat_block_reason(self, task: ScheduledTask, *, manual: bool) -> str | None:
+        if task.conversation_id in self._heartbeat_target_runs:
+            return "turn_in_progress"
+        if self._heartbeat_gate is not None:
+            return self._heartbeat_gate(task, manual=manual)
+        from backend.services.scheduled_task_runner import heartbeat_block_reason
+
+        return heartbeat_block_reason(task, manual=manual)
+
+    def _require_manual_heartbeat_eligible(self, task: ScheduledTask) -> None:
+        if task.kind != "heartbeat":
+            return
+        reason = self._heartbeat_block_reason(task, manual=True)
+        if reason is not None:
+            message = {
+                "thread_missing": "Heartbeat thread not found.",
+                "missing_collaboration_mode": "Heartbeat thread mode is still loading.",
+                "server_draining": "The execution host is draining.",
+            }.get(reason, "Heartbeat thread is busy right now.")
+            raise ValueError(message)
+
+    def _defer_heartbeat(self, task: ScheduledTask, now: datetime, *, until: datetime | None = None) -> None:
+        # Kn changes only the next check, never the last fire or run history.
+        if until is None:
+            nominal = next_run_after(task.schedule, now, timezone=task.timezone)
+            until = min(nominal, now + timedelta(seconds=60)) if nominal else now + timedelta(seconds=60)
+        previous = task.next_run_at
+        task.next_run_at = until.isoformat()
+        try:
+            self._save(workspace_root=task.workspace_root)
+        except BaseException:
+            task.next_run_at = previous
+            raise
 
     def _active_run_for_task(self, task_id: str) -> ScheduledTaskRun | None:
         for run_id, worker in self._run_tasks.items():
@@ -958,6 +1023,10 @@ class TaskScheduler:
         start_gate: asyncio.Event | None = None,
     ) -> asyncio.Task[None]:
         execution_task = ScheduledTask.from_dict(task.to_dict())
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        run.host_admission_generation = conversation_query_guards().admission_generation
+        run.start_receipt = asyncio.get_running_loop().create_future()
         async def execute() -> None:
             if start_gate is not None:
                 await start_gate.wait()
@@ -965,6 +1034,8 @@ class TaskScheduler:
 
         worker = asyncio.create_task(execute())
         self._run_tasks[run.id] = worker
+        if task.kind == "heartbeat":
+            self._heartbeat_target_runs[run.conversation_id] = run.id
         worker.add_done_callback(lambda finished: self._finalize_worker(task, run, finished))
         return worker
 
@@ -977,12 +1048,16 @@ class TaskScheduler:
         retry_conversation_id: str = "",
         allow_deleted: bool = False,
     ) -> ScheduledTaskRun:
+        from backend.agent.conversation_query_guard import conversation_query_guards
+
+        if conversation_query_guards().admission_closed:
+            raise ValueError("The execution host is draining.")
         if task.deleted_at is not None and not allow_deleted:
             raise ValueError(f"Cannot schedule deleted task '{task.id}'")
         run = ScheduledTaskRun(
             task_id=task.id,
-            turn_trigger=("automation_heartbeat_scheduled"
-                if consume_schedule and task.kind == "heartbeat" else None),
+            turn_trigger=(("automation_heartbeat_scheduled" if consume_schedule else "automation_heartbeat_run_now")
+                if task.kind == "heartbeat" else None),
             scheduled_at=due_at.astimezone(UTC).isoformat(),
             workspace_root=task.workspace_root,
             conversation_id=retry_conversation_id or task.conversation_id,
@@ -1004,7 +1079,7 @@ class TaskScheduler:
             # cc one-shot (recurring=false): fire once, then auto-delete.
             task.next_run_at = None
             task.deleted_at = claimed_at.isoformat()
-        elif consume_schedule:
+        elif consume_schedule or task.kind == "heartbeat":
             next_run = next_run_after(task.schedule, claimed_at, timezone=task.timezone)
             task.next_run_at = next_run.isoformat() if next_run else None
         task.last_run_id = run.id
@@ -1026,6 +1101,8 @@ class TaskScheduler:
             ) = previous
             self._runs.pop(run.id, None)
             self._run_tasks.pop(run.id, None)
+            if self._heartbeat_target_runs.get(run.conversation_id) == run.id:
+                self._heartbeat_target_runs.pop(run.conversation_id)
             worker.cancel()
             raise
         start_gate.set()
@@ -1041,25 +1118,19 @@ class TaskScheduler:
                 raise RuntimeError("Scheduled task runner is not configured")
             result = await self._invoke_callback(execution_task, run)
             result = result if isinstance(result, dict) else {}
-            run.status = str(result.get("status") or "completed")
-            run.conversation_id = str(result.get("conversation_id") or run.conversation_id)
-            reported_workspace = _normalize_workspace_root(result.get("workspace_root"))
-            # The worker may report its resolved path, but it must never move
-            # a run into another project's history.  The task binding is the
-            # authority for both persistence and notification routing.
-            if reported_workspace and reported_workspace != task.workspace_root:
-                logger.warning(
-                    "scheduled task %s reported a different workspace; keeping bound workspace",
-                    task.id,
-                )
-            elif reported_workspace:
-                run.workspace_root = reported_workspace
-            run.result_summary = str(result.get("summary") or result.get("reply") or "")[:8000]
-            run.completion_notification = result.get("completion_notification")
-            run.message_id = result.get("message_id", "")
-            run.error = str(result.get("error") or "")[:4000]
-            if run.status not in {"completed", "partial", "failed", "cancelled"}:
-                run.status = "completed" if not run.error else "failed"
+            if "_turn_terminal_receipt" in result:
+                # Source wu releases its scheduled wait after ten minutes.
+                # The real turn still owns its terminal; keep its monitor in
+                # the existing worker map instead of inventing a completion.
+                run.scheduler_wait_elapsed = True
+                if self._heartbeat_target_runs.get(run.conversation_id) == run.id:
+                    self._heartbeat_target_runs.pop(run.conversation_id)
+                monitor = asyncio.create_task(self._wait_for_actual_terminal(task, run, result))
+                self._run_tasks[run.id] = monitor
+                monitor.add_done_callback(lambda finished: self._finalize_worker(task, run, finished))
+                self._save(workspace_root=task.workspace_root)
+                return
+            self._apply_run_result(task, run, result)
         except asyncio.CancelledError:
             run.status = "cancelled"
             run.error = "cancelled"
@@ -1068,6 +1139,41 @@ class TaskScheduler:
             logger.error("scheduled task %s fire failed: %s", task.id, exc)
             run.status = "failed"
             run.error = str(exc)[:4000]
+
+    async def _wait_for_actual_terminal(self, task: ScheduledTask, run: ScheduledTaskRun, waiting: dict[str, Any]) -> None:
+        try:
+            result = await asyncio.shield(waiting["_turn_terminal_receipt"])
+            await waiting["_turn_owner"].wait_for_turn_release()
+            self._apply_run_result(task, run, {**waiting,
+                "status": result["status"], "summary": result["reply"],
+                "message_id": result.get("assistant_message_id", ""),
+                "actual_turn_id": result.get("turn_id", result["run_id"]),
+                "error": result.get("error") or (result["reason"] if result["status"] != "completed" else ""),
+            })
+        except asyncio.CancelledError:
+            run.status, run.error = "cancelled", "cancelled"
+            raise
+        except Exception as exc:
+            run.status, run.error = "failed", str(exc)
+
+    def _apply_run_result(self, task: ScheduledTask, run: ScheduledTaskRun, result: dict[str, Any]) -> None:
+        run.status = str(result.get("status") or "completed")
+        run.conversation_id = str(result.get("conversation_id") or run.conversation_id)
+        reported_workspace = _normalize_workspace_root(result.get("workspace_root"))
+        # The task binding owns persistence and notification routing even
+        # when the real turn executes in its existing nested worktree.
+        if reported_workspace and reported_workspace != task.workspace_root:
+            logger.warning("scheduled task %s reported a different workspace; keeping bound workspace", task.id)
+        elif reported_workspace:
+            run.workspace_root = reported_workspace
+        run.result_summary = str(result.get("summary") or result.get("reply") or "")[:8000]
+        run.completion_notification = result.get("completion_notification")
+        run.message_id = result.get("message_id", "")
+        run.actual_turn_id = str(result.get("actual_turn_id") or "")
+        run.error = str(result.get("error") or "")[:4000]
+        if run.status not in {"completed", "partial", "failed", "cancelled"}:
+            run.status = "completed" if not run.error else "failed"
+
     def _finalize_worker(self, task: ScheduledTask, run: ScheduledTaskRun, worker: asyncio.Task[Any]) -> None:
         if self._run_tasks.get(run.id) is not worker:
             return
@@ -1078,6 +1184,8 @@ class TaskScheduler:
             run.status = "failed"
             run.error = str(worker.exception())[:4000]
         run.finished_at = datetime.now(UTC).isoformat()
+        if run.start_receipt is not None and not run.start_receipt.done():
+            run.start_receipt.set_result({"status": "not_started", "error": run.error or "The heartbeat turn ended before it started."})
         if run.cleanup_requested_at is not None:
             run.cleanup_pending = False
             run.cleanup_completed_at = run.finished_at
@@ -1085,6 +1193,8 @@ class TaskScheduler:
         task.last_run_status = run.status
         task.last_error = run.error or None
         self._run_tasks.pop(run.id, None)
+        if self._heartbeat_target_runs.get(run.conversation_id) == run.id:
+            self._heartbeat_target_runs.pop(run.conversation_id)
         try:
             self._save(workspace_root=task.workspace_root)
         except OSError:

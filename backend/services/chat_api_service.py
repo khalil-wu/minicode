@@ -9,6 +9,8 @@ from contextlib import aclosing, suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 from uuid import uuid4
+from pathlib import Path
+from datetime import UTC, datetime
 
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.conversation_query_guard import (
@@ -20,6 +22,7 @@ from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
+from backend.agent.turn_input import ScheduledInputCommand, TurnInputQueue
 from backend.agent.state import AgentState
 from backend.agent.context import ContextBuilder
 from backend.artifact.store import ArtifactStore
@@ -31,6 +34,69 @@ from backend.owner_scope import canonical_workspace_root
 from backend.services.workspace_service import parse_user_message_workspace_request
 
 logger = logging.getLogger(__name__)
+
+
+def _bind_rest_turn_input_owner(run_context: RunContext, repository: Any, conversation_id: str, metadata: dict[str, Any]) -> None:
+    """Use the existing shared durable input queue for this actual REST owner."""
+    from backend.ws.durable_user_queue import DurableUserMessageQueue
+
+    store = None
+    pending: list[ScheduledInputCommand] = []
+
+    def accept(command: ScheduledInputCommand):
+        nonlocal store
+        context = run_context.context_builder
+        command.data["_guardian_acceptance_order"] = context.guardian_evidence.reserve_order()
+        if store is None:
+            store = DurableUserMessageQueue(session_id="shared",
+                root_dir=Path(repository._base_dir).parent / "user-message-queue" / "conversations", shared_inputs=True)
+        queue = run_context.turn_input_queue
+        item = queue.enqueue_command(command, target_message_id=queue.turn_id,
+            before_publish=lambda _item: store.save({}, {}, {conversation_id: [*pending, command]}))
+        if item is not None:
+            pending.append(command)
+        return item
+
+    def acknowledge(item):
+        command = item.original_command
+        pending.remove(command)
+        store.save({}, {}, {conversation_id: list(pending)})
+
+    def close():
+        if store is not None:
+            store.close()
+
+    async def commit(*, boundary_input, history_start, history_end):
+        item = boundary_input.consumed_steer
+        if item is None:
+            return
+        command = item.original_command
+        context = run_context.context_builder
+        snapshot = context.export_snapshot()
+        admissions = dict(snapshot.get("turn_admissions") or {})
+        admission = {
+            "history_start": history_start, "history_end": history_end,
+            "run_id": metadata["run_id"], "assistant_message_id": metadata["assistant_message_id"],
+            "client_command_id": "", "client_queue_key": "",
+        }
+        admissions[item.user_message_id] = admission
+        snapshot["turn_admissions"] = admissions
+        committed = repository.commit_turn_admission(conversation_id, user_message={
+            "id": item.user_message_id, "role": "user", "content": command.public_content,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "metadata": {"source": "scheduled_task", "scheduled_task_id": command.task_id,
+                "scheduled_run_id": command.scheduled_run_id},
+            "steered": True, "steer_target_message_id": item.target_message_id,
+        }, context_snapshot=snapshot, expected_revision=run_context.conversation_revision)
+        if committed is None:
+            raise RuntimeError("The conversation disappeared before its host input was saved")
+        run_context.conversation_revision = committed.revision
+        context.record_turn_admission(item.user_message_id, admission)
+
+    run_context.accept_scheduled_input = accept
+    run_context.acknowledge_consumed_turn_input = acknowledge
+    run_context.close_turn_inputs = close
+    metadata["commit_turn_admission"] = commit
 
 ATTACHMENT_PREVIEW_CONTENT_CHARS = 2 * 1024 * 1024
 GENERATED_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
@@ -94,9 +160,12 @@ async def run_rest_chat(
 ) -> dict[str, Any]:
     owner_id = f"{'scheduled' if run_id else 'rest'}:{run_id or id(query_engine)}"
     query_guards = conversation_query_guards()
+    run_context = RunContext(turn_input_queue=TurnInputQueue())
+    run_context.prepare_turn_owner()
     query_claim = query_guards.try_start(
         conversation_id,
         owner_id=owner_id,
+        owner=run_context,
     )
     if query_claim is None:
         return {
@@ -109,7 +178,6 @@ async def run_rest_chat(
             "iterations": 0,
             "tool_calls": [],
         }
-    run_context = RunContext()
     cleanup_waiters: set[asyncio.Task] = set()
     try:
         return await run_owned_rest_chat(
@@ -125,6 +193,8 @@ async def run_rest_chat(
             run_context=run_context,
         )
     finally:
+        if run_context.close_turn_inputs is not None:
+            run_context.close_turn_inputs()
         query_guards.end_after_cleanup(
             query_claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=cleanup_waiters,
         )
@@ -151,6 +221,11 @@ async def run_owned_rest_chat(
         active_claim = conversation_query_guards().active_claim(conversation_id)
         if active_claim != query_claim:
             raise RuntimeError("The REST turn does not own the active conversation query generation.")
+        conversation_query_guards().bind_owner(query_claim, run_context)
+    if run_context.turn_input_queue is None:
+        run_context.turn_input_queue = TurnInputQueue()
+    if run_context.turn_terminal_receipt is None:
+        run_context.prepare_turn_owner()
     normalized_permission_mode = str(permission_mode or "confirm").strip().lower()
     if normalized_permission_mode == "auto_approve":
         normalized_permission_mode = "auto"
@@ -174,13 +249,24 @@ async def run_owned_rest_chat(
         from backend.conversations.repository import ConversationRepository
 
         repository = ConversationRepository()
+        repository = run_context.conversation_repository or repository
+        run_context.conversation_repository = repository
         owner = repository.get_conversation(conversation_id)
+        if owner is not None:
+            if conversation_snapshot is None:
+                conversation_snapshot = owner.context_snapshot
+            if run_context.conversation_revision is None:
+                run_context.conversation_revision = owner.revision
         if owner is not None and workspace_root is None:
             from pathlib import Path
 
             owner = repository.bind_execution_cwd(owner.id, owner.execution_cwd or str(Path.cwd()))
             workspace_root = Path(owner.execution_cwd)
     config = load_config(cwd=workspace_root)
+    if owner is not None and automation_kind == "heartbeat" and owner.model_selection:
+        selection = {key: value for key, value in owner.model_selection.items() if key in {"provider", "model", "reasoning_effort"}}
+        config = replace(config, llm=replace(config.llm, **selection))
+    run_context.active_final_output_json_schema = config.model_request_policy.final_output_json_schema if config.model_request_policy is not None else None
 
     artifact_store = ArtifactStore()
     if owner is not None and not owner.workspace_root and not owner.projectless_output_dir:
@@ -271,6 +357,7 @@ async def run_owned_rest_chat(
         metadata={
             "source": "scheduled_task" if run_id else "rest_api",
             "conversation_id": conversation_id,
+            **({"agent_mode": owner.agent_mode} if owner is not None else {}),
             "run_id": run_id,
             "assistant_message_id": (
                 f"assistant_schedule_{run_id}" if run_id else f"assistant_rest_{journal_turn_id}"
@@ -297,6 +384,8 @@ async def run_owned_rest_chat(
             workspace_root=workspace_root,
         )
         context_builder.load_snapshot(conversation_snapshot)
+    if owner is not None:
+        _bind_rest_turn_input_owner(run_context, repository, conversation_id, runtime.metadata)
     engine = query_engine or QueryEngine()
     session = AgentSession(
             llm=llm,

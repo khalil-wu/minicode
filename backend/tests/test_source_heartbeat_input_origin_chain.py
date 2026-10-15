@@ -53,7 +53,7 @@ async def test_real_scheduler_origin_survives_run_store_and_query_admission(sche
     assert run.status == "completed", run.error
 
     expected = "heartbeat" if kind == "heartbeat" and scheduled else "user"
-    trigger = "automation_heartbeat_scheduled" if expected == "heartbeat" else None
+    trigger = ("automation_heartbeat_scheduled" if scheduled else "automation_heartbeat_run_now") if kind == "heartbeat" else None
     assert run.turn_trigger == trigger
     cold_scheduler = TaskScheduler()
     assert cold_scheduler._runs[run.id].turn_trigger == trigger
@@ -239,7 +239,9 @@ async def test_actual_responses_request_matches_scheduled_input_provenance(sched
                 assert source["request_kind"] == "turn"
                 assert json.loads(request.headers["x-codex-turn-metadata"]) == source
             else:
-                assert source.get("turn_trigger") != "automation_heartbeat_scheduled"
+                assert source["turn_trigger"] == "automation_heartbeat_run_now"
+                assert source["request_kind"] == "turn"
+                assert json.loads(request.headers["x-codex-turn-metadata"]) == source
             assert "x-openai-memgen-request" not in request.headers
             assert "input_origin" not in request.body.get("metadata", {})
             cold = ContextBuilder()

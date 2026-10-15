@@ -3788,11 +3788,15 @@ class SessionAgentRunnerMixin:
             if part
         )
         query_guards = conversation_query_guards()
+        run_context = run_context or RunContext()
+        run_context.prepare_turn_owner()
+        run_context.turn_kind = "review" if run_metadata.get("code_review") is not None else "regular"
+        run_context.accept_scheduled_input = lambda command: self.run_manager.enqueue_scheduled_input(target_conversation_id, command)
         transition = run_metadata.pop("_conversation_transition", None)
         query_claim = (
             query_guards.handoff(transition, owner_id=owner_id)
             if transition is not None
-            else query_guards.try_start(target_conversation_id, owner_id=owner_id)
+            else query_guards.try_start(target_conversation_id, owner_id=owner_id, owner=run_context)
         )
         if query_claim is None:
             active_claim = query_guards.active_claim(target_conversation_id)
@@ -3824,7 +3828,8 @@ class SessionAgentRunnerMixin:
                     str(run_metadata.get("_run_task_id") or ""),
                 )
             return
-        run_context = run_context or RunContext()
+        if transition is not None:
+            query_guards.bind_owner(query_claim, run_context)
         run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
             target_conversation_id
         )
@@ -4290,6 +4295,7 @@ class SessionAgentRunnerMixin:
                 model=run_model,
                 model_runtime=run_model_runtime,
             )
+            run_context.active_final_output_json_schema = run_config.model_request_policy.final_output_json_schema if run_config.model_request_policy is not None else None
             run_runtime_model = (
                 run_model_runtime.get_model(run_provider, run_model)
                 if run_model_runtime is not None and run_provider and run_model
@@ -4827,6 +4833,11 @@ class SessionAgentRunnerMixin:
                 if consumed_steer is not None
                 else user_message
             )
+            from backend.agent.turn_input import ScheduledInputCommand
+
+            host_input = (consumed_steer.original_command if consumed_steer is not None
+                else run_context.initial_scheduled_input)
+            public_admitted_content = host_input.public_content if isinstance(host_input, ScheduledInputCommand) else admitted_content
             admitted_client_command_id = str(
                 (
                     consumed_steer.original_command.data.get("client_command_id")
@@ -4864,7 +4875,7 @@ class SessionAgentRunnerMixin:
             user_projection = {
                 "id": user_message_id,
                 "role": "user",
-                "content": admitted_content,
+                "content": public_admitted_content,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "attachments": admitted_attachments,
                 **input_metadata,

@@ -19,6 +19,7 @@ from backend.agent.context_compaction_hooks import (
 from backend.agent.message import AgentEvent
 from backend.hooks.manager import HookEvent
 from backend.agent.conversation_query_guard import conversation_query_guards
+from backend.agent.run_context import RunContext
 from backend.conversations.repository import ConversationWriteConflict
 from backend.conversations.context_delta import rebase_turn_admissions
 
@@ -127,6 +128,7 @@ async def compact_conversation(
     claim = conversation_query_guards().try_start(
         clean_id,
         owner_id=f"mutation:context.compact:{uuid4().hex}",
+        owner=RunContext(turn_kind="compact"),
     )
     if claim is None:
         raise RuntimeError(

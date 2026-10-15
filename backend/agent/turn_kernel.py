@@ -140,6 +140,7 @@ class TurnKernel:
             self.run_context.turn_input_queue = turn_input_queue
         self._turn_input_queue = turn_input_queue
         self._turn_input_queue.begin_turn(run_record.run_id)
+        self.run_context.publish_turn_started(str(metadata.get("turn_id") or run_record.run_id))
         self._next_user_message = initial_user_message
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
         self._scheduled_steer: TurnInput | None = None
@@ -256,6 +257,11 @@ class TurnKernel:
             }
         )
         self._terminal_commit_failure_event = event
+        self.run_context.publish_turn_terminal({
+            "status": "failed", "run_id": self.run_record.run_id,
+            "reason": "terminal_commit_failed", "reply": self.state.reply,
+            "error": str(error), "terminal_commit_failed": True,
+        })
         return event
 
     def start_events(self) -> tuple[AgentEvent, ...]:
@@ -304,6 +310,13 @@ class TurnKernel:
         self.run_record = record
         self._run_completed_emitted = True
         self._completion_event = AgentEvent.agent_run_completed(record or self.run_record)
+        self.run_context.publish_turn_terminal({
+            "status": normalized_status, "run_id": self.run_record.run_id,
+            "turn_id": str(self.metadata.get("turn_id") or self.run_record.run_id),
+            "assistant_message_id": str(self.metadata.get("assistant_message_id") or ""),
+            "reply": self.state.reply, "reason": terminal_reason or normalized_status,
+            "error": error or "",
+        })
         return self._completion_event
 
     def defer_mailbox_to_next_turn(self) -> bool:

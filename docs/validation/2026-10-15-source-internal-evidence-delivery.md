@@ -1,6 +1,8 @@
 # 原生命令投影与内部证据链：最终交付
 
-后续状态（2026-10-15）：用户随后报告 CI、新会话和项目动作问题，当前优先处理，见 `2026-10-15-ci-new-chat-repair.md`。本文件的冻结输入、前端和 wheel 身份是此前交付批的历史记录；不代表后续 CI 修复后的当前源码。下列剩余范围在 GitHub CI 全通过之后继续实施。
+后续状态（2026-10-15）：用户随后报告的 CI、新会话和项目动作问题已收尾。冻结基线 `18e8bd8d` 的 GitHub run `38749202449` 七项全部通过，见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`。现在继续下列已确认的 heartbeat、Memory Phase 1 WS 与 remote 剩余范围，尚不把只读审计或施工中的代码计为完成。本文件下方冻结输入、前端和 wheel 身份是此前交付批的历史记录，不代表后续 CI 修复及新功能后的当前源码或安装包。
+
+后续实现检查点：heartbeat H1–H3（重复版本、按接受顺序恢复、完整 transcript 引用及运行时 Skill 证据）相关节点最新去重 391/391；H4（真实 busy gate、start-or-steer、durable run 与等待寿命）最新去重 130/130；Memory Phase 1 独立 WS 及原运输回归最终一次五文件 83/83；前端 renderer observer 123/123，均无跳过。范围相互有重叠，不能相加；初败及修复后窄复验均保留。详见 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md` 和 `2026-10-15-memory-phase1-websocket-transport.md`。这批正在提交完整 CI，本地专项结果不等于新提交已全绿；remote 仍另行实施。
 
 本批生产修改、必要验证、前端构建与独立安装冷验已完成。它闭合下列已定位的问题，不代表整款 MiniCode 已与 Codex 完全等价。官方账号登录、授权及依赖该账号的 hosted 服务按用户要求排除；排除项不记通过。
 
@@ -73,8 +75,8 @@ Root 独立逐张查看 companion01 的 01/02/04/05、companion03 的最终五�
 
 ## 仍需后续对齐的范围
 
-本批没有未通过的必要项。全产品仍不能声称等价：heartbeat 重复触发合并、完整 transcript 引用、busy 自动注入及相关 gate 尚未由本批实现；本地可配置 remote executor 的 registry/connection、thread selection、远程 filesystem/tools 与生命周期链仍未实现，且不因排除官方账号而自动排除。远程能力须先核实际桌面入口，不能因 Source 有 API 就自创按钮。
+此前交付批没有未通过的必要项，但不代表全产品等价。heartbeat 重复触发合并、完整 transcript 引用、busy 自动注入及相关 gate 已在上方后续检查点接通，分别保留其新验证；不追写成此前批次已实现。本地可配置 remote executor 的 registry/connection、thread selection、远程 filesystem/tools 与生命周期链仍在后续实施，且不因排除官方账号而自动排除。远程能力须先核实际桌面入口，不能因 Source 有 API 就自创按钮。
 
-Memory Phase 1 的归因及 HTTP 链已经完成，另有一条确定的可选传输差异：Source `memories/write/src/runtime.rs::stream_stage_one_prompt` 调用 `ModelClientSession::stream`，后者在 `core/src/client.rs:1030、2237` 按 provider WebSocket 能力及 session fallback 选择运输，没有官方账号门槛。MiniCode `OpenAIAdapter._simple_responses_api:5339` 未传 `websocket_request`，所以 `_create_responses_request:2690` 进入 HTTP；已启用 Responses WS 的第三方/API-key provider 在 Phase 1 仍走 HTTP。这条分支尚未接通或实测，不将整个 Phase 1 归因批重新标为待完成，也不用主回合/Phase 2 的 WS 验证替代。
+Memory Phase 1 的归因及 HTTP 链由此前批完成。随后确认的可选 WS 差异现已另批修复：Source `memories/write/src/runtime.rs::stream_stage_one_prompt` 调用 `ModelClientSession::stream`，后者在 `core/src/client.rs:1030、2237` 按 provider WebSocket 能力及 session fallback 选择运输，没有官方账号门槛。MiniCode 现为实际 side context 建立独立 pool/request，保留主回合连接和 fallback，具体真实 HTTP/WS 与取消、partial usage、计费隔离证据见上方新报告，不借主回合或 Phase 2 测试替代。
 
 Node/CUA 本批是已注册工具的证据消费链，不包含新执行器。官方账号相关 hosted connectors 不做。旧“高级 review”笼统待办不能直接沿用：实际桌面 Markdown/code-comments 工作流与 Rust 可选 ReviewTask 应分别核对。更多桌面区域也不能借本批测试数被宣布完全一致；已证实范围与后续只读范围分别保留在 active-work 和 `2026-10-15-local-remote-environment-scope-audit.md`。

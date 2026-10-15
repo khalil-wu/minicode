@@ -17,6 +17,7 @@ from backend.agent.conversation_query_guard import (
     conversation_query_guards,
 )
 from backend.agent.run_context import RunContext
+from backend.agent.turn_input import ScheduledInputCommand, TurnInputQueue
 from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.runtime import default_runtime
 from backend.async_cleanup import to_thread_cancel_safe
@@ -24,6 +25,46 @@ from backend.conversations.repository import ConversationRepository
 from backend.services.chat_api_service import run_owned_rest_chat
 from backend.services.conversation_projection_service import replay_pending_conversation_projections
 from backend.services.workspace_service import git_branch_for, main_worktree_root
+
+HEARTBEAT_TERMINAL_WAIT_SECONDS = 600
+
+
+def heartbeat_block_reason(task: Any, *, bootstrap: Any = None, manual: bool = False) -> str | None:
+    """Read the actual local thread owner before the scheduler consumes a fire."""
+    guards = conversation_query_guards()
+    if guards.admission_closed:
+        return "server_draining"
+    manager = getattr(bootstrap, "ws_manager", None)
+    if manager is not None and manager._shutting_down:
+        return "server_draining"
+    repository = ConversationRepository()
+    conversation = repository.get_conversation(task.conversation_id)
+    if conversation is None or conversation.archived:
+        return "thread_missing"
+    if manager is not None:
+        if manager.conversation_delete_fence(conversation.id):
+            return "thread_missing"
+        if not manual:
+            manager.request_heartbeat_renderer_state(conversation.id, workspace_root=task.workspace_root)
+            renderer = manager.heartbeat_renderer_block_reason(conversation.id)
+            if renderer is not None:
+                return renderer
+        owner = manager.execution_session_for_conversation(conversation.id)
+        if owner is not None:
+            for request in owner._pending_approval_runtime_items():
+                if request.get("conversation_id") != conversation.id:
+                    continue
+                return "waiting_on_user_input" if request.get("subtype") == "request_user_input" else "waiting_on_approval"
+            if owner.run_manager.has_pending_lifecycle_cleanup(conversation.id):
+                return "turn_in_progress"
+    if guards.active_claim(conversation.id) is not None or guards.has_transition(conversation.id):
+        return "turn_in_progress"
+    from backend.config import load_config
+
+    config = getattr(bootstrap, "config", None) or load_config(cwd=Path(task.workspace_root))
+    if not (conversation.model_selection.get("model") or config.llm.model):
+        return "missing_collaboration_mode"
+    return None
 
 
 async def run_scheduled_task(
@@ -88,18 +129,64 @@ async def run_scheduled_task(
             bind_conversation(run.id, conversation.id)
 
     query_guards = conversation_query_guards()
-    query_claim = query_guards.try_start(
-        conversation.id,
-        owner_id=f"scheduled:{str(getattr(run, 'id', '') or '')}",
-    )
-    if query_claim is None:
+    manager = getattr(bootstrap, "ws_manager", None)
+    if manager is not None and (manager._shutting_down or manager.conversation_delete_fence(conversation.id)):
+        return {"status": "failed", "conversation_id": conversation.id,
+            "workspace_root": str(workspace_root.resolve()), "error": "The heartbeat execution host is closing."}
+    run_context = RunContext(turn_input_queue=TurnInputQueue())
+    run_context.prepare_turn_owner()
+    if run.start_receipt is not None:
+        run_context.turn_started_receipt = run.start_receipt
+    now = datetime.now(UTC).isoformat()
+    from backend.services.turn_notifications import heartbeat_user_message
+
+    command = ScheduledInputCommand(type="user_message", data={
+        "content": heartbeat_user_message(task.id, now, task.prompt) if task.kind == "heartbeat" else task.prompt,
+        "conversation_id": conversation.id, "user_message_id": f"schedule_{run.id}",
+        "assistant_message_id": f"assistant_schedule_{run.id}",
+    }, turn_trigger=run.turn_trigger or "", public_content=task.prompt,
+        task_id=task.id, scheduled_run_id=run.id)
+    if task.kind == "heartbeat":
+        submission = query_guards.start_or_steer(
+            conversation.id,
+            owner_id=f"scheduled:{run.id}", owner=run_context, command=command,
+            expected_admission_generation=run.host_admission_generation or None,
+        )
+    else:
+        from backend.agent.conversation_query_guard import TurnInputSubmission
+
+        claim = query_guards.try_start(conversation.id, owner_id=f"scheduled:{run.id}", owner=run_context)
+        submission = TurnInputSubmission("started", claim=claim, owner=run_context) if claim is not None else TurnInputSubmission("not_submitted", reason="active_owner_unavailable")
+    if submission.mode == "steered":
+        owner = submission.owner
+        if run.start_receipt is not None and not run.start_receipt.done():
+            run.start_receipt.set_result({"status": "steered", "turn_id": owner.turn_input_queue.turn_id})
+        run.actual_turn_id = owner.turn_input_queue.turn_id
+        # Timeout/cancellation ends this scheduler wait, never the actual turn.
+        try:
+            async with asyncio.timeout(HEARTBEAT_TERMINAL_WAIT_SECONDS):
+                result = await asyncio.shield(owner.turn_terminal_receipt)
+                await owner.wait_for_turn_release()
+        except TimeoutError:
+            return {"status": "running", "conversation_id": conversation.id,
+                "workspace_root": str(workspace_root.resolve()),
+                "_turn_terminal_receipt": owner.turn_terminal_receipt,
+                "_turn_owner": owner}
+        return {
+            "status": result["status"], "conversation_id": conversation.id,
+            "workspace_root": str(workspace_root.resolve()), "summary": result["reply"],
+            "message_id": result.get("assistant_message_id", ""),
+            "actual_turn_id": result.get("turn_id", result["run_id"]),
+            "error": result.get("error") or (result["reason"] if result["status"] != "completed" else ""),
+        }
+    query_claim = submission.claim
+    if submission.mode == "not_submitted":
         return {
             "status": "failed",
             "workspace_root": str(workspace_root.resolve()),
             "conversation_id": conversation.id,
-            "error": "The heartbeat conversation already has an active turn.",
+            "error": "The heartbeat conversation already has an active turn." if submission.reason == "active_owner_unavailable" else submission.reason,
         }
-    run_context = RunContext()
     interrupted = False
     try:
         runtime = default_runtime()
@@ -143,6 +230,8 @@ async def run_scheduled_task(
                     repository, run_context.execution_journal, conversation_id=conversation.id,
                 )
         finally:
+            if run_context.close_turn_inputs is not None:
+                run_context.close_turn_inputs()
             query_guards.end(query_claim)
         if cancelled_during_cleanup:
             raise asyncio.CancelledError
@@ -269,6 +358,7 @@ async def _run_scheduled_task_owned(
     )
     if admitted is None:
         raise RuntimeError("The scheduled conversation disappeared before its prompt was saved.")
+    run_context.conversation_revision = admitted.revision
 
     from backend.services.turn_notifications import heartbeat_user_message
 
@@ -352,7 +442,7 @@ async def _run_scheduled_task_owned(
         "conversation_projection_pending",
         {
             "conversation_id": conversation.id, "assistant_message": assistant_message,
-            "context_snapshot": next_snapshot, "expected_revision": admitted.revision,
+            "context_snapshot": next_snapshot, "expected_revision": run_context.conversation_revision,
             "context_delta": context_snapshot_delta(snapshot, next_snapshot),
             "run_id": str(getattr(run, "id", "")),
             "source_user_message_ids": [f"schedule_{getattr(run, 'id', '')}"],
@@ -362,7 +452,7 @@ async def _run_scheduled_task_owned(
         conversation.id,
         assistant_message=assistant_message,
         context_snapshot=next_snapshot,
-        expected_revision=admitted.revision,
+        expected_revision=run_context.conversation_revision,
     )
     if committed is None:
         raise RuntimeError("The scheduled conversation disappeared before its result was saved.")
@@ -385,6 +475,7 @@ async def _run_scheduled_task_owned(
         "summary": visible_reply,
         "completion_notification": notification,
         "message_id": assistant_message["id"],
+        "actual_turn_id": str(getattr(run, "id", "")),
         **run_context.lifecycle_cleanup_evidence(),
         "error": stopped_reason if status in {"failed", "cancelled"} else "",
     }

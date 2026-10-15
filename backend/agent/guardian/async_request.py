@@ -11,6 +11,8 @@ from backend.agent.guardian.retained import (
     _json_bytes, role_lines,
 )
 from backend.agent.guardian.truncation import source_token_estimate, truncate_guardian_text
+from backend.agent.guardian.heartbeat import selected_transcript
+from backend.agent.guardian.skills import render_trusted_skills
 from backend.llm.base import _estimate_responses_window_tokens
 
 
@@ -45,10 +47,8 @@ def text_item(text, *, role="user", sources=(), review_ids=(), omissions=None):
         "content": [{"type": "input_text", "text": text}]}, sources, review_ids, omissions)
 
 
-def transcript_entries(evidence, loaded_checkpoint):
-    if (evidence.context_mode == "thread_owned" or loaded_checkpoint) and evidence.parent_window_transcript is not None:
-        return evidence.parent_window_transcript
-    return evidence.transcript
+def transcript_entries(evidence, loaded_checkpoint, sources=None):
+    return selected_transcript(evidence, loaded_checkpoint, sources=sources)
 
 
 def source_identity(order, revision):
@@ -67,7 +67,7 @@ class CollectedAsyncEvidence:
 
     def compose(self, cursor, history):
         evidence, config = self.evidence, self.config
-        entries = transcript_entries(evidence, self.loaded_checkpoint)
+        entries = transcript_entries(evidence, self.loaded_checkpoint, config.sources)
         next_cursor = TranscriptCursor(evidence.history_version, len(entries))
         if cursor is not None and (cursor.parent_history_version != next_cursor.parent_history_version
                 or cursor.transcript_entry_count > next_cursor.transcript_entry_count):
@@ -142,6 +142,8 @@ class CollectedAsyncEvidence:
             result.append(AnnotatedItem({"type": "message", "role": "developer", "content": [
                 {"type": "input_text", "text": part} for part in parts]}, review_ids=tuple(review["delivery_id"] for review in reviews)))
         result.extend(self._retained_instructions(history, result))
+        if evidence.trusted_skill_paths:
+            result.append(text_item(render_trusted_skills(evidence.trusted_skill_paths), role="developer"))
         result.append(text_item(">>> APPROVAL REQUEST START\nPlanned action JSON:\n" + self.action + "\n>>> APPROVAL REQUEST END\n"))
         existing_images = {image_identity(part) for item in [*history, *result] if item.item.get("type") == "message"
             for part in item.item["content"] if part["type"] == "input_image"}
