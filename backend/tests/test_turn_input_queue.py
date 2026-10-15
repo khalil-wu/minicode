@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,16 @@ from backend.agent.loop import run_agent_loop
 from backend.agent.state import AgentState
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.handlers.misc import handle_user_message_queue_steer
+
+
+@asynccontextmanager
+async def _owned_run_manager(session):
+    manager = SessionRunManager(session)
+    try:
+        yield manager
+    finally:
+        await manager.shutdown_notification_wakes()
+        manager.close_durable_queue()
 
 
 def _command(message_id: str, content: str) -> UserCommand:
@@ -183,20 +194,20 @@ def test_run_manager_restores_unconsumed_turn_inputs_on_cleanup() -> None:
             ),
             conversation_lifecycle_lock=lambda: asyncio.Lock(),
         )
-        manager = SessionRunManager(session)
-        queue = manager.turn_input_queue("conv-a")
-        command = _command("assistant-1", "restore me")
-        assert queue.enqueue_command(command) is not None
-        task = asyncio.create_task(asyncio.sleep(0))
-        await task
-        manager.cleanup(
-            conversation_id="conv-a",
-            task=task,
-            task_id="task-1",
-            cancel_event=asyncio.Event(),
-        )
-        restored = manager.dequeue_user_message("conv-a")
-        assert restored is command
+        async with _owned_run_manager(session) as manager:
+            queue = manager.turn_input_queue("conv-a")
+            command = _command("assistant-1", "restore me")
+            assert queue.enqueue_command(command) is not None
+            task = asyncio.create_task(asyncio.sleep(0))
+            await task
+            manager.cleanup(
+                conversation_id="conv-a",
+                task=task,
+                task_id="task-1",
+                cancel_event=asyncio.Event(),
+            )
+            restored = manager.dequeue_user_message("conv-a")
+            assert restored is command
 
     asyncio.run(scenario())
 
@@ -515,35 +526,36 @@ def test_cleanup_immediately_restores_preaccepted_unacknowledged_steer(
             ),
             conversation_lifecycle_lock=lambda: asyncio.Lock(),
         )
-        manager = SessionRunManager(session)
-        command = _command("assistant-steer", "keep after cancel")
-        follow_up = _command("assistant-follow-up", "run after recovered steer")
-        manager.enqueue_user_message("conv-a", command)
-        manager.enqueue_user_message("conv-a", follow_up)
-        turn_queue = manager.turn_input_queue("conv-a")
-        selected = manager.pop_queued_user_message("conv-a", "assistant-steer")
-        assert selected is command
-        assert manager.enqueue_turn_steer("conv-a", selected) is not None
-        # Provider-chunk admission removes the item from the in-memory queue,
-        # but ctx.start_turn has not acknowledged it yet.
-        assert turn_queue.pop_steer() is not None
+        async with _owned_run_manager(session) as manager:
+            command = _command("assistant-steer", "keep after cancel")
+            follow_up = _command("assistant-follow-up", "run after recovered steer")
+            manager.enqueue_user_message("conv-a", command)
+            manager.enqueue_user_message("conv-a", follow_up)
+            turn_queue = manager.turn_input_queue("conv-a")
+            selected = manager.pop_queued_user_message("conv-a", "assistant-steer")
+            assert selected is command
+            assert manager.enqueue_turn_steer("conv-a", selected) is not None
+            # Provider-chunk admission removes the item from the in-memory queue,
+            # but ctx.start_turn has not acknowledged it yet.
+            assert turn_queue.pop_steer() is not None
 
-        task = asyncio.create_task(asyncio.sleep(0))
-        await task
-        manager.cleanup(
-            conversation_id="conv-a",
-            task=task,
-            task_id="task-1",
-            cancel_event=asyncio.Event(),
-        )
+            task = asyncio.create_task(asyncio.sleep(0))
+            await task
+            manager.cleanup(
+                conversation_id="conv-a",
+                task=task,
+                task_id="task-1",
+                cancel_event=asyncio.Event(),
+            )
 
-        restored = manager.dequeue_user_message("conv-a")
-        assert restored is command
-        manager.finish_user_message_dispatch("conv-a", restored, succeeded=True)
-        next_command = manager.dequeue_user_message("conv-a")
-        assert next_command is follow_up
-        manager.finish_user_message_dispatch("conv-a", next_command, succeeded=True)
-        assert SessionRunManager(session).dequeue_user_message("conv-a") is None
+            restored = manager.dequeue_user_message("conv-a")
+            assert restored is command
+            manager.finish_user_message_dispatch("conv-a", restored, succeeded=True)
+            next_command = manager.dequeue_user_message("conv-a")
+            assert next_command is follow_up
+            manager.finish_user_message_dispatch("conv-a", next_command, succeeded=True)
+        async with _owned_run_manager(session) as recovered:
+            assert recovered.dequeue_user_message("conv-a") is None
 
     asyncio.run(scenario())
 
@@ -588,31 +600,31 @@ def test_queue_steer_targets_active_turn_without_cancelling_it() -> None:
             send_event=send_event,
             _conversation_streams={"conv-a": {"message_id": "assistant-current"}},
         )
-        manager = SessionRunManager(session)
-        session.run_manager = manager
-        manager.enqueue_user_message("conv-a", _command("assistant-1", "steer now"))
-        manager.turn_input_queue("conv-a")
-        session.running_agent_task_for = lambda conversation_id: active_task
+        async with _owned_run_manager(session) as manager:
+            session.run_manager = manager
+            manager.enqueue_user_message("conv-a", _command("assistant-1", "steer now"))
+            manager.turn_input_queue("conv-a")
+            session.running_agent_task_for = lambda conversation_id: active_task
 
-        async def cancel(**_kwargs):
-            nonlocal cancel_called
-            cancel_called = True
+            async def cancel(**_kwargs):
+                nonlocal cancel_called
+                cancel_called = True
 
-        session.cancel_agent_runs = cancel
+            session.cancel_agent_runs = cancel
 
-        await handle_user_message_queue_steer(
-            session,
-            {"conversation_id": "conv-a", "message_id": "assistant-1"},
-        )
+            await handle_user_message_queue_steer(
+                session,
+                {"conversation_id": "conv-a", "message_id": "assistant-1"},
+            )
 
-        item = manager.turn_input_queue("conv-a").pop_steer()
-        assert item is not None
-        assert item.content == "steer now"
-        assert not cancel_called
-        assert events[0].data["status"] == "dequeued"
-        assert events[0].data["reason"] == "steered_current_turn"
-        assert events[0].data["target_message_id"] == "assistant-current"
-        assert events[0].data["turn_mode"] == "steer"
+            item = manager.turn_input_queue("conv-a").pop_steer()
+            assert item is not None
+            assert item.content == "steer now"
+            assert not cancel_called
+            assert events[0].data["status"] == "dequeued"
+            assert events[0].data["reason"] == "steered_current_turn"
+            assert events[0].data["target_message_id"] == "assistant-current"
+            assert events[0].data["turn_mode"] == "steer"
 
     asyncio.run(scenario())
 

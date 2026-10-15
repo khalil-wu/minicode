@@ -53,9 +53,7 @@ async def test_malformed_attachments_fail_input_without_admitting_text_only_turn
         assert repository.get_conversation(record.id).transcript == []
         assert not session._has_active_run()
     finally:
-        await session.event_outbox.drain_delivery()
-        await session.event_outbox.drain_persistence()
-        store.shutdown()
+        await session.session_lifecycle.shutdown(reason="attachment_input_fixture")
 
 
 def test_valid_duplicate_attachment_references_keep_one_uploaded_identity():

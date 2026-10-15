@@ -127,7 +127,7 @@ def test_turn_and_recovery_use_owned_durable_mode_while_explicit_child_modes_do_
     if explicit is not None:
         metadata["agent_mode"] = explicit
         metadata["_agent_mode_selection_revision"] = session.conversation_repo.get_conversation("conv_runnerdone").agent_mode_revision
-    _run_session_scenario(session._run_agent_locked("Continue owned work", conversation_id="conv_runnerdone", metadata=metadata))
+    _run_session_scenario(session, session._run_agent_locked("Continue owned work", conversation_id="conv_runnerdone", metadata=metadata))
     assert captured == [explicit or selected]
     assert session.conversation_repo.get_conversation("conv_runnerdone").agent_mode == expected_durable
     assert session.conversation_repo.get_conversation(foreign.id).agent_mode == "build"
@@ -143,7 +143,7 @@ def _owned_admission_session(tmp_path, monkeypatch):
     session = _Session(tmp_path, events)
     session._extension_shutdown_requested = False
     session.running_agent_task_for = session.run_manager.running_task_for
-    session.run_manager._notification_wakes_closed = True
+    session.run_manager.stop_notification_wake_intake()
 
     async def start(content, *, attachments, conversation_id, metadata):
         await session._run_agent_locked(content, attachments=attachments, conversation_id=conversation_id, metadata=metadata)
@@ -199,7 +199,7 @@ def test_accepted_queued_build_keeps_its_turn_mode_after_new_plan_selection_and_
             session.conversation_runtime._conversation_repo = session.conversation_repo
             session.run_manager.close_durable_queue()
             session.run_manager = SessionRunManager(session)
-            session.run_manager._notification_wakes_closed = True
+            session.run_manager.stop_notification_wake_intake()
             session.running_agent_task_for = session.run_manager.running_task_for
             pending = session.run_manager.queued_user_messages(owner)
             assert len(pending) == 1 and pending[0].data["agent_mode"] == "build"
@@ -217,7 +217,7 @@ def test_accepted_queued_build_keeps_its_turn_mode_after_new_plan_selection_and_
                 await running
             session.run_manager.close_durable_queue()
 
-    _run_session_scenario(scenario())
+    _run_session_scenario(session, scenario())
 
 
 def test_queue_configuration_write_failure_reopens_original_selection_revision_and_applies_only_at_real_admission(
@@ -260,7 +260,7 @@ def test_queue_configuration_write_failure_reopens_original_selection_revision_a
             session.conversation_repo = ConversationRepository(storage)
             session.conversation_runtime._conversation_repo = session.conversation_repo
             session.run_manager = SessionRunManager(session)
-            session.run_manager._notification_wakes_closed = True
+            session.run_manager.stop_notification_wake_intake()
             session.running_agent_task_for = session.run_manager.running_task_for
             pending = session.run_manager.dequeue_user_message(owner)
             assert pending is not None and pending.data["_agent_mode_selection_revision"] == 1
@@ -275,7 +275,7 @@ def test_queue_configuration_write_failure_reopens_original_selection_revision_a
                 await running
             session.run_manager.close_durable_queue()
 
-    _run_session_scenario(scenario())
+    _run_session_scenario(session, scenario())
 
 
 @pytest.mark.parametrize("new_selection", [None, "plan"])
@@ -321,7 +321,7 @@ def test_fresh_turn_updates_default_only_at_actual_admission_and_keeps_a_newer_s
             await pending
             session.run_manager.close_durable_queue()
 
-    _run_session_scenario(scenario())
+    _run_session_scenario(session, scenario())
 
 
 def test_unadmitted_startup_refusal_and_failed_queue_publish_leave_the_real_selection_unchanged(
@@ -362,4 +362,4 @@ def test_unadmitted_startup_refusal_and_failed_queue_publish_leave_the_real_sele
                 await running
             session.run_manager.close_durable_queue()
 
-    _run_session_scenario(scenario())
+    _run_session_scenario(session, scenario())

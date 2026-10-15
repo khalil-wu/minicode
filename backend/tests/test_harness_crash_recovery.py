@@ -272,7 +272,7 @@ async def test_delivery_fences_remain_bounded_and_keep_old_completion_until_clea
         assert manager._delivery_complete == set()
         assert manager.is_delivery_complete("conv-fences", "new")
     finally:
-        manager._unsubscribe_parent_notifications()
+        await manager.shutdown_notification_wakes()
 
 
 @pytest.mark.asyncio
@@ -292,7 +292,7 @@ async def test_new_run_registration_clears_both_legacy_delivery_markers():
     finally:
         task.set_result(None)
         manager.cleanup(conversation_id="conv-legacy", task=task, task_id="new-run", cancel_event=cancel)
-        manager._unsubscribe_parent_notifications()
+        await manager.shutdown_notification_wakes()
 
 
 @pytest.mark.asyncio

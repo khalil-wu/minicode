@@ -261,31 +261,34 @@ def test_context_fork_command_reaches_registered_websocket_route(tmp_path: Path)
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        context = ContextBuilder(token_budget=TokenBudget(), agent_settings=AgentSettings())
-        context.append_user("start")
-        context.append_assistant("answer")
-        parent = session.conversation_repo.create_conversation(
-            conversation_id="conv_route_parent",
-            title="Route parent",
-            transcript=[
-                {"id": "user-start", "role": "user", "content": "start"},
-                {"id": "assistant-answer", "role": "assistant", "content": "answer"},
-            ],
-            context_snapshot=context.export_snapshot(),
-        )
-        session.active_conversation_id = parent.id
-        session.load_active_conversation_snapshot(parent.id, parent.context_snapshot)
-        await session.command_dispatcher._handle_command(
-            UserCommand(
-                type="context.fork",
-                data={
-                    "message_id": "assistant-answer",
-                    "message_index": 0,
-                    "create_branch": True,
-                },
+        try:
+            context = ContextBuilder(token_budget=TokenBudget(), agent_settings=AgentSettings())
+            context.append_user("start")
+            context.append_assistant("answer")
+            parent = session.conversation_repo.create_conversation(
+                conversation_id="conv_route_parent",
+                title="Route parent",
+                transcript=[
+                    {"id": "user-start", "role": "user", "content": "start"},
+                    {"id": "assistant-answer", "role": "assistant", "content": "answer"},
+                ],
+                context_snapshot=context.export_snapshot(),
             )
-        )
-        return websocket.sent, session.conversation_repo, parent.id
+            session.active_conversation_id = parent.id
+            session.load_active_conversation_snapshot(parent.id, parent.context_snapshot)
+            await session.command_dispatcher._handle_command(
+                UserCommand(
+                    type="context.fork",
+                    data={
+                        "message_id": "assistant-answer",
+                        "message_index": 0,
+                        "create_branch": True,
+                    },
+                )
+            )
+            return websocket.sent, session.conversation_repo, parent.id
+        finally:
+            await session.session_lifecycle.shutdown(reason="fork_route_fixture")
 
     sent, repo, parent_id = asyncio.run(scenario())
     forked = next(payload for payload in sent if payload.get("type") == "context_forked")
