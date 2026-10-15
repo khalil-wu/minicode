@@ -80,6 +80,8 @@ def test_live_callback_keeps_process_claim_across_websocket_hosts(tmp_path: Path
             claim = guards.active_claim(conversation_id)
             if claim is not None:
                 guards.end(claim)
+            await first.run_manager.shutdown_notification_wakes()
+            await second.run_manager.shutdown_notification_wakes()
             first.run_manager.close_durable_queue()
             second.run_manager.close_durable_queue()
 
@@ -102,23 +104,29 @@ def test_generation_retirement_waits_for_actual_callback(tmp_path: Path, cancel_
             effects.append(reason)
             shut_down.set()
 
-        runtime = SimpleNamespace(shutdown=shutdown)
-        await host._retire_lifecycle_runtime(
-            "conv_runnerdone", runtime, None, None,
-            reason="reload", clear_loader_cache=False, defer_until=None,
-        )
-        state = host._extension_runtime_state("conv_runnerdone")
-        if cancel_waiter:
-            state["retired_generations"][0]["defer_until"].cancel()
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-        await host._drain_retired_lifecycle_runtimes("conv_runnerdone", force=True)
-        assert effects == []
-        assert state["retired_generations"]
-        released.set()
-        await asyncio.wait_for(shut_down.wait(), 1)
-        assert effects == ["reload"]
-        host.run_manager.close_durable_queue()
+        try:
+            runtime = SimpleNamespace(shutdown=shutdown)
+            await host._retire_lifecycle_runtime(
+                "conv_runnerdone", runtime, None, None,
+                reason="reload", clear_loader_cache=False, defer_until=None,
+            )
+            state = host._extension_runtime_state("conv_runnerdone")
+            if cancel_waiter:
+                state["retired_generations"][0]["defer_until"].cancel()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+            await host._drain_retired_lifecycle_runtimes("conv_runnerdone", force=True)
+            assert effects == []
+            assert state["retired_generations"]
+            released.set()
+            await asyncio.wait_for(shut_down.wait(), 1)
+            assert effects == ["reload"]
+        finally:
+            released.set()
+            await pending
+            await asyncio.gather(*host.cleanup_tasks)
+            await host.run_manager.shutdown_notification_wakes()
+            host.run_manager.close_durable_queue()
 
     asyncio.run(scenario())
 
@@ -137,22 +145,28 @@ def test_cancelled_shutdown_waiter_does_not_dispose_borrowed_generation(tmp_path
             effects.append(reason)
             shut_down.set()
 
-        state = host._extension_runtime_state("conv_runnerdone")
-        state["runtime"] = SimpleNamespace(shutdown=shutdown)
-        teardown = asyncio.create_task(host._shutdown_lifecycle_runtimes("disconnect"))
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        teardown.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await teardown
-        assert state["runtime"] is not None
-        assert effects == []
-        assert host.cleanup_tasks
-        released.set()
-        await asyncio.wait_for(shut_down.wait(), 1)
-        await asyncio.gather(*host.cleanup_tasks)
-        assert effects == ["disconnect"]
-        assert host._extension_runtime_states == {}
-        host.run_manager.close_durable_queue()
+        try:
+            state = host._extension_runtime_state("conv_runnerdone")
+            state["runtime"] = SimpleNamespace(shutdown=shutdown)
+            teardown = asyncio.create_task(host._shutdown_lifecycle_runtimes("disconnect"))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            teardown.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await teardown
+            assert state["runtime"] is not None
+            assert effects == []
+            assert host.cleanup_tasks
+            released.set()
+            await asyncio.wait_for(shut_down.wait(), 1)
+            await asyncio.gather(*host.cleanup_tasks)
+            assert effects == ["disconnect"]
+            assert host._extension_runtime_states == {}
+        finally:
+            released.set()
+            await pending
+            await asyncio.gather(*host.cleanup_tasks)
+            await host.run_manager.shutdown_notification_wakes()
+            host.run_manager.close_durable_queue()
 
     asyncio.run(scenario())

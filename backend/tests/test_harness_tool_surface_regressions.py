@@ -461,6 +461,9 @@ async def test_git_launch_review_real_fsmonitor_and_commit_boundary(tmp_path, mo
     assert (root / ".minicode" / "rules.json").read_text() == "unchanged"
     actual = host("log", "-1", "--format=%s").stdout.decode().strip()
     assert actual == message
+    indexed = set(host("ls-files", "-z").stdout.decode().split("\0")) - {""}
+    assert indexed == {".minicode/rules.json", "tracked.py", "fsmonitor.sh"}
+    assert (root / "tracked.py").read_text(encoding="utf-8") == "final\n"
     print("GIT_REAL_ORACLE=" + json.dumps({"backend": capability.backend, "host_baseline_outside_write": True,
           "readonly_fsmonitor_ran": True, "readonly_outside_write": False, "commit_hook_ran": True,
           "commit_outside_write": False, "protected_rules_write": False, "literal_commit_message": actual}))

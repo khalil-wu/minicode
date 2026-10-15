@@ -234,18 +234,32 @@ async def test_auth_refresh_obeys_query_cancellation_and_deadline(tmp_path, monk
         # Authentication owns this deadline. There are no workspace tools in
         # this scenario; filesystem preflight is covered by workspace tests.
         task = asyncio.create_task(run_query(fixture, None, cancel_event=cancel_event))
-        await asyncio.wait_for(entered.wait(), 3)
-        if stop == "cancel":
-            cancel_event.set()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, 4)
-        else:
-            state, _ = await asyncio.wait_for(task, 4)
-            assert state.stopped_reason == "max_turn_seconds"
-        assert cancelled.is_set()
-        assert len(requests) == (1 if phase == "401" else 0)
-        assert len(fixture.adapters) == 1
-        await fixture.adapters[0].aclose()
+        refresh_entered = asyncio.create_task(entered.wait())
+        try:
+            # Wait for the actual phase, or the query's own bounded terminal.
+            # Journal/prompt setup is not part of the cancellation latency.
+            ready, _ = await asyncio.wait({refresh_entered, task}, return_when=asyncio.FIRST_COMPLETED)
+            if task in ready and not entered.is_set():
+                state, events = await task
+                pytest.fail(f"Query ended before authentication refresh: {state.stopped_reason}; {events}")
+            if stop == "cancel":
+                cancel_event.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 4)
+            else:
+                state, _ = await asyncio.wait_for(task, 4)
+                assert state.stopped_reason == "max_turn_seconds"
+            assert cancelled.is_set()
+            assert len(requests) == (1 if phase == "401" else 0)
+            assert len(fixture.adapters) == 1
+        finally:
+            refresh_entered.cancel()
+            await asyncio.gather(refresh_entered, return_exceptions=True)
+            if not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            await fixture.adapters[0].aclose()
 
 
 @pytest.mark.asyncio

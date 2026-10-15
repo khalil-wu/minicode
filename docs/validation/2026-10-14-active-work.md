@@ -2,6 +2,8 @@
 
 ## 当前优先项：修复 GitHub CI、新会话与项目动作
 
+最新收尾见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`：Root、前端和桌面等五项在诊断 run `38743267369` 通过，Backend 的三个 closed-loop 失败已由真实创建栈定位到原测试发源；Windows 的认证取消 fixture 进入等待也已复现并修正。Linux mount target/FD、真实桌面 close 和这两类 fixture 正在合批，尚待下一次七项完整 CI。先前普通客户端已于 21:05 正常退出；当前源码及后续构建不能用旧窗口或历史 wheel 身份代指。
+
 2026-10-15 最新状态以 `2026-10-15-ci-new-chat-repair.md`、`2026-10-15-ci-source-contract-round03.md` 为准：bundled Python 3.11 新会话的 `is_junction` 根因与文件夹旁的菜单/新聊天按钮已修复、实机核对，前端 `index-srAOTZkG.js` 已在普通 MiniCode 中运行且 `/health` ready。后续已闭合 REST 私有包装记录、LSP 正常退出、未知模型提示词字节来源和冻结审批生命周期；各范围按冻结清单和真实 XML 分别记录。GitHub 尚未全绿，旧 8311 snapshot 明确中止、不计通过，原来未执行的 675 项 Root 尾段正单独验证。完成 CI 后才继续下述 heartbeat、remote executor 和 Memory Phase 1 可选 WS。下方“最终前端/最终 wheel/冻结输入”描述均属于此前交付批，不代表后续修改后的当前源码或安装包。
 
 ## 最新状态：原生命令活动投影与内部证据链本批已交付

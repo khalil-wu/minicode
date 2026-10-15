@@ -69,7 +69,7 @@ def _attach_controlling_terminal():
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
-async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: dict[str, str]):
+async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: dict[str, str], pass_fds: tuple[int, ...] = ()):
     if sys.platform == "win32":
         from backend.sandbox.windows_native import pty_command
 
@@ -92,6 +92,8 @@ async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: di
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         kwargs = {"cwd": str(cwd) if cwd else None, "env": env, "stdin": slave, "stdout": slave,
                   "stderr": slave, "preexec_fn": _attach_controlling_terminal}
+        if pass_fds:
+            kwargs["pass_fds"] = pass_fds
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         read_transport, _ = await loop.connect_read_pipe(lambda: _PtyReadProtocol(reader), os.fdopen(os.dup(master), "rb", 0))

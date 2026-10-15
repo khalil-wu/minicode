@@ -7,6 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const { externalPeerEnvironment } = require("./test-peer-env");
 
 const electronPath = require("electron");
@@ -25,21 +26,16 @@ function closeServer(server) {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-function waitForExit(child, timeoutMs = 5000) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({ code: child.exitCode, signal: child.signalCode, timedOut: false });
+async function waitForClose(closed, timeoutMs = 5000) {
+  let timer;
+  try {
+    return await Promise.race([
+      closed.then((exit) => ({ ...exit, timedOut: false })),
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off("exit", onExit);
-      resolve({ code: child.exitCode, signal: child.signalCode, timedOut: true });
-    }, timeoutMs);
-    const onExit = (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, timedOut: false });
-    };
-    child.once("exit", onExit);
-  });
 }
 
 function createSmokePage(port) {
@@ -57,6 +53,8 @@ function createSmokePage(port) {
           apiBaseUrl: runtime?.apiBaseUrl || "",
           wsBaseUrl: runtime?.wsBaseUrl || "",
           hasRuntimeToken: typeof runtime?.runtimeToken === "string" && runtime.runtimeToken.length >= 16,
+          windowOwnerId: runtime?.windowOwnerId,
+          windowInstanceId: runtime?.windowInstanceId,
           hasSandboxSetup: typeof runtime?.desktop?.sandbox?.setup === "function",
           hasMenuPopup: typeof runtime?.desktop?.menu?.popup === "function",
           nodeIntegrationBlocked: typeof window.require === "undefined",
@@ -140,6 +138,7 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
   });
   const requests = [];
   const requestPaths = [];
+  const releasedWindows = [];
 
   const server = http.createServer((req, res) => {
     requestPaths.push(`${req.method || "GET"} ${req.url || ""}`);
@@ -156,6 +155,21 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     if (req.url === "/embedded") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end("<!doctype html><title>Embedded Browser Smoke</title><p>embedded browser ready</p>");
+      return;
+    }
+    if (req.url === "/api/workspace/language/lifecycle" && req.method === "POST") {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        releasedWindows.push({
+          body: JSON.parse(body),
+          runtimeToken: req.headers["x-minicode-token"],
+          lifecycleToken: req.headers["x-minicode-desktop-lifecycle-token"],
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
     if (req.url === "/e2e-done" && req.method === "POST") {
@@ -210,6 +224,9 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  // `exit` does not prove the child's inherited stdout/stderr handles closed.
+  // Keep the real close receipt from spawn, including an already-exited child.
+  const childClosed = once(child, "close").then(([code, signal]) => ({ code, signal }));
 
   let stdout = "";
   let stderr = "";
@@ -220,12 +237,14 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     stderr += chunk.toString();
   });
 
+  let timeoutId;
   try {
-    let timeoutId;
     const timeout = new Promise((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error("Electron smoke timed out")), 25000);
     });
-    const payload = await Promise.race([done, timeout]);
+    const payload = await Promise.race([done, timeout, childClosed.then((exit) => {
+      throw new Error(`Electron closed before the smoke report: ${JSON.stringify(exit)}`);
+    })]);
     clearTimeout(timeoutId);
 
     assert.equal(payload.hasRuntime, true);
@@ -246,18 +265,31 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     );
     assert.equal(payload.error, "");
     assert.equal(requests.length, 1);
+    const exit = await waitForClose(childClosed, 3000);
+    assert.equal(exit.timedOut, false, "Electron did not complete its normal desktop shutdown");
+    assert.equal(exit.code, 0);
+    assert.equal(exit.signal, null);
+    assert.deepEqual(releasedWindows, [{
+      body: { action: "release_window", window_owner_id: payload.windowOwnerId, window_instance_id: payload.windowInstanceId },
+      runtimeToken: "e2e-runtime-token-1234567890",
+      lifecycleToken: peer.env.MINICODE_EMBEDDED_BROWSER_TOKEN,
+    }]);
   } catch (error) {
-    error.message += `\n--- requests ---\n${requestPaths.join("\n")}`;
-    error.message += `\n--- child ---\nexitCode=${child.exitCode} signalCode=${child.signalCode}`;
-    error.message += `\n--- electron stdout ---\n${stdout}\n--- electron stderr ---\n${stderr}`;
-    throw error;
+    throw new Error(`${error.message}\n--- requests ---\n${requestPaths.join("\n")}`
+      + `\n--- child ---\nexitCode=${child.exitCode} signalCode=${child.signalCode}`
+      + `\n--- electron stdout ---\n${stdout}\n--- electron stderr ---\n${stderr}`, { cause: error });
   } finally {
-    const exit = await waitForExit(child, 3000);
+    clearTimeout(timeoutId);
+    let exit = await waitForClose(childClosed, 3000);
     if (exit.timedOut) {
       child.kill("SIGKILL");
-      await waitForExit(child, 3000);
+      exit = await waitForClose(childClosed, 3000);
     }
     await closeServer(server);
-    fs.rmSync(userDataDir, { recursive: true, force: true });
+    assert.equal(exit.timedOut, false, "Owned Electron process and its stdio are still open; preserving its profile");
+    if (exit.code === 0 && exit.signal === null) {
+      assert.equal(path.dirname(path.resolve(userDataDir)), path.resolve(os.tmpdir()));
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+    }
   }
 });

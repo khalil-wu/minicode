@@ -93,11 +93,10 @@ jobs:
         id: backend_tests
         run: |
           set -o pipefail
-          session_owner_trace=()
-          if [[ "${{ matrix.suite }}" == "backend" ]]; then
-            session_owner_trace=(-p scripts.ci_trace_session_owners --session-owner-trace-output=pytest-backend-session-owners.jsonl)
-          fi
-          python -m pytest "${{ matrix.test_path }}" "${session_owner_trace[@]}" -vv -o faulthandler_timeout=60 --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
+          uname -a
+          git --version
+          bwrap --version
+          python -m pytest "${{ matrix.test_path }}" -vv -o faulthandler_timeout=60 -o junit_logging=system-out --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
         if: failure() && steps.backend_tests.outcome == 'failure'
         run: |
@@ -118,7 +117,6 @@ jobs:
           path: |
             pytest-${{ matrix.suite }}.log
             pytest-${{ matrix.suite }}.xml
-            pytest-backend-session-owners.jsonl
           if-no-files-found: ignore
 
   windows-harness:

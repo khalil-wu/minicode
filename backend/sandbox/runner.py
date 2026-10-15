@@ -24,6 +24,7 @@ from typing import Any, Awaitable, BinaryIO, Callable
 
 from backend.config import DATA_ROOT
 from backend.runtime_env import powershell_script, shell_subprocess_env
+from backend.sandbox.mount_targets import BubblewrapMountTargets
 from backend.sandbox.policy import (
     FileSystemAccessMode,
     ResolvedSandboxPolicy,
@@ -100,11 +101,10 @@ class SandboxUnavailableError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _SyntheticMountTarget:
-    """Host mount target created only for sandbox namespace construction.
+    """Legacy container mount target created for namespace construction.
 
-    This mirrors Codex's SyntheticMountTarget lifecycle: cleanup removes only
-    the exact empty inode created by this runner, after the child confirms that
-    its mount namespace is ready.
+    Container bootstrap removes its exact empty host inode after readiness.
+    Bubblewrap uses BubblewrapMountTargets and holds targets through child exit.
     """
 
     path: Path
@@ -448,6 +448,7 @@ class SandboxRunner:
         self._container_name = ""
         self.process: asyncio.subprocess.Process | None = None
         self._synthetic_mount_targets: list[_SyntheticMountTarget] = []
+        self._bubblewrap_mount_targets: BubblewrapMountTargets | None = None
         self._synthetic_mount_overrides: dict[str, Path] = {}
         self._sandbox_ready_file: Path | None = None
         self._windows_private_desktop: Any | None = None
@@ -655,6 +656,8 @@ class SandboxRunner:
                 "cwd": str(cwd) if cwd else None,
                 "env": self._build_env(),
             }
+            if self._bubblewrap_mount_targets is not None:
+                spawn_kwargs["pass_fds"] = self._bubblewrap_mount_targets.preserved_fds
             if isinstance(wrapped, list):
                 process = await spawn_exec(*wrapped, **spawn_kwargs)
             else:
@@ -695,6 +698,8 @@ class SandboxRunner:
                 "env": self._build_env(),
                 "on_exit": on_exit,
             }
+            if self._bubblewrap_mount_targets is not None:
+                spawn_kwargs["pass_fds"] = self._bubblewrap_mount_targets.preserved_fds
             if isinstance(wrapped, list):
                 process = await spawn_exec(*wrapped, **spawn_kwargs)
             else:
@@ -865,10 +870,16 @@ class SandboxRunner:
                 "cwd": str(cwd) if cwd else None,
                 "env": env,
             }
+            preserved_fds = self._bubblewrap_mount_targets.preserved_fds if self._bubblewrap_mount_targets is not None else ()
+            if preserved_fds:
+                spawn_kwargs["pass_fds"] = preserved_fds
             if tty and capability.backend != "windows-elevated-wfp":
                 from backend.terminal.pty_process import spawn_pty
 
-                proc = await spawn_pty(wrapped_command, cwd=cwd, env=env)
+                pty_kwargs = {"cwd": cwd, "env": env}
+                if preserved_fds:
+                    pty_kwargs["pass_fds"] = preserved_fds
+                proc = await spawn_pty(wrapped_command, **pty_kwargs)
             elif isinstance(wrapped_command, list):
                 proc = await spawn_exec(*wrapped_command, **spawn_kwargs)
             else:
@@ -1222,12 +1233,13 @@ class SandboxRunner:
         shell_command = shlex.join(argv) if argv is not None else command
 
         if capability.backend == "bubblewrap":
-            ready_path = self._prepare_synthetic_mount_targets(resolved)
+            ready_path = self._prepare_bubblewrap_mount_targets(resolved)
             return _bubblewrap_command(
                 shell_command,
                 resolved,
                 ready_path=ready_path,
                 mount_path_overrides=self._synthetic_mount_overrides,
+                private_mount_targets=self._bubblewrap_mount_targets,
             )
 
         if capability.backend == "seatbelt":
@@ -1290,6 +1302,38 @@ class SandboxRunner:
         raise SandboxUnavailableError(
             capability.reason or f"Unsupported sandbox backend: {capability.backend}"
         )
+
+    def _prepare_bubblewrap_mount_targets(self, resolved: ResolvedSandboxPolicy) -> Path | None:
+        targets = BubblewrapMountTargets()
+        self._bubblewrap_mount_targets = targets
+        protected_names = {name for writable in resolved.writable_roots for name in writable.protected_metadata_names}
+        overrides = {}
+        for path, access in _resolved_path_events(resolved):
+            if access is FileSystemAccessMode.WRITE:
+                continue
+            writable_symlink = _first_writable_symlink_component(path, resolved)
+            if writable_symlink is not None:
+                raise SandboxUnavailableError(
+                    f"Cannot enforce sandbox protection for {path} because it crosses writable symlink {writable_symlink}"
+                )
+            if path.exists():
+                if _policy_path_is_writable(resolved, path.parent):
+                    targets.acquire(path, kind="file", protected_metadata=path.name in protected_names)
+                continue
+            missing = _first_missing_component(path)
+            if missing is None or not _policy_path_is_writable(resolved, missing.parent):
+                continue
+            protected = missing.name in protected_names
+            targets.acquire(missing, kind="directory" if protected else "file",
+                protected_metadata=protected)
+            overrides[os.path.normcase(str(path.expanduser().absolute()))] = missing
+        self._synthetic_mount_overrides = overrides
+        if not targets.masks:
+            return None
+        handle = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="minicode-sandbox-ready-", delete=False)
+        handle.close()
+        self._sandbox_ready_file = Path(handle.name)
+        return self._sandbox_ready_file
 
     def _prepare_synthetic_mount_targets(
         self,
@@ -1386,7 +1430,8 @@ class SandboxRunner:
         while time.monotonic() < deadline:
             try:
                 if ready_file.read_text(encoding="utf-8") == "ready":
-                    self._cleanup_sandbox_setup_state()
+                    if self._bubblewrap_mount_targets is None:
+                        self._cleanup_sandbox_setup_state()
                     return
             except OSError:
                 pass
@@ -1417,6 +1462,9 @@ class SandboxRunner:
         )
 
     def _cleanup_sandbox_setup_state(self) -> None:
+        if self._bubblewrap_mount_targets is not None:
+            self._bubblewrap_mount_targets.close()
+            self._bubblewrap_mount_targets = None
         targets = self._synthetic_mount_targets
         self._synthetic_mount_overrides = {}
         ready_file = self._sandbox_ready_file
@@ -1892,6 +1940,7 @@ def _bubblewrap_command(
     *,
     ready_path: Path | None = None,
     mount_path_overrides: dict[str, Path] | None = None,
+    private_mount_targets: BubblewrapMountTargets | None = None,
 ) -> str:
     """Build Codex-style layered mounts for a canonical filesystem policy."""
 
@@ -1935,12 +1984,32 @@ def _bubblewrap_command(
         if access is FileSystemAccessMode.DENY
     ]
     for path, access in _resolved_path_events(resolved):
+        target = _mount_event_path(path, access, mount_path_overrides)
+        private_kind = private_mount_targets.masks.get(target) if private_mount_targets is not None else None
+        if private_kind is not None and access is not FileSystemAccessMode.WRITE:
+            if private_kind == "directory":
+                args.extend(("--perms", "555" if access is FileSystemAccessMode.READ else "000",
+                    "--tmpfs", str(target), "--remount-ro", str(target)))
+            else:
+                descriptor = private_mount_targets.bind_data_descriptor()
+                if access is FileSystemAccessMode.DENY:
+                    args.extend(("--perms", "000"))
+                args.extend(("--ro-bind-data", str(descriptor), str(target)))
+            continue
         _append_bwrap_path_event(
             args,
-            _mount_event_path(path, access, mount_path_overrides),
+            target,
             access,
             denied_roots=denied_roots,
         )
+        if private_mount_targets is not None and access is FileSystemAccessMode.WRITE and target.exists():
+            registry = private_mount_targets.registry_root
+            registry_mount = registry if registry.is_relative_to(target) else target if target.is_relative_to(registry) else None
+            if registry_mount is not None:
+                # Source applies registry protection immediately after a write
+                # bind exposes it, before a later deny can hide its parent.
+                registry.mkdir(parents=True, exist_ok=True)
+                args.extend(("--ro-bind", str(registry_mount), str(registry_mount)))
 
     if ready_path is not None:
         args.extend(("--bind", str(ready_path), "/dev/minicode-control-ready"))

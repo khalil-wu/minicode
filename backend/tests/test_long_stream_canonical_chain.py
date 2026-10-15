@@ -190,6 +190,7 @@ async def _run_image_query_through_main(directory, workspace, config, model, sto
             await outbox.drain_delivery()
             await outbox.drain_persistence()
         finally:
+            await session.run_manager.shutdown_notification_wakes()
             session.run_manager.close_durable_queue()
             await artifacts.flush()
     cold = ConversationRepository(session.conversation_repo._base_dir).get_conversation(session.active_conversation_id)
