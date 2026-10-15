@@ -21,6 +21,7 @@ def _owner_session(repository: ConversationRepository, active_id: str, **extra):
     return SimpleNamespace(
         active_conversation_id=active_id,
         conversation_repo=repository,
+        is_connected=True,
         **extra,
     )
 

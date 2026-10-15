@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 
 import pytest
 
 from backend.artifact.store import ArtifactStore
-from backend.config import PermissionSettings
 from backend.permissions import argv_rules, shell_ast
 from backend.permissions.checker import PermissionChecker, check_catastrophic_command
-from backend.permissions.context import PermissionContext
 from backend.tools.base import PermissionLevel
 from backend.tools.command_support import _command_side_effect_kind
 from backend.tools.command_tool import RunCommandTool
@@ -177,18 +173,40 @@ def test_literal_external_commands_are_classified_external() -> None:
     assert _command_side_effect_kind({"command": "git -C sub fetch"}) == "external"
 
 
-def test_bypass_mode_confirms_composed_destructive_commands() -> None:
-    td = tempfile.mkdtemp()
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path(td) / "artifacts"))
-    checker = PermissionChecker(settings=PermissionSettings(), workspace_root=Path(td))
-    bypass = PermissionContext(mode="bypass")
-    remembered = PermissionContext(
-        mode="confirm", session_overrides={"run_command": PermissionLevel.AUTO}
-    )
-    for command in ("{ rm -rf /; }", "git $(echo reset) --hard", "echo / | xargs rm -rf"):
-        for context in (bypass, remembered):
-            assert (
-                checker.check("run_command", {"command": command}, context=context, tool=tool)
-                == PermissionLevel.CONFIRM
-            ), (command, context.mode)
-    assert checker.check("run_command", {"command": "ls"}, context=bypass, tool=tool) == PermissionLevel.AUTO
+def test_bypass_and_remembered_allows_preserve_frozen_source_compound_rules(tmp_path) -> None:
+    import json
+    from backend.config import permission_settings_from_config
+    from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+    from backend.permissions.exec_policy import ExecPolicyOwner
+    from backend.permissions.context import ToolExecutionContext
+    from backend.llm.base import ToolCallEvent
+    from backend.sandbox import SandboxPolicy
+    from backend.tests.native_command_harness import configure_command_context, authorize_command_call
+    from backend.tools.command_support import command_shell_argv
+
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
+    home = tmp_path / "source-policy"
+    (home / "rules").mkdir(parents=True)
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(home / "settings.json")), {}),))
+    for text in ("{ rm -rf /; }", "git $(echo reset) --hard", "echo / | xargs rm -rf"):
+        # Authorize the real captured argv only. None of these commands run.
+        outer = command_shell_argv(text, wrap_powershell=False)
+        rules = "\n".join(f'prefix_rule(pattern={json.dumps(prefix)}, decision="forbidden")'
+            for prefix in (["rm"], ["git"], ["xargs"], [outer[0]]))
+        (home / "rules/default.rules").write_text(rules, encoding="utf-8")
+        for mode in ("bypass", "confirm"):
+            permission = checker.build_context(mode=mode,
+                session_overrides={"run_command": PermissionLevel.AUTO})
+            context = configure_command_context(tool, ToolExecutionContext(permission, workspace_root=tmp_path),
+                sandbox_policy=SandboxPolicy.bypass())
+            context.run_context.exec_policy_owner = ExecPolicyOwner(home=home, stack=stack)
+            result = authorize_command_call(ToolCallEvent(id="compound", name="run_command", arguments={"command": text}), context)
+            assert result.request.exec_policy.kind == "forbidden", result.request.exec_policy.evidence_json
+            assert result.permission_decision.permission_level == PermissionLevel.ALWAYS_DENY
+    context = configure_command_context(tool,
+        ToolExecutionContext(checker.build_context(mode="bypass"), workspace_root=tmp_path),
+        sandbox_policy=SandboxPolicy.bypass())
+    safe = authorize_command_call(ToolCallEvent(id="safe-command", name="run_command", arguments={"command": "echo observed"}), context)
+    assert safe.request.exec_policy.kind == "skip"
+    assert safe.permission_decision.decision == "allow"

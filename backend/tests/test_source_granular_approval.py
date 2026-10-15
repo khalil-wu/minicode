@@ -291,15 +291,16 @@ async def test_real_strict_turn_grant_reaches_frozen_command_review_without_waiv
     import shlex
     import sys
     from backend.agent.context import ContextBuilder
-    from backend.agent.final_tool_request import canonical_tool_request_digest
     from backend.agent.guardian.host import GuardianHostState
     from backend.agent.state import AgentState
     from backend.agent.tool_batch_runner import ToolBatchRunner
     from backend.llm.base import ToolCallEvent
     from backend.permissions.grants import PermissionGrantResponse
+    from backend.permissions.exec_policy import ExecPolicyOwner
     from backend.sandbox.policy import AdditionalPermissionProfile, FileSystemPermissions, FileSystemSandboxEntry, FileSystemPath, FileSystemAccessMode
     from backend.tests.test_codex_guardian import ControlledRuntime, guardian_context
     from backend.tools.command_tool import RunCommandTool
+    from backend.tools.command_support import command_shell_argv
     from backend.tools.registry import ToolRegistry
 
     ControlledRuntime.outputs = ['{"outcome":"allow"}']
@@ -336,7 +337,18 @@ async def test_real_strict_turn_grant_reaches_frozen_command_review_without_waiv
     script = "from pathlib import Path; Path('reviewed.txt').write_text('approved bytes')"
     command = ("& '" + sys.executable.replace("'", "''") + "' -c '" + script.replace("'", "''") + "'"
         if sys.platform == "win32" else shlex.quote(sys.executable) + " -c " + shlex.quote(script))
-    args = {"command": command, **({"with_escalated_permissions": True} if escalated else {})}
+    args = {"command": command, **({"sandbox_permissions": "require_escalated"} if escalated else {})}
+    native_home = tmp_path / "strict-exec-policy"
+    if explicit_rule:
+        rules = native_home / "rules"
+        rules.mkdir(parents=True)
+        # Source retains this PowerShell invocation as a generic command;
+        # its executable, rather than the embedded Python string, owns the rule.
+        executable = command_shell_argv(command, wrap_powershell=False)[0] if sys.platform == "win32" else sys.executable
+        (rules / "default.rules").write_text(
+            f'prefix_rule(pattern={json.dumps([executable])}, decision="prompt")', encoding="utf-8")
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(native_home / "settings.json")), {}),))
+    ctx.run_context.exec_policy_owner = ExecPolicyOwner(home=native_home, stack=stack)
     registry = ToolRegistry()
     registry.register(RunCommandTool(ctx.artifact_store))
     state = AgentState(user_message="Write the approved file")
@@ -346,7 +358,13 @@ async def test_real_strict_turn_grant_reaches_frozen_command_review_without_waiv
     try:
         events = [event async for event in batch.run([ToolCallEvent(id="strict-call", name="run_command", arguments=args)])]
         decisions = [event.data for event in events if event.type == "permission.decision"]
-        assert decisions and decisions[0]["request_digest"] == canonical_tool_request_digest("run_command", args)
+        if escalated:
+            assert not decisions and not target.exists()
+            assert state.tool_calls[-1].error_kind == "exec_policy"
+            assert not ControlledRuntime.instances
+            assert not any(kind == "guardian_assessment" for kind, _ in emissions)
+            return
+        assert decisions and decisions[0]["request_digest"] == state.tool_calls[-1].request_digest
         if explicit_rule or escalated:
             assert not target.exists()
             assert decisions[0]["decision"] == "deny"

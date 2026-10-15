@@ -91,7 +91,14 @@ def test_active_editor_file_loads_scoped_instructions_before_any_tool(instructio
 def test_child_role_matches_its_model_visible_execution_mode(role, instruction_roots):
     state = AgentState(user_message='Delegate')
     populate_prompt_context(state=state, metadata={'agent_mode': 'subagent', 'agent_role': f'subagent:{role}'}, workspace_root=instruction_roots, permission_context=PermissionContext(mode='plan'))
-    assert f'mode: {role}' in ContextBuilder._build_agent_mode_block(state)
+    builder = ContextBuilder(workspace_root=instruction_roots)
+    if role == 'plan':
+        assert ContextBuilder._build_agent_mode_block(state) == ''
+        assert state.prompt_context['collaboration_mode'] == 'plan'
+        assert builder._build_collaboration_mode_block(state).startswith('<collaboration_mode>\n')
+        assert '# Plan Mode' in builder._build_collaboration_mode_block(state)
+    else:
+        assert f'mode: {role}' in ContextBuilder._build_agent_mode_block(state)
 
 
 def test_explicit_skill_tail_survives_initial_load_and_checkpoint_roundtrip(instruction_roots):
@@ -139,6 +146,7 @@ def test_missing_selected_skill_does_not_switch_to_same_named_workflow(instructi
 async def test_interrupt_replay_cannot_stop_a_different_turn():
     session = SimpleNamespace(
         active_conversation_id='conversation',
+        ws_manager=None,
         _conversation_streams={'conversation': {'turn_id': 'new-turn', 'message_id': 'new-message'}},
         run_manager=SimpleNamespace(
             run_task_ids={'conversation': 'new-task'},

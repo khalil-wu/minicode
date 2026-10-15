@@ -1105,6 +1105,7 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         "availability_filters": [],
         "code_mode_enabled": True,
         "code_mode_only": False,
+        "supports_search_tool": False,
     }
     first_epoch = first_record.mailbox_epoch
     original_agent_path = first_record.agent_path

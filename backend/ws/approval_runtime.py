@@ -304,6 +304,9 @@ class SessionApprovalRuntimeMixin:
                 return False
             payload = dict(payload)
             payload.pop("remember_for_session", None)
+        if isinstance(pending_request, dict) and "mcp_approval" in pending_request:
+            if payload.get("auto_approved") or payload.get("session_approved"):
+                return False
         if isinstance(pending_request, dict) and "command" in pending_request:
             decision = payload.get("decision")
             available = pending_request["available_decisions"]
@@ -397,9 +400,8 @@ class SessionApprovalRuntimeMixin:
     ) -> list[str]:
         """Approve pending tool calls that the current policy now allows.
 
-        A mode switch approves exactly what the new mode would have run without
-        asking; anything it still gates (bypass keeps destructive commands behind
-        confirmation) stays pending for the user.
+        A session default change can settle ordinary local prompts. Source
+        command and MCP requests retain their issuing step's captured authority.
         """
         pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
@@ -448,6 +450,10 @@ class SessionApprovalRuntimeMixin:
     def _pending_tool_payload_is_auto_allowed(self, payload: dict[str, Any]) -> bool:
         request = payload.get("request")
         if not isinstance(request, dict):
+            return False
+        # Source pending_approvals hold the issuing StepContext's one-shot
+        # response. Changing session defaults never reauthorizes that request.
+        if "available_decisions" in request or "mcp_approval" in request:
             return False
         tool_name = str(request.get("tool_name") or "").strip()
         args = request.get("input") or {}

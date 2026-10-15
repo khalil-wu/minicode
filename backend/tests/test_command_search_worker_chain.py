@@ -12,7 +12,10 @@ from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.message import AgentEvent
 from backend.agent.query_journal import QueryJournalRecorder
 from backend.agent.state import AgentState
-from backend.agent.tool_execution import run_tool_with_timeout, store_result
+from backend.agent.tool_execution import (
+    _authorize_final_tool_request, _bind_final_tool_request,
+    run_tool_with_timeout, store_result, tool_context_with_live_output,
+)
 from backend.artifact.store import ArtifactStore
 from backend.config import PermissionSettings
 from backend.llm.base import ToolCallEvent
@@ -20,6 +23,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.sandbox import SandboxPolicy, SandboxResult
 from backend.subprocesses import SubprocessOutputLimitError, SubprocessTimeoutError, record_unproven_cleanup
+from backend.tests.native_command_harness import configure_command_context
 from backend.tools import command_tool, search_support, search_tools
 from backend.tools.registry import ToolRegistry
 
@@ -163,6 +167,7 @@ async def test_foreground_output_cancel_finishes_owned_persistence_and_capture_c
     store = ArtifactStore(storage_dir=tmp_path / "artifacts")
     token = store.bind_owner(context.conversation_id, str(tmp_path))
     tool = command_tool.RunCommandTool(store)
+    configure_command_context(tool, context, sandbox_policy=context.sandbox_policy)
     loop = asyncio.get_running_loop()
     entered, release, finished = asyncio.Event(), threading.Event(), threading.Event()
     references = []
@@ -186,7 +191,14 @@ async def test_foreground_output_cancel_finishes_owned_persistence_and_capture_c
             finished.set()
 
     monkeypatch.setattr(command_tool if fallback else store, "persist_tool_result" if fallback else "save", persist)
-    task = asyncio.create_task(tool.execute({"command": "Write-Output 'recorded'", "max_chars": 32, "env": {"TASK_MODE": "audit"}}, context))
+    call = ToolCallEvent(id=context.tool_call_id, name=tool.name,
+        arguments={"command": "Write-Output 'recorded'", "max_chars": 32, "env": {"TASK_MODE": "audit"}})
+    authorized = _authorize_final_tool_request(call, tool_registry=context.tool_registry,
+        permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+    assert not authorized.error and authorized.permission_decision.decision == "allow"
+    _bind_final_tool_request(call, authorized.request)
+    execution_context = tool_context_with_live_output(call, context, context.tool_registry)
+    task = asyncio.create_task(tool.execute(call.arguments, execution_context))
     try:
         await cancel_while_owned(task, entered, release, finished)
         assert not raw.exists() and len(references) == 1

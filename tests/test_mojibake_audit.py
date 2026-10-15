@@ -8,7 +8,8 @@ from pathlib import Path
 MOJIBAKE_MARKER_CODEPOINTS = (0xFFFD, 0x9225, 0x93C9, 0x935B, 0x7EDB, 0x6A9A, 0x6A9D, 0x8133)
 MOJIBAKE_MARKERS = tuple(chr(codepoint) for codepoint in MOJIBAKE_MARKER_CODEPOINTS)
 SOURCE_PREFIXES = ("backend/", "frontend/src.v2/", "desktop/")
-EXCLUDED_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pyc", ".pyo")
+# Compiled PE resources are binary data, independently of their source text.
+EXCLUDED_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pyc", ".pyo", ".exe")
 EXCLUDED_DIR_NAMES = {"__pycache__", "node_modules", "dist", "build", "python-runtime", "release"}
 TEXT_SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".cjs", ".mjs", ".json", ".html", ".css", ".md"}
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import get_args
 
 from backend.agent.compaction import format_compaction_history
-from backend.config import AgentSettings, PermissionSettings
+from backend.config import AgentSettings, PermissionSettings, permission_settings_from_config
 from backend.agent.policies.stream_retry import DefaultStreamRetryPolicy, StreamRetryState
 from backend.llm.base import LLMMessage, ToolCallEvent
 from backend.llm.errors import classify_llm_error, retry_after_seconds
@@ -147,20 +147,20 @@ def test_retry_after_parser_accepts_response_header_and_projected_error() -> Non
 
 
 def test_auto_does_not_silently_accept_workspace_edits(tmp_path) -> None:
-    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
     tool = WriteFileTool()
     args = {"file_path": "new.txt", "content": "hello"}
 
     assert checker.check(
         "write_file",
         args,
-        context=PermissionContext(mode="auto"),
+        context=checker.build_context(mode="auto"),
         tool=tool,
     ) == PermissionLevel.DIFF_REVIEW
     assert checker.check(
         "write_file",
         args,
-        context=PermissionContext(mode="bypass"),
+        context=checker.build_context(mode="bypass"),
         tool=tool,
     ) == PermissionLevel.AUTO
 

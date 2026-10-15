@@ -51,9 +51,13 @@ async def execute_command(tool: RunCommandTool, arguments: dict, context: ToolEx
     return await execute_command_call(call, context)
 
 
-async def execute_command_call(call: ToolCallEvent, context: ToolExecutionContext):
-    authorization = _authorize_final_tool_request(call, tool_registry=context.tool_registry,
+def authorize_command_call(call: ToolCallEvent, context: ToolExecutionContext):
+    return _authorize_final_tool_request(call, tool_registry=context.tool_registry,
         permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+
+
+async def execute_command_call(call: ToolCallEvent, context: ToolExecutionContext):
+    authorization = authorize_command_call(call, context)
     assert not authorization.error, authorization.error
     assert authorization.permission_decision.decision == "allow", authorization.permission_decision
     assert authorization.request.exec_policy.kind == "skip", authorization.request.exec_policy.reason

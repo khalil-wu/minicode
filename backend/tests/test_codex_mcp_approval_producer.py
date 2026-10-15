@@ -78,13 +78,14 @@ def policy(workspace, kind):
     return SandboxPolicy(workspace_root=workspace, permission_profile=profile)
 
 
-def authorize(tool, workspace, sandbox, permission, *, permission_settings=None, context=None):
+def authorize(tool, workspace, sandbox, permission, *, permission_settings=None, context=None, arguments=None):
     registry = ToolRegistry()
     registry.register(tool)
     checker = PermissionChecker(permission_settings or settings(), workspace)
     context = context or ToolExecutionContext(permission, workspace_root=workspace, sandbox_policy=sandbox, tool_registry=registry,
         session_id="owned-session", conversation_id="owned-thread", turn_id="owned-turn")
-    call = ToolCallEvent(id="frozen-mcp-call", name=tool.name, arguments={"value": "original"})
+    call = ToolCallEvent(id="frozen-mcp-call", name=tool.name,
+        arguments={"value": "original"} if arguments is None else arguments)
     return _authorize_final_tool_request(call, tool_registry=registry, permission_checker=checker,
         permission_context=permission, tool_ctx=context), context, registry
 

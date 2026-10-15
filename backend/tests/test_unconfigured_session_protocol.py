@@ -432,6 +432,8 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
     from backend.agent.model_execution import ModelExecutionSnapshot
     from backend.agent.execution_journal import ExecutionJournal, execution_journal_owner, turn_input_rejection_id
 
+    monkeypatch.setattr("backend.memory.generation.schedule_memory_startup", lambda **_kwargs: None)
+
     monkeypatch.setenv("OPENAI_MODEL", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_API_KEY", "offline-fixture")
@@ -482,7 +484,7 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             assert before["model"] == "gpt-6.1-sol" and before["effective_reasoning_effort"] == "medium"
             assert before["reasoning_effort_supported"] is True and adapters == []
             await socket.command("user_message", content="Return the requested result", conversation_id=conversation_id,
-                client_command_id="first-selected-query", user_message_id="first-user", assistant_message_id="first-assistant")
+                permission_mode="bypass", client_command_id="first-selected-query", user_message_id="first-user", assistant_message_id="first-assistant")
             done = await socket.until("done", conversation_id=conversation_id)
             assert done["status"] == "completed", [event for event in socket.sent if event["type"] == "error"]
             session = main._state.ws_manager.get_session(socket.query_params["session_id"])
@@ -537,10 +539,14 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             assert len(adapters) == 1 and session.llm is captured.llm
             assert session.runtime_toolset_policy(session.tool_registry).code_mode_enabled is False
             await socket.command("user_message", content="Use the saved provider", conversation_id=saved.id,
-                client_command_id="saved-provider-query", user_message_id="saved-user", assistant_message_id="saved-assistant")
+                permission_mode="bypass", client_command_id="saved-provider-query", user_message_id="saved-user", assistant_message_id="saved-assistant")
             second_done = await socket.until("done", conversation_id=saved.id)
             assert second_done["status"] == "completed"
-            assert len(adapters) == len(requests) == 2 and session.llm is adapters[1]
+            assert len(adapters) == len(requests) == 2 and session.llm is adapters[1], [
+                {"model": request.get("model"), "client_metadata": request.get("client_metadata"),
+                 "input_types": [item.get("type", item.get("role")) for item in request.get("input", [])],
+                 "instructions_length": len(request.get("instructions", ""))} for request in requests
+            ]
             assert requests[1]["model"] == "catalog-model" and requests[1]["reasoning"]["effort"] == "high"
             assert "Saved entry 0" in json.dumps(requests[1])
 
@@ -604,6 +610,11 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             assert session._provider_capabilities_payload()["model"] == "gpt-6.1-sol"
             assert session.runtime_toolset_policy(session.tool_registry).code_mode_enabled is True
             assert len(adapters) == len(requests) == 2 and session.llm is adapters[1]
+            probe = session.session_lifecycle.sandbox_capability_task
+            if probe is not None:
+                await asyncio.wait_for(asyncio.shield(probe), 5)
+            await asyncio.gather(*tuple(session.session_lifecycle._retired_workspace_tasks))
+            await session.event_outbox.drain_delivery()
             skill_snapshot = session.skill_manager.snapshot
             skill_reads = []
 

@@ -35,8 +35,8 @@ def message(cid, name):
 
 async def drain_commands(session):
     async with asyncio.timeout(3):
-        while session.command_dispatcher.command_tasks:
-            await asyncio.gather(*tuple(session.command_dispatcher.command_tasks))
+        while session.command_dispatcher.command_tasks or session.execution_cleanup_tasks:
+            await asyncio.gather(*(session.command_dispatcher.command_tasks | session.execution_cleanup_tasks))
             session.command_dispatcher.prune_command_tasks()
 
 
@@ -131,6 +131,7 @@ async def test_live_callback_done_gate_then_true_claim_release_dispatches_once(m
     callback_entered = asyncio.Event()
     release_callback = asyncio.Event()
     finish_old = asyncio.Event()
+    late_completed = asyncio.Event()
     admitted = []
     old_claim = None
 
@@ -157,6 +158,8 @@ async def test_live_callback_done_gate_then_true_claim_release_dispatches_once(m
         done.data.update(conversation_id=cid, message_id=metadata['assistant_message_id'])
         await session.send_event(done)
         session.run_manager.mark_delivery_complete(cid, metadata['_run_task_id'])
+        if content == 'late':
+            late_completed.set()
 
     session._run_agent_locked = run_locked
     assert await session.command_dispatcher._handle_command(message(cid, 'old'))
@@ -180,6 +183,7 @@ async def test_live_callback_done_gate_then_true_claim_release_dispatches_once(m
     async with asyncio.timeout(3):
         while conversation_query_guards().owns(old_claim):
             await asyncio.sleep(0)
+    await asyncio.wait_for(late_completed.wait(), 3)
     await drain_commands(session)
     await session.event_outbox.drain_delivery()
     assert admitted == ['old', 'queued', 'late']

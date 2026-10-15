@@ -18,16 +18,20 @@ from backend.tests.test_unconfigured_session_protocol import ProtocolSocket, pro
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.durable_user_queue import DurableUserMessageQueue
 from backend.ws.run_manager import SessionRunManager
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 @pytest.mark.asyncio
-async def test_two_verified_windows_same_conversation_same_request_id_execute_both_tasks(monkeypatch, protocol_environment):
+async def test_two_verified_windows_same_conversation_same_request_id_execute_both_tasks(tmp_path, monkeypatch, protocol_environment):
     from backend.config_helpers import SETTINGS_FILE
     monkeypatch.setenv("OPENAI_MODEL", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_API_KEY", "offline-fixture")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://identity.protocol.invalid/v1")
     SETTINGS_FILE.write_text(json.dumps({"llm": {"provider": "openai"}}), encoding="utf-8")
+    # This oracle counts the two foreground producers. Memory consolidation
+    # owns separate model requests and has its own lifecycle/transport tests.
+    monkeypatch.setattr("backend.memory.generation.schedule_memory_startup", lambda **_kwargs: None)
     requests = []
 
     async def respond(request):
@@ -60,7 +64,8 @@ async def test_two_verified_windows_same_conversation_same_request_id_execute_bo
         try:
             for socket in sockets:
                 await socket.until("llm.model.updated")
-            await sockets[0].command("conversation.create", activate=True, title="Shared request identity")
+            await sockets[0].command("conversation.create", activate=True, title="Shared request identity",
+                projectless_base=str(tmp_path / "tasks"), permission_mode="bypass")
             conversation_id = (await sockets[0].until("conversation.switched"))["conversation_id"]
             await sockets[1].command("conversation.switch", conversation_id=conversation_id)
             await sockets[1].until("conversation.switched", conversation_id=conversation_id, is_hydrating=False)
@@ -69,7 +74,7 @@ async def test_two_verified_windows_same_conversation_same_request_id_execute_bo
                 # No message IDs are sent; two independent producers legally
                 # reuse one request ID and even submit identical content.
                 await socket.command("user_message", content="Complete this task", conversation_id=conversation_id,
-                    client_command_id="same-request")
+                    client_command_id="same-request", permission_mode="bypass")
                 receipt = await socket.until("command.result", command="user_message", client_command_id="same-request")
                 assert receipt["data"]["admitted"] is True
                 done = await socket.until("done", conversation_id=conversation_id, message_id=receipt["data"]["assistant_message_id"])
@@ -114,8 +119,10 @@ def recovered_session(tmp_path, monkeypatch):
         conversation_repo=repository, running_agent_task_for=lambda cid: None,
         conversation_lifecycle_lock=lambda: asyncio.Lock(),
         event_outbox=SimpleNamespace(bind_connection_generation=lambda *_: nullcontext(), bind_client_command=lambda *_, **__: nullcontext()),
-        session_lifecycle=SimpleNamespace(schedule_task_runtime_update=lambda: None, workspace_root_for_conversation=lambda *_: ""),
         send_event=send_event, start_agent_run=start)
+    session.session_lifecycle = SessionLifecycle(session)
+    session.session_lifecycle.schedule_task_runtime_update = lambda: None
+    session.session_lifecycle.workspace_root_for_conversation = lambda *_: ""
     queue_path = tmp_path / "user-message-queue/identity-source.json"
     queue_path.parent.mkdir(parents=True)
     packet = {"type": "user_message", "data": {"conversation_id": conversation.id, "client_command_id": "legacy-request",

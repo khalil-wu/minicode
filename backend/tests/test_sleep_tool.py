@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.sleep_tool import SleepTool
+from backend.tools.toolsets import ToolsetPolicy
 
 
 def test_sleep_waits_briefly() -> None:
@@ -31,9 +34,13 @@ def test_sleep_is_cancel_aware() -> None:
     assert "cancelled" in result.content
 
 
-def test_sleep_is_registered_as_deferred_tool(tmp_path) -> None:
+@pytest.mark.parametrize("supports_search_tool", [False, True])
+def test_sleep_exposure_follows_selected_model_search_capability(tmp_path, supports_search_tool) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
     assert registry.get_tool("sleep") is not None
-    names = {schema["function"]["name"] for schema in registry.get_schemas()}
-    assert "sleep" not in names
+    policy = ToolsetPolicy(supports_search_tool=supports_search_tool)
+    names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)}
+    assert ("sleep" in names) is not supports_search_tool
+    view = registry.get_schema_view("sleep", toolset_policy=policy)
+    assert view.exposure == "deferred" and view.direct is not supports_search_tool

@@ -49,7 +49,7 @@ async def session(tmp_path, monkeypatch):
     monkeypatch.setattr(owner.run_manager, "watch_conversation_notifications", lambda _id: None)
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _path: True)
     yield owner
-    owner.run_manager.stop_notification_wake_intake()
+    await owner.run_manager.shutdown_notification_wakes()
     owner.run_manager.close_durable_queue()
 
 
@@ -147,14 +147,17 @@ async def test_rejected_message_identity_does_not_apply_prompt_settings(session,
     other = tmp_path / "other"
     other.mkdir()
 
-    await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
+    await session.command_dispatcher._dispatch_client_command(UserCommand(type="user_message", data={
         "content": "different content", "conversation_id": conversation_id, "user_message_id": "existing-user",
         "client_command_id": "conflicting-command", "permission_mode": "bypass", "workspace_root": str(other),
-    }))
+    }), session.connection_generation)
 
     saved = session.conversation_repo.get_conversation(conversation_id)
     assert saved.permission_mode == "confirm"
     assert saved.workspace_root == str(tmp_path)
     session.activate_workspace_path.assert_not_awaited()
     session.start_agent_run.assert_not_awaited()
-    assert session.send_event.await_args.args[0].data["error_code"] == "turn_admission_conflict"
+    response = session.send_event.await_args.args[0]
+    assert response.type == "command.result" and response.data["level"] == "error"
+    assert response.data["data"]["admitted"] is False
+    assert "already admitted" in response.data["message"]

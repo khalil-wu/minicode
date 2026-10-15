@@ -4,7 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 from backend.commands.catalog import get_builtin_command_names
-from backend.config import PermissionSettings
+from backend.config import AppConfig, LLMSettings, PermissionSettings, permission_settings_from_config
+from backend.config_layers import ConfigLayerStack
 from backend.artifact.store import ArtifactStore
 from backend.permissions.checker import PermissionChecker
 from backend.tools.command_tool import RunCommandTool
@@ -71,6 +72,8 @@ class _FakeConversationRepo:
 
 def _make_session():
     session = WebSocketSession.__new__(WebSocketSession)
+    session.config = AppConfig(llm=LLMSettings(api_key=""),
+        permissions=permission_settings_from_config({}), config_layer_stack=ConfigLayerStack(()))
     session.session_id = "session-1"
     session.turn_wait_state = TurnWaitState()
     session.event_outbox = SimpleNamespace(connected=True)
@@ -87,7 +90,7 @@ def _make_session():
         tool_deny_rules=["run_existing"],
         session_overrides={"write_file": PermissionLevel.CONFIRM},
     )
-    session.session_lifecycle = SimpleNamespace()
+    session.session_lifecycle = SimpleNamespace(is_shutting_down=False)
     session.ws_manager = None
     session.command_dispatcher = object.__new__(SessionCommandDispatcher)
     session.command_dispatcher._session = session

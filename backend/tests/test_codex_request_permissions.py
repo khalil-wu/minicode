@@ -264,16 +264,35 @@ def test_unknown_environment_cannot_borrow_primary_authority(tmp_path):
 
 
 def test_user_explicit_static_rules_survive_identical_default_routing(tmp_path):
-    ctx = context_for(tmp_path)
-    ctx.permission_grants.record(PermissionGrantResponse(profile(tmp_path, {"network": {"enabled": True}})), "local", "turn")
-    permission = permission_context_with_grants(ctx.permission, ctx)
+    from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+    from backend.permissions.exec_policy import ExecPolicyOwner
+    from backend.llm.base import ToolCallEvent
+    from backend.tests.native_command_harness import configure_command_context, authorize_command_call
+
     command = RunCommandTool(None)
     args = {"command": "echo approved"}
-    builtin = PermissionChecker(permission_settings_from_config({}), tmp_path)
-    explicit = PermissionChecker(permission_settings_from_config({"permissions": {"require_confirm": ["run_command"]}}), tmp_path)
-    assert builtin.check("run_command", args, context=permission, tool=command) == PermissionLevel.AUTO
-    assert explicit.check("run_command", args, context=permission, tool=command) == PermissionLevel.CONFIRM
-    assert PermissionChecker(PermissionSettings(), tmp_path).check("run_command", args, context=permission, tool=command) == PermissionLevel.CONFIRM
+    ctx = configure_command_context(command, context_for(tmp_path), sandbox_policy=SandboxPolicy.bypass())
+    ctx.permission_grants.record(PermissionGrantResponse(profile(tmp_path, {"network": {"enabled": True}})), "local", "turn")
+    call = ToolCallEvent(id="granted-command", name=command.name, arguments=args)
+    builtin = authorize_command_call(call, ctx)
+    assert builtin.request.exec_policy.kind == "skip"
+    assert builtin.permission_decision.permission_level == PermissionLevel.AUTO
+    home = tmp_path / "explicit-command-policy"
+    (home / "rules").mkdir(parents=True)
+    (home / "rules/default.rules").write_text("\n".join(
+        f'prefix_rule(pattern={json.dumps(list(command))}, decision="prompt")'
+        for command in builtin.request.exec_policy.parsed_commands), encoding="utf-8")
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(home / "settings.json")), {}),))
+    ctx.run_context.exec_policy_owner = ExecPolicyOwner(home=home, stack=stack)
+    explicit = authorize_command_call(call, ctx)
+    assert explicit.request.exec_policy.kind == "needs_approval"
+    assert explicit.permission_decision.permission_level == PermissionLevel.CONFIRM
+    ctx.permission_checker = PermissionChecker(permission_settings_from_config({
+        "permissions": {"always_deny": [command.name]},
+    }), tmp_path)
+    denied = authorize_command_call(call, ctx)
+    assert denied.permission_decision.permission_level == PermissionLevel.ALWAYS_DENY
+    assert denied.permission_decision.decision == "deny"
 
 
 def test_grants_do_not_cover_escalation_or_typed_file_tools(tmp_path):

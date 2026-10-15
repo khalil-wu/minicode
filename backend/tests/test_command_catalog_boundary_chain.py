@@ -21,7 +21,7 @@ async def test_ws_command_uses_its_workspace_and_replay_retains_accepted_templat
     monkeypatch.setattr("backend.commands.catalog._get_managed_minicode_dir", lambda: tmp_path / "managed")
     monkeypatch.setattr("backend.commands.catalog.get_explicit_active_workspace_root", lambda: b)
     session, conversation, _ = session_for(tmp_path, monkeypatch)
-    session.conversation_repo.update_workspace_binding(conversation.id, workspace_root=str(a))
+    session.conversation_repo.update_workspace_binding(conversation.id, workspace_root=str(a), execution_cwd=str(a))
     monkeypatch.setattr(session, "_ensure_extension_commands_for_conversation", AsyncMock(return_value=None))
     start = AsyncMock()
     monkeypatch.setattr(session, "start_agent_run", start)
@@ -35,7 +35,11 @@ async def test_ws_command_uses_its_workspace_and_replay_retains_accepted_templat
         session.conversation_repo.commit_turn_admission(conversation.id,
             user_message={"id": "source-user", "role": "user", "content": "A owned prompt",
                 "display_content": "/owned", "submitted_content": "/owned", "attachments": []},
-            context_snapshot={"turn_admissions": {"source-user": {"client_command_id": "source-command"}}})
+            context_snapshot={"turn_admissions": {"source-user": {
+                "client_command_id": metadata["client_command_id"],
+                "client_queue_key": metadata["_client_queue_key"],
+                "assistant_message_id": metadata["assistant_message_id"],
+            }}})
         (a / ".minicode" / "commands" / "owned.md").write_text("A changed after admission", encoding="utf-8")
         await session.command_dispatcher._handle_command_inner(UserCommand("user_message", dict(packet)))
         assert start.await_args.args[0] == "A owned prompt"
@@ -46,7 +50,7 @@ async def test_ws_command_uses_its_workspace_and_replay_retains_accepted_templat
 
 @pytest.mark.asyncio
 async def test_command_preparation_keeps_context_prefix_and_original_display(tmp_path, monkeypatch):
-    root = tmp_path / "workspace"
+    root = tmp_path / "command-workspace"
     directory = root / ".minicode" / "commands"
     directory.mkdir(parents=True)
     (root / ".git").mkdir()
@@ -54,7 +58,7 @@ async def test_command_preparation_keeps_context_prefix_and_original_display(tmp
     monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setattr("backend.commands.catalog._get_managed_minicode_dir", lambda: tmp_path / "managed")
     session, conversation, _ = session_for(tmp_path, monkeypatch)
-    session.conversation_repo.update_workspace_binding(conversation.id, workspace_root=str(root))
+    session.conversation_repo.update_workspace_binding(conversation.id, workspace_root=str(root), execution_cwd=str(root))
     monkeypatch.setattr(session, "_ensure_extension_commands_for_conversation", AsyncMock(return_value=None))
     start = AsyncMock()
     monkeypatch.setattr(session, "start_agent_run", start)

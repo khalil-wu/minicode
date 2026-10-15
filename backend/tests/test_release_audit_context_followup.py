@@ -356,6 +356,7 @@ def test_import_uses_persisted_worktree_owner_before_resetting_git_binding(tmp_p
     repo, attachments, artifacts, source, artifact_id, target = _import_context(tmp_path)
     worktree = str(tmp_path / "owned-worktree")
     source.worktree_path = worktree
+    source.execution_cwd = worktree
     source.git_isolated = True
     repo.save_conversation(source)
     attachments.save(artifact_id="att_visible", content="visible worktree original", metadata={
@@ -367,3 +368,4 @@ def test_import_uses_persisted_worktree_owner_before_resetting_git_binding(tmp_p
     assert attachments.get("att_visible", conversation_id=result["conversation_id"], workspace_root=target) == "visible worktree original"
     imported = repo.get_conversation(result["conversation_id"])
     assert not imported.worktree_path and not imported.git_isolated
+    assert imported.execution_cwd == target

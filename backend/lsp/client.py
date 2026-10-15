@@ -37,6 +37,7 @@ from backend.sandbox.policy import ResolvedSandboxPolicy, SandboxPolicy
 from backend.sandbox.runner import SandboxRunner, SandboxUnavailableError
 
 logger = logging.getLogger(__name__)
+_SHUTDOWN_EXIT_TIMEOUT_SECONDS = 2.0
 
 # ── Language server commands by file extension ──────────────────────
 
@@ -223,6 +224,10 @@ class LSPClient:
                     await self.close_file(file_path)
                 await self._send_request("shutdown", {})
                 await self._send_notification("exit", {})
+                # exit is a notification, so flushing it does not mean the
+                # server has read it. Give the protocol peer its normal exit
+                # before asking the existing runner to terminate its process.
+                await asyncio.wait_for(self._process.wait(), timeout=_SHUTDOWN_EXIT_TIMEOUT_SECONDS)
             except Exception:
                 logger.warning("LSP graceful shutdown failed; terminating the owned process", exc_info=True)
         # A failed spawn may retain resources before it returns a process to

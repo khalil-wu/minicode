@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 from backend.config import PermissionSettings
@@ -48,9 +49,11 @@ def test_recursive_listing_stops_before_opening_the_unrequested_subtree(tmp_path
     expensive.mkdir()
     (expensive / "child.txt").write_text("child")
     original = os.scandir
+    @contextmanager
     def guarded(path):
         assert Path(path) != expensive, "limit must stop before traversing the tail"
-        return original(path)
+        with original(path) as entries:
+            yield iter(sorted(entries, key=lambda entry: entry.name))
     monkeypatch.setattr(os, "scandir", guarded)
     result = asyncio.run(ListFilesTool().execute({"path": ".", "recursive": True, "limit": 1}, context_for(tmp_path)))
     assert not result.is_error, result.content

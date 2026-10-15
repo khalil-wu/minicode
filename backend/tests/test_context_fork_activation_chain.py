@@ -194,7 +194,10 @@ async def test_fork_switched_projection_failure_returns_error_and_restores_sourc
     assert result["level"] == "error" and result["data"]["reason"] == "activation_failed"
     assert result["data"]["branch_conversation_id"] == forked["branch_conversation_id"]
     assert session.active_conversation_id == parent.id
-    assert session.context_builder.export_snapshot() == original
+    restored = session.context_builder.export_snapshot()
+    assert restored["guardian_evidence"]["review_context_revision"] != original["guardian_evidence"]["review_context_revision"]
+    restored["guardian_evidence"]["review_context_revision"] = original["guardian_evidence"]["review_context_revision"]
+    assert restored == original
     assert session.switched == [forked["branch_conversation_id"], parent.id]
     await _drain(session)
 

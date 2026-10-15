@@ -9,7 +9,7 @@ import pytest
 from backend.agent import prompting
 from backend.agent.query_engine import QueryEngine, QuerySubmission
 from backend.agent.context import ContextBuilder
-from backend.agent.codex_prompts import codex_model_instructions
+from backend.agent.codex_prompts import codex_collaboration_mode, codex_model_instructions
 from backend.agent.loop import run_agent_loop
 from backend.agent.message import AgentEvent
 from backend.agent.prompting import (
@@ -32,7 +32,10 @@ def test_context_builder_uses_layered_prompt_contract() -> None:
 
     messages = asyncio.run(ContextBuilder().build(state.user_message, state))
     system = messages[0].content
-    developer = messages[1]
+    runtime_messages = [message for message in messages
+        if message.role == "developer" and state.tool_runtime_guidance in message.content]
+    assert len(runtime_messages) == 1
+    developer = runtime_messages[0]
     user = messages[-1].content
 
     assert system.startswith(codex_model_instructions())
@@ -40,6 +43,8 @@ def test_context_builder_uses_layered_prompt_contract() -> None:
     assert "Runtime contract" not in system
     assert developer.role == "developer"
     assert "Runtime contract" in developer.content
+    assert messages[1].content == codex_collaboration_mode("default")
+    assert messages.index(developer) > 1
     assert user.startswith("<system-reminder>")
     assert "Runtime contract" not in user
     assert user.endswith("write README")
@@ -61,7 +66,10 @@ def test_prompt_dynamic_boundary_keeps_system_prefix_stable() -> None:
 
     messages = asyncio.run(ContextBuilder().build(state.user_message, state))
     assert messages[1].role == "developer"
-    assert "Runtime guidance belongs after the cache boundary." in messages[1].content
+    assert messages[1].content == codex_collaboration_mode("default")
+    runtime_messages = [message for message in messages
+        if message.role == "developer" and state.tool_runtime_guidance in message.content]
+    assert len(runtime_messages) == 1 and messages.index(runtime_messages[0]) > 1
     assert "Runtime guidance belongs after the cache boundary." not in messages[-1].content
 
 

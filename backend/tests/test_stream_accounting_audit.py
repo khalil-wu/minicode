@@ -8,6 +8,8 @@ import httpx
 import pytest
 
 from backend.agent.provider_attempt import ProviderAttempt
+from backend.agent.context import ContextBuilder
+from backend.agent.runtime_records import AgentRunRecord
 from backend.agent.run_context import RunContext
 from backend.agent.provider_completion import ProviderCompletionResult
 from backend.agent.provider_event_projection import project_non_text_provider_event
@@ -18,7 +20,7 @@ from backend.agent.provider_stream_runtime import ProviderStreamResult, stream_p
 from backend.agent.provider_stream_wait import ProviderWaitResult
 from backend.agent.rollout_budget import billable_tokens_from_usage
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
-from backend.config import LLMSettings
+from backend.config import AgentSettings, LLMSettings
 from backend.llm.anthropic_adapter import AnthropicAdapter
 from backend.llm.anthropic_protocol import _anthropic_replay_content
 from backend.llm.base import LLMAdapter, LLMMessage, LLMSideCallContext, LLMTurnContext, SideQueryOptions, StreamEvent, StreamEventType, UsageInfo
@@ -281,7 +283,7 @@ def provider_run(monkeypatch, batches):
     monkeypatch.setattr(module, "handle_provider_error_event", retry)
     monkeypatch.setattr(module, "handle_provider_stream_exception", exception)
     class Kernel:
-        run_record = SimpleNamespace(run_id="r1")
+        run_record = AgentRunRecord(run_id="r1")
         metadata = {}
         async def start_provider_attempt(self, **kwargs):
             return ProviderAttempt(kwargs["iteration_id"], kwargs["retry_index"], "span", kwargs["started_at"])
@@ -301,10 +303,10 @@ def provider_run(monkeypatch, batches):
             yield None
     generator = stream_provider_response(
         llm=SimpleNamespace(), messages=[], tool_schemas=[], llm_request_metadata={}, prompt_cache_safe_params={},
-        provider_completion=Completion(), state=SimpleNamespace(stopped_reason=None, iterations=1), context_builder=SimpleNamespace(),
+        provider_completion=Completion(), state=SimpleNamespace(stopped_reason=None, iterations=1), context_builder=ContextBuilder(),
         turn_kernel=Kernel(), budget_runtime=SimpleNamespace(ensure_started=lambda: None, cost_session_id="probe",
             record_provider_usage_total=lambda value: committed.append(value.total_tokens)), turn_usage=turn.usage,
-        settings=SimpleNamespace(stream_max_attempts=1, live_text_streaming=True), tool_registry=None, permission_checker=None,
+        settings=AgentSettings(stream_max_attempts=1, live_text_streaming=True), tool_registry=None, permission_checker=None,
         effective_permission_context=None, tool_context=ToolExecutionContext(permission=PermissionContext(),
             cancel_event=asyncio.Event(), run_context=RunContext()), turn_start_tool_call_count=0,
         turn_started_at=0, iteration_limit=10, tool_batch_count=0, iteration_id_value="i1", stream_retry_policy=None, error_controller=None,

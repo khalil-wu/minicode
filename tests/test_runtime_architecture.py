@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.config import AgentSettings, AppConfig, LLMSettings, PermissionSettings
+from backend.config import AgentSettings, AppConfig, LLMSettings, PermissionSettings, permission_settings_from_config
 from backend.artifact.store import ArtifactStore
 from backend.atomic_io import canonical_file_path_key
 from backend.checkpoint import CheckpointManager, CheckpointStore
@@ -36,6 +36,7 @@ from backend.tools.search_tools import GlobFilesTool, GrepFilesTool
 from backend.tools.web_tools import WebFetchTool
 from backend.tools.registry import CapabilityRegistry
 from backend.tools.contracts import ToolSpec
+from backend.tools.toolsets import ToolsetPolicy
 from backend.agent.message import UserCommand
 from backend.agent.message import AgentEvent
 from backend.agent.run_events import should_emit_event
@@ -45,6 +46,17 @@ from backend.agent.state import AgentState, ToolCallRecord
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 from backend.ws.turn_wait_state import TurnWaitState
+from backend.tests.native_command_harness import configure_command_context, execute_command
+from backend.terminal.manager import BackgroundCommand
+from backend.agent.tool_execution import _authorize_final_tool_request
+from backend.llm.base import ToolCallEvent
+
+
+def _native_command_context(tool, workspace_root, *, sandbox_policy, background_manager=None):
+    checker = PermissionChecker(permission_settings_from_config({}), workspace_root)
+    return configure_command_context(tool, ToolExecutionContext(
+        permission=checker.build_context(mode="bypass"), workspace_root=workspace_root,
+        background_manager=background_manager), sandbox_policy=sandbox_policy)
 
 
 def _python_command(script: str) -> str:
@@ -163,7 +175,7 @@ def test_capability_registry_builds_stable_snapshot() -> None:
         },
     )
 
-    snapshot = registry.build_snapshot()
+    snapshot = registry.build_snapshot(toolset_policy=ToolsetPolicy(supports_search_tool=True))
 
     assert snapshot["version"] == registry.version
     assert snapshot["tools"] == []
@@ -218,7 +230,7 @@ def test_capability_registry_tool_views_explain_direct_deferred_and_hidden_tools
     registry.register(_DummyTool())
     registry.register(_HiddenDummyTool())
 
-    snapshot = registry.build_snapshot()
+    snapshot = registry.build_snapshot(toolset_policy=ToolsetPolicy(supports_search_tool=True))
     views = {view["name"]: view for view in snapshot["tool_views"]}
 
     assert views["core_dummy"] == {
@@ -253,6 +265,7 @@ def test_capability_registry_snapshot_respects_permission_context() -> None:
     )
 
     snapshot = registry.build_snapshot(
+        toolset_policy=ToolsetPolicy(supports_search_tool=True),
         permission_checker=checker,
         permission_context=context,
     )
@@ -288,7 +301,7 @@ def test_capability_registry_passes_tool_execution_context_when_supported() -> N
     assert tool.received_contexts == [execution_context]
 
 
-def test_run_command_tool_returns_recoverable_result_when_cancelled() -> None:
+def test_run_command_native_cancellation_reaps_child_before_propagating(tmp_path, monkeypatch) -> None:
     class _FakeStdout:
         def __init__(self, owner: "_FakeProcess") -> None:
             self._owner = owner
@@ -333,61 +346,54 @@ def test_run_command_tool_returns_recoverable_result_when_cancelled() -> None:
 
     fake_process = _FakeProcess()
 
-    async def _fake_create_subprocess_shell(*args, **kwargs):
+    async def _fake_spawn_exec(*args, **kwargs):
         return fake_process
 
-    async def _exercise() -> ToolResult:
-        original = asyncio.create_subprocess_shell
-        asyncio.create_subprocess_shell = _fake_create_subprocess_shell  # type: ignore[assignment]
+    async def _exercise() -> None:
+        monkeypatch.setattr("backend.sandbox.runner.spawn_exec", _fake_spawn_exec)
+        cancel_event = asyncio.Event()
+        tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+        checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
+        context = configure_command_context(tool, ToolExecutionContext(
+            permission=checker.build_context(mode="bypass"), workspace_root=tmp_path,
+            cancel_event=cancel_event), sandbox_policy=SandboxPolicy.bypass())
+        task = asyncio.create_task(execute_command(tool, {"command": "sleep 10"}, context))
         try:
-            cancel_event = asyncio.Event()
-            tool = RunCommandTool(
-                ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test")
-            )
-            task = asyncio.create_task(
-                tool.execute(
-                    {"command": "sleep 10"},
-                    context=ToolExecutionContext(
-                        # Windows default mode is intentionally fail-closed when
-                        # no OS filesystem/network sandbox is available. Use
-                        # explicit bypass here to exercise cancellation itself.
-                        permission=PermissionContext(mode="bypass", source="test"),
-                        cancel_event=cancel_event,
-                    ),
-                )
-            )
-            await fake_process._stream_started.wait()
+            async with asyncio.timeout(10):
+                await fake_process._stream_started.wait()
             cancel_event.set()
-            return await task
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert context.run_context.lifecycle_cleanup_evidence()["lifecycle_cleanup_pending_count"] == 0
         finally:
-            asyncio.create_subprocess_shell = original  # type: ignore[assignment]
+            cancel_event.set()
+            await asyncio.gather(task, return_exceptions=True)
 
-    result = asyncio.run(_exercise())
-
-    assert result.is_error is True
-    assert "cancel" in result.content.lower() or "interrupt" in result.content.lower()
+    asyncio.run(_exercise())
     assert fake_process.killed is True
 
 
-def test_run_command_tool_rejects_cwd_outside_workspace(tmp_path: Path) -> None:
+def test_native_command_cwd_keeps_issuing_filesystem_authority(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
     outside.mkdir()
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
-    result = asyncio.run(
-        tool.execute(
-            {"command": "echo should-not-run", "cwd": str(outside)},
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                workspace_root=workspace,
-            ),
-        )
+    context = _native_command_context(tool, workspace,
+        sandbox_policy=SandboxPolicy(workspace_root=workspace, denied_roots=(outside,)))
+    context.permission = context.permission_checker.build_context(mode="confirm")
+    authorization = _authorize_final_tool_request(
+        ToolCallEvent(id="outside-cwd", name=tool.name, arguments={"command": "echo should-not-run", "cwd": str(outside)}),
+        tool_registry=context.tool_registry, permission_checker=context.permission_checker,
+        permission_context=context.permission, tool_ctx=context,
     )
-
-    assert result.is_error is True
-    assert "cwd must stay inside workspace" in result.content
+    assert authorization.error == ""
+    native = authorization.request.exec_policy
+    assert native.command.cwd == outside.resolve()
+    assert native.command.policy.workspace_root == workspace.resolve()
+    assert native.command.policy.resolve(cwd=outside).resolve_access(outside / "unexpected.txt").can_write is False
+    assert list(outside.iterdir()) == []
 
 
 def test_run_command_tool_projects_permission_allowlist_into_sandbox_mounts(
@@ -417,65 +423,24 @@ def test_run_command_tool_projects_permission_allowlist_into_sandbox_mounts(
 
 
 def test_run_command_tool_allows_relative_cwd_inside_workspace(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    nested = workspace / "nested"
+    workspace = tmp_path / 'workspace'
+    nested = workspace / 'nested'
     nested.mkdir(parents=True)
-    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-    python_command = "python" if sys.platform == "win32" else "python3"
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": f'{python_command} -c "import os; print(os.path.basename(os.getcwd()))"',
-                "cwd": "nested",
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                workspace_root=workspace,
-            ),
-        )
-    )
-
-    if (
-        sys.platform == "win32"
-        and result.is_error
-        and (
-            "拒绝访问" in result.content
-            or "sandbox is unavailable" in result.content.lower()
-        )
-    ):
-        pytest.skip(
-            "MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host"
-        )
-    if result.is_error and "workspace sandbox is unavailable on this host" in result.content.lower():
-        pytest.skip("workspace sandbox backend is unavailable on this host")
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': _python_command("import os; print(os.path.basename(os.getcwd()))"), 'cwd': 'nested'}, context=_native_command_context(tool, workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))))
+    if sys.platform == 'win32' and result.is_error and ('拒绝访问' in result.content or 'sandbox is unavailable' in result.content.lower()):
+        pytest.skip('MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host')
+    if result.is_error and 'workspace sandbox is unavailable on this host' in result.content.lower():
+        pytest.skip('workspace sandbox backend is unavailable on this host')
     assert result.is_error is False
-    assert "nested" in result.content
+    assert 'nested' in result.content
 
 
-def test_run_command_tool_injects_structured_environment_in_bypass_mode(
-    tmp_path: Path,
-) -> None:
-    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": _python_command(
-                    "import os; print(os.environ['MINICODE_STRUCTURED_ENV'])"
-                ),
-                "cwd": str(tmp_path),
-                "env": {"MINICODE_STRUCTURED_ENV": "structured-value"},
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="bypass", source="test"),
-                workspace_root=tmp_path,
-            ),
-        )
-    )
-
+def test_run_command_tool_injects_structured_environment_in_bypass_mode(tmp_path: Path) -> None:
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': _python_command("import os; print(os.environ['MINICODE_STRUCTURED_ENV'])"), 'cwd': str(tmp_path), 'env': {'MINICODE_STRUCTURED_ENV': 'structured-value'}}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass())))
     assert result.is_error is False
-    assert "structured-value" in result.content
+    assert 'structured-value' in result.content
 
 
 def test_run_command_tool_rejects_invalid_structured_environment(
@@ -498,53 +463,24 @@ def test_run_command_tool_rejects_invalid_structured_environment(
 
 
 def test_run_command_tool_reads_large_stderr_without_deadlock(tmp_path: Path) -> None:
-    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "python -c \"import sys; sys.stderr.write('x' * 200000); sys.stderr.flush()\"",
-                "timeout": 5,
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="bypass", source="test")
-            ),
-        )
-    )
-
-    if sys.platform == "win32" and result.is_error and "拒绝访问" in result.content:
-        pytest.skip(
-            "MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host"
-        )
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': _python_command("import sys; sys.stderr.write('x' * 200000); sys.stderr.flush()"), 'timeout': 5}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass())))
+    if sys.platform == 'win32' and result.is_error and ('拒绝访问' in result.content):
+        pytest.skip('MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host')
     assert result.is_error is False
-    assert "Exit code: 0" in result.content
-    assert (
-        result.artifact_id
-        or "bytes truncated; showing beginning and end" in result.content
-    )
+    assert 'Exit code: 0' in result.content
+    assert result.artifact_id or 'bytes truncated; showing beginning and end' in result.content
 
 
-def test_run_command_tool_marks_nonzero_exit_as_failed(tmp_path: Path) -> None:
-    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": _python_command(
-                    "import sys; sys.stderr.write('boom\\n'); sys.exit(7)"
-                ),
-                "timeout": 5,
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="bypass", source="test")
-            ),
-        )
-    )
-
-    assert result.is_error is True
-    assert result.status == "failed"
-    assert "Exit code: 7 (failed)" in result.content
-    assert "boom" in result.content
+def test_native_command_keeps_nonzero_process_exit_in_successful_tool_response(tmp_path: Path) -> None:
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': _python_command("import sys; sys.stderr.write('boom\\n'); sys.exit(7)"), 'timeout': 5}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass())))
+    assert result.is_error is False
+    assert result.status == 'success'
+    assert 'Exit code: 7' in result.content
+    assert result.runtime_metadata['exit_code'] == 7
+    assert result.runtime_metadata['process_status'] == 'failed'
+    assert 'boom' in result.content
 
 
 def test_run_command_wraps_powershell_cmdlets_on_windows(
@@ -646,36 +582,16 @@ def test_windows_command_failure_explains_posix_recovery(monkeypatch) -> None:
 @pytest.mark.skipif(
     sys.platform != "win32", reason="PowerShell shell selection is Windows-specific"
 )
-def test_run_command_tool_executes_powershell_cmdlets_on_windows(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
-    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "Get-ChildItem -Path . -Depth 0 -Name",
-                "cwd": str(tmp_path),
-                "timeout": 10,
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                workspace_root=tmp_path,
-            ),
-        )
-    )
-
-    if result.is_error and (
-        "拒绝访问" in result.content
-        or "sandbox is unavailable" in result.content.lower()
-    ):
-        pytest.skip(
-            "MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host"
-        )
+@pytest.mark.skipif(sys.platform != 'win32', reason='PowerShell shell selection is Windows-specific')
+def test_run_command_tool_executes_powershell_cmdlets_on_windows(tmp_path: Path) -> None:
+    (tmp_path / 'README.md').write_text('# Project\n', encoding='utf-8')
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': 'Get-ChildItem -Path . -Depth 0 -Name', 'cwd': str(tmp_path), 'timeout': 10}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path))))
+    if result.is_error and ('拒绝访问' in result.content or 'sandbox is unavailable' in result.content.lower()):
+        pytest.skip('MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host')
     assert result.is_error is False
-    assert "README.md" in result.content
-    assert "not recognized" not in result.content.lower()
+    assert 'README.md' in result.content
+    assert 'not recognized' not in result.content.lower()
 
 
 def test_legacy_search_and_git_tools_return_current_tool_result_shape(
@@ -948,228 +864,126 @@ def test_context_builder_preserves_bare_continue_as_user_input() -> None:
     assert user_content.endswith("continue")
 
 
-def test_run_command_tool_uses_context_background_manager_for_background_runs(
-    monkeypatch,
-) -> None:
+def test_run_command_tool_uses_context_background_manager_for_background_runs(monkeypatch, tmp_path) -> None:
+
     class _FakeBackgroundCommand:
-        command_id = "bg_test123"
-        cwd = "C:\\workspace"
+        command_id = 'bg_test123'
+        cwd = str(tmp_path)
 
     class _FakeBackgroundManager:
+
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
         async def run_background(self, **kwargs):
             self.calls.append(kwargs)
-            return _FakeBackgroundCommand()
-
+            return BackgroundCommand(command_id=_FakeBackgroundCommand.command_id, command=str(kwargs['command']), cwd=str(kwargs['cwd']))
     manager = _FakeBackgroundManager()
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test"))
-    monkeypatch.setattr(
-        "backend.tools.command_tool.SandboxRunner.capability",
-        lambda _runner, *, cwd=None: SimpleNamespace(
-            available=True, reason="", backend="full-access"
-        ),
-    )
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "python backend\\server.py --port 8082",
-                "cwd": "C:\\workspace",
-                "run_in_background": True,
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                background_manager=manager,  # type: ignore[arg-type]
-            ),
-        )
-    )
-
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    monkeypatch.setattr('backend.tools.command_tool.SandboxRunner.capability', lambda _runner, *, cwd=None: SimpleNamespace(available=True, reason='', backend='full-access'))
+    result = asyncio.run(execute_command(tool, {'command': 'python backend\\server.py --port 8082', 'cwd': str(tmp_path), 'run_in_background': True}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path, writable_roots=(tmp_path,)), background_manager=manager)))
     assert result.is_error is False
-    assert "bg_test123" in result.content
+    assert 'bg_test123' in result.content
     assert len(manager.calls) == 1
     call = manager.calls[0]
-    assert call["command"] == "python backend\\server.py --port 8082"
-    expected_cwd = (
-        "C:\\workspace"
-        if os.name == "nt"
-        else str((Path.cwd() / "C:\\workspace").resolve())
-    )
-    assert call["cwd"] == expected_cwd
-    # Background commands are durable tasks.  A zero timeout means the
-    # launcher does not kill them after the foreground command default; the
-    # background manager still owns cancellation and explicit deadlines.
-    assert call["timeout_ms"] == 0
-    assert call["description"] == "python backend\\server.py --port 8082"
-    policy = call["sandbox_policy"]
+    assert call['command'] == 'python backend\\server.py --port 8082'
+    expected_cwd = str(tmp_path) if os.name == 'nt' else str((Path.cwd() / str(tmp_path)).resolve())
+    assert call['cwd'] == expected_cwd
+    assert call['timeout_ms'] == 0
+    assert call['description'] == 'python backend\\server.py --port 8082'
+    policy = call['sandbox_policy']
     assert isinstance(policy, SandboxPolicy)
     assert policy.disable_os_sandbox is False
     assert policy.allow_network is False
-    expected_workspace = (
-        Path("C:\\workspace")
-        if os.name == "nt"
-        else (Path.cwd() / "C:\\workspace").resolve()
-    )
+    expected_workspace = Path(str(tmp_path)) if os.name == 'nt' else (Path.cwd() / str(tmp_path)).resolve()
     assert policy.writable_roots == (expected_workspace,)
 
 
-def test_run_command_tool_background_bypass_uses_bypass_policy() -> None:
+def test_run_command_tool_background_bypass_uses_bypass_policy(tmp_path) -> None:
+
     class _FakeBackgroundCommand:
-        command_id = "bg_bypass"
-        cwd = "C:\\workspace"
+        command_id = 'bg_bypass'
+        cwd = str(tmp_path)
 
     class _FakeBackgroundManager:
+
         def __init__(self) -> None:
             self.call: dict[str, object] = {}
 
         async def run_background(self, **kwargs):
             self.call = kwargs
-            return _FakeBackgroundCommand()
-
+            return BackgroundCommand(command_id=_FakeBackgroundCommand.command_id, command=str(kwargs['command']), cwd=str(kwargs['cwd']))
     manager = _FakeBackgroundManager()
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test"))
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "python backend\\server.py --port 8082",
-                "cwd": "C:\\workspace",
-                "run_in_background": True,
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="bypass", source="test"),
-                background_manager=manager,  # type: ignore[arg-type]
-            ),
-        )
-    )
-
-    if result.is_error and "拒绝访问" in result.content:
-        pytest.skip(
-            "MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host"
-        )
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': 'python backend\\server.py --port 8082', 'cwd': str(tmp_path), 'run_in_background': True}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass(), background_manager=manager)))
+    if result.is_error and '拒绝访问' in result.content:
+        pytest.skip('MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host')
     assert result.is_error is False
-    policy = manager.call["sandbox_policy"]
+    policy = manager.call['sandbox_policy']
     assert isinstance(policy, SandboxPolicy)
     assert policy.disable_os_sandbox is True
     assert policy.allow_network is True
 
 
-def test_run_command_tool_does_not_infer_background_mode_from_command_text(
-    monkeypatch,
-) -> None:
+def test_run_command_tool_does_not_infer_background_mode_from_command_text(monkeypatch, tmp_path) -> None:
+
     class _FakeBackgroundCommand:
-        command_id = "bg_server"
-        cwd = "C:\\workspace"
+        command_id = 'bg_server'
+        cwd = str(tmp_path)
 
     class _FakeBackgroundManager:
+
         def __init__(self) -> None:
             self.commands: list[str] = []
 
         async def run_background(self, **kwargs):
-            self.commands.append(str(kwargs["command"]))
-            return _FakeBackgroundCommand()
-
+            self.commands.append(str(kwargs['command']))
+            return BackgroundCommand(command_id=_FakeBackgroundCommand.command_id, command=str(kwargs['command']), cwd=str(kwargs['cwd']))
     manager = _FakeBackgroundManager()
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test"))
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
 
-    async def fake_foreground(
-        command,
-        cwd,
-        timeout,
-        context,
-        *,
-        escalated=False,
-        env_overrides=None,
-        max_chars=None,
-    ):
-        return ToolResult(content=f"foreground: {command}")
-
-    monkeypatch.setattr(tool, "_execute_foreground", fake_foreground)
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "python backend\\server.py --port 8082",
-                "cwd": "C:\\workspace",
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                background_manager=manager,  # type: ignore[arg-type]
-            ),
-        )
-    )
-
+    async def fake_foreground(command, cwd, timeout, context, *, escalated=False, env_overrides=None, max_chars=None, shell=None, login=None, tty=False):
+        return ToolResult(content=f'foreground: {command}')
+    monkeypatch.setattr(tool, '_execute_foreground', fake_foreground)
+    result = asyncio.run(execute_command(tool, {'command': 'python backend\\server.py --port 8082', 'cwd': str(tmp_path)}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path), background_manager=manager)))
     assert result.is_error is False
-    assert "foreground:" in result.content
+    assert 'foreground:' in result.content
     assert manager.commands == []
 
 
-def test_run_command_tool_does_not_rewrite_windows_start_b(monkeypatch) -> None:
+def test_run_command_tool_does_not_rewrite_windows_start_b(monkeypatch, tmp_path) -> None:
+
     class _FakeBackgroundCommand:
-        command_id = "bg_startb"
-        cwd = "C:\\workspace"
+        command_id = 'bg_startb'
+        cwd = str(tmp_path)
 
     class _FakeBackgroundManager:
+
         def __init__(self) -> None:
             self.commands: list[str] = []
 
         async def run_background(self, **kwargs):
-            self.commands.append(str(kwargs["command"]))
-            return _FakeBackgroundCommand()
-
+            self.commands.append(str(kwargs['command']))
+            return BackgroundCommand(command_id=_FakeBackgroundCommand.command_id, command=str(kwargs['command']), cwd=str(kwargs['cwd']))
     manager = _FakeBackgroundManager()
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test"))
-
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
     foreground: list[str] = []
 
-    async def fake_foreground(
-        command,
-        cwd,
-        timeout,
-        context,
-        *,
-        escalated=False,
-        env_overrides=None,
-        max_chars=None,
-    ):
+    async def fake_foreground(command, cwd, timeout, context, *, escalated=False, env_overrides=None, max_chars=None, shell=None, login=None, tty=False):
         foreground.append(command)
-        return ToolResult(content="foreground")
-
-    monkeypatch.setattr(tool, "_execute_foreground", fake_foreground)
-
-    result = asyncio.run(
-        tool.execute(
-            {
-                "command": "start /B python backend\\server.py --port 8082",
-                "cwd": "C:\\workspace",
-            },
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test"),
-                background_manager=manager,  # type: ignore[arg-type]
-            ),
-        )
-    )
-
+        return ToolResult(content='foreground')
+    monkeypatch.setattr(tool, '_execute_foreground', fake_foreground)
+    result = asyncio.run(execute_command(tool, {'command': 'start /B python backend\\server.py --port 8082', 'cwd': str(tmp_path)}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path), background_manager=manager)))
     assert result.is_error is False
-    assert foreground == ["start /B python backend\\server.py --port 8082"]
+    assert foreground == ['start /B python backend\\server.py --port 8082']
     assert manager.commands == []
 
 
-def test_run_command_tool_requires_manager_for_explicit_background_mode() -> None:
-    tool = RunCommandTool(ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test"))
-
-    result = asyncio.run(
-        tool.execute(
-            {"command": "npm run dev", "run_in_background": True},
-            context=ToolExecutionContext(
-                permission=PermissionContext(mode="confirm", source="test")
-            ),
-        )
-    )
-
+def test_run_command_tool_requires_manager_for_explicit_background_mode(tmp_path) -> None:
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
+    result = asyncio.run(execute_command(tool, {'command': 'npm run dev', 'run_in_background': True}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path))))
     assert result.is_error is True
-    assert "Background command execution is unavailable" in result.content
+    assert 'Background command execution is unavailable' in result.content
 
 
 def test_write_tools_emit_file_changed_without_waiting_for_watcher(
@@ -1326,12 +1140,9 @@ def test_permission_checker_builds_context_with_mode_and_overrides() -> None:
 
 def test_permission_modes_apply_predictable_safety_policy() -> None:
     checker = PermissionChecker(
-        PermissionSettings(
-            auto_allow=["*"],
-            require_confirm=[],
-            require_diff_review=["write_file", "edit_file"],
-            always_deny=["delete_*"],
-        )
+        permission_settings_from_config({"permissions": {
+            "auto_allow": ["*"], "require_confirm": [], "always_deny": ["delete_*"],
+        }})
     )
 
     plan_context = checker.build_context(mode="plan", source="test")
@@ -1381,6 +1192,10 @@ def test_permission_modes_apply_predictable_safety_policy() -> None:
         checker.check("delete_file", context=bypass_context)
         == PermissionLevel.ALWAYS_DENY
     )
+    explicit = PermissionChecker(permission_settings_from_config({
+        "permissions": {"require_diff_review": ["write_file"]},
+    }))
+    assert explicit.check("write_file", context=bypass_context) == PermissionLevel.ALWAYS_DENY
 
 
 def test_auto_permission_mode_routes_workspace_edits_to_diff_review() -> None:
@@ -1455,14 +1270,18 @@ def test_minicode_permission_profile_mapping_and_sandbox_status() -> None:
         checker.build_context(mode="unsupported_mode", source="test")
 
 
-def test_auto_network_policy_requires_review_for_local_targets() -> None:
+def test_auto_network_policy_requires_review_for_local_targets(tmp_path: Path) -> None:
+    from backend.mcp.client import MCPToolDef
+    from backend.mcp.registry import MCPToolProxy
+    from backend.tests.test_codex_mcp_approval_producer import authorize, Transport
+
     checker = PermissionChecker(
-        PermissionSettings(auto_allow=["*"], require_confirm=[])
+        permission_settings_from_config({"permissions": {"auto_allow": ["web_fetch"], "require_confirm": []}}), tmp_path,
     )
     auto_context = checker.build_context(mode="auto", source="test")
     bypass_context = checker.build_context(mode="bypass", source="test")
     web_tool = WebFetchTool(
-        ArtifactStore(storage_dir=Path.cwd() / "tmp-artifacts-test")
+        ArtifactStore(storage_dir=tmp_path / "artifacts")
     )
 
     assert (
@@ -1489,27 +1308,18 @@ def test_auto_network_policy_requires_review_for_local_targets() -> None:
         )
         == PermissionLevel.AUTO
     )
-    assert (
-        checker.check(
-            "mcp__websearch__fetch_page",
-            {"url": "https://example.com/docs"},
-            context=auto_context,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(
-            "mcp__websearch__fetch_page",
-            {"url": "http://localhost:8000"},
-            context=auto_context,
-        )
-        == PermissionLevel.CONFIRM
-    )
+    proxy = MCPToolProxy("websearch", MCPToolDef(name="fetch_page", description="Fetch a page",
+        input_schema={"type": "object"}), Transport())
+    for url in ("https://example.com/docs", "http://localhost:8000"):
+        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
+            permission_settings=permission_settings_from_config({}), arguments={"url": url})
+        assert result.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_auto_network_policy_checks_url_like_mcp_arguments() -> None:
+def test_auto_network_policy_checks_url_like_mcp_arguments(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
+    from backend.tests.test_codex_mcp_approval_producer import authorize
 
     class _Client:
         connected = True
@@ -1518,7 +1328,7 @@ def test_auto_network_policy_checks_url_like_mcp_arguments() -> None:
             raise AssertionError("permission test should not execute the MCP tool")
 
     checker = PermissionChecker(
-        PermissionSettings(auto_allow=["*"], require_confirm=[])
+        permission_settings_from_config({}), tmp_path,
     )
     auto_context = checker.build_context(mode="auto", source="test")
     bypass_context = checker.build_context(mode="bypass", source="test")
@@ -1533,56 +1343,28 @@ def test_auto_network_policy_checks_url_like_mcp_arguments() -> None:
         _Client(),  # type: ignore[arg-type]
     )
 
-    assert (
-        checker.check(
-            proxy.name,
-            {"href": "https://example.com/docs"},
-            context=auto_context,
-            tool=proxy,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(
-            proxy.name,
-            {"href": "http://localhost:8000"},
-            context=auto_context,
-            tool=proxy,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(
-            proxy.name,
-            {"request": {"host": "127.0.0.1:8000"}},
-            context=auto_context,
-            tool=proxy,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(
-            proxy.name,
-            {"urls": ["https://example.com/docs", "http://192.168.1.20/status"]},
-            context=auto_context,
-            tool=proxy,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(
-            proxy.name,
-            {"endpoint": "http://127.0.0.1:8000/api"},
-            context=bypass_context,
-            tool=proxy,
-        )
-        == PermissionLevel.AUTO
-    )
+    # Source approves this captured read-only MCP capability. URL-shaped
+    # arguments are not a second MCP approval producer.
+    for args in ({"href": "https://example.com/docs"}, {"href": "http://localhost:8000"},
+        {"request": {"host": "127.0.0.1:8000"}},
+        {"urls": ["https://example.com/docs", "http://192.168.1.20/status"]},
+        {"endpoint": "http://127.0.0.1:8000/api"}):
+        for permission, sandbox in ((auto_context, SandboxPolicy.workspace_default(tmp_path)),
+            (bypass_context, SandboxPolicy.bypass())):
+            result, _, _ = authorize(proxy, tmp_path, sandbox, permission,
+                permission_settings=permission_settings_from_config({}), arguments=args)
+            assert result.permission_decision.permission_level == PermissionLevel.AUTO
+        asked, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
+            permission_settings=permission_settings_from_config({
+                "permissions": {"require_confirm": [proxy.policy_identity]},
+            }), arguments=args)
+        assert asked.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_auto_policy_requires_review_for_open_world_mcp_tools() -> None:
+def test_auto_policy_requires_review_for_open_world_mcp_tools(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
+    from backend.tests.test_codex_mcp_approval_producer import authorize
 
     class _Client:
         connected = True
@@ -1591,7 +1373,7 @@ def test_auto_policy_requires_review_for_open_world_mcp_tools() -> None:
             raise AssertionError("permission test should not execute the MCP tool")
 
     checker = PermissionChecker(
-        PermissionSettings(auto_allow=["*"], require_confirm=[])
+        permission_settings_from_config({}), tmp_path,
     )
     auto_context = checker.build_context(mode="auto", source="test", approval_policy="on-request")
     bypass_context = checker.build_context(mode="bypass", source="test", approval_policy="on-request")
@@ -1606,22 +1388,29 @@ def test_auto_policy_requires_review_for_open_world_mcp_tools() -> None:
         _Client(),  # type: ignore[arg-type]
     )
 
-    assert (
-        checker.check(proxy.name, {}, context=auto_context, tool=proxy)
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(proxy.name, {}, context=bypass_context, tool=proxy)
-        == PermissionLevel.CONFIRM
-    )
+    for permission in (auto_context, bypass_context):
+        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+            permission_settings=permission_settings_from_config({}), arguments={})
+        assert result.permission_decision.permission_level == PermissionLevel.AUTO
+    writer = MCPToolProxy("figma-desktop", MCPToolDef(name="change_design", description="Change design",
+        input_schema={"type": "object"}, annotations={"readOnlyHint": False, "openWorldHint": True}), _Client())
     for mode in ("auto", "bypass"):
+        permission = checker.build_context(mode=mode, source="test", approval_policy="on-request")
+        asked, _, _ = authorize(writer, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+            permission_settings=permission_settings_from_config({}), arguments={})
+        assert asked.permission_decision.permission_level == PermissionLevel.CONFIRM
         never = checker.build_context(mode=mode, source="test", approval_policy="never")
-        assert checker.check(proxy.name, {}, context=never, tool=proxy) == PermissionLevel.ALWAYS_DENY
+        for sandbox, expected in ((SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
+            (SandboxPolicy.bypass(), PermissionLevel.AUTO)):
+            result, _, _ = authorize(writer, tmp_path, sandbox, never,
+                permission_settings=permission_settings_from_config({}), arguments={})
+            assert result.permission_decision.permission_level == expected
 
 
-def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
+def test_auto_policy_requires_review_for_destructive_mcp_tools(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
+    from backend.tests.test_codex_mcp_approval_producer import authorize
 
     class _Client:
         connected = True
@@ -1630,7 +1419,7 @@ def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
             raise AssertionError("permission test should not execute the MCP tool")
 
     checker = PermissionChecker(
-        PermissionSettings(auto_allow=["*"], require_confirm=[])
+        permission_settings_from_config({}), tmp_path,
     )
     auto_context = checker.build_context(mode="auto", source="test", approval_policy="on-request")
     bypass_context = checker.build_context(mode="bypass", source="test", approval_policy="on-request")
@@ -1645,17 +1434,17 @@ def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
         _Client(),  # type: ignore[arg-type]
     )
 
-    assert (
-        checker.check(proxy.name, {"issue": 123}, context=auto_context, tool=proxy)
-        == PermissionLevel.CONFIRM
-    )
-    assert (
-        checker.check(proxy.name, {"issue": 123}, context=bypass_context, tool=proxy)
-        == PermissionLevel.CONFIRM
-    )
+    for permission in (auto_context, bypass_context):
+        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+            permission_settings=permission_settings_from_config({}), arguments={"issue": 123})
+        assert result.permission_decision.permission_level == PermissionLevel.CONFIRM
     for mode in ("auto", "bypass"):
         never = checker.build_context(mode=mode, source="test", approval_policy="never")
-        assert checker.check(proxy.name, {"issue": 123}, context=never, tool=proxy) == PermissionLevel.ALWAYS_DENY
+        for sandbox, expected in ((SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
+            (SandboxPolicy.bypass(), PermissionLevel.AUTO)):
+            result, _, _ = authorize(proxy, tmp_path, sandbox, never,
+                permission_settings=permission_settings_from_config({}), arguments={"issue": 123})
+            assert result.permission_decision.permission_level == expected
 
 
 def test_bypass_skips_workspace_path_policy_for_local_file_tools(
@@ -1666,10 +1455,9 @@ def test_bypass_skips_workspace_path_policy_for_local_file_tools(
     outside = tmp_path / "outside.md"
     outside.write_text("secret", encoding="utf-8")
     checker = PermissionChecker(
-        PermissionSettings(
-            path_allowlist=["./src", "./backend"],
-            path_denylist=[".env", "*.pem"],
-        ),
+        permission_settings_from_config({"permissions": {
+            "path_allowlist": ["./src", "./backend"], "path_denylist": [".env", "*.pem"],
+        }}),
         workspace,
     )
     bypass_context = checker.build_context(mode="bypass", source="test")
@@ -1679,6 +1467,7 @@ def test_bypass_skips_workspace_path_policy_for_local_file_tools(
             "write_file",
             {"file_path": "README.md"},
             context=bypass_context,
+            tool=WriteFileTool(),
         )
         is None
     )
@@ -1687,14 +1476,16 @@ def test_bypass_skips_workspace_path_policy_for_local_file_tools(
             "write_file",
             {"file_path": ".env"},
             context=bypass_context,
+            tool=WriteFileTool(),
         )
-        is None
+        is not None
     )
     assert (
         checker.get_denial_reason(
             "write_file",
             {"file_path": str(outside)},
             context=bypass_context,
+            tool=WriteFileTool(),
         )
         is None
     )
@@ -1815,10 +1606,15 @@ def test_run_command_bypass_allows_cwd_outside_workspace(tmp_path: Path) -> None
     assert tool._resolve_cwd(str(outside), bypass_context) == str(outside.resolve())
 
 
-def test_run_command_blocks_catastrophic_commands_without_runtime_checker(
-    tmp_path: Path,
+def test_run_command_rejects_unfrozen_request_before_spawning(
+    tmp_path: Path, monkeypatch,
 ) -> None:
+    from unittest.mock import AsyncMock
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    foreground = AsyncMock()
+    background = AsyncMock()
+    monkeypatch.setattr(tool, "_execute_foreground", foreground)
+    monkeypatch.setattr(tool, "_execute_background", background)
 
     result = asyncio.run(
         tool.execute(
@@ -1831,7 +1627,9 @@ def test_run_command_blocks_catastrophic_commands_without_runtime_checker(
     )
 
     assert result.is_error is True
-    assert "recursive delete" in result.content
+    assert "no frozen native execution-policy request" in result.content
+    foreground.assert_not_awaited()
+    background.assert_not_awaited()
 
 
 def test_bypass_write_file_can_write_outside_workspace(tmp_path: Path) -> None:
@@ -2703,7 +2501,8 @@ def test_tool_batch_execution_routes_control_tools_through_router() -> None:
     assert 'tc.name == "load_skill"' not in source
     assert 'tc.name == "unload_skill"' not in source
     assert 'tc.name == "list_skills"' not in source
-    assert "ask_user" in router_source
+    assert 'CONTROL_TOOL_NAMES = {"request_user_input"}' in router_source
+    assert "RequestUserInputTool" in router_source
     assert "load_skill" not in router_source
     assert "unload_skill" not in router_source
     assert "list_skills" not in router_source

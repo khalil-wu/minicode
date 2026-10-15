@@ -2758,7 +2758,7 @@ def test_conversation_transcript_marks_process_blocks_failed_on_agent_error(monk
             assert _receive_next_non_task_update(ws)["type"] == "done"
 
             ws.send_json({"type": "conversation.list"})
-            listing = _receive_next_non_task_update(ws)
+            listing = _receive_until_event(ws, "conversation.list", active_conversation_id=error["conversation_id"])
 
     transcript = listing["active_conversation"]["transcript"]
     assistant_message = next(message for message in transcript if message["role"] == "assistant")
@@ -2828,10 +2828,10 @@ def test_context_builder_injects_profile_memory_without_visible_transcript(tmp_p
     assert messages[0].role == "system"
     assert "Inherited user profile" in messages[0].content
     assert "Likes concise Chinese responses" in messages[0].content
-    assert len(messages) == 2
-    assert messages[1].role == "user"
-    assert messages[1].content.startswith("<system-reminder>")
-    assert "<environment_context>" in messages[1].content
+    assert [message.role for message in messages] == ["system", "developer", "user"]
+    assert "<collaboration_mode>" in messages[1].content
+    assert messages[2].content.startswith("<system-reminder>")
+    assert "<environment_context>" in messages[2].content
     assert messages[-1].content.endswith("Start a new session")
 
 

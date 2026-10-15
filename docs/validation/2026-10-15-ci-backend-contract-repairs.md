@@ -1,6 +1,6 @@
 # Backend CI contract repairs, 2026-10-15
 
-Status: the full Python 3.11 backend/root run is still in progress. The first repair batch was committed and pushed as `878b2721a379d7f441595811e5bfe3a0fefd461c`; the following scoped results also include subsequent corrections. This report does not claim GitHub CI or complete Codex equivalence is green.
+Status: the original Python 3.11 full snapshot was explicitly interrupted after confirming its obsolete cancellation fixture waited indefinitely. Its partial outcomes are preserved, not treated as a passing run or as the current remaining defect count. The first repair batch was committed and pushed as `878b2721a379d7f441595811e5bfe3a0fefd461c`; subsequent frozen batches and current CI status are recorded in `2026-10-15-ci-source-contract-round03.md`. This report does not claim GitHub CI or complete Codex equivalence is green.
 
 ## Original CI evidence
 
@@ -37,7 +37,7 @@ The original external Electron close produced an HTTP 503 without its response b
 - `source-window-ms-before.log/.xml`: one real HTTP negative case, with the incorrect 16-digit start value and the true 13-digit issuing-run value above.
 - `backend-window-ms-owner-final.log/.xml`: 33/33 pass: the real default HTTP start metadata, both existing authored snapshot/window modes and the entire 30-case follower file, with its actual lifecycle cleanup.
 - `subprocess-race-before.log`: expected negative evidence against unchanged HEAD, one failure with `psutil.NoSuchProcess`.
-- `backend-root-python311-full.log/.xml`: the full backend/root snapshot collected before later corrections, 8311 cases; final result pending. Its original failure list includes nodes already repaired and revalidated in the scoped batches above; it is not counted as a green run or a count of remaining defects.
+- `backend-root-python311-full.log`: the 8311-case snapshot was collected before subsequent repairs and kept its old loaded fixture functions. It stopped at the old unbound `test_run_command_tool_returns_recoverable_result_when_cancelled`, waiting inside `asyncio.run` at original line 365. After confirmation with faulthandler, the owner interrupted it: 7551 completed outcomes, comprising 7292 passed / 203 failed / 53 skipped / 3 errors. See `backend-root-python311-full-interrupted.json` and its exact failed-node list. It produced no completed full-suite XML and is not a green run or the current defect count. The repaired cancellation case goes through actual native authorization/binding and canonical registry cancellation, with a controlled process double, bounded startup handshake and verified cleanup; its original incorrect subprocess-shell hook is no longer used.
 
 Counts from overlapping batches are not added. The 15 sandbox integration skips remain unverified, not passed. The Windows local full run also does not substitute for the Ubuntu GitHub jobs.
 

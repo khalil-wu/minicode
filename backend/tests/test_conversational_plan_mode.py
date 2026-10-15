@@ -32,14 +32,15 @@ def test_agent_mode_plan_uses_codex_conversational_instructions_without_changing
 
 def test_build_mode_explicitly_ends_conversational_plan_and_leaves_permission_plan_separate(tmp_path: Path) -> None:
     state = AgentState(user_message="Implement")
+    builder = ContextBuilder()
     populate_prompt_context(state=state, metadata={"agent_mode": "build"}, workspace_root=tmp_path, permission_context=PermissionContext(mode="auto"))
-    default = ContextBuilder._build_collaboration_mode_block(state)
+    default = builder._build_collaboration_mode_block(state)
     assert "# Collaboration Mode: Default" in default
     assert "previous instructions for other modes" in default
     assert "request_user_input" in default
     populate_prompt_context(state=state, metadata={"agent_mode": "build"}, workspace_root=tmp_path,
                           permission_context=PermissionContext(mode="plan", filesystem_constraints={"plan_files":[str(tmp_path / "plan.md")]}))
-    legacy = ContextBuilder._build_collaboration_mode_block(state)
+    legacy = builder._build_collaboration_mode_block(state)
     assert "# Collaboration Mode: Default" in legacy
     assert "exit_plan_mode" not in legacy
     assert state.prompt_context["collaboration_mode"] == "default"

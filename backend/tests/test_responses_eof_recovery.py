@@ -8,7 +8,7 @@ from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.state import AgentState
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, LLMSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, LLMSettings, TokenBudget, permission_settings_from_config
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
@@ -55,15 +55,16 @@ def test_responses_eof_retracts_incomplete_call_and_retries_before_any_write(tmp
                                                model="gpt-6-luna", wire_api="responses", reasoning_effort="high"), http_client=client)
             registry = ToolRegistry()
             registry.register(writer)
+            checker = PermissionChecker(permission_settings_from_config({}), workspace_root=tmp_path)
             session = AgentSession(llm=adapter, tool_registry=registry,
                 artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
-                permission_checker=PermissionChecker(PermissionSettings(), workspace_root=tmp_path),
+                permission_checker=checker,
                 agent_settings=AgentSettings(max_iterations=4, stream_max_attempts=2, stream_retry_delay_seconds=0),
                 token_budget=TokenBudget())
             try:
                 return [event async for event in QueryEngine().submit(QuerySubmission(
                     user_message="Write result.txt", session=session,
-                    runtime=AgentLoopSessionContext(workspace_root=tmp_path, permission_context=PermissionContext(mode="bypass")),
+                    runtime=AgentLoopSessionContext(workspace_root=tmp_path, permission_context=checker.build_context(mode="bypass")),
                     state=AgentState(user_message="Write result.txt", workspace_root=tmp_path),
                 ))]
             finally:

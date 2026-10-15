@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import asyncio
 
 import pytest
+import pytest_asyncio
 
 from backend.agent.message import UserCommand
 from backend.conversations.repository import ConversationRepository
@@ -20,8 +21,8 @@ async def _noop(*args, **kwargs):
     pass
 
 
-@pytest.fixture
-def session(tmp_path):
+@pytest_asyncio.fixture
+async def session(tmp_path):
     events = []
     started = []
     repository = ConversationRepository(tmp_path / "conversations")
@@ -49,7 +50,7 @@ def session(tmp_path):
             bind_client_command=lambda *args, **kwargs: nullcontext(),
         ),
         conversation_lifecycle_lock=lambda: lock,
-        cancel_pending_approvals=_noop, cleanup_tasks=set(), _cleanup_tasks=set(),
+        cancel_pending_approvals=_noop, cleanup_tasks=set(), _cleanup_tasks=set(), execution_cleanup_tasks=set(),
         task_manager=SimpleNamespace(cancel=lambda task_id: None),
         start_agent_run=start, send_event=send_event, git_branch_for=lambda path: "",
         events=events, started=started,
@@ -67,7 +68,10 @@ def session(tmp_path):
     value._register_agent_run = lambda **kwargs: WebSocketSession._register_agent_run(value, **kwargs)
     value._cleanup_agent_run = lambda **kwargs: WebSocketSession._cleanup_agent_run(value, **kwargs)
     yield value
-    manager._unsubscribe_parent_notifications()
+    await manager.cancel(reason="test_fixture_shutdown")
+    await manager.shutdown_notification_wakes()
+    while value.execution_cleanup_tasks | value.cleanup_tasks | value._cleanup_tasks:
+        await asyncio.gather(*(value.execution_cleanup_tasks | value.cleanup_tasks | value._cleanup_tasks))
     manager.close_durable_queue()
 
 
@@ -297,7 +301,7 @@ async def test_new_input_does_not_resume_old_queue_but_explicit_queue_send_does(
     assert manager.user_queue_paused("conv_stop_owner")
     assert manager.dequeue_user_message("conv_stop_owner") is None
     await handle_user_message_queue_steer(session, {"conversation_id": "conv_stop_owner", "message_id": "old"})
-    await asyncio.gather(*list(session.command_dispatcher.command_tasks))
+    await asyncio.gather(*list(session.command_dispatcher.execution_command_tasks))
     assert session.started == ["new", "old"]
     assert not manager.user_queue_paused("conv_stop_owner")
 

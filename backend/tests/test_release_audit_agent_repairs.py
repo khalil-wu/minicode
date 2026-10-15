@@ -158,7 +158,8 @@ async def test_mixed_terminal_task_results_cannot_claim_completed(runtime):
 def test_partial_apply_patch_result_is_not_labelled_completed():
     summary = display_summary_for_result(ToolCallEvent(id='patch', name='apply_patch', arguments={}),
         ToolResult(content='One file committed and another edit failed.', status='partial'), status='partial')
-    assert summary == 'Partially completed: apply_patch'
+    assert summary == 'apply_patch'
+    assert status_for_result(ToolResult(content='One file committed and another edit failed.', status='partial')) == 'partial'
 
 
 def test_interrupted_child_state_maps_to_stopped_tool_outcome():
@@ -522,10 +523,11 @@ async def test_ws_forged_producer_scope_is_overwritten_and_cold_client_claim_reb
     session.is_connected = True
     session.ws = SimpleNamespace(receive_text=receive)
     session.send_payload = send
-    monkeypatch.setattr(session.command_dispatcher, "_schedule_durable_client_command", lambda command_id, generation: scheduled.append(command_id))
+    monkeypatch.setattr(session.command_dispatcher, "_schedule_durable_client_command",
+        lambda command_id, generation, *, command_type: scheduled.append((command_id, command_type)))
     monkeypatch.setattr(session.command_dispatcher, "_handle_command", dispatch)
     await session.command_dispatcher.run(1)
-    assert scheduled == ["cancelled-input-0"]
+    assert scheduled == [("cancelled-input-0", "user_message")]
     assert acknowledgements[0].get("duplicate") is None
     await session.command_dispatcher._run_durable_client_command(client_command_id="cancelled-input-0", connection_generation=1)
     assert dispatched[0]["_client_queue_key"] == session.run_manager.durable_client_commands.path.stem
@@ -775,14 +777,18 @@ async def test_stop_write_error_is_visible_after_execution_has_actually_stopped(
     def cannot_save(reason):
         raise OSError('isolated Stop disk failure')
     run_context = RunContext(record_user_cancelled=cannot_save)
+    cancel_event = asyncio.Event()
     session.run_manager.register(conversation_id='conv_stop_owner', task=worker, task_id='write-failed-run',
-        cancel_event=asyncio.Event(), active_conversation_id='conv_stop_owner', run_context=run_context)
+        cancel_event=cancel_event, active_conversation_id='conv_stop_owner', run_context=run_context)
     session._conversation_streams['conv_stop_owner'] = {'message_id': 'assistant_input'}
     with pytest.raises(ExceptionGroup, match='durable input state') as caught:
         await session.run_manager.cancel(conversation_id='conv_stop_owner', reason='user_interrupted')
     assert worker.cancelled()
     assert 'isolated Stop disk failure' in str(caught.value.exceptions[0])
     assert not [event for event in session.events if event.type == 'command.result']
+    assert queue.pending_client_commands()[0].data['content'] == original.data['content']
+    session._cleanup_agent_run(conversation_id='conv_stop_owner', task=worker,
+        task_id='write-failed-run', cancel_event=cancel_event)
     assert queue.pending_client_commands()[0].data['content'] == original.data['content']
 
 
@@ -873,8 +879,9 @@ async def test_stop_caller_cancel_and_shutdown_keep_one_durable_writer_owner(ses
             raise OSError("isolated shared writer failure")
         queue.cancel_client_command(original, reason=reason)
     run_context = RunContext(record_user_cancelled=save)
+    cancel_event = asyncio.Event()
     session.run_manager.register(conversation_id="conv_stop_owner", task=worker, task_id="shared-writer-run",
-        cancel_event=asyncio.Event(), active_conversation_id="conv_stop_owner", run_context=run_context)
+        cancel_event=cancel_event, active_conversation_id="conv_stop_owner", run_context=run_context)
     session._conversation_streams["conv_stop_owner"] = {"message_id": "assistant_input"}
     stopping = asyncio.create_task(session.run_manager.cancel(conversation_id="conv_stop_owner", reason="user_interrupted"))
     shutdown = None
@@ -903,3 +910,7 @@ async def test_stop_caller_cancel_and_shutdown_keep_one_durable_writer_owner(ses
         await asyncio.gather(stopping, *([shutdown] if shutdown is not None else []), return_exceptions=True)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
+        session._cleanup_agent_run(conversation_id="conv_stop_owner", task=worker,
+            task_id="shared-writer-run", cancel_event=cancel_event)
+    if write_fails:
+        assert queue.pending_client_commands()[0].data["content"] == original.data["content"]

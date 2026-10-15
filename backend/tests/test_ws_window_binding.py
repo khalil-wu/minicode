@@ -62,7 +62,7 @@ async def test_other_window_or_headless_cannot_take_over_an_existing_desktop_ses
                        proof="" if headless else "a" * 64)
     manager = manager_module.WebSocketManager()
     original_socket = SimpleNamespace()
-    original = SimpleNamespace(window_owner_id="window-b", ws=original_socket, session_id="window-session")
+    original = SimpleNamespace(window_instance_id="window-b-instance", window_owner_id="window-b", ws=original_socket, session_id="window-session")
     manager._sessions["window-session"] = original
     if not headless:
         async def verified(*args):

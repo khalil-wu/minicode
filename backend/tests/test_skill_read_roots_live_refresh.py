@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
 
 from backend.agent.loop import run_agent_loop
@@ -12,52 +11,9 @@ from backend.config import AgentSettings, PermissionSettings
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
-from backend.skills.loader import SkillFull, SkillMeta
+from backend.skills.loader import SkillLoader
 from backend.skills.manager import SkillManager
 from backend.services.tool_registry_factory import build_tool_registry
-
-
-class _Loader:
-    def __init__(self, skills: list[SkillFull]) -> None:
-        self.skills = list(skills)
-
-    def discover(self):
-        return [skill.meta for skill in self.skills]
-
-    def list_metas(self):
-        return [skill.meta for skill in self.skills]
-
-    def list_skill_names(self):
-        return list(dict.fromkeys(skill.meta.name for skill in self.skills))
-
-    def get_metas(self, name: str):
-        return [skill.meta for skill in self.skills if skill.meta.name == name]
-
-    def get_unambiguous_meta(self, name: str):
-        matches = self.get_metas(name)
-        return matches[0] if len(matches) == 1 else None
-
-    def get_invocation_meta(self, name: str):
-        return self.get_unambiguous_meta(name)
-
-    def get_meta_by_path(self, path):
-        if not path:
-            return None
-        target = Path(path).resolve()
-        return next(
-            (skill.meta for skill in self.skills if skill.meta.source_path.resolve() == target),
-            None,
-        )
-
-    def load_full(self, name: str, path=None):
-        meta = self.get_meta_by_path(path) if path else self.get_unambiguous_meta(name)
-        return next((skill for skill in self.skills if skill.meta is meta), None)
-
-    def get_all_layer1(self):
-        return "\n".join(skill.meta.to_layer1_summary() for skill in self.skills)
-
-    def get_meta(self, name: str):
-        return self.get_unambiguous_meta(name)
 
 
 class _ReadSkillThenAnswerLLM(LLMAdapter):
@@ -78,7 +34,7 @@ class _ReadSkillThenAnswerLLM(LLMAdapter):
                     name="read_file",
                     arguments={"file_path": str(self.skill_file)},
                 )],
-                tool_calls_final=True,
+                tool_calls_committed=True,
             )
             yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
             return
@@ -90,16 +46,18 @@ class _ReadSkillThenAnswerLLM(LLMAdapter):
         return ""
 
 
-def test_skill_directory_stays_readable_after_a_live_permission_refresh() -> None:
+def test_skill_directory_stays_readable_after_a_live_permission_refresh(tmp_path, monkeypatch) -> None:
     # The turn snapshot granted the Skill directory as a read-only root, but the
     # per-iteration live refresh rebuilt filesystem constraints from the session
     # context, which never carries turn-owned roots. The grant therefore
     # survived only until the first refresh, and reading the advertised
     # SKILL.md failed with "Path is outside workspace" whenever the workspace
     # lived somewhere else.
-    root = Path(tempfile.mkdtemp())
+    root = tmp_path
     workspace = root / "workspace"
-    skill_root = root / "user-skills" / "browser"
+    config_home = root / "user-config"
+    monkeypatch.setenv("MINICODE_CONFIG_DIR", str(config_home))
+    skill_root = config_home / "skills" / "browser"
     workspace.mkdir()
     skill_root.mkdir(parents=True)
     skill_file = skill_root / "SKILL.md"
@@ -107,12 +65,7 @@ def test_skill_directory_stays_readable_after_a_live_permission_refresh() -> Non
         "---\nname: browser\ndescription: Drive a browser.\n---\nOnly authorized pages.",
         encoding="utf-8",
     )
-    skill = SkillFull(
-        SkillMeta(name="browser", description="Drive a browser.", source_path=skill_file),
-        "Only authorized pages.",
-        skill_file.read_text(encoding="utf-8"),
-    )
-    skill_manager = SkillManager(_Loader([skill]))
+    skill_manager = SkillManager(SkillLoader(workspace))
     skill_manager.discover()
     checker = PermissionChecker(settings=PermissionSettings(), workspace_root=workspace)
     session_context = checker.build_context(mode="confirm", filesystem_constraints={})

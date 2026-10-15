@@ -9,7 +9,6 @@ import pytest
 
 from backend.agent.tool_execution import generate_diff
 from backend.tools.command_tool import RunCommandTool
-from backend.tools.registry import ToolRegistry
 from backend.artifact.store import ArtifactStore
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.atomic_io import canonical_file_path_key
@@ -19,6 +18,8 @@ from backend.tools.edit_file import EditFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.file_tools_common import _generate_limited_unified_diff, content_hash
 from backend.tools.write_file import WriteFileTool
+from backend.sandbox import SandboxPolicy
+from backend.tests.native_command_harness import configure_command_context, execute_command
 
 
 @pytest.mark.parametrize("has_prior_diff", [False, True])
@@ -36,11 +37,11 @@ def test_command_preserves_the_exact_file_change_diff(tmp_path, has_prior_diff):
     context.emit_event = emit
     context.conversation_id = "conversation-diff"
     context.metadata["run_id"] = "turn-diff"
-    registry = ToolRegistry()
-    registry.register(RunCommandTool(ArtifactStore()))
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    configure_command_context(tool, context, sandbox_policy=SandboxPolicy.bypass())
     before = tracker.snapshot()
     command = "Write-Output 'Tests passed'" if os.name == "nt" else "printf 'Tests passed\\n'"
-    result = asyncio.run(registry.execute("run_command", {"command": command}, context=context))
+    result = asyncio.run(execute_command(tool, {"command": command}, context))
     assert not result.is_error, result.content
     assert "Tests passed" in result.content
     # Codex tools/events.rs updates the aggregate only for applied file deltas;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -67,7 +68,8 @@ def test_parallel_task_preserves_child_completion_and_result_identity(
     monkeypatch.setattr(tool, "_run_single_subtask", child)
     context = SimpleNamespace(cancel_event=None, metadata={}, task_id="parent", session_id="session", tool_call_id="parallel-call")
     result = asyncio.run(tool._run_parallel_subtasks(
-        [{"description": "First", "prompt": "First"}, {"description": "Second", "prompt": "Second"}],
+        [{"description": "First", "prompt": "First", "_source_role_requested": False},
+         {"description": "Second", "prompt": "Second", "_source_role_requested": False}],
         context,
     ))
 
@@ -124,17 +126,20 @@ def test_mcp_error_keeps_structured_diagnostics_media_and_resource_artifact(tmp_
 
     assert result.status == "failed"
     assert result.is_error is True
-    assert "Operation failed after generating diagnostics" in result.content
-    assert '"reason": "limit_reached"' in result.content
-    assert '"retry_after_seconds": 30' in result.content
-    assert "Captured diagnostic" in result.content
-    assert "diagnostics://next" in result.content
+    header, output = result.content.split("\nOutput:\n", 1)
+    assert header.startswith("Wall time: ") and header.endswith(" seconds")
+    assert json.loads(output) == response.structured_content
+    assert result.mcp_result == response.public_result()
+    assert result.mcp_result["content"][0]["text"] == "Operation failed after generating diagnostics"
+    assert result.mcp_result["content"][3]["uri"] == "diagnostics://next"
+    assert result.mcp_result["content"][4]["resource"]["text"] == "Captured diagnostic"
     assert result.images == [{"media_type": "image/png", "data": "AQID"}]
     assert result.audios == [{"media_type": "audio/wav", "data": "BAUG"}]
     assert result.artifact_id
     assert result.artifact_media_type == "application/octet-stream"
     assert result.artifact_bytes == 3
-    assert result.artifact_id in result.content
+    assert result.runtime_metadata["mcp_resource_artifacts"] == [{"artifact_id": result.artifact_id,
+        "uri": "diagnostics://binary", "media_type": "application/octet-stream", "bytes": 3}]
     assert result.runtime_metadata["mcp"]["structuredContent"] == response.structured_content
     assert result.runtime_metadata["mcp"]["_meta"] == response.meta
     assert "private_trace" not in result.to_context_string()
@@ -142,15 +147,15 @@ def test_mcp_error_keeps_structured_diagnostics_media_and_resource_artifact(tmp_
 
 
 @pytest.mark.parametrize(
-    ("response", "expected_status", "expected_content"),
+    ("response", "expected_status", "expected_output"),
     [
-        (MCPCallResult(is_error=True, structured_content={"reason": "failed"}), "failed", '"reason": "failed"'),
-        (MCPCallResult(is_error=True), "failed", "MCP tool execution failed"),
-        (MCPCallResult(structured_content={"error": "business data", "status": "failed"}), "success", '"error": "business data"'),
+        (MCPCallResult(is_error=True, structured_content={"reason": "failed"}), "failed", {"reason": "failed"}),
+        (MCPCallResult(is_error=True), "failed", None),
+        (MCPCallResult(structured_content={"error": "business data", "status": "failed"}), "success", {"error": "business data", "status": "failed"}),
     ],
 )
 def test_mcp_outcome_uses_protocol_error_flag_without_discarding_content(
-    response, expected_status, expected_content
+    response, expected_status, expected_output
 ):
     proxy = MCPToolProxy("protocol", MCPToolDef(name="result", description="Result"), ResultClient(response))
 
@@ -158,4 +163,7 @@ def test_mcp_outcome_uses_protocol_error_flag_without_discarding_content(
 
     assert result.status == expected_status
     assert result.is_error is response.is_error
-    assert expected_content in result.content
+    header, _, output = result.content.partition("\nOutput:")
+    assert header.startswith("Wall time: ") and header.endswith(" seconds")
+    assert (json.loads(output) if output else None) == expected_output
+    assert result.mcp_result == response.public_result()

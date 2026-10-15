@@ -405,20 +405,20 @@ async def test_priority_control_can_release_saturated_normal_command_slots():
 
 @pytest.mark.asyncio
 async def test_start_boundary_assigns_identity_for_non_transport_prompts():
-    captured, cleanup = [], []
+    captured = []
     async def run(content, *, metadata, **kwargs):
         captured.append(metadata)
         metadata["_turn_admission_future"].set_result(None)
     def create(name, coroutine):
         return SimpleNamespace(id="task1", task=asyncio.create_task(coroutine))
-    host = SimpleNamespace(run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True),
+    host = SimpleNamespace(session_id="non-transport-fixture", ws_manager=None,
+        run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True),
         _window_binding_token="", window_instance_id="", window_owner_id="",
-        _conversation_streams={},
+        _conversation_streams={}, execution_cleanup_tasks=set(),
         event_outbox=SimpleNamespace(bind_connection_generation=lambda value: nullcontext()), task_manager=SimpleNamespace(create=create),
-        _run_agent=run, _register_agent_run=lambda **kwargs: None, _cleanup_agent_run=lambda **kwargs: None,
-        command_dispatcher=SimpleNamespace(track_command_task=cleanup.append))
+        _run_agent=run, _register_agent_run=lambda **kwargs: None, _cleanup_agent_run=lambda **kwargs: None)
     await WebSocketSession.start_agent_run(host, "authorized PR follow-up", conversation_id="conv_probe")
-    await asyncio.gather(*cleanup)
+    await asyncio.gather(*host.execution_cleanup_tasks)
     assert captured[0]["user_message_id"].startswith("user_")
 
 

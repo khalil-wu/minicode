@@ -268,8 +268,10 @@ def test_stdio_invalid_tool_result_preserves_live_client_and_stop_ownership(tmp_
             lifecycle = client._lifecycle_task
 
             invalid = await client.call_tool("inspect", {"behavior": "invalid"})
-            assert invalid.is_error
-            assert "Invalid structured content" in invalid.text
+            assert not invalid.is_error
+            assert invalid.structured_content == {"count": "invalid"}
+            assert invalid.content == [{"type": "text", "text": "TOOL_MARKER"}]
+            assert invalid.wire_result["structuredContent"] == {"count": "invalid"}
             await client._session.send_ping()
             assert manager._servers[config.name].status == ServerStatus.CONNECTED
             assert manager.get_client(config.name) is client

@@ -769,7 +769,10 @@ def test_context_builder_preserves_control_like_text_and_repeated_users() -> (
     assert [(m["role"], m["content"]) for m in history] == [
         (m["role"], m["content"]) for m in snapshot["history"]
     ]
-    assert history[1]["tool_calls"] == snapshot["history"][1]["tool_calls"]
+    assert history[1]["tool_calls"] == [
+        {**call, "native_type": "", "native_namespace": "", "native_name": ""}
+        for call in snapshot["history"][1]["tool_calls"]
+    ]
     assert history[2]["tool_call_id"] == "call_a"
 
 
@@ -852,7 +855,7 @@ def test_context_builder_does_not_silently_truncate_history_to_fit_budget() -> N
 
     roles = [message.role for message in messages]
     assert roles[0] == "system"
-    assert roles[1:5] == ["user", "assistant", "tool", "tool"]
+    assert roles[1:6] == ["developer", "user", "assistant", "tool", "tool"]
     assert roles[-1] == "user"
     assert messages[-1].content.endswith("Summarize it.")
     assert [message.tool_call_id for message in messages if message.role == "tool"] == [

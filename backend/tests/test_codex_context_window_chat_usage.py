@@ -113,12 +113,13 @@ async def test_real_chat_nested_vm_ws_has_compaction_and_followup_terminal(tmp_p
         monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda *_args, **_kwargs: adapter)
         monkeypatch.setattr(session, "_build_conversation_tool_registry", lambda *_args, **_kwargs: registry)
         try:
-            assert await session.command_dispatcher._dispatch_client_command(UserCommand("user_message", {
+            admission = asyncio.create_task(session.command_dispatcher._dispatch_client_command(UserCommand("user_message", {
                 "conversation_id": parent.id, "workspace_root": parent.workspace_root,
                 "permission_mode": "bypass", "client_command_id": "real-chat-window-command",
                 "user_message_id": "real-chat-user", "assistant_message_id": "real-chat-answer",
                 "content": "Start and finish the real Chat window fixture.",
-            }), session.connection_generation) is True
+            }), session.connection_generation))
+            assert await admission is True
             running = session.run_manager.running_task_for(parent.id)
             if running is not None:
                 await asyncio.wait_for(asyncio.shield(running), 10)

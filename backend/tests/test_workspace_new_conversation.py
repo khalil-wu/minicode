@@ -10,6 +10,7 @@ from backend.conversations.repository import ConversationRepository
 from backend.artifact.store import ArtifactStore
 from backend.ws.handlers import conversation, workspace
 from backend.ws.command_dispatcher import SessionCommandDispatcher
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 @pytest.mark.parametrize("command", ["workspace.set", "workspace.switch", "workspace.import", "conversation.create"])
@@ -23,7 +24,7 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
     request.addfinalizer(artifacts.shutdown)
     session = SimpleNamespace(
-        active_conversation_id=old.id, conversation_repo=repo,
+        active_conversation_id=old.id, conversation_repo=repo, ws_manager=None,
         # Direct handler calls have no durable client-command claim.
         event_outbox=SimpleNamespace(client_command_id=""),
         artifact_store=artifacts,
@@ -32,6 +33,7 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
         send_payload=AsyncMock(), emit_command_result=AsyncMock(),
         runtime_snapshot=lambda: {"active_conversation_id": session.active_conversation_id},
     )
+    session.session_lifecycle = SessionLifecycle(session)
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _: True)
     monkeypatch.setattr(conversation, "_broadcast_conversation_lists", AsyncMock(return_value=[]))
     handler = conversation.handle_conversation_create if command == "conversation.create" else workspace.HANDLERS[command]
@@ -39,6 +41,7 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     created = repo.get_conversation(session.active_conversation_id)
     assert created.id != old.id
     assert created.workspace_root == str(new_root)
+    assert created.execution_cwd == str(new_root)
     assert created.git_branch == "main"
     assert created.permission_mode == "bypass"
     assert created.transcript == []
@@ -47,6 +50,7 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     switched = session.send_payload.await_args.args[0]
     assert switched["conversation_id"] == created.id
     assert switched["conversation"]["workspace_root"] == str(new_root)
+    assert switched["conversation"]["execution_cwd"] == str(new_root)
     assert session.emit_command_result.await_args.args[0] == command
     session.load_active_conversation_snapshot.assert_called_once_with(created.id, {}, notify=True, defer_start=True)
 
@@ -68,6 +72,7 @@ def test_failed_workspace_initialization_keeps_previous_owner(monkeypatch, tmp_p
         git_branch_for=Mock(return_value="main"), switch_workspace_for_conversation=fail_activation,
         send_payload=AsyncMock(), load_active_conversation_snapshot=Mock(),
     )
+    session.session_lifecycle = SessionLifecycle(session)
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _: True)
     asyncio.run(workspace.handle_workspace_set(session, {"path": str(new_root)}))
     assert session.active_conversation_id == old.id

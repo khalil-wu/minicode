@@ -129,32 +129,23 @@ def test_permission_checker_blocks_destructive_home_and_system_deletes(tmp_path:
 
 
 def test_bypass_ignores_tool_owned_confirm_defaults(tmp_path: Path) -> None:
-    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    from backend.config import permission_settings_from_config
+    from backend.sandbox import SandboxPolicy
+    from backend.tests.test_codex_mcp_approval_producer import authorize, proxy
+
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
     confirm_context = checker.build_context(mode="confirm", source="test")
     bypass_context = checker.build_context(mode="bypass", source="test")
 
-    class ConservativeTool(BaseTool):
-        name = "mcp__websearch__fetch_page"
-        description = "Fetch a page."
-        read_only = True
-
-        def get_schema(self):
-            return ToolSchema(
-                name=self.name,
-                description=self.description,
-                parameters={"type": "object", "properties": {}},
-            )
-
-        def check_permission(self, args=None, context=None):
-            return PermissionLevel.CONFIRM
-
-        async def execute(self, args, context=None):
-            return ToolResult(content="ok")
-
-    tool = ConservativeTool()
-
-    assert checker.check("mcp__websearch__fetch_page", {"url": "https://example.test"}, context=confirm_context, tool=tool) == PermissionLevel.CONFIRM
-    assert checker.check("mcp__websearch__fetch_page", {"url": "https://example.test"}, context=bypass_context, tool=tool) == PermissionLevel.AUTO
+    tool, _, _ = proxy({"readOnlyHint": True}, "prompt")
+    for permission, sandbox, expected in (
+        (confirm_context, SandboxPolicy.workspace_default(tmp_path), PermissionLevel.CONFIRM),
+        (bypass_context, SandboxPolicy.bypass(), PermissionLevel.AUTO),
+        (bypass_context, SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
+    ):
+        result, _, _ = authorize(tool, tmp_path, sandbox, permission,
+            permission_settings=permission_settings_from_config({}), arguments={"value": "original"})
+        assert result.permission_decision.permission_level == expected
 
 
 def test_permission_signature_probe_is_cached_per_checker(monkeypatch) -> None:

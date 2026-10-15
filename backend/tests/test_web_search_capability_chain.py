@@ -10,6 +10,7 @@ import pytest
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import toolset_policy_guard_reason
 from backend.agent.tool_schema_derivation import effective_toolset_policy
+from backend.config import AppConfig, AgentSettings, LLMSettings
 from backend.llm.base import ToolCallEvent
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.code_execution import ToolExecTool, ToolWaitTool
@@ -223,7 +224,7 @@ def test_idle_catalog_uses_selected_wire_contract_without_instantiating_a_model(
         run_manager=SimpleNamespace(context_for=lambda _: None), active_conversation_id="conversation",
         _extension_runtime_states={}, _model_runtime_for_conversation=lambda _: None,
         provider="custom", selected_model="selected",
-        config=SimpleNamespace(llm=SimpleNamespace(tool_mode="direct"), agent=SimpleNamespace(code_mode_only=False)),
+        config=AppConfig(llm=LLMSettings(api_key="fixture", tool_mode="direct"), agent=AgentSettings(code_mode_only=False)),
         session_lifecycle=SimpleNamespace(current_workspace_root=lambda: None),
         permission_context=PermissionContext(mode="bypass"),
         _llm_selection_payload=lambda: {"wire_api": wire, "base_url": url, "supports_hosted_web_search": declared},

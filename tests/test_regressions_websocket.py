@@ -30,6 +30,8 @@ from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.manager import WebSocketManager
+from backend.ws.stream_state import create_stream_state, get_stream_content_blocks
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 class _HungLLM(LLMAdapter):
@@ -81,6 +83,22 @@ def _use_injected_tool_registry(monkeypatch) -> None:
         "backend.ws.handler.WebSocketSession._build_conversation_tool_registry",
         lambda self, conversation_id="", **_kwargs: self.tool_registry,
     )
+
+
+@pytest.fixture(autouse=True)
+def _release_unit_session_queue_owners(monkeypatch):
+    sessions = []
+    initialize = WebSocketSession.__init__
+
+    def initialized(session, *args, **kwargs):
+        initialize(session, *args, **kwargs)
+        sessions.append(session)
+
+    monkeypatch.setattr(WebSocketSession, "__init__", initialized)
+    yield
+    for session in sessions:
+        session.run_manager.stop_notification_wake_intake()
+        session.run_manager.close_durable_queue()
 
 
 class _FakeWebSocket:
@@ -146,11 +164,17 @@ def test_websocket_reconnect_closes_resources_created_for_the_discarded_connecti
             self.llm = live_llm
             self.artifact_store = live_artifacts
             self.connection_generation = 4
+            self.window_instance_id = ""
             self.window_owner_id = ""
+            self.session_id = "session-reconnect"
+            self.is_connected = True
+            self.active_conversation_id = None
             self.previous_socket = _Socket()
+            self.ws = self.previous_socket
+            self.session_lifecycle = SessionLifecycle(self)
 
         def attach_websocket(self, websocket, *, window_instance_id, window_owner_id, window_binding_token):
-            del websocket
+            self.ws = websocket
             assert (window_instance_id, window_owner_id, window_binding_token) == ("", "", "")
             self.connection_generation += 1
             return self.previous_socket, self.connection_generation
@@ -785,7 +809,10 @@ def test_delete_active_conversation_does_not_start_workspace_index(monkeypatch, 
 
                 return self.manager, asyncio.create_task(ready())
 
-            def create_tool_registry(self, _artifact_store, *, mcp_manager=None):
+            def get_mcp_manager_for_workspace(self, workspace_root):
+                return self.manager if workspace_root is not None else None
+
+            def create_tool_registry(self, _artifact_store, *, workspace_root=None, config=None, mcp_manager=None):
                 return ToolRegistry()
 
         monkeypatch.setattr(_state, "bootstrap", SlowWorkspaceBootstrap())
@@ -1310,14 +1337,17 @@ def test_websocket_query_submission_passes_background_manager(monkeypatch, tmp_p
 
 
 def test_first_user_message_creates_unbound_conversation(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     captured: dict[str, object] = {}
 
-    async def fake_run_agent_loop(*args, **kwargs):
-        captured["session_context"] = kwargs.get("session_context")
-        yield AgentEvent.agent_message_completed("hello")
-        yield AgentEvent.done()
+    class CapturingQueryEngine:
+        async def submit(self, submission):
+            await _admit_query_submission(submission)
+            captured["session_context"] = submission.runtime
+            yield AgentEvent.agent_message_completed("hello")
+            yield AgentEvent.done()
 
-    monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
+    monkeypatch.setattr("backend.memory.generation.schedule_memory_startup", lambda **_kwargs: None)
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
 
     async def scenario() -> WebSocketSession:
@@ -1330,6 +1360,7 @@ def test_first_user_message_creates_unbound_conversation(monkeypatch, tmp_path) 
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
+        session.query_engine = CapturingQueryEngine()
         await session.command_dispatcher._handle_command(UserCommand(type="user_message", data={"content": "hello"}))
         task = session.run_manager.active_run_task
         if task is not None:
@@ -1343,7 +1374,9 @@ def test_first_user_message_creates_unbound_conversation(monkeypatch, tmp_path) 
     conversation = session.conversation_repo.get_conversation(conversation_id)
     assert conversation is not None
     assert conversation.workspace_root == ""
-    assert getattr(captured["session_context"], "workspace_root") is None
+    assert conversation.execution_cwd == str(tmp_path.resolve())
+    assert getattr(captured["session_context"], "workspace_root") == tmp_path.resolve()
+    assert [message["content"] for message in conversation.transcript if message["role"] == "user"] == ["hello"]
     assert any(payload.get("type") == "item.completed" and payload.get("conversation_id") == conversation_id for payload in session.ws.sent)
 
 
@@ -1552,25 +1585,20 @@ def test_websocket_session_caches_agent_message_deltas_for_stream_resume(monkeyp
         conversation = session.conversation_repo.create_conversation(conversation_id="conv_finalcache")
         session.active_conversation_id = conversation.id
         # Legacy fields removed: only _conversation_streams is authoritative
-        session._conversation_streams[conversation.id] = {
-            "conversation_id": conversation.id,
-            "message_id": "assistant-final",
-            "content_blocks": [],
-            "tool_calls": {},
-        }
+        session._conversation_streams[conversation.id] = create_stream_state(conversation.id, "assistant-final")
 
         for delta in ("北京今天", "晴。"):
             event = AgentEvent.agent_message_delta(delta)
             event.data["conversation_id"] = conversation.id
             await session.send_event(event)
-        accumulated = session._conversation_streams[conversation.id]["content_blocks"][-1]["content"]
+        accumulated = get_stream_content_blocks(session._conversation_streams[conversation.id])[-1]["content"]
         return session, accumulated
 
     session, accumulated = asyncio.run(scenario())
 
     assert accumulated == "北京今天晴。"
     # Legacy field removed: only check per-conversation stream state
-    assert session._conversation_streams["conv_finalcache"]["content_blocks"][-1]["content"] == "北京今天晴。"
+    assert get_stream_content_blocks(session._conversation_streams["conv_finalcache"])[-1]["content"] == "北京今天晴。"
 
 
 def test_websocket_reemit_stream_resume_includes_pending_tool_calls(monkeypatch, tmp_path) -> None:
@@ -1756,8 +1784,8 @@ def test_websocket_streaming_text_cache_is_scoped_by_conversation(monkeypatch, t
         conv_a = session.conversation_repo.create_conversation(conversation_id="conv_cachea", title="A")
         conv_b = session.conversation_repo.create_conversation(conversation_id="conv_cacheb", title="B")
         session._conversation_streams = {
-            conv_a.id: {"conversation_id": conv_a.id, "message_id": "assistant-a", "content_blocks": [], "tool_calls": {}},
-            conv_b.id: {"conversation_id": conv_b.id, "message_id": "assistant-b", "content_blocks": [], "tool_calls": {}},
+            conv_a.id: create_stream_state(conv_a.id, "assistant-a"),
+            conv_b.id: create_stream_state(conv_b.id, "assistant-b"),
         }
 
         for conversation_id, delta in ((conv_a.id, "A1"), (conv_b.id, "B1"), (conv_a.id, "A2")):
@@ -1768,8 +1796,8 @@ def test_websocket_streaming_text_cache_is_scoped_by_conversation(monkeypatch, t
 
     session = asyncio.run(scenario())
 
-    assert session._conversation_streams["conv_cachea"]["content_blocks"][-1]["content"] == "A1A2"
-    assert session._conversation_streams["conv_cacheb"]["content_blocks"][-1]["content"] == "B1"
+    assert get_stream_content_blocks(session._conversation_streams["conv_cachea"])[-1]["content"] == "A1A2"
+    assert get_stream_content_blocks(session._conversation_streams["conv_cacheb"])[-1]["content"] == "B1"
     assert [item["conversation_id"] for item in session.ws.sent] == ["conv_cachea", "conv_cacheb", "conv_cachea"]
 
 

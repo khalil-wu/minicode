@@ -354,6 +354,7 @@ async def run_owned_rest_chat(
         "tool_calls": [
             ToolCallRecord.from_internal(tool_call).model_dump()
             for tool_call in state.tool_calls
+            if not tool_call.private_model_only
         ],
         **({"context_snapshot": context_builder.export_snapshot()} if context_builder is not None else {}),
     }

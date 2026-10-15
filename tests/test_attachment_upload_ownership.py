@@ -22,21 +22,21 @@ from backend.services.chat_api_service import (
     upload_document_payload,
 )
 from backend.ws.manager import WebSocketManager
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 def _owners(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     repo = ConversationRepository(base_dir=tmp_path / "conversations")
     store = AttachmentStore(tmp_path / "attachments")
     session = SimpleNamespace(
         _attachment_upload_lock=threading.RLock(),
         active_conversation_id=None,
         conversation_repo=repo,
+        attachment_store=store,
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
-        session_lifecycle=SimpleNamespace(
-            workspace_root_for_conversation=lambda conversation: Path(conversation.workspace_root)
-            if conversation.workspace_root else None,
-        ),
     )
+    session.session_lifecycle = SessionLifecycle(session)
     manager = WebSocketManager()
     monkeypatch.setattr(manager, "get_session", lambda session_id: session if session_id == "upload-session" else None)
     monkeypatch.setattr(routes_chat._state, "ws_manager", manager)
@@ -133,11 +133,14 @@ def test_renamed_pdf_never_becomes_native_pdf_input(tmp_path, monkeypatch, raw):
         result = upload_document_payload(context=context, file_name="renamed.pdf", raw_content=raw)
     finally:
         context.release()
-    payload = store.get_payload(result["artifact_id"], conversation_id=context.conversation_id)
+    owner_root = str(context.workspace_root)
+    assert store.get_payload(result["artifact_id"], conversation_id=context.conversation_id,
+        workspace_root=str(tmp_path / "other")) is None
+    payload = store.get_payload(result["artifact_id"], conversation_id=context.conversation_id, workspace_root=owner_root)
     assert base64.b64decode(payload["native_data"]) == raw
     plan = build_attachment_input_plan(
         [result["attachment"]], attachment_store=store, conversation_id=context.conversation_id,
-        retain_native_media=True,
+        workspace_root=owner_root, retain_native_media=True,
     )
     assert not plan.documents and not plan.images
     if b"\x00" not in raw:

@@ -71,6 +71,8 @@ class ToolCallRecord(BaseModel):
         # Completed event snapshot used for internal replay/reconciliation.
         # REST exposes the call identity and curated fields, not this payload.
         "result_payload",
+        # Host-only wrapper marker. Private model evidence never enters REST.
+        "private_model_only",
     })
 
     @classmethod

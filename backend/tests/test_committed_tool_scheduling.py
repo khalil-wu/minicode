@@ -14,7 +14,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, PermissionSettings, TokenBudget, permission_settings_from_config
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent, ToolCallStartEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
@@ -63,14 +63,15 @@ async def run_case(tmp_path, llm, tools, observe=None, cancel_event=None, approv
     budget = TokenBudget(total=32768, response_reserve=4096)
     ctx = ContextBuilder(token_budget=budget, llm=llm, conversation_id="conv_scheduling", workspace_root=tmp_path)
     settings = AgentSettings(max_iterations=4, max_turn_seconds=15, stream_max_attempts=stream_max_attempts, turn_error_budget=2)
-    permissions = PermissionSettings(require_confirm=[tool.name for tool in tools]) if approval else PermissionSettings()
-    session = AgentSession(llm=llm, tool_registry=registry, artifact_store=artifacts, permission_checker=PermissionChecker(permissions, tmp_path), agent_settings=settings, token_budget=budget, context_builder=ctx, approval_handler=approval)
+    permissions = PermissionSettings(require_confirm=[tool.name for tool in tools]) if approval else permission_settings_from_config({})
+    checker = PermissionChecker(permissions, tmp_path)
+    session = AgentSession(llm=llm, tool_registry=registry, artifact_store=artifacts, permission_checker=checker, agent_settings=settings, token_budget=budget, context_builder=ctx, approval_handler=approval)
     runtime = AgentRuntime(enable_lease_heartbeat=False)
     state = AgentState(user_message="Complete the fixture work", conversation_id="conv_scheduling", workspace_root=tmp_path)
     events = []
     try:
         async with asyncio.timeout(10):
-            async for event in QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state, runtime=AgentLoopSessionContext(workspace_root=tmp_path, session_id="schedule-test", permission_context=PermissionContext(mode="confirm" if approval else "bypass"), cancel_event=cancel_event, run_context=RunContext(agent_runtime=runtime, execution_journal=ExecutionJournal("schedule-test", base_dir=tmp_path / "journals"))))):
+            async for event in QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state, runtime=AgentLoopSessionContext(workspace_root=tmp_path, session_id="schedule-test", permission_context=checker.build_context(mode="confirm" if approval else "bypass"), cancel_event=cancel_event, run_context=RunContext(agent_runtime=runtime, execution_journal=ExecutionJournal("schedule-test", base_dir=tmp_path / "journals"))))):
                 events.append(event)
                 if observe:
                     observe(event)

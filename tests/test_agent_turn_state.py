@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.agent.turn_state import AgentTurnState
+from backend.agent.turn_state import AgentTurnState, materialize_content_block
 from backend.ws.agent_runner import _project_agent_message_event
 
 
@@ -48,7 +48,7 @@ def test_runner_projection_does_not_persist_provisional_agent_message_source() -
         'source': 'model_final',
     })
 
-    assert state._blocks == [{
+    assert [materialize_content_block(block) for block in state._blocks] == [{
         'type': 'text',
         'itemId': 'agent-message',
         'content': 'I will inspect the files first.',

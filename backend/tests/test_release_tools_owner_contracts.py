@@ -239,7 +239,8 @@ async def test_elicitation_hook_decisions_and_typed_content_reach_sdk(before, af
             pass
     session = Session()
     bootstrap = object.__new__(AppBootstrap)
-    bootstrap._resolve_mcp_request_session = lambda payload: (session, {"conversation_id": "hook", "hook_manager": manager})
+    bootstrap._resolve_mcp_request_session = lambda payload: (session, {"conversation_id": "hook", "hook_manager": manager,
+        "permission_context_provider": lambda: PermissionContext(mode="confirm", approval_policy="on-request")})
     result = await bootstrap._handle_mcp_elicitation({"prompt": "Fill form", "schema": schema, "_mcp_server_name": "server"})
     expected = after or before or "accept"
     assert result["action"] == expected
@@ -332,7 +333,10 @@ async def test_direct_mcp_images_publish_owner_artifact_without_changing_model_b
         events = store_result_events(call, result, builder, state, tool_ctx=owner, tool_registry=registry)
         previews = [event for event in events if event.type == "artifact.preview"]
         assert len(previews) == int(not nested)
-        assert sum(len(message.images) for message in builder._history) == int(not nested)
+        model_images = [block for message in builder._history for block in message.mcp_output or []
+            if block["type"] == "input_image"]
+        assert model_images == ([] if nested else [{"type": "input_image", "image_url": f"data:image/png;base64,{png}", "detail": "high"}])
+        assert not any(message.images for message in builder._history)
         if not nested:
             artifact_id = previews[0].data["artifact_id"]
             assert artifacts.get_meta(artifact_id, conversation_id="image-owner", workspace_root=tmp_path).media_type == "image/png"

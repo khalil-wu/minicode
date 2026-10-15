@@ -6,7 +6,6 @@ import asyncio
 import json
 import shlex
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -336,14 +335,19 @@ def test_config_async_hook_is_session_owned_and_drained(tmp_path) -> None:
 
 
 def test_dynamic_async_timeout_terminates_owned_process(tmp_path) -> None:
+    import psutil
+
     script = tmp_path / "timed_async_hook.py"
     script.write_text(
         "\n".join(
             (
-                "import json, sys, time",
+                "import json, os, sys, time",
+                "from pathlib import Path",
                 "sys.stdin.readline()",
+                "Path(__file__).with_suffix('.pid').write_text(str(os.getpid()))",
                 'print(json.dumps({"async": True, "asyncTimeout": 50}), flush=True)',
                 "time.sleep(2)",
+                "Path(__file__).with_suffix('.finished').write_text('natural completion')",
             )
         ),
         encoding="utf-8",
@@ -361,15 +365,14 @@ def test_dynamic_async_timeout_terminates_owned_process(tmp_path) -> None:
         tool_context=_hook_tool_context(events),
     )
 
-    async def scenario() -> float:
+    async def scenario() -> None:
         await manager.run_user_prompt_submit("hello")
-        started = time.monotonic()
         await manager.drain_async_hooks()
-        return time.monotonic() - started
 
-    elapsed = asyncio.run(scenario())
+    asyncio.run(scenario())
 
-    assert elapsed < 1.5
+    assert not psutil.pid_exists(int(script.with_suffix('.pid').read_text()))
+    assert not script.with_suffix('.finished').exists()
     assert manager.pending_async_hooks == 0
     assert len(events) == 1
     assert events[0][1]["status"] == "failed"

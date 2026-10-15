@@ -28,6 +28,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 }));
 vi.mock("../overlays/DialogService", () => ({ showConfirm: mocks.confirm, showAlert: mocks.alert }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: mocks.toast }));
+vi.mock("./GitDelivery", () => ({ GitDelivery: () => null }));
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;

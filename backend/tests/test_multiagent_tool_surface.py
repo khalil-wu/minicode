@@ -132,7 +132,23 @@ def test_task_batch_rejects_teammate_routing_in_the_published_execution_contract
     assert validate_tool_input(tool, args) == ""
     args["parallel_tasks"][0][routing_field] = "auto" if routing_field == "mode" else "parser-summary"
     assert validate_tool_input(tool, args)
-    assert tool.model_schema().parameters == tool.get_execution_schema().parameters
+    published = tool.model_schema().parameters
+    execution = tool.get_execution_schema().parameters
+    model_role = published["properties"]["agent_type"]
+    execution_role = execution["properties"]["agent_type"]
+    assert set(execution_role["enum"]) == set(model_role["enum"]) | {"general-purpose", "explore", "plan"}
+    assert not {"general-purpose", "explore", "plan"} & set(model_role["enum"])
+    def execution_contract(node):
+        if isinstance(node, dict):
+            normalized = {key: execution_contract(value) for key, value in node.items()}
+            if "agent_type" in node.get("properties", {}):
+                assert node["properties"]["agent_type"] == model_role
+                normalized["properties"]["agent_type"] = execution_role
+            return normalized
+        if isinstance(node, list):
+            return [execution_contract(value) for value in node]
+        return node
+    assert execution_contract(published) == execution
 
 
 def test_code_mode_task_signature_presents_distinct_single_teammate_and_batch_inputs(tmp_path):

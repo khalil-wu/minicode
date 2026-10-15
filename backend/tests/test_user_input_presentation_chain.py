@@ -1,5 +1,6 @@
 import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,8 @@ from starlette.websockets import WebSocketState
 
 from backend.agent.message import UserCommand
 from backend.artifact.store import ArtifactStore
-from backend.config import AppConfig, LLMSettings, PermissionSettings
+from backend.config import AgentSettings, AppConfig, LLMSettings, permission_settings_from_config
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
 from backend.permissions.checker import PermissionChecker
@@ -37,7 +39,7 @@ class Answer(LLMAdapter):
         self.requests = []
 
     async def stream_chat(self, messages, tools=None, metadata=None):
-        self.requests.append(messages)
+        self.requests.append(deepcopy(messages))
         yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="fixture answer", phase="final_answer")
         yield StreamEvent(type=StreamEventType.DONE, finish_reason="completed", usage=UsageInfo())
 
@@ -47,13 +49,17 @@ class Answer(LLMAdapter):
 
 def session_for(tmp_path, monkeypatch):
     adapter = Answer()
-    config = AppConfig(llm=LLMSettings(api_key="fixture", model=adapter.model, provider="custom"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = AppConfig(llm=LLMSettings(api_key="fixture", model=adapter.model, provider="custom", tool_mode="direct"),
+        agent=AgentSettings(code_mode_only=False), permissions=permission_settings_from_config({}),
+        config_layer_stack=ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "config.toml")), {}),)))
     session = WebSocketSession(session_id="input-display", websocket=Socket(), llm=adapter,
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"), tool_registry=ToolRegistry(),
-        permission_checker=PermissionChecker(PermissionSettings(), workspace_root=None), config=config,
+        permission_checker=PermissionChecker(config.permissions, workspace_root=workspace), config=config,
         mcp_manager=None)
     session.conversation_repo = ConversationRepository(tmp_path / "conversations")
-    conversation = session.conversation_repo.create_conversation()
+    conversation = session.conversation_repo.create_conversation(execution_cwd=str(workspace))
     session.active_conversation_id = conversation.id
     monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda **kwargs: config)
     monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda *args, **kwargs: adapter)
@@ -115,7 +121,7 @@ async def test_real_ws_turn_persists_original_input_without_changing_provider_co
             assert row["display_content"] == display
             assert row["context_refs"] == packet["context_refs"]
             assert row["quoted_message"] == packet["quoted_message"]
-        evidence = Path(".tmp/full-chain-audit-20261002/parallel-input-display-20261003")
+        evidence = tmp_path / "evidence"
         evidence.mkdir(parents=True, exist_ok=True)
         (evidence / ("backend-empty-public.json" if not display else "backend-public.json")).write_text(
             json.dumps({"user": user, "queued": queued, "steered": steered}, indent=2) + "\n", encoding="utf-8")
@@ -162,7 +168,7 @@ async def test_consumed_steer_admission_uses_its_original_presentation(tmp_path,
     session.tool_registry.register(WaitRead())
 
     async def stream(messages, tools=None, metadata=None):
-        adapter.requests.append(messages)
+        adapter.requests.append(deepcopy(messages))
         if len(adapter.requests) == 1:
             yield StreamEvent(type=StreamEventType.TOOL_CALL,
                 tool_calls=[ToolCallEvent("audit-read-call", "audit_wait_read", {})])
@@ -191,7 +197,8 @@ async def test_consumed_steer_admission_uses_its_original_presentation(tmp_path,
         assert steered["content"] == packet["content"]
         assert steered["context_refs"] == packet["context_refs"]
         assert steered["quoted_message"] == packet["quoted_message"]
-        evidence = Path(".tmp/full-chain-audit-20261002/parallel-input-display-20261003")
+        evidence = tmp_path / "evidence"
+        evidence.mkdir()
         (evidence / "backend-consumed-steer.json").write_text(json.dumps(steered, indent=2) + "\n", encoding="utf-8")
     finally:
         release.set()

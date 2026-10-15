@@ -153,6 +153,7 @@ def test_scheduler_fallback_projects_existing_durable_completion(
             bind_connection_generation=lambda _generation: contextlib.nullcontext(),
         ),
         _command_tasks=set(),
+        execution_cleanup_tasks=set(),
         _conversation_streams={},
         schedule_task_runtime_update=lambda: None,
         schedule_next_queued_user_message=lambda _conversation_id: None,
@@ -216,6 +217,7 @@ def test_scheduler_fallback_projects_existing_durable_completion(
                 metadata={"assistant_message_id": "assistant-durable", "_parent_notification_only": True},
             )
             await asyncio.gather(*tuple(session._command_tasks))
+            await asyncio.gather(*tuple(session.execution_cleanup_tasks))
         finally:
             runtime.close(release_lease=True)
 

@@ -9,7 +9,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from backend.lsp.editor import EditorLanguageServers, EditorLanguageStateError, editor_language_servers
+from backend.lsp.client import LSPClient
+from backend.lsp.editor import EditorLanguageProcess, EditorLanguageServers, EditorLanguageStateError, editor_language_servers
 from backend.workspace.api import create_workspace_router
 
 
@@ -235,6 +236,55 @@ async def test_real_pyright_discard_restores_disk_semantics_via_rest_and_keeps_r
             assert a.read_text(encoding="utf-8") == "value = 1\n" and b.read_text(encoding="utf-8") == doc_b["content"]
         finally:
             await editor_language_servers.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ignores_exit", [False, True])
+async def test_language_shutdown_waits_for_protocol_exit_and_reaps_an_unresponsive_peer(tmp_path, monkeypatch, ignores_exit):
+    trace = tmp_path / "shutdown.jsonl"
+    server = tmp_path / "language_server.py"
+    server.write_text('''import json, sys, time
+from pathlib import Path
+trace = Path(sys.argv[1])
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if line in (b"\\r\\n", b"\\n", b""):
+            break
+        name, value = line.decode().split(":", 1)
+        headers[name.lower()] = value.strip()
+    if not line:
+        break
+    message = json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+    method = message.get("method")
+    if method in ("shutdown", "exit"):
+        with trace.open("a", encoding="utf-8") as output:
+            output.write(json.dumps({"method": method}) + "\\n")
+    if "id" in message:
+        result = {"capabilities": {"hoverProvider": True}} if method == "initialize" else None
+        body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+        sys.stdout.buffer.write(f"Content-Length: {len(body)}\\r\\n\\r\\n".encode() + body)
+        sys.stdout.buffer.flush()
+    if method == "exit":
+        time.sleep(30 if sys.argv[2] == "ignore" else 0.05)
+        break
+''', encoding="utf-8")
+    monkeypatch.setattr("backend.lsp.client._SHUTDOWN_EXIT_TIMEOUT_SECONDS", 0.2)
+    runner = EditorLanguageProcess()
+    client = LSPClient(sys.executable, [str(server), str(trace), "ignore" if ignores_exit else "exit"],
+        str(tmp_path), sandbox_runner=runner)
+    try:
+        await client.start()
+        process = runner.process
+        await asyncio.wait_for(client.stop(), 5)
+        assert [json.loads(line)["method"] for line in trace.read_text(encoding="utf-8").splitlines()] == ["shutdown", "exit"]
+        assert process.returncode is not None
+        assert (process.returncode != 0) if ignores_exit else (process.returncode == 0)
+        assert client._process is None and client._reader_task is None and client._stderr_task is None
+        assert client._pending == {}
+    finally:
+        await client.stop()
 
 
 @pytest.mark.asyncio

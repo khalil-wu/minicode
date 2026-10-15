@@ -1826,6 +1826,7 @@ def test_main_responses_recovers_final_tool_call_without_done_delta() -> None:
             id="call-terminal",
             name="run_command",
             arguments={"command": "pwd"},
+            native_name="run_command",
         )
     ]
     assert events[-1].type == StreamEventType.DONE
@@ -2804,6 +2805,7 @@ def test_main_responses_finalizes_function_call_from_output_item_done() -> None:
             id="call-1",
             name="run_command",
             arguments={"command": "pwd"},
+            native_name="run_command",
         )
     ]
     assert events[-1].type == StreamEventType.DONE

@@ -65,17 +65,12 @@ def test_call_tool_forwards_meta_through_official_session() -> None:
         def __init__(self) -> None:
             self.call: dict[str, object] = {}
 
-        async def call_tool(self, name, arguments, read_timeout_seconds, *, meta):
+        async def send_request(self, request, result_type, *, request_read_timeout_seconds):
             self.call = {
-                "name": name,
-                "arguments": arguments,
-                "timeout": read_timeout_seconds.total_seconds(),
-                "meta": meta,
+                "request": request.model_dump(mode="json", by_alias=True, exclude_none=True),
+                "timeout": request_read_timeout_seconds.total_seconds(),
             }
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text="ok")],
-                isError=False,
-            )
+            return result_type.model_validate({"content": [{"type": "text", "text": "ok"}], "isError": False})
 
     session = _Session()
     client = MCPClient("remote", transport=MCPTransport.HTTP, url="https://mcp.example/mcp")
@@ -87,13 +82,17 @@ def test_call_tool_forwards_meta_through_official_session() -> None:
     )
 
     assert result.text == "ok"
-    assert session.call["meta"] == {"trace": "turn-1"}
+    assert session.call["request"] == {"method": "tools/call", "params": {
+        "name": "search", "arguments": {"query": "MCP"}, "_meta": {"trace": "turn-1"},
+    }}
     assert session.call["timeout"] == 300.0
 
 
 def test_call_tool_preserves_official_sdk_rpc_error() -> None:
     class _Session:
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, request, result_type, *, request_read_timeout_seconds):
+            assert request.root.method == "tools/call"
+            assert request.root.params.name == "search" and request.root.params.arguments == {}
             raise McpError(types.ErrorData(code=-32602, message="missing required field query"))
 
     client = MCPClient("remote", transport=MCPTransport.HTTP, url="https://mcp.example/mcp")
@@ -146,11 +145,10 @@ def test_oversized_tool_response_does_not_disconnect_a_live_session(monkeypatch)
     class _Session:
         calls = 0
 
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, request, result_type, *, request_read_timeout_seconds):
+            assert request.root.method == "tools/call" and request.root.params.name == "inspect"
             self.calls += 1
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text="x" * 512 if self.calls == 1 else "ok")]
-            )
+            return result_type.model_validate({"content": [{"type": "text", "text": "x" * 512 if self.calls == 1 else "ok"}]})
 
     async def scenario() -> None:
         client = MCPClient("bounded-response")

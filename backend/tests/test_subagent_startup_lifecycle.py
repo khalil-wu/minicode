@@ -14,7 +14,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.worktree import create_agent_worktree
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, PermissionSettings, TokenBudget, permission_settings_from_config
 from backend.hooks.manager import HookResult
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
@@ -185,7 +185,7 @@ def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     model = _RecordingLLM()
     registry = ToolRegistry()
-    checker = PermissionChecker(PermissionSettings(), workspace_root=workspace)
+    checker = PermissionChecker(permission_settings_from_config({}), workspace_root=workspace)
     tool = TaskTool(
         llm_provider=model,
         tool_registry_provider=registry,

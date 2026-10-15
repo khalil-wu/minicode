@@ -1524,10 +1524,18 @@ def test_run_agent_loop_recovers_from_empty_run_command_with_model_guidance(tmp_
         def get_denial_reason(self, tool_name: str, args=None, context=None):
             return None
 
+    from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.config import permission_settings_from_config
+    from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+
     llm = _EmptyThenValidCommandLLM()
     run_tool = _RecordingRunCommandTool()
     registry = ToolRegistry()
     registry.register(run_tool)
+    config = AppConfig(llm=LLMSettings(api_key="", provider="custom", model="empty-command-fixture"),
+        agent=AgentSettings(max_iterations=3), permissions=permission_settings_from_config({}),
+        config_layer_stack=ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "config.toml")), {}),)))
+    checker = PermissionChecker(config.permissions, tmp_path)
 
     events = asyncio.run(
         _collect_events(
@@ -1535,11 +1543,14 @@ def test_run_agent_loop_recovers_from_empty_run_command_with_model_guidance(tmp_
                 user_message="what folder am I in",
                 llm=llm,
                 tool_registry=registry,
-                artifact_store=ArtifactStore(),
-                permission_checker=_AutoPermissionChecker(),
-                agent_settings=AgentSettings(max_iterations=3),
+                artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+                permission_checker=checker,
+                agent_settings=config.agent,
                 token_budget=TokenBudget(),
-                state=AgentState(user_message="what folder am I in"),
+                state=AgentState(user_message="what folder am I in", workspace_root=tmp_path),
+                session_context=AgentLoopSessionContext(workspace_root=tmp_path,
+                    permission_context=checker.build_context(mode="bypass"),
+                    run_context=RunContext(model_execution=ModelExecutionSnapshot.capture(config, llm))),
             )
         )
     )
@@ -1631,7 +1642,7 @@ def test_desktop_no_workspace_turn_disables_local_workspace_tools() -> None:
     assert tool_result["id"] == "cmd_pwd"
     assert tool_result["status"] == "blocked"
     assert tool_result["is_error"] is True
-    assert tool_result["display_summary"] == "Tool unavailable"
+    assert tool_result["display_summary"] == "run_command"
     assert "unavailable under the active execution capability policy" in tool_result["summary"]
 
 

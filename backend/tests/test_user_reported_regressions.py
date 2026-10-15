@@ -395,13 +395,14 @@ def test_conversation_create_emits_authoritative_switch_for_the_new_task(
 
     session = SimpleNamespace(
         active_conversation_id="conv-old-task",
+        ws_manager=None,
         # This unit test calls the handler without a durable dispatcher claim.
         event_outbox=SimpleNamespace(client_command_id=""),
         artifact_store=artifacts,
         conversation_repo=SimpleNamespace(
             create_conversation=Mock(return_value=created),
         ),
-        session_lifecycle=SimpleNamespace(clear_workspace_runtime=Mock()),
+        session_lifecycle=SimpleNamespace(clear_workspace_runtime=Mock(), foreground_navigation_is_current=lambda: True),
         load_active_conversation_snapshot=Mock(return_value=False),
         sync_permission_mode_with_active_conversation=Mock(),
         send_payload=send_payload,
@@ -729,6 +730,7 @@ def test_usage_snapshot_emits_budget_and_context_without_visible_silent_result(
     session = SimpleNamespace(
         session_id="session-usage",
         active_conversation_id="conv-usage",
+        session_lifecycle=SimpleNamespace(current_workspace_root=lambda: None),
         last_agent_state=None,
         refresh_tool_registry_if_mcp_changed=Mock(),
         tool_registry=SimpleNamespace(get_schemas=Mock(return_value=[])),

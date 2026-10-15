@@ -23,7 +23,7 @@ from backend.agent.tool_execution import prepare_tool_call_sequence, run_tool
 from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
-from backend.config import PermissionSettings
+from backend.config import PermissionSettings, permission_settings_from_config
 from backend.llm.base import ToolCallEvent as AgentToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -455,7 +455,7 @@ def test_extension_exec_uses_canonical_tool_batch(tmp_path: Path) -> None:
             name="run_command",
         )
     )
-    checker = PermissionChecker(PermissionSettings(auto_allow=["run_command"]), tmp_path)
+    checker = PermissionChecker(permission_settings_from_config({"permissions": {"auto_allow": ["run_command"]}}), tmp_path)
     context_builder = ContextBuilder()
     state = AgentState(user_message="parent", max_iterations=3)
     tool_context = ToolExecutionContext(
