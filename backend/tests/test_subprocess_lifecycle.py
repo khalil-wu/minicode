@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -148,3 +149,23 @@ def test_terminate_process_tree_supports_threaded_subprocess_fallbacks() -> None
 
     assert _wait_until_gone(proc.pid)
     assert _wait_until_gone(child_pid)
+
+
+def test_windows_exit_during_tree_capture_still_reaps_the_owned_child(monkeypatch) -> None:
+    import backend.subprocesses as subprocesses
+
+    async def scenario() -> None:
+        process = await spawn_exec(sys.executable, "-c", "pass")
+        await process.wait()
+
+        class ExitedParent:
+            def children(self, *, recursive):
+                assert recursive is True
+                raise psutil.NoSuchProcess(process.pid)
+
+        monkeypatch.setattr(subprocesses, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(subprocesses.psutil, "Process", lambda pid: ExitedParent())
+        assert await terminate_process_tree(process) is True
+        assert process.returncode == 0
+
+    asyncio.run(scenario())

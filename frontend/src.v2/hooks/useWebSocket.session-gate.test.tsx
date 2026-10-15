@@ -418,14 +418,13 @@ describe("session gate replay", () => {
       const { client_command_id: _sent, ...sent } = response;
       const { client_command_id: _captured, ...captured } = expected[index].command;
       if (name === "__fixtures__approval_gate.json") {
-        // This capture used the removed generic rejection-feedback field.
-        // The current UI still rejects the identical request/turn/owner; only
-        // that obsolete optional text is excluded from exact wire equality.
+        // These responses predate digest-bound decisions. Preserve the actual
+        // captured request authority while removing the retired feedback field.
         const envelope = captured.response as { subtype: string; response: { action: string; feedback?: string } };
-        if (envelope.response.action === "reject") {
-          const { feedback: _feedback, ...decision } = envelope.response;
-          captured.response = { ...envelope, response: decision };
-        }
+        const request = c3.events.find(event => event.type === "control_request"
+          && event.request_id === captured.request_id)!.request as { request_digest: string };
+        const { feedback: _feedback, ...decision } = envelope.response;
+        captured.response = { ...envelope, response: { ...decision, request_digest: request.request_digest } };
       }
       expect(sent).toEqual(captured);
     });

@@ -33,10 +33,11 @@ vi.mock("../../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ send: sendMock }),
 }));
 
-vi.mock("../../stores", () => ({
-  useAppStore: {
-    getState: () => ({
+vi.mock("../../stores", () => {
+  const getState = () => ({
       ...mockStoreState,
+      resolvedTheme: "dark",
+      isConnected: false,
       openLivePreview: openLivePreviewMock,
       setRightStackTab: vi.fn((tab: string) => {
         mockStoreState.rightStackTab = tab;
@@ -45,9 +46,9 @@ vi.mock("../../stores", () => ({
       setPreviewArtifact: vi.fn(),
       addPanel: vi.fn(),
       setDiffReviewState: vi.fn(),
-    }),
-  },
-}));
+    });
+  return { useAppStore: Object.assign((selector: (state: ReturnType<typeof getState>) => unknown) => selector(getState()), { getState }) };
+});
 
 vi.mock("../../overlays/ToastContainer", () => ({
   pushToast: vi.fn(),
@@ -307,7 +308,7 @@ describe("ToolCallCard", () => {
         activityKind: "fileChange",
         status: "success",
         summary: "Updated renderer wiring",
-        diff: { plus: 2, minus: 1, patch: "@@\n-old\n+new\n+line" },
+        diff: { plus: 2, minus: 1, patch: "@@ -1 +1,2 @@\n-old\n+new\n+line" },
         startedAt: 1000,
         finishedAt: 1500,
       },

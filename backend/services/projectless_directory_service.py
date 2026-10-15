@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import os
 import re
+import stat
 from uuid import uuid4
 
 
@@ -38,7 +40,10 @@ def create_projectless_directory(base: str, prompt: str, *, date: datetime | Non
     directory.mkdir(parents=True, exist_ok=True)
     day = directory / (date or datetime.now()).strftime("%Y-%m-%d")
     day.mkdir(exist_ok=True)
-    if not day.is_dir() or day.is_symlink() or day.is_junction():
+    metadata = day.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or (
+        os.name == "nt" and metadata.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    ):
         raise ValueError("Projectless date directory must be a real directory.")
     words = re.findall(r"[a-z0-9]+", prompt.lower())
     slug = "-".join(words[:6])[:80] if words else "new-chat"

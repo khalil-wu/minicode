@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import traceback
 
 import uvicorn
 from fastapi import Request
 from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException
 
 import backend.main as backend_main
 import backend.llm.model_registry as model_registry
@@ -12,6 +14,15 @@ from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallE
 
 models = []
 oracle_report = None
+native_http_exception_handler = backend_main.app.exception_handlers[HTTPException]
+
+
+@backend_main.app.exception_handler(HTTPException)
+async def record_native_lifecycle_failure(request: Request, error: HTTPException):
+    if request.url.path == "/api/workspace/language/lifecycle":
+        print(f"[oracle-language-lifecycle-error] HTTP {error.status_code}: {error.detail}", flush=True)
+        traceback.print_exception(error)
+    return await native_http_exception_handler(request, error)
 
 
 class NativeBrowserModel(LLMAdapter):
@@ -32,7 +43,7 @@ class NativeBrowserModel(LLMAdapter):
         self.host_secret_leaked |= os.environ["MINICODE_EMBEDDED_BROWSER_TOKEN"] in repr((messages, metadata))
         if self.calls == 1:
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[ToolCallEvent(
-                id="external-native-discovery", name="tool_search", arguments={"query": "select:browser_control"},
+                id="external-native-discovery", name="tool_search", arguments={"query": "browser_control"},
             )])
             yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
         elif self.calls == 2:

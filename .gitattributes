@@ -3,3 +3,7 @@
 # Keep Windows launchers native while normalizing source and configuration.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# source-manifest.json pins the bytes imported from the Windows reference
+# checkout. Keep those vendored inputs identical when checked out on Linux.
+/desktop/native-execpolicy/vendor/** text eol=crlf

@@ -4,6 +4,8 @@ from dataclasses import replace
 import asyncio
 import json
 from pathlib import Path
+import shlex
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -77,6 +79,13 @@ def authorize(host, *, ident="exec-call", command='Write-Output "SOURCE_NATIVE_C
     assert not result.error, result.error
     _bind_final_tool_request(call, result.request)
     return call, result
+
+
+def output_command(text):
+    if sys.platform == "win32":
+        return f'Write-Output "{text}"', ["Write-Output"]
+    arguments = [sys.executable, "-c", f"print({text!r})"]
+    return shlex.join(arguments), arguments
 
 
 def test_actual_packaged_engine_identity_and_source_parser():
@@ -169,7 +178,8 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
     from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
     from backend.ws.turn_wait_state import TurnWaitState
     host = setup(tmp_path)
-    call, auth = authorize(host, prefix=["Write-Output"], justification="SOURCE_NATIVE_PUBLIC_REASON")
+    command, prefix = output_command("SOURCE_NATIVE_COMMAND")
+    call, auth = authorize(host, command=command, prefix=prefix, justification="SOURCE_NATIVE_PUBLIC_REASON")
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
     runtime = SessionApprovalRuntimeMixin()
@@ -184,7 +194,7 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
     observed = []
     async def approve(call_id):
         event = next(event for event in observed if event.type == "approval_request")
-        assert event.data["proposed_execpolicy_amendment"] == ["Write-Output"]
+        assert event.data["proposed_execpolicy_amendment"] == prefix
         assert event.data["request_digest"] == auth.request.digest
         assert event.data["display_command"] == auth.request.arguments["command"]
         assert event.data["reason"] == "SOURCE_NATIVE_PUBLIC_REASON"
@@ -193,10 +203,10 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
         wire = runtime.build_approval_request_payload(event)
         await runtime.reemit_pending_state("source-owner")
         assert replayed == [wire]
-        assert wire["request"]["display_command"] == 'Write-Output "SOURCE_NATIVE_COMMAND"'
+        assert wire["request"]["display_command"] == command
         assert wire["request"]["reason"] == "SOURCE_NATIVE_PUBLIC_REASON"
         decision = {"action": "approve", "request_digest": auth.request.digest,
-            "decision": {"approved_execpolicy_amendment": {"proposed_execpolicy_amendment": ["Write-Output"]}}}
+            "decision": {"approved_execpolicy_amendment": {"proposed_execpolicy_amendment": prefix}}}
         assert runtime._resolve_pending_approval(call_id, decision)
         return await runtime.approval_handler(call_id)
     async for event in execute_serial(call, perm=auth.permission_decision.permission_level,
@@ -209,26 +219,27 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
     assert "SOURCE_NATIVE_COMMAND" in result.data["summary"]
     assert host.owner.default_policy_path.is_file()
     assert host.owner.revision == 1
-    assert host.owner.inspect_for_model(host.snapshot)["allowed_prefixes"] == [["Write-Output"]]
+    assert host.owner.inspect_for_model(host.snapshot)["allowed_prefixes"] == [prefix]
     host.context.permission = replace(host.context.permission, approval_policy="on-request")
-    assert '["Write-Output"]' in permission_instructions(host.context)
-    _, second = authorize(host, ident="next")
+    assert json.dumps(prefix, ensure_ascii=False) in permission_instructions(host.context)
+    _, second = authorize(host, ident="next", command=command)
     assert second.permission_decision.permission_level == PermissionLevel.AUTO
     assert second.request.exec_policy.bypass_sandbox is True
     cold = ExecPolicyOwner(home=host.home, stack=host.stack)
-    assert cold.inspect_for_model(host.snapshot)["allowed_prefixes"] == [["Write-Output"]]
+    assert cold.inspect_for_model(host.snapshot)["allowed_prefixes"] == [prefix]
 
 
 @pytest.mark.asyncio
 async def test_failed_real_amendment_write_warns_without_reuse_and_still_allows_approved_call(tmp_path):
     host = setup(tmp_path)
-    call, auth = authorize(host, prefix=["Write-Output"])
+    command, prefix = output_command("SOURCE_NATIVE_COMMAND")
+    call, auth = authorize(host, command=command, prefix=prefix)
     (host.home / "rules").write_text("preserved blocking file", encoding="utf-8")
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
     async def approve(call_id):
         return {"action": "approve", "request_digest": auth.request.digest,
-            "decision": {"approved_execpolicy_amendment": {"proposed_execpolicy_amendment": ["Write-Output"]}}}
+            "decision": {"approved_execpolicy_amendment": {"proposed_execpolicy_amendment": prefix}}}
     events = [event async for event in execute_serial(call, perm=auth.permission_decision.permission_level,
         permission_decision=auth.permission_decision, permission_checker=host.checker, permission_context=host.context.permission,
         ctx=builder, state=AgentState(user_message="failed rule persistence"), tool_registry=host.registry,
@@ -263,7 +274,8 @@ async def test_an_approval_cannot_replace_the_source_proposed_prefix_or_execute_
 @pytest.mark.asyncio
 async def test_changed_discovery_after_approval_cannot_replace_frozen_shell_or_argv(tmp_path, monkeypatch):
     host = setup(tmp_path, approval_policy="on-request")
-    call, auth = authorize(host)
+    command, _ = output_command("SOURCE_NATIVE_COMMAND")
+    call, auth = authorize(host, command=command)
     def changed(*args, **kwargs):
         raise AssertionError("Shell must not be discovered again after final request capture")
     monkeypatch.setattr("backend.tools.command_tool.command_shell_argv", changed)
@@ -389,7 +401,7 @@ async def test_production_loop_uses_captured_trusted_layers_actual_native_argv_a
             self.requests.append(messages)
             if len(self.requests) == 1:
                 yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[ToolCallEvent(
-                    id="production-native", name="run_command", arguments={"command": 'Write-Output "PRODUCTION_SOURCE_NATIVE"', "login": False})])
+                    id="production-native", name="run_command", arguments={"command": output_command("PRODUCTION_SOURCE_NATIVE")[0], "login": False})])
                 yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
             else:
                 yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Native command verified.", phase="final_answer", item_id="native-final")

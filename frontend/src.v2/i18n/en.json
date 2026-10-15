@@ -136,6 +136,7 @@
   "活动": "Activity",
   "项目": "Projects",
   "添加项目": "Add project",
+  "项目操作：{name}": "Project actions: {name}",
   "暂无任务活动": "No task activity",
   "开始你的第一个任务": "Start your first task",
   "新建任务": "New task",

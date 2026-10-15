@@ -179,9 +179,14 @@ async def test_yielded_cell_keeps_its_registry_and_selection_but_honors_live_per
 
     fixture = setup(tmp_path, monkeypatch, behavior, [old, Gate("gate"), optional])
     snapshot = fixture.owner.model_execution
+    catalog = snapshot.model_runtime
+    original_get_model = catalog.get_model
+    monkeypatch.setattr(catalog, "get_model", lambda provider, name:
+        replace(original_get_model(provider, name), supports_search_tool=True))
     settings = replace(snapshot.config.llm, supports_search_tool=True)
     fixture.model._settings = settings
-    fixture.owner.model_execution = replace(snapshot, config=replace(snapshot.config, llm=settings))
+    fixture.owner.model_execution = replace(snapshot, config=replace(snapshot.config, llm=settings),
+        model_info=catalog.get_model(snapshot.provider, snapshot.model))
     fixture.session.tool_registry.register(ToolSearchTool(fixture.session.tool_registry))
     await execute(fixture, tmp_path)
     final = reports[-1]

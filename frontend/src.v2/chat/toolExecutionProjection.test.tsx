@@ -56,7 +56,7 @@ it("keeps a rejected weather delegation as its actual expandable action without 
   expect(cells[0]).toMatchObject({ kind: "activity", id: "weather-task", collapsed: true });
   const view = renderCalls();
   expect(view.container.textContent).toContain("启动子智能体");
-  expect(view.container.textContent).toContain("失败");
+  expect(view.container.textContent).not.toContain("失败");
   expect(view.container.textContent).not.toContain("错误详情");
   expect(view.container.textContent).not.toContain("开始工作");
   expect(view.container.textContent).not.toContain(failure);

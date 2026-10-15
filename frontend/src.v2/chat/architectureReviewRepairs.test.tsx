@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { useAppStore } from "../stores";
@@ -116,6 +116,7 @@ it("retains all loaded failures and running work in the actual group", () => {
   first.record.status = "running";
   const cells = projectMessagesToTurns([message], true)[0].committedCells;
   render(<AgentTimeline cells={cells} isRunning renderCell={({ key, cell }) => <div key={key} data-testid="cell">{cell.id}</div>} />);
+  fireEvent.click(screen.getByRole("button", { name: "正在读取 file0.py" }));
   expect(screen.getAllByTestId("cell")).toHaveLength(300);
   expect(screen.getByText("t0")).toBeTruthy();
   expect(screen.queryByRole("button", { name: /显示更早的操作/ })).toBeNull();

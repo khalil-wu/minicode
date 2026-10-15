@@ -24,7 +24,8 @@ import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "./renderers/ToolTextRenderer";
-import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
+import { getRecordOutputText, isBrowserRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
+import { formatCellDuration } from "../cells/cellStatus";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
@@ -53,26 +54,6 @@ function normalizeLocalUrl(url: string): string {
 const Spinner = () => (
   <LoaderCircle size={12} className="animate-spin shrink-0" aria-hidden="true" />
 );
-
-function phaseLabel(record: ToolCallRecord): string {
-  const status = recordPresentationStatus(record);
-  if (status === "failed") return "失败";
-  if (status === "timeout") return "超时";
-  if (status === "blocked") return "已阻止";
-  if (status === "partial") return "部分完成";
-  if (status === "cancelled") return "已取消";
-  if (isCodeModeRecord(record) && ["Script yielded", "Script running", "脚本仍在运行"].includes(record.displaySummary || "")) return "运行中";
-  if (record.status === "success") return "已完成";
-  const transition = String(record.transition || "").toLowerCase();
-  if (transition === "waiting_approval" || record.waitingOn === "approval") return "等待审批";
-  if (record.waitingOn === "user" || record.waitingOn === "user_input") return "等待用户输入";
-  if (transition === "queued" || record.waitingOn === "dispatch") return "排队中";
-  if (transition === "prepared") return "准备中";
-  if (transition === "streaming_output") return "输出中";
-  if (record.status === "pending") return "准备中";
-  if (record.status === "running") return "运行中";
-  return "已完成";
-}
 
 function shouldAutoOpen(viewMode: ViewMode): boolean {
   return viewMode === "verbose";
@@ -134,23 +115,20 @@ export const ToolCallCard = memo(({
       setOpen(shouldAutoOpen(viewMode) || hasFailure);
     }
   }, [hasFailure, record, record.status, viewMode]);
-  const duration =
-    record.finishedAt && record.startedAt
-      ? `${((record.finishedAt - record.startedAt) / 1000).toFixed(1)}s`
+  const duration = formatCellDuration(
+    record.finishedAt !== undefined && record.startedAt !== undefined
+      ? record.finishedAt - record.startedAt
       : isActive
-        ? formatElapsed(now - (record.startedAt ?? now))
-        : "";
+        ? now - (record.startedAt ?? now)
+        : undefined);
   const filePath = extractToolFilePath(record.args);
   const inputTarget = recordInputTarget(record);
   const displayInput = filePath && inputTarget === filePath
     ? workspaceRelativeDiffPath(filePath, workspaceDirectory) || inputTarget
     : inputTarget;
-  const resultText = getRecordOutputText(record)
-    || (hasFailure ? record.userSummary || "工具执行失败。" : "");
+  const resultText = getRecordOutputText(record);
   const previewUrl = normalizeLocalUrl(resultText.match(LOCAL_URL_RE)?.[0] ?? "");
   const toolLabel = readableRecordLabel(record);
-  const phase = phaseLabel(record);
-  const showStatus = phase !== "已完成";
   const imageArtifact = recordHasImageArtifact(record)
     ? {
         kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
@@ -196,11 +174,10 @@ export const ToolCallCard = memo(({
             {toolLabel}
           </span>
           {displayInput && <span style={{ ...summaryValueStyle, fontFamily: "var(--font-ui)" }}>{displayInput}</span>}
-          {showStatus && <span>{phase}</span>}
-          {showStatus && duration && <span>{duration}</span>}
+          {duration && <span>{duration}</span>}
           {resultText && <SmallAction label="复制工具结果" onClick={copyResult}><Copy size={14} /></SmallAction>}
         </div>
-        {hasFailure && <div className="text-[var(--state-danger)] whitespace-pre-wrap break-words">{resultText}</div>}
+        {hasFailure && <div className="text-[var(--text-secondary)] whitespace-pre-wrap break-words">{resultText}</div>}
       </div>
     );
   }
@@ -259,7 +236,6 @@ export const ToolCallCard = memo(({
           }}
         >
           {isActive ? <Spinner /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />}
-          {showStatus && <span style={phaseBadgeStyle(record)}>{phase}</span>}
           <span className="text-[var(--accent-primary)] font-semibold">
             {toolLabel}
           </span>
@@ -269,7 +245,7 @@ export const ToolCallCard = memo(({
             </span>
           )}
           <span className="flex-1" />
-          {showStatus && duration && (
+          {duration && (
             <span className="text-[var(--text-muted)] text-xs shrink-0">
               {duration}
             </span>
@@ -474,13 +450,6 @@ function ToolCallArtifactImage({
   );
 }
 
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}s`;
-}
-
 const summaryValueStyle: React.CSSProperties = {
   minWidth: 0,
   overflow: "hidden",
@@ -498,30 +467,6 @@ const toolInputInlineStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
   fontFamily: "var(--font-ui)",
-};
-
-const phaseBadgeStyle = (record: ToolCallRecord): React.CSSProperties => {
-  const status = recordPresentationStatus(record);
-  const tone = status === "failed" || status === "timeout" || status === "blocked"
-    ? "var(--state-warning)"
-    : status === "success"
-      ? "var(--state-success)"
-      : "var(--text-muted)";
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    minHeight: 20,
-    padding: "0 6px",
-    border: "1px solid var(--border-subtle)",
-    borderRadius: "var(--radius-sm, 4px)",
-    background: "var(--surface-base)",
-    color: tone,
-    fontSize: "var(--text-3xs)",
-    fontWeight: "var(--fw-bold)",
-    textTransform: "uppercase",
-    letterSpacing: 0,
-    flexShrink: 0,
-  };
 };
 
 const limitationBadgeStyle: React.CSSProperties = {

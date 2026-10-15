@@ -12,7 +12,7 @@ from backend.agent.tool_batch_execution import execute_serial
 from backend.agent.tool_events import tool_call_pending_event, tool_call_start_event
 from backend.conversations.public_projection import project_public_tool_call
 from backend.llm.base import ToolCallStartEvent
-from backend.tests.test_native_exec_policy_chain import authorize, setup
+from backend.tests.test_native_exec_policy_chain import authorize, output_command, setup
 from backend.ws.stream_state import apply_stream_event, create_stream_state
 
 
@@ -37,7 +37,7 @@ def snapshot(events):
 @pytest.mark.asyncio
 async def test_frozen_native_planned_item_approval_execution_result_and_recovery_share_one_identity(tmp_path):
     host = setup(tmp_path)
-    call, auth = authorize(host, command='Write-Output "NATIVE_ACTIVITY_RESULT"')
+    call, auth = authorize(host, command=output_command("NATIVE_ACTIVITY_RESULT")[0])
     state = AgentState(user_message="native activity lifecycle")
     state.ui_tool_started_at[call.id] = time.time() - 30
     events = [tool_call_pending_event(ToolCallStartEvent(id=call.id, name=call.name),

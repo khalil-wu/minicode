@@ -2076,8 +2076,8 @@ def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch, re
     assert done[0]["provider_raw"] == {"finish_reason": "stop", "request_id": "req-123"}
     assert done[0]["usage"]["input_tokens"] == 12
     assert done[0]["usage"]["output_tokens"] == 7
-    if reported_duration is not None:
-        assert done[0]["duration_ms"] == reported_duration
+    completed = next(event for event in events if event.get("type") == "agent.run.completed")
+    assert done[0]["duration_ms"] == completed["duration_ms"]
     restored = ConversationRepository(session.conversation_repo._base_dir)
     public_page = restored.get_transcript_page("conv_runnerdone")
     assert public_page["transcript"][-1]["duration_ms"] == done[0]["duration_ms"]

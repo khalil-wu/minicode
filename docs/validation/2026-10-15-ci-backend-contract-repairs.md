@@ -1,0 +1,37 @@
+# Backend CI contract repairs, 2026-10-15
+
+Status: the full Python 3.11 backend/root run is still in progress. This report does not claim GitHub CI or complete Codex equivalence is green.
+
+## Original CI evidence
+
+Run 38715302345 is preserved under `output/ci-repair-20261015/`. Both Ubuntu jobs stopped at the kernel byte gate (`provider_stream_runtime.py`: 23307 > 22000 bytes); their test suites did not execute. Windows stopped after 87 passes at the cross-window model ownership test. Its fixture bypassed the manager constructor and omitted the lifecycle shutdown field now consumed by real resource-owner routing.
+
+## Production changes
+
+- Provider attempt metadata construction now belongs to the existing `provider_protocol` module. The stream owner retains lifecycle orchestration. Authored Source request/session/window facts still win; the original input dictionaries remain unchanged. The real `TurnKernel.run_record` and typed `AgentSettings` supply their required fields directly. The kernel gate passes at 21994 bytes and 471 lines, with its original budgets unchanged.
+- Command cancellation goes through the registry task owner once. The former second observer of the same token inside the managed command wait could enter process cleanup just before registry cancellation interrupted it. Removing that duplicate observer preserves the concrete `CancelledError` handler, actual manager cancellation and exit proof. The canonical cancellation regression first failed with a still-running process and then passed after the change.
+- Windows process capture recognizes an exit occurring between `psutil.Process(pid)` and `parent.children(recursive=True)`, using the same existing terminal-state branch and still awaiting the owned child. The new case uses a real exited child and injects the tree-capture race. Running it against the unchanged HEAD implementation fails with `psutil.NoSuchProcess`; the repaired implementation passes.
+
+The Source cancellation reference is `core/src/tools/parallel.rs` (dispatch cancellation and joining) and `core/src/unified_exec/oneshot.rs` (confirmed process termination). Run duration ownership follows `core/src/tasks/mod.rs` and `core/src/turn_timing.rs`, already audited in `2026-10-15-source-run-timing-owner.md`.
+
+The original external Electron close produced an HTTP 503 without its response body. Three later diagnostic runs passed before the backend race repair. The required post-repair native Electron test also passes (Pyright PID 29876, real hover, native exit 0, released editor clients, external backend remains ready). That evidence does not uniquely attribute the original unrecorded 503 to this race. See `desktop-external-postfix-20261015.log`.
+
+## Test producer corrections
+
+- Cross-window model control uses the actual manager constructor and explicit lifecycle fixture state.
+- Direct command process cases use `backend/tests/native_command_harness.py`: actual model/config/permission/exec-policy owners, actual native authorization, bound final request and canonical tool execution. It never invents an approval or native decision. Builtin permission routing comes from `permission_settings_from_config({})`, preserving the distinction between defaults and explicit user rules.
+- Private-history admissions include their actual fixture run IDs. Search capability is authored in the actual model catalog and captured model definition. Terminal fixtures also use the actual default permission producer.
+- Existing provider metadata tests compare projected duration to the actual run completion clock. Shell metadata tests no longer expect the retired command-text side-effect heuristic; native execution policy remains responsible for the final command decision.
+
+## Verification evidence
+
+- `kernel-final.log`, `protocol-after.log`, `duplicate-tools-after.log`: all pass. Module-size scan exits 0 with existing soft warnings; no budget was raised.
+- `windows-harness-native-after.log/.xml`: 373 passed, 16 failed, 15 existing sandbox integration skips. Eleven failures came from the first loaded revision of the new test helper missing the required fixture API key; the other five exposed the stale contracts above. This is retained as a failed run, not counted as green.
+- `backend-failures-recheck.log/.xml`: 76 passed, one command cancellation failure. This batch includes the corrected producer cases, projectless command case, LSP/editor cases and process-race regression.
+- `command-cancellation-final.log/.xml`: the remaining canonical command cancellation case passes after the production repair. Its real process is cancelled and cleanup is complete.
+- `subprocess-race-before.log`: expected negative evidence against unchanged HEAD, one failure with `psutil.NoSuchProcess`.
+- `backend-root-python311-full.log/.xml`: full current backend/root validation, 8311 collected cases; final result pending.
+
+Counts from overlapping batches are not added. The 15 sandbox integration skips remain unverified, not passed. The Windows local full run also does not substitute for the Ubuntu GitHub jobs.
+
+Python is the actual bundled 3.11.9 runtime with pytest 8.4.2. Dev-only pytest-asyncio and lark live in `.tmp/ci-python311-test-deps`, explicitly inserted by `output/ci-repair-20261015/pytest-python311.py`; the bundled runtime was not modified. An earlier environment-only collection failure and an interrupted no-plugin attempt are retained separately and are not production failures.

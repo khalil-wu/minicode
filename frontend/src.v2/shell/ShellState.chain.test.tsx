@@ -92,7 +92,7 @@ describe("shell resource ownership", () => {
 });
 
 describe("actual code-mode keyboard routes", () => {
-  it.each([{ key: "I", role: "listbox", name: "选择模型" }, { key: "M", role: "listbox", name: "权限：询问" }])("opens $name from the hidden chat behind a maximized file", ({ key: shortcut, role, name }) => {
+  it.each([{ key: "I", role: "listbox", name: "选择模型" }, { key: "M", role: "listbox", name: "更改权限" }])("opens $name from the hidden chat behind a maximized file", ({ key: shortcut, role, name }) => {
     useAppStore.setState({ panelSlots: [{ id: "chat", kind: "chat", focused: false }, { id: "editor", kind: "editor", focused: true, maximized: true }] });
     render(<Harness />);
     key(shortcut, true);

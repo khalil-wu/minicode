@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "../stores";
 import type { ChatMessage, ContentBlock } from "../stores/types";
 import { createRecentTurnProjectionCache, projectMessagesToTurns, projectRecentMessagesToTurns } from "./chatSurfaceState";
@@ -57,6 +57,7 @@ it("retains every loaded operation in a large group, including its oldest failur
   const cells = projectMessagesToTurns([assistant()], true)[0].committedCells;
   cells[0] = { ...cells[0], status: "failed" } as typeof cells[number];
   render(<AgentTimeline cells={cells} isRunning renderCell={({ key, cell }) => <div key={key} data-testid="process-cell">{cell.id}</div>} />);
+  fireEvent.click(screen.getByRole("button", { name: "已读取文件" }));
   expect(screen.getAllByTestId("process-cell")).toHaveLength(1000);
   expect(screen.getByText("t0")).toBeTruthy();
   expect(screen.getByText("t999")).toBeTruthy();

@@ -23,7 +23,7 @@ from backend.llm.base import ToolCallEvent
 from backend.tools.base import ToolResult
 
 
-def test_run_command_classifies_each_invocation_from_arguments(tmp_path) -> None:
+def test_shell_text_does_not_override_the_commands_external_effects(tmp_path) -> None:
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
     read = {"command": "git status --short"}
@@ -34,13 +34,13 @@ def test_run_command_classifies_each_invocation_from_arguments(tmp_path) -> None
     # Shell text is not a capability proof. Dedicated typed read/search tools
     # own the automatic read path; every shell invocation stays uncached and
     # outside concurrent speculative execution.
-    assert tool.get_side_effect_kind(read) == "workspace"
+    assert tool.get_side_effect_kind(read) == "external"
     assert tool.is_idempotent(read) is False
     assert tool.is_concurrency_safe(read) is False
-    assert tool.get_side_effect_kind(workspace_write) == "workspace"
+    assert tool.get_side_effect_kind(workspace_write) == "external"
     assert tool.is_concurrency_safe(workspace_write) is False
     assert tool.get_side_effect_kind(external) == "external"
-    assert tool.get_side_effect_kind(destructive) == "destructive"
+    assert tool.get_side_effect_kind(destructive) == "external"
 
 
 def test_powershell_format_cmdlets_are_not_destructive(tmp_path) -> None:
@@ -48,11 +48,11 @@ def test_powershell_format_cmdlets_are_not_destructive(tmp_path) -> None:
 
     assert tool.get_side_effect_kind({
         "command": "Get-ChildItem -Recurse | Format-Table -AutoSize",
-    }) == "workspace"
+    }) == "external"
     assert tool.get_side_effect_kind({
         "command": "Get-ChildItem | Format-List Name,Length",
-    }) == "workspace"
-    assert tool.get_side_effect_kind({"command": "format disk"}) == "destructive"
+    }) == "external"
+    assert tool.get_side_effect_kind({"command": "format disk"}) == "external"
 
 
 def _claim_refs(claims: list[dict]) -> list[dict]:

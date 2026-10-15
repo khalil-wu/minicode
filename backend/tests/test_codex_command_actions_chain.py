@@ -23,6 +23,8 @@ from backend.artifact.store import ArtifactStore
 from backend.conversations.public_projection import project_public_tool_call
 from backend.llm.base import ToolCallEvent
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.sandbox import SandboxPolicy
+from backend.tests.native_command_harness import configure_command_context, execute_command_call
 from backend.services.subagent_service import build_subagent_transcript_messages, project_subagent_transcript_events
 from backend.tools.base import ToolResult, execution_exception_result
 from backend.tools.command_tool import RunCommandTool
@@ -181,8 +183,9 @@ def test_real_command_execution_canonical_wire_main_resume_child_history_and_res
     (root / "source.txt").write_text("real file evidence\nsecond line\n", encoding="utf-8")
     context = ToolExecutionContext(permission=PermissionContext(mode="bypass", workspace_root=root),
                                    workspace_root=root, conversation_id="actions-owner", session_id="actions-session")
-    registry = ToolRegistry()
-    registry.register(RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts")))
+    command_tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    configure_command_context(command_tool, context, sandbox_policy=SandboxPolicy.bypass())
+    registry = context.tool_registry
     state = AgentState(user_message="read and run", workspace_root=root)
     builder = ContextBuilder(workspace_root=root, conversation_id=context.conversation_id)
     read_command = "Get-Content -LiteralPath source.txt -Raw" if os.name == "nt" else "cat source.txt"
@@ -197,7 +200,9 @@ def test_real_command_execution_canonical_wire_main_resume_child_history_and_res
         start = tool_call_start_event(call, started_epoch=time.time(), iteration_id="iter:1", turn_id="turn:1",
                                       tool_registry=registry, workspace_root=root)
         context.tool_call_id = call.id
-        actual = asyncio.run(registry.execute("run_command", call.arguments, context=context))
+        actual = asyncio.run(execute_command_call(call, context))
+        if index == 1:
+            assert actual.runtime_metadata["process_status"] == "failed"
         result = store_result(call, actual, builder, state, iteration_id="iter:1", turn_id="turn:1",
                               tool_ctx=context, tool_registry=registry)
         assert start.data["command_actions"] == result.data["command_actions"]
@@ -216,7 +221,7 @@ def test_real_command_execution_canonical_wire_main_resume_child_history_and_res
     assert wire[0]["command_actions"][0]["type"] == "read"
     assert wire[2]["command_actions"] == [{"type": "unknown", "command": failed_command}]
     assert "real file evidence" in wire[1]["summary"]
-    assert wire[3]["status"] == "failed" and wire[3]["is_error"]
+    assert wire[3]["status"] == "success" and not wire[3]["is_error"]
     assert "actual exit evidence" in wire[3]["summary"] and "Exit code: 7" in wire[3]["summary"]
     journal.append_terminal(status="completed", summary="Both actual commands were inspected.")
     reopened = ExecutionJournal("actions-owner", base_dir=tmp_path / "journals")
@@ -231,7 +236,7 @@ def test_real_command_execution_canonical_wire_main_resume_child_history_and_res
     assert [record["exitCode"] for record in child_records] == [0, 7, 0]
     assert child_records[2]["stdoutPreview"] == child_records[2]["stderrPreview"] == ""
     assert [record["stdoutPreview"] for record in main_records] == [record["stdoutPreview"] for record in child_records]
-    assert child_records[1]["status"] == "failed" and "Exit code: 7" in child_records[1]["outputPreview"]
+    assert child_records[1]["status"] == "success" and "Exit code: 7" in child_records[1]["outputPreview"]
     assert child_incremental[1]["payload"]["tool_call"]["commandActions"] == wire[0]["command_actions"]
     detached = deepcopy(child_records)
     detached[0]["commandActions"][0]["name"] = "caller mutation"

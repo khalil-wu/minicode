@@ -103,19 +103,19 @@ def test_destructive_operations_are_explicit_confirmation_boundaries(command: st
     assert reason
 
 
-def test_runtime_review_posix_clusters_bind_exact_payload():
+def test_runtime_review_posix_clusters_bind_exact_payload(tmp_path):
     import asyncio
     import shlex
-    from pathlib import Path
     from unittest.mock import AsyncMock
-    from backend.agent.final_tool_request import canonical_tool_request_digest
-    from backend.config import PermissionSettings
+    from backend.agent.tool_execution import _authorize_final_tool_request, _bind_final_tool_request, run_tool_with_timeout
+    from backend.llm.base import ToolCallEvent
     from backend.permissions.checker import (
-        PermissionChecker, _shell_wrapper_payload, check_catastrophic_command,
-        evaluate_permission_decision,
+        _shell_wrapper_payload, check_catastrophic_command,
     )
     from backend.permissions.context import PermissionContext, ToolExecutionContext
     from backend.permissions.shell_ast import parse_literal_commands, posix_shell_payload_index
+    from backend.sandbox import SandboxPolicy
+    from backend.tests.native_command_harness import configure_command_context
     from backend.tools.base import ToolResult
     from backend.tools.command_tool import RunCommandTool
 
@@ -123,11 +123,11 @@ def test_runtime_review_posix_clusters_bind_exact_payload():
         tool = RunCommandTool(None)
         dispatch = AsyncMock(return_value=ToolResult(content="INTERCEPTED_BEFORE_SPAWN"))
         tool._execute_foreground = dispatch
-        checker = PermissionChecker(PermissionSettings(), workspace_root=Path.cwd())
         context = ToolExecutionContext(
-            permission=PermissionContext(mode="bypass"), workspace_root=Path.cwd(),
-            permission_checker=checker,
+            permission=PermissionContext(mode="confirm", approval_policy="untrusted", workspace_root=tmp_path),
+            workspace_root=tmp_path,
         )
+        configure_command_context(tool, context, sandbox_policy=SandboxPolicy.bypass())
         payload = "'r''m' -rf /"
         for invocation in ("bash -xec", "bash -exc", "bash +c", "bash -c -x",
                            "bash -ec --", "bash -e -o pipefail -c", "bash -o -c",
@@ -140,16 +140,26 @@ def test_runtime_review_posix_clusters_bind_exact_payload():
             assert parsed is not None and ["rm", "-rf", "/"] in parsed.commands
             assert check_catastrophic_command(command)[0] is False
             args = {"command": command}
-            decision = evaluate_permission_decision(checker, tool.name, args, context=context.permission, tool=tool)
-            assert decision.decision == "ask"
             context.metadata.clear()
-            result = await tool.execute(args, context)
-            assert result.is_error and "explicit approval" in result.content
+            call = ToolCallEvent(id="exact-wrapper", name=tool.name, arguments=args)
+            authorized = _authorize_final_tool_request(call, tool_registry=context.tool_registry,
+                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+            assert not authorized.error, authorized.error
+            assert authorized.permission_decision.decision == "ask"
+            assert authorized.request.exec_policy.kind == "needs_approval"
+            _bind_final_tool_request(call, authorized.request)
+            result = await run_tool_with_timeout(call, context.tool_registry, context)
+            assert result.is_error and "requires approval" in result.content
             dispatch.assert_not_awaited()
-            context.metadata["_approved_request_digests"] = {canonical_tool_request_digest(tool.name, args)}
-            result = await tool.execute(args, context)
+            context.metadata["_approved_request_digests"] = {authorized.request.arguments_digest}
+            result = await run_tool_with_timeout(call, context.tool_registry, context)
+            assert result.is_error and "requires approval" in result.content
+            dispatch.assert_not_awaited()
+            context.metadata["_approved_request_digests"] = {authorized.request.digest}
+            result = await run_tool_with_timeout(call, context.tool_registry, context)
             assert result.content == "INTERCEPTED_BEFORE_SPAWN"
             dispatch.assert_awaited_once()
+            assert dispatch.call_args.args[3].exec_policy_decision is authorized.request.exec_policy
             dispatch.reset_mock()
 
         assert posix_shell_payload_index(["bash", "script.sh", "-c", payload]) is None

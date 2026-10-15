@@ -10,9 +10,39 @@ permissions:
   contents: read
 
 jobs:
+  native-execpolicy:
+    name: Build pinned Source execution policy (Linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/native-execpolicy -> target
+      - name: Fetch locked execution policy dependencies
+        working-directory: desktop/native-execpolicy
+        run: cargo fetch --locked
+      - name: Build and verify the pinned native runtime
+        run: >-
+          python desktop/scripts/prepare-execpolicy-runtime.py
+          --cargo "$(rustup which --toolchain 1.95.0 cargo)"
+          --output-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-execpolicy-linux-x64
+          path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+          if-no-files-found: error
+
   backend:
     name: Backend protocol and tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
+    needs: native-execpolicy
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -24,6 +54,12 @@ jobs:
             test_path: tests
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-execpolicy-linux-x64
+          path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+      - name: Restore native executable permission
+        run: chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -73,11 +109,12 @@ jobs:
       - name: Check module size limits
         run: python scripts/check-large-files.py
       - name: Run backend and root tests
+        id: backend_tests
         run: |
           set -o pipefail
           python -m pytest "${{ matrix.test_path }}" -vv -o faulthandler_timeout=60 --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
-        if: failure()
+        if: failure() && steps.backend_tests.outcome == 'failure'
         run: |
           if grep -q '^=\+ FAILURES =\+' "pytest-${{ matrix.suite }}.log"; then
             failure_lines=$(sed -n '/^=\+ FAILURES =\+/,/^=\+ short test summary info =\+/p' "pytest-${{ matrix.suite }}.log")
@@ -138,6 +175,7 @@ jobs:
           backend/tests/test_terminal_service_canonical_exec.py
           backend/tests/test_background_command_lifecycle.py
           backend/tests/test_apply_patch.py
+          backend/tests/test_projectless_execution_cwd_chain.py
           tests/test_windows_low_integrity_sandbox.py
           --maxfail=1 --tb=short
 

@@ -13,6 +13,7 @@ import backend.terminal.manager as terminal_manager_module
 
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.tests.native_command_harness import configure_command_context, execute_command
 from backend.sandbox import SandboxCapability, SandboxPolicy, SandboxRunner
 from backend.terminal.manager import BackgroundCommand, BackgroundCommandManager
 from backend.terminal.task_persistence import (
@@ -346,7 +347,8 @@ async def test_run_command_background_handoff_ignores_foreground_timeout(tmp_pat
         conversation_id="conv-background-handoff",
     )
 
-    result = await tool.execute(
+    configure_command_context(tool, context, sandbox_policy=SandboxPolicy.bypass())
+    result = await execute_command(tool,
         {
             "command": "npm run dev",
             "cwd": str(tmp_path),

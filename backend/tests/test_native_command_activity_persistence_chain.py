@@ -16,7 +16,7 @@ from backend.agent.tool_batch_execution import execute_serial
 from backend.agent.tool_events import tool_call_pending_event
 from backend.agent.turn_state import AgentTurnState
 from backend.llm.base import ToolCallStartEvent
-from backend.tests.test_native_exec_policy_chain import authorize, setup
+from backend.tests.test_native_exec_policy_chain import authorize, output_command, setup
 
 
 def planned():
@@ -103,7 +103,7 @@ def test_actual_started_event_advances_same_journal_call_once_and_survives_missi
 async def test_real_native_producer_to_query_recorder_and_cold_canonical_record(tmp_path, abort):
     host = setup(tmp_path)
     host.context.cancel_event = asyncio.Event()
-    call, auth = authorize(host, command='Write-Output "JOURNAL_NATIVE_ACTUAL"')
+    call, auth = authorize(host, command=output_command("JOURNAL_NATIVE_ACTUAL")[0])
     state = AgentState(user_message='Real native journal task')
     state.ui_tool_started_at[call.id] = time.time() - 30
     builder = ContextBuilder()

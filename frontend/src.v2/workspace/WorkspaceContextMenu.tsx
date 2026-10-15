@@ -5,9 +5,10 @@ import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protoco
 import { useAppStore } from "../stores";
 import { pushToast } from "../overlays/ToastContainer";
 
-export const WorkspaceContextMenu = ({ path, position, onClose }: {
+export const WorkspaceContextMenu = ({ path, position, anchor, onClose }: {
   path: string;
   position: { x: number; y: number };
+  anchor?: HTMLElement;
   onClose: () => void;
 }) => {
   const { t: tr } = useI18n();
@@ -25,7 +26,7 @@ export const WorkspaceContextMenu = ({ path, position, onClose }: {
       pushToast(error instanceof Error ? error.message : tr("无法移除工作区。"), "error", 5000);
     }
   };
-  return <ContextMenu position={position} onClose={onClose} items={[{
+  return <ContextMenu position={position} anchor={anchor} onClose={onClose} items={[{
     label: tr("移除工作区"), icon: <FolderMinus size={15} />, onClick: () => { void remove(); },
   }]} />;
 };

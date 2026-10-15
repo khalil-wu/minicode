@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from backend.artifact.store import ArtifactStore
-from backend.config import PermissionSettings
+from backend.config import permission_settings_from_config
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolExecutionContext
 from backend.services.terminal_service import run_terminal_exec_command
@@ -51,7 +51,7 @@ def _context(tmp_path, checker: PermissionChecker) -> ToolExecutionContext:
 
 @pytest.mark.asyncio
 async def test_terminal_exec_uses_canonical_batch_after_exact_approval(tmp_path) -> None:
-    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
     tool = _RecordingCommandTool()
 
     async def approve(_tool_call_id: str) -> dict[str, str]:
@@ -73,7 +73,7 @@ async def test_terminal_exec_uses_canonical_batch_after_exact_approval(tmp_path)
 
 @pytest.mark.asyncio
 async def test_terminal_exec_fails_closed_without_canonical_approval(tmp_path) -> None:
-    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
     tool = _RecordingCommandTool()
 
     payload = await run_terminal_exec_command(
@@ -94,7 +94,7 @@ async def test_terminal_exec_does_not_invent_exit_zero_for_a_yielded_process(tmp
     class YieldedCommand(_RecordingCommandTool):
         async def execute(self, args, context=None):
             return ToolResult(content="Background command bg_live (running)\nnext_cursor: 0")
-    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
     context = _context(tmp_path, checker)
     context.permission = checker.build_context(mode="bypass", source="test")
     payload = await run_terminal_exec_command("long build", str(tmp_path), tool=YieldedCommand(), context=context, conversation_id="conversation-test")

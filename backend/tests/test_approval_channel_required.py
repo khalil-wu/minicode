@@ -7,7 +7,7 @@ import asyncio
 from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import execute_tool_batch
-from backend.config import PermissionSettings, TokenBudget
+from backend.config import TokenBudget, permission_settings_from_config
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolExecutionContext
@@ -72,7 +72,7 @@ def _run(tool: BaseTool, call: ToolCallEvent, *, mode: str) -> list:
     async def collect() -> list:
         registry = ToolRegistry()
         registry.register(tool)
-        checker = PermissionChecker(PermissionSettings())
+        checker = PermissionChecker(permission_settings_from_config({}))
         permission = checker.build_context(mode=mode)
         events = []
         async for event in execute_tool_batch(

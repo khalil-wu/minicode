@@ -8,6 +8,8 @@ import pytest
 
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.sandbox import SandboxPolicy
+from backend.tests.native_command_harness import configure_command_context, execute_command
 from backend.terminal.manager import BackgroundCommandManager
 from backend.terminal.task_output import read_task_output_chunk
 from backend.tools.command_tool import RunCommandTool
@@ -25,6 +27,7 @@ def setup_tools(tmp_path, manager, cancel_event=None, stream_callback=None):
         conversation_id="conv_commands", session_id="command-tests", background_manager=manager,
         cancel_event=cancel_event, stream_callback=stream_callback)
     tool = RunCommandTool(ArtifactStore(storage_dir=str(tmp_path / "artifacts")), manager)
+    configure_command_context(tool, context, sandbox_policy=SandboxPolicy.bypass())
     return tool, context
 
 
@@ -35,7 +38,7 @@ def test_yield_returns_same_process_then_monitor_waits_and_writes_stdin(tmp_path
         manager = BackgroundCommandManager(session_id="command-tests", on_started=on_started)
         tool, context = setup_tools(tmp_path, manager)
         try:
-            result = await tool.execute({"command": python_command("import sys; print('READY', flush=True); value=sys.stdin.readline(); print('ECHO:'+value.strip(), flush=True)"), "yield_time_ms": 0}, context)
+            result = await execute_command(tool, {"command": python_command("import sys; print('READY', flush=True); value=sys.stdin.readline(); print('ECHO:'+value.strip(), flush=True)"), "yield_time_ms": 0}, context)
             assert not result.is_error
             command_id = result.runtime_metadata["command_id"]
             command = manager.get_status(command_id, conversation_id=context.conversation_id)
@@ -67,7 +70,7 @@ def test_short_managed_command_finishes_without_background_notifications(tmp_pat
         manager = BackgroundCommandManager(session_id="command-tests", on_started=notify, on_completed=notify)
         tool, context = setup_tools(tmp_path, manager)
         try:
-            result = await tool.execute({"command":python_command("print('short result')"),"yield_time_ms":10000},context)
+            result = await execute_command(tool, {"command":python_command("print('short result')"),"yield_time_ms":10000},context)
             assert not result.is_error
             assert "short result" in result.content
             assert result.runtime_metadata["exit_code"] == 0
@@ -85,7 +88,7 @@ def test_cancel_during_initial_wait_stops_the_owned_command(tmp_path):
         def stream(text):
             if "READY" in text: ready.set()
         tool, context = setup_tools(tmp_path, manager, cancel, stream)
-        task = asyncio.create_task(tool.execute({"command":python_command("import time; print('READY', flush=True); time.sleep(30)"),"yield_time_ms":60000},context))
+        task = asyncio.create_task(execute_command(tool, {"command":python_command("import time; print('READY', flush=True); time.sleep(30)"),"yield_time_ms":60000},context))
         try:
             await asyncio.wait_for(ready.wait(), timeout=10)
             cancel.set()
@@ -125,7 +128,7 @@ def test_command_owner_is_checked_before_waiting(tmp_path):
         manager = BackgroundCommandManager(session_id="command-tests")
         tool, context = setup_tools(tmp_path, manager)
         try:
-            result = await tool.execute({"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0},context)
+            result = await execute_command(tool, {"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0},context)
             other = ToolExecutionContext(permission=PermissionContext(mode="bypass"), background_manager=manager, conversation_id="conv_other")
             inspected = await MonitorTool().execute({"command_id":result.runtime_metadata["command_id"],"yield_time_ms":1000,"cursor":0},other)
             assert inspected.is_error
@@ -140,7 +143,7 @@ def test_explicit_process_timeout_is_independent_of_yield_wait(tmp_path):
         tool, context = setup_tools(tmp_path, manager)
         assert tool.resolve_timeout({"timeout": 1, "yield_time_ms": 10000}) is None
         try:
-            result = await tool.execute({"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0,"timeout":1},context)
+            result = await execute_command(tool, {"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0,"timeout":1},context)
             command_id = result.runtime_metadata["command_id"]
             command = await manager.wait(command_id,conversation_id=context.conversation_id,wait_ms=10000)
             assert command.status == "failed"
@@ -157,7 +160,7 @@ def test_cancelled_monitor_wait_does_not_cancel_the_background_process(tmp_path)
         manager = BackgroundCommandManager(session_id="command-tests")
         tool, context = setup_tools(tmp_path, manager)
         try:
-            launched = await tool.execute({"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0},context)
+            launched = await execute_command(tool, {"command":python_command("import time; time.sleep(30)"),"yield_time_ms":0},context)
             command_id = launched.runtime_metadata["command_id"]
             waiting = asyncio.create_task(MonitorTool().execute({"command_id":command_id,"yield_time_ms":60000},context))
             await asyncio.sleep(0)
@@ -175,7 +178,7 @@ def test_session_scoped_command_failure_keeps_full_output_for_replay(tmp_path):
         tool, context = setup_tools(tmp_path, manager)
         context.conversation_id = ""
         try:
-            launched = await tool.execute({"command": python_command(
+            launched = await execute_command(tool, {"command": python_command(
                 "import sys; print('FAILURE_AT_START'); print('x' * 1500); print('FAILURE_AT_END'); sys.exit(7)"
             ), "yield_time_ms": 0}, context)
             command_id = launched.runtime_metadata["command_id"]
@@ -223,7 +226,7 @@ def test_command_output_budget_keeps_failure_summary_and_original_output(tmp_pat
         tool, context = setup_tools(tmp_path, manager)
         code = "import sys; print('BEGIN_DIAGNOSTIC'); print('x' * 8000); print('FINAL_FAILURE'); sys.exit(7)"
         try:
-            result = await tool.execute({"command": python_command(code), "max_chars": 128}, context)
+            result = await execute_command(tool, {"command": python_command(code), "max_chars": 128}, context)
             view = result.content if managed else result.artifact_preview
             assert not result.is_error and result.status == "success"
             assert result.runtime_metadata["process_status"] == "failed"
@@ -249,7 +252,7 @@ def test_preview_end_cursor_follows_new_output_without_replaying_old_output(tmp_
         manager = BackgroundCommandManager(session_id="preview-live")
         tool, context = setup_tools(tmp_path, manager)
         try:
-            launched = await tool.execute({"command": python_command(
+            launched = await execute_command(tool, {"command": python_command(
                 "print('BEGIN'); print('x' * 8000); print('OLD_END', flush=True); input(); print('NEW_OUTPUT', flush=True)"
             ), "yield_time_ms": 0, "max_chars": 100}, context)
             command_id = launched.runtime_metadata["command_id"]

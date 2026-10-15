@@ -46,7 +46,8 @@ import { useAppStore } from "../stores";
 import { WorkbenchShell } from "./WorkbenchShell";
 
 let runtimeState: { runtimeToken: string } | null = { runtimeToken: "test-token" };
-let nativeDesktop: { windowControls: { minimize: () => void; maximize: () => void; close: () => void } } | null = null;
+let nativeDesktop: { windowControls: { minimize: () => void; maximize: () => void; close: () => void;
+  getState: () => Promise<{ isMaximized: boolean }>; onStateChanged: () => () => void } } | null = null;
 
 describe("WorkbenchShell narrow navigation", () => {
   beforeEach(() => {
@@ -93,7 +94,8 @@ describe("WorkbenchShell narrow navigation", () => {
   it("keeps real header, navigation and native window controls visible while settings hides only the mounted workspace", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
     const minimize = vi.fn();
-    nativeDesktop = { windowControls: { minimize, maximize: vi.fn(), close: vi.fn() } };
+    nativeDesktop = { windowControls: { minimize, maximize: vi.fn(), close: vi.fn(),
+      getState: vi.fn(async () => ({ isMaximized: false })), onStateChanged: vi.fn(() => () => {}) } };
     const { container } = render(<WorkbenchShell />);
     const titlebar = screen.getByRole("banner");
     const rail = screen.getByRole("navigation", { name: "应用导航" });
@@ -235,7 +237,7 @@ describe("WorkbenchShell narrow navigation", () => {
 
     expect(screen.getByRole("button", { name: "命令面板" }).querySelector("svg.lucide-search")).toBeTruthy();
     expect(within(screen.getByRole("banner")).queryByRole("button", { name: "设置" })).toBeNull();
-    expect(screen.getByRole("button", { name: "设置" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "设置与帮助" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "后端已连接" }).textContent).toBe("");
     expect(screen.getByRole("status").textContent).toBe("后端已连接");
   });
@@ -440,12 +442,12 @@ describe("WorkbenchShell narrow navigation", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600 });
     render(<WorkbenchShell />);
     expect(screen.getAllByRole("navigation", { name: "应用导航" })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "设置", exact: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "设置与帮助", exact: true })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Git 与工作树" })).toBeTruthy();
     const workspace = screen.getByText("Code workspace");
     const sidebar = screen.getByTestId("left-sidebar");
     fireEvent.click(screen.getByRole("button", { name: "Git 与工作树" }));
-    expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "workspaceGit", conversationId: "conversation-1" });
+    expect(useAppStore.getState()).toMatchObject({ dockCollapsed: false, activeBottomTab: "git", conversationId: "conversation-1" });
     expect(useAppStore.getState().messages[0].id).toBe("message-1");
     expect(screen.getByText("Code workspace")).toBe(workspace);
     expect(screen.getByTestId("left-sidebar")).toBe(sidebar);

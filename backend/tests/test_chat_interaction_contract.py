@@ -272,13 +272,20 @@ def test_run_command_model_schema_exposes_execution_policy_controls() -> None:
         "max_chars",
         "timeout",
         "description",
-        "with_escalated_permissions",
+        "sandbox_permissions",
+        "additional_permissions",
+        "prefix_rule",
         "justification",
         "shell",
         "login",
         "tty",
     }
     assert schema.parameters["required"] == ["command"]
+    assert schema.parameters["properties"]["sandbox_permissions"]["enum"] == [
+        "use_default", "require_escalated", "with_additional_permissions",
+    ]
+    assert schema.parameters["properties"]["additional_permissions"]["type"] == "object"
+    assert schema.parameters["properties"]["prefix_rule"]["items"] == {"type": "string"}
 
 
 def test_windows_environment_prompt_matches_run_command_shell(monkeypatch) -> None:

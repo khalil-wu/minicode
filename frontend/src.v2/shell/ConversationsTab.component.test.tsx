@@ -346,8 +346,19 @@ describe('ConversationsTab project navigation', () => {
 
   it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
     const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
-    fireEvent.contextMenu(screen.getByRole('button', { name: 'Represented', exact: true }), { clientX: 40, clientY: 80 })
+    const folder = screen.getByRole('button', { name: 'Represented', exact: true })
+    const actions = screen.getByRole('button', { name: '项目操作：Represented' })
+    actions.focus()
+    fireEvent.click(actions)
+    expect(folder.getAttribute('aria-expanded')).toBe('true')
+    expect(actions.getAttribute('aria-expanded')).toBe('true')
+    expect(actions.parentElement?.getAttribute('data-menu-open')).toBe('true')
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+    expect(actions.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(actions)
+    fireEvent.click(actions)
     fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
+    expect(actions.getAttribute('aria-expanded')).toBe('false')
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: 'workspace.recent.remove', path: 'C:\\Represented', preserve_history: true,
     }, 'workspace.recent.remove'))

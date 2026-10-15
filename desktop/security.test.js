@@ -25,12 +25,15 @@ test("runtime bootstrap accepts the owned main frame before URL commit and rejec
   const webContents = { mainFrame, getURL: () => "" };
   const win = { webContents, isDestroyed: () => false };
   const runtime = { apiBaseUrl: "http://127.0.0.1:8123", wsBaseUrl: "ws://127.0.0.1:8123", runtimeToken: "test-token" };
-  moduleBox.exports.init({ getWindowForSender: (sender) => sender === win.webContents ? win : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), getRuntimeConfig: () => runtime });
+  const record = { windowInstanceId: "fixture-window", initialNavigation: { conversationId: "actual-owned-conversation" } };
+  moduleBox.exports.init({ getWindowForSender: (sender) => sender === win.webContents ? win : null, getWindowRecord: () => record, getRuntimeConfig: () => runtime });
   moduleBox.exports.registerIpcHandlers();
   const bootstrap = listeners.get("minicode:runtime:get");
   const event = { sender: webContents, senderFrame: mainFrame };
   bootstrap(event);
-  assert.equal(event.returnValue, runtime);
+  assert.notEqual(event.returnValue, runtime);
+  assert.deepEqual({ ...event.returnValue }, { ...runtime, initialNavigation: record.initialNavigation });
+  assert.equal(Object.hasOwn(runtime, "initialNavigation"), false);
   for (const foreign of [
     { sender: webContents, senderFrame: { url: "" } },
     { sender: { mainFrame }, senderFrame: mainFrame },
@@ -38,6 +41,13 @@ test("runtime bootstrap accepts the owned main frame before URL commit and rejec
     assert.throws(() => bootstrap(foreign), { code: "ERR_UNTRUSTED_IPC_SENDER" });
     assert.equal(foreign.returnValue, undefined);
   }
+  const consumed = { sender: webContents, senderFrame: mainFrame };
+  listeners.get("minicode:window:initialNavigation:consume")(consumed);
+  assert.equal(consumed.returnValue, true);
+  assert.equal(record.initialNavigation, null);
+  bootstrap(event);
+  assert.deepEqual({ ...event.returnValue }, { ...runtime, initialNavigation: null });
+  assert.equal(Object.hasOwn(runtime, "initialNavigation"), false);
   win.isDestroyed = () => true;
   assert.throws(() => bootstrap(event), { code: "ERR_UNTRUSTED_IPC_SENDER" });
 });

@@ -26,7 +26,7 @@ function fixture(t) {
   const env = { ...process.env, LOCALAPPDATA: path.join(root, "Local"), APPDATA: path.join(root, "Roaming"),
     ProgramFiles: path.join(root, "Programs"), "ProgramFiles(x86)": path.join(root, "Programs32"),
     ProgramData: path.join(root, "ProgramData"), SystemRoot: path.join(root, "Windows"),
-    Path: path.join(root, "bin"), CMDER_ROOT: "" };
+    Path: path.join(root, "bin"), PATHEXT: ".com;.exe;.bat;.cmd", CMDER_ROOT: "" };
   const launches = [], reveals = [], openPaths = [];
   const shell = { readShortcutLink: file => ({ target: fs.readFileSync(file, "utf8") }),
     showItemInFolder: file => reveals.push(file), openPath: async file => { openPaths.push(file); return ""; } };
@@ -56,10 +56,10 @@ function fixture(t) {
 test("Windows discovery finds system installs, CLI executables, shortcuts and current JetBrains versions without advertising other platforms", t => {
   const f = fixture(t);
   const code = f.install(path.join(f.env.ProgramFiles, "Microsoft VS Code", "Code.exe"));
-  const insiders = f.install(path.join(f.env.LOCALAPPDATA, "Programs", "Microsoft VS Code Insiders", "Code - Insiders.exe"));
+  f.install(path.join(f.env.LOCALAPPDATA, "Programs", "Microsoft VS Code Insiders", "Code - Insiders.exe"));
   f.install(path.join(f.env.Path, "code-insiders.cmd"));
   // The CLI must resolve the sibling executable, rather than launching the cmd shim.
-  f.install(path.join(f.env.Path, "Code - Insiders.exe"));
+  const insidersCli = f.install(path.join(f.env.Path, "Code - Insiders.exe"));
   const cursor = f.install(path.join(f.env.ProgramFiles, "Cursor", "resources", "app", "bin", "cursor.cmd"));
   f.install(path.join(f.env.ProgramFiles, "Cursor", "Cursor.exe"));
   f.env.Path += path.delimiter + path.dirname(cursor);
@@ -70,7 +70,7 @@ test("Windows discovery finds system installs, CLI executables, shortcuts and cu
   f.install(path.join(f.env.ProgramFiles, "Windsurf", "Windsurf.exe"));
   const discovered = f.targets.fileOpenTargets();
   assert.equal(discovered.find(target => target.id === "vscode").executable, code);
-  assert.notEqual(discovered.find(target => target.id === "vscodeInsiders").executable, insiders);
+  assert.equal(discovered.find(target => target.id === "vscodeInsiders").executable, insidersCli);
   assert.equal(discovered.find(target => target.id === "cursor").executable, path.join(f.env.ProgramFiles, "Cursor", "Cursor.exe"));
   assert.equal(discovered.find(target => target.id === "pycharm").executable, pycharm);
   assert.equal(discovered.find(target => target.id === "terminal").executable, terminal);

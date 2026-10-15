@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   closeBrowser: vi.fn(async () => 1),
   terminals: vi.fn(async () => []),
   browsers: vi.fn(async () => []),
+  openPreferredPath: vi.fn(async (path: string) => ({ openInEditor: true, path })),
 }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "session", send: () => true }) }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
@@ -37,7 +38,7 @@ vi.mock("./openAttachmentPreview", () => ({
   openAttachmentPreview: vi.fn(), openLocalFilePreview: vi.fn(),
 }));
 vi.mock("../desktop/runtime", () => ({
-  isDesktop: () => true, desktop: () => undefined,
+  isDesktop: () => true, desktop: () => ({ openPreferredPath: mocks.openPreferredPath, hideNotifications: vi.fn(async () => {}) }),
   openPath: vi.fn(), revealPath: vi.fn(),
   ptyKillConversation: mocks.kill, embeddedBrowserCloseConversation: mocks.closeBrowser,
   ptyList: mocks.terminals, embeddedBrowserList: mocks.browsers,
@@ -75,7 +76,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); registerWebSocketSender(null); });
 
 describe("repaired transcript and resource contracts", () => {
-  it("keeps code and copied source intact when hiding prose citation markers", async () => {
+  it("copies Source semantic prose and literal code without hidden citation markers or markdown fences", async () => {
     const source = 'Example [1]\n\n```python\nif ok:\n    values = [1]\n    print("a  b")\n```';
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -86,15 +87,16 @@ describe("repaired transcript and resource contracts", () => {
     expect(container.querySelector(".md-body p")?.textContent?.trim()).toBe("Example");
     expect(container.textContent).toContain("values = [1]");
     fireEvent.click(screen.getByRole("button", { name: "复制回复" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(source));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Example \n\nif ok:\n    values = [1]\n    print("a  b")'));
   });
 
-  it("opens child transcript file links in the child workspace", () => {
+  it("opens child transcript file links in the child workspace", async () => {
     render(<AssistantMarkdownCell isTranscriptMode conversationId="child" workspaceRoot="C:/child" cell={{
       kind: "assistant_markdown", id: "reply", markdownSource: "[child](src/main.ts:12)", phase: "final", copyable: true, createdAt: 1,
     }} />);
     fireEvent.click(screen.getByRole("button", { name: "child" }));
-    expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ path: "src/main.ts", workspaceRoot: "C:/child", conversationId: "child" }));
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ path: "src/main.ts", workspaceRoot: "C:/child", conversationId: "child" })));
+    expect(mocks.openPreferredPath).toHaveBeenCalledWith("C:/child/src/main.ts", 12, { workspaceRoot: "C:/child" });
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
   });
 
@@ -110,11 +112,11 @@ describe("repaired transcript and resource contracts", () => {
     expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ path: "src/one.ts", workspaceRoot: "C:/child", conversationId: "child" }));
   });
 
-  it("retains the line on a linkified absolute Windows file reference", () => {
+  it("retains the line on a linkified absolute Windows file reference", async () => {
     useAppStore.setState({ workingDirectory: "C:/repo" });
     render(<MarkdownRenderer content="C:/repo/main.ts:12" workspaceRoot="C:/repo" knownFilePaths={["C:/repo/main.ts"]} />);
     fireEvent.click(screen.getByRole("button", { name: "C:/repo/main.ts:12" }));
-    expect(useAppStore.getState().editorOpenRequests.at(-1)).toMatchObject({ path: "main.ts", line: 12 });
+    await waitFor(() => expect(useAppStore.getState().editorOpenRequests.at(-1)).toMatchObject({ path: "main.ts", line: 12 }));
   });
 
   it("uses each file's real hunk line numbers", () => {

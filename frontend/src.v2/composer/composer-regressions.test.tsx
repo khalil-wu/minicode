@@ -32,6 +32,8 @@ vi.mock("../protocol/api", async (load) => ({
 vi.mock("../desktop/runtime", async (load) => ({
   ...await load<typeof import("../desktop/runtime")>(),
   isDesktop: () => true,
+  getDesktopPreferences: vi.fn(async () => ({ showFullAccess: true })),
+  onDesktopPreferencesChanged: vi.fn(() => () => {}),
   fsListTree: vi.fn(async () => []),
   fsSearchFiles: vi.fn(async () => []),
 }));
@@ -63,7 +65,7 @@ const deferred = <T,>() => {
 beforeEach(() => {
   vi.clearAllMocks();
   mentionTreeCache.clear(); mentionSearchCache.clear();
-  useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A", permissionMode: "confirm", currentModel: "model", currentProvider: "openai", availableModels: ["model"], isConnected: true, isStreaming: false, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], availableSkills: [], slashCommands: [], pendingApproval: null, pendingAskUser: null, pendingDiffReview: null, prMonitor: null, fileTreeVersion: 0 });
+  useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A", permissionMode: "confirm", runtimeCapabilities: { permission: { available_modes: ["confirm", "bypass"] } }, currentModel: "model", currentProvider: "openai", availableModels: ["model"], isConnected: true, isStreaming: false, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], availableSkills: [], slashCommands: [], pendingApproval: null, pendingAskUser: null, pendingDiffReview: null, prMonitor: null, fileTreeVersion: 0 });
   vi.mocked(showConfirm).mockResolvedValue(true);
   vi.mocked(fsListTree).mockResolvedValue([]);
   vi.mocked(fsSearchFiles).mockResolvedValue([]);
@@ -181,7 +183,7 @@ describe("composer user-boundary regressions", () => {
     const pending = deferred<boolean>();
     vi.mocked(showConfirm).mockReturnValueOnce(pending.promise);
     render(<FooterRow sendState="idle" onSend={vi.fn()} />);
-    fireEvent.click(screen.getByTitle("权限：询问"));
+    fireEvent.click(screen.getByTitle("更改权限"));
     fireEvent.click(screen.getByRole("option", { name: "完全访问" }));
     await waitFor(() => expect(showConfirm).toHaveBeenCalledTimes(1));
     act(() => useAppStore.setState({ conversationId: "B", workingDirectory: "C:/B" }));
@@ -193,7 +195,7 @@ describe("composer user-boundary regressions", () => {
 
   it("still applies a full-access decision to its unchanged owner", async () => {
     render(<FooterRow sendState="idle" onSend={vi.fn()} />);
-    fireEvent.click(screen.getByTitle("权限：询问"));
+    fireEvent.click(screen.getByTitle("更改权限"));
     fireEvent.click(screen.getByRole("option", { name: "完全访问" }));
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.permission_mode.set", conversation_id: "A", mode: "bypass" }), "conversation.permission_mode.set"));
   });

@@ -48,6 +48,7 @@ from backend.agent.provider_stream_failures import (
     handle_provider_stream_exception,
 )
 from backend.agent.provider_attempt import provider_progress_id
+from backend.agent.provider_protocol import build_provider_attempt_metadata
 from backend.agent.provider_stream_transport import (
     ProviderTransportFailureResult,
     handle_provider_transport_failure,
@@ -113,16 +114,8 @@ async def stream_provider_response(
     finish_reason = ""
     provider_raw_done = stream_state.raw_done
     stream_attempt = 0
-    max_retries = max(
-        0,
-        int(getattr(settings, "stream_max_attempts", 0) or 0),
-    )
-    progress_owner = str(getattr(getattr(turn_kernel, "run_record", None), "run_id", "")
-                         or turn_kernel.metadata.get("turn_id", "")).strip()
-    provider_progress_key = provider_progress_id(
-        iteration_id_value,
-        progress_owner,
-    )
+    max_retries = max(0, settings.stream_max_attempts)
+    provider_progress_key = provider_progress_id(iteration_id_value, turn_kernel.run_record.run_id)
     retry_state = StreamRetryState()
     query_source = str(llm_request_metadata.get("query_source") or "user").strip()
     stream_recovery_attempted = False
@@ -160,27 +153,10 @@ async def stream_provider_response(
                 max_retries=max_retries,
                 progress_id=provider_progress_key,
             )
-            request_metadata = dict(llm_request_metadata)
-            source_metadata = dict(request_metadata.get("_source_responses_metadata", {}))
-            if source_metadata or context_builder.token_budget_enabled:
-                from backend.agent.agent_identity import AgentPath
-
-                source_defaults = {
-                    "session_id": tool_context.run_context.responses_session_id,
-                    "thread_id": llm_request_metadata["thread_id"],
-                    "agent_name": AgentPath.parse(turn_kernel.run_record.agent_path).logical_name,
-                    "turn_id": llm_request_metadata["turn_id"],
-                    "request_kind": "turn",
-                    "turn_started_at_unix_ms": int(turn_kernel.run_record.started_at * 1000),
-                }
-                if context_builder.token_budget_enabled:
-                    window = context_builder._context_window_state
-                    source_defaults.update({"context_window_id": window.window_id, "window_number": window.window_number})
-                    if context_builder._context_window_config.use_history_notes_extension:
-                        source_defaults["history_ingest_requested"] = True
-                for key, value in source_defaults.items():
-                    source_metadata.setdefault(key, value)
-                request_metadata["_source_responses_metadata"] = source_metadata
+            request_metadata = build_provider_attempt_metadata(
+                llm_request_metadata, context_builder=context_builder,
+                run_context=tool_context.run_context, run_record=turn_kernel.run_record,
+            )
             stream_iter = safe_stream_chat_with_request_metadata(
                 llm,
                 messages,

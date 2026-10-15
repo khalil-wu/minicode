@@ -10,8 +10,10 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
   const http = require("node:http"), vm = require("node:vm");
   const manager = require("./window-manager"), browser = require("./embedded-browser-manager");
   const bridge = require("./embedded-browser-bridge"), terminal = require("./pty-manager"), ipc = require("./ipc-handlers");
+  const desktopPreferences = require("./preferences");
   const profile = process.env.MINICODE_MULTIWINDOW_TEST_PROFILE;
   app.setPath("userData", profile);
+  desktopPreferences.init(path.join(profile, "preferences.json"), { localeOverride: "zh-CN" });
   app.whenReady().then(async () => {
     const closes = new Map();
     let resolveSecond;
@@ -55,7 +57,7 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       const menuSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8")
         .match(/function buildApplicationMenu\(\) \{[\s\S]*?\n\}/)[0];
       vm.runInNewContext(`${menuSource}\nbuildApplicationMenu();`, {
-        Menu, windowManager: manager, FIGMA_CAPTURE_ENABLED: false, process, dialog: { showErrorBox() {} }, appendDesktopLog() {},
+        app, desktopPreferences, Menu, windowManager: manager, FIGMA_CAPTURE_ENABLED: false, process, dialog: { showErrorBox() {} }, appendDesktopLog() {},
       });
       const newWindow = Menu.getApplicationMenu().getMenuItemById("minicode-menu-file").submenu.items.find((item) => item.label === "新建窗口");
       newWindow.click(newWindow, primary);

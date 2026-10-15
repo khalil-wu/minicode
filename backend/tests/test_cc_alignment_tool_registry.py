@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.artifact.store import ArtifactStore
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.tool_search import DeferredToolCatalog
+from backend.tools.toolsets import ToolsetPolicy
 
 
 class _HostedSearchProvider:
@@ -40,7 +43,12 @@ def test_cc_alignment_tools_are_registered_with_expected_visibility(tmp_path) ->
     assert "skill_search" not in direct_names
     assert "repl" not in direct_names
     assert "team_memory_sync" not in direct_names
-    assert "browser_control" not in direct_names
+    assert "browser_control" in direct_names
+    assert "tool_search" not in direct_names
+    search_policy = ToolsetPolicy(supports_search_tool=True)
+    search_direct = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=search_policy)}
+    assert "browser_control" not in search_direct and "tool_search" in search_direct
+    assert "browser_control" in {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=search_policy).entries()}
 
 
 def test_web_search_is_available_without_a_hosted_provider(tmp_path) -> None:
@@ -49,14 +57,15 @@ def test_web_search_is_available_without_a_hosted_provider(tmp_path) -> None:
     assert registry.get_tool("web_search") is not None
 
 
-def test_mcp_bridge_tools_are_uniformly_deferred(tmp_path) -> None:
-    """No MCP bridge tool may sit in the always-on tool array.
+@pytest.mark.parametrize("supports_search", [False, True])
+def test_mcp_bridge_tools_share_the_admitted_search_capability(tmp_path, supports_search) -> None:
+    """MCP helpers stay reachable with and without native discovery support.
 
     list_mcp_resources/read_mcp_resource declared should_defer while the
     template, subscription, notification, and prompt bridges did not, so the
     rarely-needed six were direct on every turn while the two entry points were
-    hidden behind tool_search. Keep the whole family lazy and reachable only
-    through the deferred directory.
+    hidden behind tool_search. Keep the whole family deferred when the admitted
+    model supports discovery, and direct when it cannot call tool_search.
     """
 
     registry = build_tool_registry(
@@ -66,12 +75,17 @@ def test_mcp_bridge_tools_are_uniformly_deferred(tmp_path) -> None:
     mcp_names = {name for name in registry.list_tools() if "mcp" in name}
     assert mcp_names, "expected MCP bridge tools to be registered"
 
-    direct_names = {schema["function"]["name"] for schema in registry.get_schemas()}
-    assert not (mcp_names & direct_names)
+    policy = ToolsetPolicy(supports_search_tool=supports_search)
+    direct_names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)}
+    if supports_search:
+        assert not (mcp_names & direct_names)
+    else:
+        assert mcp_names <= direct_names
 
-    views = {view.name: view for view in registry.build_schema_views()}
+    views = {view.name: view for view in registry.build_schema_views(toolset_policy=policy)}
     for name in mcp_names:
         assert views[name].exposure == "deferred", name
+        assert views[name].direct is (not supports_search), name
         assert views[name].schema_available is True, name
 
     # The async-agent availability filter admits the whole "mcp" toolset, so
@@ -110,6 +124,8 @@ _NON_TOOL_DOC_TOKENS = frozenset(
         "audio_block",
         "media_type",
         "image_url",  # generatedImage() payload, not a registered tool name.
+        "audio_url",  # audio() payload from the Source code execution surface.
+        "file_system",  # Nested additional_permissions payload.
         "output_hint",  # Optional text accompanying generatedImage() output.
         "yield_control",
     }

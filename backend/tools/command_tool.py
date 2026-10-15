@@ -568,9 +568,11 @@ class RunCommandTool(BaseTool):
             from backend.tools.monitor_tool import MonitorTool
 
             try:
+                # The registry owns cancellation of this tool task. A second
+                # token waiter can start cleanup before that cancellation and
+                # have the same cleanup interrupted by the registry.
                 await background_manager.wait(
                     bg_cmd.command_id, conversation_id=conversation_id, wait_ms=wait_ms,
-                    cancel_event=getattr(context, "cancel_event", None),
                 )
                 await background_manager.detach(bg_cmd.command_id, conversation_id=conversation_id)
             except asyncio.CancelledError:

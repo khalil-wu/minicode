@@ -24,6 +24,8 @@ from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.services.chat_api_service import reserve_attachment_upload_context
 from backend.services.projectless_directory_service import create_projectless_directory
 from backend.services.workspace_service import conversation_workspace_path, resolve_requested_workspace
+from backend.sandbox.policy import PermissionProfile, SandboxPolicy
+from backend.tests.native_command_harness import configure_command_context, execute_command
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.read_file import ReadFileTool
 from backend.tools.write_file import WriteFileTool
@@ -120,7 +122,10 @@ def test_fixed_cwd_flows_to_scope_real_read_write_command_and_attachments(tmp_pa
     read = asyncio.run(ReadFileTool(session.artifact_store).execute({"file_path": "outputs/report.txt"}, context=context))
     assert not read.is_error and "actual final report" in read.content
     command = "Get-Location | Select-Object -ExpandProperty Path" if os.name == "nt" else "pwd"
-    result = asyncio.run(RunCommandTool(session.artifact_store).execute({"command": command}, context=context))
+    command_tool = RunCommandTool(session.artifact_store)
+    configure_command_context(command_tool, context,
+        sandbox_policy=SandboxPolicy(permission_profile=PermissionProfile.disabled(), workspace_root=root))
+    result = asyncio.run(execute_command(command_tool, {"command": command}, context))
     assert not result.is_error and str(root) in result.content
     reservation = SimpleNamespace(get_session=lambda key: session, reserve_attachment_upload=lambda key: "upload-token")
     upload = reserve_attachment_upload_context(session_id="session", conversation_id=created.id, ws_manager=reservation, attachment_store=session.attachment_store)
@@ -353,9 +358,11 @@ def test_legacy_empty_attachment_scope_is_retained_when_real_execution_owner_is_
     session.attachment_store.save(artifact_id=attachment_id, content="original uploaded file", metadata={"conversation_id": "conv_legacy_owner", "workspace_root": ""})
     artifact_id = session.artifact_store.save("original output", source="original", type="text", conversation_id="conv_legacy_owner", workspace_root="")
     old_metadata = ConversationSummary.from_dict({"id": "conv_legacy_owner", "title": "original", "workspace_root": ""})
-    assert session.session_lifecycle.workspace_root_for_conversation(old_metadata) == directory
+    assert session.session_lifecycle.workspace_root_for_conversation(old_metadata) is None
     assert session.attachment_store.get(attachment_id, conversation_id="conv_legacy_owner", workspace_root=directory) is None
-    session.session_lifecycle.bind_execution_for_operation(old_metadata)
+    bound = session.session_lifecycle.bind_execution_for_operation(old_metadata)
+    assert bound.execution_cwd == str(directory)
+    assert session.session_lifecycle.workspace_root_for_conversation(bound) == directory
     assert session.attachment_store.get(attachment_id, conversation_id="conv_legacy_owner", workspace_root=directory) == "original uploaded file"
     assert session.attachment_store.get(attachment_id, conversation_id="conv_legacy_owner", workspace_root="") == "original uploaded file"
     assert session.artifact_store.get(artifact_id, conversation_id="conv_legacy_owner", workspace_root=directory) == "original output"

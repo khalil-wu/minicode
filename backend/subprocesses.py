@@ -166,9 +166,9 @@ async def terminate_process_tree(
             def kill_windows_tree() -> bool:
                 try:
                     parent = psutil.Process(pid)
+                    descendants = parent.children(recursive=True)
                 except psutil.NoSuchProcess:
                     return True
-                descendants = parent.children(recursive=True)
                 owned_tree = [*descendants, parent]
                 taskkill_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 try:

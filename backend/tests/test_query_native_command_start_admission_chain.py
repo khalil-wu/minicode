@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+import shlex
+import sys
 
 import pytest
 
@@ -18,7 +20,7 @@ from backend.config import AgentSettings, TokenBudget, PermissionSettings
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.context import PermissionContext
 from backend.permissions.checker import PermissionChecker
-from backend.tests.test_native_exec_policy_chain import setup
+from backend.tests.test_native_exec_policy_chain import output_command, setup
 from backend.tools.code_execution import ToolExecTool, ToolWaitTool
 
 
@@ -52,6 +54,12 @@ async def test_actual_query_command_start_is_durable_before_host_and_without_hos
     command = (f"Set-Content -LiteralPath {shell_path(entered)} -Value 'ACTUAL_NATIVE_EXECUTION'; "
         f"while (-not (Test-Path -LiteralPath {shell_path(release)})) {{ Start-Sleep -Milliseconds 30 }}; "
         'Write-Output "ACTUAL_NATIVE_START_STDOUT"')
+    if sys.platform != "win32":
+        code = ("import time\nfrom pathlib import Path\n"
+            f"Path({str(entered)!r}).write_text('ACTUAL_NATIVE_EXECUTION', encoding='utf-8')\n"
+            f"while not Path({str(release)!r}).exists():\n    time.sleep(0.03)\n"
+            "print('ACTUAL_NATIVE_START_STDOUT')\n")
+        command = shlex.join([sys.executable, "-c", code])
     arguments = {"command": command, "login": False, "yield_time_ms": 10000}
     if shape != "direct":
         host.registry.register(ToolExecTool())
@@ -138,7 +146,7 @@ async def test_actual_query_command_start_is_durable_before_host_and_without_hos
 @pytest.mark.asyncio
 async def test_actual_old_callback_cannot_replace_new_turn_clock_when_provider_reuses_call_id(tmp_path):
     host = setup(tmp_path, approval_policy="never")
-    arguments = {"command": 'Write-Output "REAL_REUSED_NATIVE_CALL"', "login": False, "yield_time_ms": 10000}
+    arguments = {"command": output_command("REAL_REUSED_NATIVE_CALL")[0], "login": False, "yield_time_ms": 10000}
     model = NativeCommandModel(host.snapshot.config.llm, ToolCallEvent(id="reused-native-id", name="run_command", arguments=arguments))
     settings, budget = AgentSettings(max_iterations=3, max_turn_seconds=30, stream_max_attempts=0, code_mode_only=False), TokenBudget(total=96000)
     admitted = replace(host.snapshot, config=replace(host.snapshot.config, agent=settings, token_budget=budget), llm=model)

@@ -66,6 +66,10 @@ it("keeps a script's independent failure alongside successful leaf evidence", ()
   ] }]);
   const turn = projectMessagesToTurns(messages, false)[0];
   render(<>{turn.committedCells.map(cell => <HistoryCellRenderer key={cell.id} cell={cell} />)}</>);
-  expect(screen.getByRole("alert").textContent).toContain("Computation failed");
-  expect(screen.getByText("代码执行失败")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText("代码执行失败")).toBeNull();
+  for (const detail of screen.getAllByRole("button", { name: "展开活动详情" })) fireEvent.click(detail);
+  expect(screen.getByText("file bytes")).toBeTruthy();
+  expect(screen.getByText("Computation failed")).toBeTruthy();
+  expect(messages[0].blocks?.[1]).toMatchObject({ type: "tool_call", record: { status: "failed", summary: expect.stringContaining("Computation failed") } });
 });

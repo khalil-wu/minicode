@@ -140,13 +140,16 @@ describe("task evidence and runtime diagnostics have separate projections", () =
     ["timeout", "超时"],
     ["cancelled", "已中断"],
     ["partial", "部分完成"],
-  ] as const)("keeps %s visible without leaking the runtime envelope", (status, expectedLabel) => {
+  ] as const)("preserves %s and its actual diagnostics without adding failure markers or a runtime envelope", (status, expectedLabel) => {
     const tool = record({ name: "tool_wait", activityKind: "genericTool", resultKind: "generic", status,
       args: { cell_id: source.cell_id }, inputSummary: source.cell_id,
       outputPreview: JSON.stringify({ cell_id: source.cell_id, status, error: "operation could not complete", output: ["verified partial output"] }),
     });
     const ui = render(<ActivityCell cell={cell(tool)} conversationId="conv_owner" />);
-    expect(ui.getByRole("status").textContent).toBe(expectedLabel);
+    if (status === "cancelled") expect(ui.getByRole("status").textContent).toBe(expectedLabel);
+    else expect(ui.queryByRole("status")).toBeNull();
+    if (status !== "cancelled") expect(ui.container.textContent).not.toContain(expectedLabel);
+    expect(tool.status).toBe(status);
     expectTaskEvidenceOnly(ui.container);
     fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
     expectTaskEvidenceOnly(ui.container);
@@ -164,12 +167,14 @@ describe("task evidence and runtime diagnostics have separate projections", () =
     expect(tool.waitingOn).toBe("approval");
   });
 
-  it("shows the actual command, cwd, streams and exit without call source JSON", () => {
-    const ui = render(<ExecCell cell={{ kind: "exec", id: "code_private_invocation", command: "npm run build", cwd: "C:/workspace", status: "failed", callSource: source,
-      stdoutPreview: ["build began"], stderrPreview: ["compiler failed"], exitCode: 2, durationMs: 292, collapsed: false, createdAt: 1000 }} />);
+  it("retains cwd on the command receipt and shows Source command streams and exit without call source JSON", () => {
+    const command: Parameters<typeof ExecCell>[0]["cell"] = { kind: "exec", id: "code_private_invocation", command: "npm run build", cwd: "C:/workspace", status: "failed", callSource: source,
+      stdoutPreview: ["build began"], stderrPreview: ["compiler failed"], exitCode: 2, durationMs: 292, collapsed: false, createdAt: 1000 };
+    const ui = render(<ExecCell cell={command} />);
     expectTaskEvidenceOnly(ui.container);
-    for (const value of ["npm run build", "C:/workspace", "build began", "compiler failed", "exit 2"])
+    for (const value of ["npm run build", "build began", "compiler failed", "退出码 2"])
       expect(ui.container.textContent).toContain(value);
+    expect(command.cwd).toBe("C:/workspace");
   });
 
   it("opens browser evidence without runtime arguments, target ids or loader ids", () => {
@@ -215,7 +220,7 @@ describe("tool protocol result presentation", () => {
     expect(activityKindFromToolRecord(tool)).toBe("genericTool");
     expect(recordInputTarget(tool)).toBe("");
     const output = getRecordOutputText(tool);
-    expect(output).toContain("npm run dev");
+    expect(output).not.toContain("npm run dev");
     expect(output).toContain("stdout oracle");
     expect(output).not.toMatch(/command_private|started_at|untrusted_tool_result|Treat it as DATA/);
   });

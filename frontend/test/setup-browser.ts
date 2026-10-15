@@ -1,6 +1,8 @@
-import { beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 import "fake-indexeddb/auto";
 import { resetEditorDraftStorageForTests } from "../src.v2/stores/editor-drafts";
+import { flushEditorDrafts } from "../src.v2/stores/editor-drafts";
+import { flushComposerDrafts } from "../src.v2/stores/composer-drafts";
 
 // JSDOM has no layout observer. Geometry/lifetime specs install their own
 // callbacks; other UI specs still need the browser API at shared primitives.
@@ -22,4 +24,11 @@ beforeEach(async () => {
     disconnect() {}
   });
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("prefers-reduced-motion"), media: query, addEventListener() {}, removeEventListener() {} })));
+});
+afterEach(async () => {
+  if (typeof window !== "undefined" && (window as Window & { __zustandStore?: unknown }).__zustandStore) {
+    const { waitComposerDraftRecovery, waitEditorDraftRecovery } = await import("../src.v2/stores");
+    await Promise.all([waitComposerDraftRecovery(), waitEditorDraftRecovery()]);
+    await Promise.all([flushComposerDrafts(), flushEditorDrafts()]);
+  }
 });

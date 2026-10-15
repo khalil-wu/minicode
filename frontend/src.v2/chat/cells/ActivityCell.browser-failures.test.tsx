@@ -24,7 +24,8 @@ describe("browser failure projection", () => {
     const row = view.container.querySelector(".activity-cell-main-button")!;
     expect(row.textContent).toContain("Navigate");
     expect(row.textContent).toContain(target);
-    expect(row.textContent).toContain("已阻止");
+    expect(row.textContent).not.toMatch(/已阻止|失败/);
+    expect(record.status).toBe("blocked");
     expect(view.container.textContent).not.toContain("浏览器操作失败");
     expect(view.container.textContent).not.toContain("下一步");
     expect(view.container.querySelector(".activity-cell-error-detail")).toBeNull();

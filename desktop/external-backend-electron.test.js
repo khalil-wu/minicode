@@ -124,6 +124,11 @@ test("external FastAPI attests its native host and runs real WS, browser and LSP
   for (const directory of [profile, path.join(state, "data"), workspace, managed]) fs.mkdirSync(directory, {recursive:true});
   fs.writeFileSync(path.join(workspace, "a.py"), "value = 41\nvalue\n", "utf8");
   fs.writeFileSync(path.join(state, "settings.json"), JSON.stringify({agent:{code_mode_only:false}, llm:{provider:"openai", openai:{base_url:"https://fixture.invalid/v1", model:"fixture", auth_header:false}}}), "utf8");
+  fs.mkdirSync(path.join(state, ".minicode"));
+  fs.writeFileSync(path.join(state, ".minicode", "models.json"), JSON.stringify({providers:{openai:{
+    api:"openai-responses", base_url:"https://fixture.invalid/v1", auth_header:false,
+    models:[{id:"fixture", name:"Native browser oracle", supports_search_tool:true}],
+  }}}), "utf8");
   fs.writeFileSync(path.join(state, "data", "active_workspace.json"), JSON.stringify({root:workspace}), "utf8");
   fs.writeFileSync(path.join(state, "data", "trusted_workspaces.json"), JSON.stringify({roots:[workspace]}), "utf8");
   const html = path.join(root, "oracle.html");
@@ -172,6 +177,7 @@ test("external FastAPI attests its native host and runs real WS, browser and LSP
     assert.equal(report.conversationId, report.conversationPayloadId);
     assert.ok(report.conversationId);
     assert.equal(report.toolSearchResult.is_error, false);
+    assert.match(report.toolSearchResult.summary, /browser_control/);
     assert.equal(report.toolResult.is_error, false);
     assert.match(report.toolResult.summary, /external-tab/);
     assert.match(report.toolResult.summary, /about:blank/);

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from backend.agent.terminal_projection import TurnTerminalProjection
 
+from backend.agent.agent_identity import AgentPath
 from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
 from backend.agent.public_projection import (
     project_public_usage,
@@ -779,6 +780,36 @@ def add_usage(left: UsageInfo, right: UsageInfo | None) -> UsageInfo:
         else None
     )
     return left
+
+
+def build_provider_attempt_metadata(
+    metadata: dict[str, Any],
+    *,
+    context_builder: Any,
+    run_context: Any,
+    run_record: Any,
+) -> dict[str, Any]:
+    """Attach the issuing turn and window facts without replacing authored provenance."""
+    request = dict(metadata)
+    source = dict(request.get("_source_responses_metadata", {}))
+    if source or context_builder.token_budget_enabled:
+        defaults = {
+            "session_id": run_context.responses_session_id,
+            "thread_id": metadata["thread_id"],
+            "agent_name": AgentPath.parse(run_record.agent_path).logical_name,
+            "turn_id": metadata["turn_id"],
+            "request_kind": "turn",
+            "turn_started_at_unix_ms": int(run_record.started_at * 1000),
+        }
+        if context_builder.token_budget_enabled:
+            window = context_builder._context_window_state
+            defaults.update({"context_window_id": window.window_id, "window_number": window.window_number})
+            if context_builder._context_window_config.use_history_notes_extension:
+                defaults["history_ingest_requested"] = True
+        for key, value in defaults.items():
+            source.setdefault(key, value)
+        request["_source_responses_metadata"] = source
+    return request
 
 
 def build_llm_request_metadata(

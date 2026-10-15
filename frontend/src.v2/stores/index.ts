@@ -96,14 +96,16 @@ useAppStore.subscribe(
   { equalityFn: (left, right) => left.every((value, index) => value === right[index]) },
 );
 
-const restoringWorkspaces = new Set<string>();
+const restoringWorkspaces = new Map<string, Promise<void>>();
+export async function waitEditorDraftRecovery() {
+  while (restoringWorkspaces.size) await Promise.all(restoringWorkspaces.values());
+}
 useAppStore.subscribe(
   state => [state.workingDirectory, state.editorTabs] as const,
   ([workspace, tabs]) => {
     if ((!tabs.some(tab => tab.recoveryPending) && cachedEditorDrafts(editorWorkspaceKey(workspace))) || restoringWorkspaces.has(workspace)) return;
-    restoringWorkspaces.add(workspace);
     const initial = useAppStore.getState();
-    void restoreWorkspaceEditorDrafts(workspace, initial).then(restored => {
+    const restoring = restoreWorkspaceEditorDrafts(workspace, initial).then(restored => {
       const location = editorWorkspaceRecoveryLocation(workspace);
       useAppStore.setState(state => workspaceRootsEqual(state.workingDirectory, workspace)
         ? { editorTabs: reconcileRestoredEditorTabs(state.editorTabs, restored, workspace),
@@ -116,6 +118,7 @@ useAppStore.subscribe(
             ? { ...tab, loading: false } : tab) } : {});
       pushToast(`无法读取编辑器恢复草稿：${error instanceof Error ? error.message : String(error)}。`, "error");
     }).finally(() => restoringWorkspaces.delete(workspace));
+    restoringWorkspaces.set(workspace, restoring);
   },
   { fireImmediately: true, equalityFn: (left, right) => left.every((value, index) => value === right[index]) },
 );

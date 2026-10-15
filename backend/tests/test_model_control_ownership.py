@@ -46,6 +46,7 @@ class ControlHost(SessionCommandHandlersMixin):
         self.catalog = fixture.owner.model_execution.model_runtime
         self._model_runtime_for_conversation = lambda _: self.catalog
         self.session_lifecycle = SimpleNamespace(
+            is_shutting_down=False,
             workspace_root_for_conversation=lambda *_: tmp_path,
             schedule_task_runtime_update=Mock(), send_runtime_capabilities=AsyncMock(),
         )
@@ -132,7 +133,7 @@ async def test_other_window_targets_running_owner_without_changing_visible_task(
     executing, repo = controls(fixture, tmp_path, monkeypatch)
     executing.active_conversation_id = "conv_other_control"
     requesting = ControlHost(fixture, repo, tmp_path, "conv_other_control")
-    manager = object.__new__(WebSocketManager)
+    manager = WebSocketManager()
     manager._sessions = {"executing": executing, "requesting": requesting}
     executing.ws_manager = requesting.ws_manager = manager
     try:

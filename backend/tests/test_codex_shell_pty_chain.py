@@ -12,10 +12,13 @@ import psutil
 import pytest
 
 from backend.artifact.store import ArtifactStore
+from backend.agent.tool_execution import _authorize_final_tool_request
+from backend.llm.base import ToolCallEvent
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.sandbox.policy import SandboxPolicy
 from backend.sandbox.runner import SandboxCapability, SandboxRunner
 from backend.terminal.manager import BackgroundCommandManager
+from backend.tests.native_command_harness import configure_command_context, execute_command
 from backend.tools.command_support import command_shell_argv
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.monitor_tool import MonitorTool
@@ -34,8 +37,8 @@ def setup_tools(tmp_path: Path, *, stream_callback=None):
         workspace_root=tmp_path, conversation_id="source-shell-chat", session_id="source-shell-tests",
         background_manager=manager, stream_callback=stream_callback)
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"), manager)
-    registry = ToolRegistry()
-    registry.register(tool)
+    configure_command_context(tool, context, sandbox_policy=SandboxPolicy.bypass())
+    registry = context.tool_registry
     return manager, tool, registry, context
 
 
@@ -83,7 +86,7 @@ def test_real_selected_shell_receives_source_login_semantics(tmp_path, login):
         command = ("Write-Output ([Environment]::GetCommandLineArgs() -contains '-NoProfile')" if sys.platform == "win32"
                    else "if shopt -q login_shell; then printf true; else printf false; fi")
         try:
-            result = await registry.execute("run_command", {"command": command, "shell": "pwsh" if sys.platform == "win32" else "bash", "login": login,
+            result = await execute_command(_tool, {"command": command, "shell": "pwsh" if sys.platform == "win32" else "bash", "login": login,
                 "yield_time_ms": 10000}, context=context)
             assert not result.is_error, result.content
             captured = manager.get_output_chunk(result.runtime_metadata["command_id"],
@@ -104,9 +107,13 @@ def test_managed_login_disable_rejects_explicit_true_before_launch(tmp_path, mon
     monkeypatch.setattr("backend.config.load_config_layer_stack", lambda **_kwargs: stack)
     async def scenario():
         manager, _tool, registry, context = setup_tools(tmp_path)
+        from backend.permissions.exec_policy import ExecPolicyOwner
+        context.run_context.exec_policy_owner = ExecPolicyOwner(home=tmp_path / ".managed-command-policy", stack=stack)
         try:
-            result = await registry.execute("run_command", {"command": "echo untouched", "login": True}, context=context)
-            assert result.is_error and "login shell is disabled" in result.content
+            result = _authorize_final_tool_request(ToolCallEvent(id="managed-login", name="run_command",
+                arguments={"command": "echo untouched", "login": True}), tool_registry=registry,
+                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+            assert "login shell is disabled" in result.error
             assert manager.list_commands(include_completed=True, conversation_id=context.command_scope_id) == []
             omitted = command_shell_argv("echo source", shell="pwsh" if sys.platform == "win32" else "bash", allow_login_shell=False)
             assert ("-NoProfile" if sys.platform == "win32" else "-c") in omitted
@@ -120,7 +127,7 @@ def test_real_cmd_shell_keeps_exit_code_and_public_command(tmp_path):
         manager, _tool, registry, context = setup_tools(tmp_path)
         command = "echo SOURCE_CMD&exit /b 7" if sys.platform == "win32" else "printf SOURCE_CMD; exit 7"
         try:
-            result = await registry.execute("run_command", {"command": command, "shell": "cmd" if sys.platform == "win32" else "sh", "login": False,
+            result = await execute_command(_tool, {"command": command, "shell": "cmd" if sys.platform == "win32" else "sh", "login": False,
                 "yield_time_ms": 10000}, context=context)
             assert not result.is_error and result.status == "success"
             assert result.runtime_metadata["process_status"] == "failed"
@@ -141,7 +148,7 @@ def test_real_pipe_and_pty_share_owner_yield_stdin_and_durable_output(tmp_path, 
         script = "import sys; print('READY:'+str(sys.stdin.isatty())+':'+str(sys.stdout.isatty()),flush=True); line=sys.stdin.readline(); print('SOURCE_ECHO:'+line.strip(),flush=True)"
         command = python_command(script)
         try:
-            result = await registry.execute("run_command", {"command": command, "login": False, "tty": tty,
+            result = await execute_command(_tool, {"command": command, "login": False, "tty": tty,
                 "yield_time_ms": 0}, context=context)
             assert not result.is_error, result.content
             command_id = result.runtime_metadata["command_id"]
@@ -172,7 +179,7 @@ def test_real_pty_timeout_and_cancel_settle_the_owned_tree(tmp_path, terminal_ac
         manager, _tool, registry, context = setup_tools(tmp_path)
         command = python_command("import time; print('SOURCE_READY',flush=True); time.sleep(60)")
         try:
-            result = await registry.execute("run_command", {"command": command, "tty": True, "login": False,
+            result = await execute_command(_tool, {"command": command, "tty": True, "login": False,
                 "timeout": 3 if terminal_action == "timeout" else 30, "yield_time_ms": 0}, context=context)
             assert not result.is_error, result.content
             command_id = result.runtime_metadata["command_id"]
@@ -204,7 +211,7 @@ def test_tty_cannot_escape_an_unavailable_required_sandbox(tmp_path, monkeypatch
         context.permission = PermissionContext(mode="confirm")
         context.sandbox_policy = SandboxPolicy(workspace_root=tmp_path)
         try:
-            result = await registry.execute("run_command", {"command": "echo untouched", "tty": True}, context=context)
+            result = await execute_command(_tool, {"command": "echo untouched", "tty": True}, context=context)
             assert result.is_error and "required policy cannot launch" in result.content
             assert manager.list_commands(include_completed=True, conversation_id=context.command_scope_id) == []
         finally:

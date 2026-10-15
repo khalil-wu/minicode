@@ -347,7 +347,7 @@ describe("ChatTurn", () => {
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
     expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
     rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
-    fireEvent.click(screen.getByRole("button", { name: "已查看目录正在搜索文件" }));
+    fireEvent.click(screen.getByRole("button", { name: "已读取文件" }));
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
   });
@@ -549,6 +549,7 @@ describe("ChatTurn", () => {
       },
       status: "completed",
       startedAt: 1,
+      durationMs: 2_000,
       completedAt: 2_001,
     };
 

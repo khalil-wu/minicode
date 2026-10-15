@@ -3,6 +3,7 @@ import { cloneElement, useCallback, useEffect, useMemo, useRef, useState } from 
 import {
   Folder,
   FolderOpen,
+  MoreHorizontal,
   Plus,
   SquarePen,
 } from "lucide-react";
@@ -236,7 +237,7 @@ export const ConversationsTab = ({
   const listRef = useRef<HTMLDivElement | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [selectedRow, setSelectedRow] = useState<{ conversationId: string; rowId: string } | null>(null);
-  const [workspaceMenu, setWorkspaceMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ path: string; x: number; y: number; anchor?: HTMLElement } | null>(null);
 
   useEffect(() => {
     if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
@@ -353,8 +354,11 @@ export const ConversationsTab = ({
           || (left.pinnedAt || "").localeCompare(right.pinnedAt || ""))
       .map(conversation => ({ ...conversation, treeDepth: 0 }));
   }, [filtered, pinnedConversationIds, pinnedConversationSortMode]);
-  const projectOptions = useMemo(() => recentWorkspaces.map(workspace => ({ id: workspaceGroupIdentity(workspace.path),
-    name: projectGroups.get(workspaceGroupIdentity(workspace.path))?.label ?? workspaceDisplayName(workspace.path, "Computer") })), [recentWorkspaces, projectGroups]);
+  const projectOptions = useMemo(() => {
+    const groups = groupByWorkspace([], recentWorkspaces.map(workspace => workspace.path));
+    return recentWorkspaces.map(workspace => ({ id: workspaceGroupIdentity(workspace.path),
+      name: groups.get(workspaceGroupIdentity(workspace.path))!.label }));
+  }, [recentWorkspaces]);
   const recentConversations = useMemo(() => {
     const recent = filtered.filter(conversation => !conversation.pinned).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
     return (sidebarSortMode === "manual" ? orderSidebarItems(recent, sidebarOrder?.recent_thread_ids ?? [], item => item.id) : recent)
@@ -668,9 +672,17 @@ export const ConversationsTab = ({
           : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}</span>
         <span className="mc-workspace-label" title={group.path}>{group.label}</span>
       </button>
-      {!overlay && <button type="button" className="mc-workspace-new-session" aria-label={tr("在 {name} 中新建任务", { name: group.label })}
+      {!overlay && <div className="mc-workspace-actions" data-menu-open={workspaceMenu?.path === group.path || undefined}>
+      <button type="button" className="mc-workspace-menu" aria-label={tr("项目操作：{name}", { name: group.label })}
+        title={tr("项目操作：{name}", { name: group.label })} aria-haspopup="menu" aria-expanded={workspaceMenu?.path === group.path}
+        onClick={event => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setWorkspaceMenu(workspaceMenu?.path === group.path ? null : { path: group.path, x: bounds.left, y: bounds.bottom + 4, anchor: event.currentTarget });
+        }}><MoreHorizontal size={16} aria-hidden="true" /></button>
+      <button type="button" className="mc-workspace-new-session" aria-label={tr("在 {name} 中新建任务", { name: group.label })}
         title={tr("在 {name} 中新建任务", { name: group.label })} data-testid={`workspace-new-session-${projectKey}`}
-        onClick={() => startWorkspaceConversation(projectKey, group)}><SquarePen size={15} aria-hidden="true" /></button>}
+        onClick={() => startWorkspaceConversation(projectKey, group)}><SquarePen size={15} aria-hidden="true" /></button>
+      </div>}
     </div>
   );
   const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
@@ -757,7 +769,7 @@ export const ConversationsTab = ({
           {filtered.filter(conversation => !conversation.pinned).length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
         </section>}
       </div>
-      {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
+      {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} anchor={workspaceMenu.anchor} onClose={() => setWorkspaceMenu(null)} />}
     </>
   );
 };

@@ -828,7 +828,16 @@ html[data-theme="light"] .workbench-home {
   flex: 1 1 auto;
 }
 
-.mc-workspace-new-session {
+.mc-workspace-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+}
+
+.mc-workspace-new-session,
+.mc-workspace-menu {
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
@@ -841,21 +850,24 @@ html[data-theme="light"] .workbench-home {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  opacity: 0;
 }
 
-.mc-workspace-group-header:hover .mc-workspace-new-session,
-.mc-workspace-group-header:focus-within .mc-workspace-new-session { opacity: 1; }
+.mc-workspace-group-header:hover .mc-workspace-actions,
+.mc-workspace-group-header:focus-within .mc-workspace-actions,
+.mc-workspace-actions[data-menu-open="true"] { opacity: 1; }
 
 .mc-workspace-new-session:hover,
-.mc-workspace-new-session:focus-visible {
+.mc-workspace-new-session:focus-visible,
+.mc-workspace-menu:hover,
+.mc-workspace-menu:focus-visible {
   border-color: var(--border-subtle);
   background: var(--surface-hover);
   color: var(--text-primary);
   opacity: 1;
 }
 
-.mc-workspace-new-session:focus-visible {
+.mc-workspace-new-session:focus-visible,
+.mc-workspace-menu:focus-visible {
   outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent);
   outline-offset: 1px;
 }
@@ -1195,6 +1207,8 @@ html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
 .mc-sidebar-right-tab-frame,
 .mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
 .mc-sidebar-right-action,
+.mc-workspace-actions,
+.mc-workspace-menu,
 .mc-workspace-new-session,
 .mc-sidebar-action,
 .mc-navigation-rail button {
@@ -1292,6 +1306,8 @@ html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
   .mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
   .mc-sidebar-right-action,
   .mc-process-disclosure,
+  .mc-workspace-actions,
+  .mc-workspace-menu,
   .mc-workspace-new-session,
   .mc-sidebar-action,
   .mc-navigation-rail button {

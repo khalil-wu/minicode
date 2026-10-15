@@ -30,6 +30,7 @@ from backend.sandbox.policy import AdditionalPermissionProfile, FileSystemAccess
 from backend.sandbox.result import SandboxResult
 from backend.terminal.manager import BackgroundCommand, BackgroundCommandManager
 from backend.terminal.stdin_authority import StdinAuthorityError, TerminalInputApproval, TerminalLaunchAuthority
+from backend.tests.native_command_harness import configure_command_context
 from backend.tools.command_support import stdin_approval_enabled, stdin_wait_ms
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.monitor_tool import MonitorTool
@@ -403,7 +404,11 @@ async def test_real_batch_pairs_one_bash_hook_for_original_command_after_stdin_a
     hook = SimpleNamespace(run_pre_tool=AsyncMock(return_value=HookResult()), run_post_tool=AsyncMock(return_value=HookResult()), run_post_tool_failure=AsyncMock(return_value=HookResult()))
     context = ToolExecutionContext(PermissionContext(mode="bypass"), workspace_root=tmp_path, conversation_id="owner",
         session_id="batch-stdin", background_manager=manager, run_context=RunContext(hook_manager=hook))
-    registry = ToolRegistry(); registry.register(RunCommandTool(store, manager)); registry.register(MonitorTool())
+    command_tool = RunCommandTool(store, manager)
+    configure_command_context(command_tool, context, sandbox_policy=SandboxPolicy.bypass())
+    context.run_context.hook_manager = hook
+    registry = context.tool_registry
+    registry.register(MonitorTool())
     builder, state = ContextBuilder(), AgentState(user_message="fixture")
     batch = ToolBatchRunner(ctx=builder, state=state, tool_registry=registry, permission_checker=PermissionChecker(permission_settings_from_config({}), tmp_path), approval_handler=None,
         skill_manager=None, permission_context=context.permission, tool_ctx=context)

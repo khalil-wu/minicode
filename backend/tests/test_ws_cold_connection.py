@@ -101,10 +101,12 @@ def _assert_released(connection):
 
 async def _release_session(session):
     manager = session.ws_manager
-    assert await manager.shutdown_session(session.session_id, reason="test_cleanup") is True
+    assert await manager.shutdown_execution_host(session.session_id, reason="test_cleanup") is True
     assert manager.iter_sessions() == ()
     assert not manager._disconnect_tasks
     assert not manager._connecting_websockets
+    assert not manager._execution_watch_tasks
+    assert not manager._execution_host_shutdown_tasks
 
 
 @pytest.mark.asyncio
