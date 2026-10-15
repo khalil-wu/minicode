@@ -2,6 +2,8 @@
 
 功能检查点为 `98dd6e49d1a2fd2578f043fec2982223e34c7914`，对应 GitHub run `38760788042`。原基线 `18e8bd8d` 的七项绿灯不代表这个新检查点的状态。
 
+最终 CI 修正提交 **`2c3cae04ca0a121d74d91cc26b40d68689a6d417`** 的 run **`38764385600` 七项全部成功**。Backend 为 **6579 passed / 27 skipped / 0 failed / 0 errors**，6606 个节点；Windows、Root、原生策略构建、前端及两项桌面任务均 success。实际状态及完整 Backend XML/log 保存在 `output/ci-repair-20261015/github-2c3cae04-state.json` 与 `github-2c3cae04-backend/`。27 个 skip 保留，不算通过。
+
 首次 Windows job 在原认证租约测试中失败：`test_changed_request_auth_replaces_adapter_and_preserves_inflight_lease[api_key]` 尚未进入 provider，就在 `_bind_config_model_request_policy` 中产生 `TypeError: isinstance() arg 2 must be a type`。其 fixture 将 `factory.OpenAIAdapter` 类替换成一个返回 adapter 的函数；新增的真实 adapter feature gate 因此在测试替身上失败。外层 `entered.wait()` 的超时是这个前置异常的结果，不是认证服务慢。
 
 只修两处实际注入点：`test_auth_request_ownership.py` 与 `test_step_auth_refresh.py` 使用真实 OpenAIAdapter 子类注入原 `httpx` client，保留类身份、所有原认证/计费/租约断言及原时间预算。生产没有添加 `getattr`、吞异常或为测试函数增加兼容层。
@@ -29,3 +31,5 @@ bundled Python 3.11.9 的必要相邻统一复验为 **66 passed / 0 failed / 0 
 | H4 独立失败组及相邻八文件 | 133/133 | `heartbeat-independent-fixtures-after.xml` |
 
 以上均使用 bundled Python 3.11.9，无失败/错误/跳过；各批次有重叠，不能相加。它们使原 102 个 failure/error 节点逐一都有最新通过结果；节点映射和原始失败分别保留于 `github-98dd6e49-failed-nodes.json` 与后续修复索引。完整新提交 CI 仍需独立通过，本地分批结果不能替代。
+
+完整 CI 已由本页顶部 2c3cae04 的七项结果确认；上述末句是提交前验证边界的历史记录。之后另核设置消费，发现 Stable `content_item_kinds` 没有 Source display_name，却会经 MiniCode 通用 flag 列表新增开关。仅补既有内部 flag 排除集合，保留真实配置/effective/override 和模型 wire gate；既有 feature-flags 全文件 10/10 通过，见 `content-item-kinds-settings-final.xml`。这项后续小修不追写为 2c3cae04 的代码。

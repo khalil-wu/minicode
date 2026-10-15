@@ -2,7 +2,7 @@
 
 后续状态（2026-10-15）：用户随后报告的 CI、新会话和项目动作问题已收尾。冻结基线 `18e8bd8d` 的 GitHub run `38749202449` 七项全部通过，见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`。现在继续下列已确认的 heartbeat、Memory Phase 1 WS 与 remote 剩余范围，尚不把只读审计或施工中的代码计为完成。本文件下方冻结输入、前端和 wheel 身份是此前交付批的历史记录，不代表后续 CI 修复及新功能后的当前源码或安装包。
 
-后续实现检查点：heartbeat H1–H3（重复版本、按接受顺序恢复、完整 transcript 引用及运行时 Skill 证据）相关节点最新去重 391/391；H4（真实 busy gate、start-or-steer、durable run 与等待寿命）最新去重 130/130；Memory Phase 1 独立 WS 及原运输回归最终一次五文件 83/83；前端 renderer observer 123/123，均无跳过。范围相互有重叠，不能相加；初败及修复后窄复验均保留。详见 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md` 和 `2026-10-15-memory-phase1-websocket-transport.md`。这批正在提交完整 CI，本地专项结果不等于新提交已全绿；remote 仍另行实施。
+后续实现检查点：heartbeat H1–H3（重复版本、按接受顺序恢复、完整 transcript 引用及运行时 Skill 证据）相关节点最新去重 391/391；H4（真实 busy gate、start-or-steer、durable run 与等待寿命）最新去重 130/130；Memory Phase 1 独立 WS 及原运输回归最终一次五文件 83/83；前端 renderer observer 123/123，均无跳过。范围相互有重叠，不能相加；初败及修复后窄复验均保留。详见 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md` 和 `2026-10-15-memory-phase1-websocket-transport.md`。完整修正提交 **2c3cae04** 的 GitHub run **38764385600 七项全部成功**，Backend **6579 passed、27 skipped、0 failed/error**，详见 `2026-10-15-heartbeat-memory-ci-checkpoint.md`；remote 仍另行实施。
 
 本批生产修改、必要验证、前端构建与独立安装冷验已完成。它闭合下列已定位的问题，不代表整款 MiniCode 已与 Codex 完全等价。官方账号登录、授权及依赖该账号的 hosted 服务按用户要求排除；排除项不记通过。
 

@@ -38,10 +38,11 @@ def get_feature_flag_settings() -> dict[str, Any]:
     effective = feature_flags_payload(settings_data, managed_requirements=managed)
     flags: list[dict[str, Any]] = []
     for name in sorted(DEFAULT_FEATURE_FLAGS):
-        # Source Stable/UnderDevelopment Guardian flags have no display_name.
+        # Source internal Stable/UnderDevelopment flags have no display_name.
         # Their real config values stay available in `effective`; they do not
         # create new desktop switches when a runtime capability is added.
         if name in {
+            "content_item_kinds",
             "guardian_approval", "guardian_reuse_parent_compaction", "guardianv2",
             "guardianv2_decisions_comparison", "guardian_root_handoff_context",
             "guardian_enhanced_node_repl_transcripts", "guardian_node_repl_transcript_images",

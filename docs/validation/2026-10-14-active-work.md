@@ -2,9 +2,9 @@
 
 ## 当前优先项：CI 已通过，继续剩余 Source 行为
 
-最新收尾见 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`：提交 `18e8bd8dc097aa892c76ede818beb15d9b8659f1` 的 run `38749202449` 七项全部通过；Backend 6509 passed、27 skipped、0 failed/error，新增 9 个真实 Linux 场景全部通过。新会话、文件夹动作及所有已定位 CI 根因已闭合，现在实施后续 heartbeat、Memory Phase 1 WS 与已确认 remote 范围，尚未把这些后续代码计为交付。先前普通客户端已于 21:05 正常退出；当前源码及后续构建不能用旧窗口或历史 wheel 身份代指。
+最新完整检查点为提交 `2c3cae04ca0a121d74d91cc26b40d68689a6d417`，GitHub run `38764385600` 七项全部通过，Backend **6579 passed / 27 skipped / 0 failed/error**。它包含 heartbeat、Memory WS 以及全量回归揭示的测试生命周期/配置隔离修正，详见 `2026-10-15-heartbeat-memory-ci-checkpoint.md`。原 CI 修复基线 18e8bd8d 的七项绿灯保留于 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`；新会话及文件夹动作已修。当前继续 remote 完整消费链，不把独立客户端基础层或只读审计计为整项完成。历史窗口和 wheel 身份不能代指当前源码。
 
-后续 heartbeat/Memory 检查点已完成本地专项验证，当前正在提交完整 CI：H1–H3 最新节点去重 391/391、H4 最新节点去重 130/130、Memory WS 最终一次 83/83、前端 observer 123/123，均无跳过。真实 `/compact` 请求携带 host native item ID/turn，并按原接受顺序恢复；不以文本匹配或公开 metadata 推断信任。各范围重叠不相加，原始失败保留。稳定报告为 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md`、`2026-10-15-memory-phase1-websocket-transport.md`；本地 remote 完整消费链仍未闭合。
+heartbeat/Memory 本地专项及顶部完整 CI 均已通过：H1–H3 最新节点去重 391/391、H4 最新节点去重 130/130、Memory WS 最终一次 83/83、前端 observer 123/123，专项无跳过。真实 `/compact` 请求携带 host native item ID/turn，并按原接受顺序恢复；不以文本匹配或公开 metadata 推断信任。各范围重叠不相加，原始失败保留。稳定报告为 `2026-10-15-source-heartbeat-retained-context.md`、`2026-10-15-source-heartbeat-host-admission.md`、`2026-10-15-memory-phase1-websocket-transport.md`；本地 remote 完整消费链仍未闭合。
 
 此前 CI 修复阶段记录见 `2026-10-15-ci-new-chat-repair.md`、`2026-10-15-ci-source-contract-round03.md`：bundled Python 3.11 新会话的 `is_junction` 根因与文件夹旁的菜单/新聊天按钮已修复、实机核对，前端 `index-srAOTZkG.js` 曾在普通 MiniCode 中运行且 `/health` ready。后续已闭合 REST 私有包装记录、LSP 正常退出、未知模型提示词字节来源和冻结审批生命周期；各范围按冻结清单和真实 XML 分别记录。旧 8311 snapshot 明确中止、不计通过；当时未执行的 Root 尾段已完成，最新 GitHub 状态以上一段的 18e8 七项绿灯为准。下方“最终前端/最终 wheel/冻结输入”描述均属于此前交付批，不代表后续修改后的当前源码或安装包。
 

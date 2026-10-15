@@ -172,15 +172,18 @@ def test_feature_flag_settings_service_reports_env_overrides(monkeypatch, tmp_pa
 
 def test_source_internal_guardian_flags_keep_real_config_values_without_invented_desktop_controls(monkeypatch, tmp_path) -> None:
     settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps({"feature_flags": {"guardianv2": True}}), encoding="utf-8")
+    settings_file.write_text(json.dumps({"feature_flags": {"guardianv2": True, "content_item_kinds": False}}), encoding="utf-8")
     monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings_file)
     payload = get_feature_flag_settings()
     assert payload["effective"]["guardianv2"] == {"enabled": True}
     assert payload["effective"]["guardian_approval"] == {"enabled": True}
     assert payload["effective"]["guardian_reuse_parent_compaction"] == {"enabled": True}
     assert payload["effective"]["guardian_enhanced_node_repl_transcripts"] == {"enabled": False}
+    assert payload["effective"]["content_item_kinds"] == {"enabled": False}
     assert all(not flag["name"].startswith("guardian") for flag in payload["flags"])
+    assert all(flag["name"] != "content_item_kinds" for flag in payload["flags"])
     assert payload["overrides"]["guardianv2"] is True
+    assert payload["overrides"]["content_item_kinds"] is False
 
 
 def test_feature_flag_settings_service_rejects_unknown_flags(monkeypatch, tmp_path) -> None:
