@@ -1,5 +1,9 @@
 # 当前 Source 对齐工作记录（总任务尚未完成）
 
+## 当前优先项：修复 GitHub CI、新会话与项目动作
+
+2026-10-15 最新状态以 `2026-10-15-ci-new-chat-repair.md` 为准：bundled Python 3.11 新会话的 `is_junction` 根因与文件夹旁的菜单/新聊天按钮已修复、实机核对，最新前端 `index-srAOTZkG.js` 已在普通 MiniCode 中运行且 `/health` ready。GitHub `2146695c` 的四项已通过，Linux 后端 147 项实际失败、Desktop 环境错误与尚未结束的 Root suite 正在处理，不能宣布 CI 全绿。完成 CI 后才继续下述 heartbeat、remote executor 和 Memory Phase 1 可选 WS。下方“最终前端/最终 wheel/冻结输入”描述均属于此前交付批，不代表后续修改后的当前源码或安装包。
+
 ## 最新状态：原生命令活动投影与内部证据链本批已交付
 
 范围更新（2026-10-15）：用户明确“官方账号不做”。官方账号登录、授权、接入，以及依赖该账号的 hosted 服务线上验收均移出本轮范围，不再计作待办或阻塞。历史未运行证据保留，不把范围排除记为通过；第三方/自定义模型接口、本地权限、工具、Skill、MCP、多 agent 与桌面交互继续对齐。

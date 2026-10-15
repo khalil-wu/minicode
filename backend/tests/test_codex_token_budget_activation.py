@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import aclosing
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +29,8 @@ from backend.config import (
     TokenBudget,
 )
 from backend.feature_flags import FeatureFlags
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+from backend.config_requirements import ConfigRequirements
 from backend.llm.base import ToolCallEvent
 from backend.llm.provider_contracts import ModelDefinition, TokenBudgetAuthContext
 from backend.permissions.checker import PermissionChecker
@@ -54,7 +55,8 @@ def model(prefix="A", *, enabled=True, notes=False, experimental=False):
 
 
 def config(*, raw=None, pinned=None, enabled=False, seed=None):
-    stack = SimpleNamespace(effective_config=lambda: raw or {}, requirements=SimpleNamespace(feature_requirements=pinned or {}))
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user"), raw or {}),),
+        requirements=ConfigRequirements(raw={"features": pinned or {}}))
     return AppConfig(llm=LLMSettings(api_key="fixture-key"), feature_flags=FeatureFlags({"token_budget": enabled, "context_management": True}),
         config_layer_stack=stack, context_window_config=seed)
 

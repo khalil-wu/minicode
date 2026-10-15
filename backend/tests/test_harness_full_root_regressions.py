@@ -17,7 +17,7 @@ from backend.agent.tool_batch_execution import _flush_queue, execute_tool_batch
 from backend.agent.tool_execution import _execution_arguments_for_tool
 from backend.artifact.store import ArtifactPersistenceError, ArtifactStore
 from backend.atomic_io import canonical_file_path_key
-from backend.config import AppConfig, LLMSettings, PermissionSettings
+from backend.config import AppConfig, LLMSettings, permission_settings_from_config
 from backend.evals.minicode_driver import _eval_max_turn_seconds, _runtime_occupied_ms
 from backend.extensions.loader import ExtensionLoader
 from backend.extensions.runtime import _as_tool_result
@@ -124,9 +124,18 @@ async def test_extension_inplace_and_rich_results_survive_projection(tmp_path):
 
 def test_factory_uses_explicit_session_config(monkeypatch):
     requested = LLMSettings(api_key="fixture", provider="custom", model="selected", wire_api="anthropic", thinking_budget=2048)
-    monkeypatch.setattr(llm_adapter_factory, "build_wire_adapter", lambda settings, **_kwargs: settings)
+    adapter = Provider()
+    captured = []
+
+    def build(settings, **_kwargs):
+        captured.append(settings)
+        return adapter
+
+    monkeypatch.setattr(llm_adapter_factory, "build_wire_adapter", build)
     actual = llm_adapter_factory.create_session_llm(AppConfig(llm=requested))
-    assert actual == requested
+    assert actual is adapter
+    assert captured == [requested]
+    assert adapter.model_request_policy().model == "selected"
 
 
 def test_provider_candidate_is_validated_before_publishing(monkeypatch):
@@ -254,7 +263,8 @@ def test_codex_append_and_eof_patch_contract(patch, expected):
 async def test_write_does_not_bless_external_changes_or_model_supplied_hash(tmp_path, monkeypatch):
     target = tmp_path / "file.txt"
     target.write_text("original", encoding="utf-8")
-    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), workspace_root=tmp_path, metadata={"_read_file_hashes": {canonical_file_path_key(target): content_hash("original")}})
+    checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
+    context = ToolExecutionContext(permission=checker.build_context(mode="bypass"), workspace_root=tmp_path, metadata={"_read_file_hashes": {canonical_file_path_key(target): content_hash("original")}})
     registry = ToolRegistry()
     registry.register(WriteFileTool())
     builder = ContextBuilder()
@@ -265,7 +275,7 @@ async def test_write_does_not_bless_external_changes_or_model_supplied_hash(tmp_
 
     monkeypatch.setattr("backend.tools.write_file._emit_write_diff", external_change)
     call = ToolCallEvent(id="first", name="write_file", arguments={"file_path": target.name, "content": "owned"})
-    async with aclosing(execute_tool_batch([call], ctx=builder, state=state, tool_registry=registry, permission_checker=PermissionChecker(PermissionSettings(), tmp_path), approval_handler=None, skill_manager=None, permission_context=context.permission, tool_ctx=context)) as events:
+    async with aclosing(execute_tool_batch([call], ctx=builder, state=state, tool_registry=registry, permission_checker=checker, approval_handler=None, skill_manager=None, permission_context=context.permission, tool_ctx=context)) as events:
         async for _ in events:
             pass
     assert target.read_text(encoding="utf-8") == "external"

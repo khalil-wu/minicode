@@ -15,6 +15,7 @@ from backend.agent.first_byte_waiter import wait_for_provider_event
 from backend.agent.turn_context_runtime import _coerce_extension_context_messages
 from backend.attachments.store import AttachmentStore
 from backend.bootstrap.app import AppBootstrap
+from backend.config import PermissionSettings
 from backend.config_helpers import LLMSettings
 from backend.conversations.import_export import import_conversation_tree
 from backend.conversations.models import ConversationRecord
@@ -29,6 +30,7 @@ from backend.llm.base import LLMMessage, StreamEventType
 from backend.llm.errors import retry_after_seconds
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.mcp.client import MCPClient
+from backend.permissions.checker import PermissionChecker
 from backend.services.chat_api_service import attachment_preview_payload
 from backend.ws.event_outbox import EventOutbox
 from backend.ws.turn_wait_state import TurnWaitState
@@ -163,6 +165,8 @@ def _owned_elicitation_client(tmp_path, monkeypatch, response):
     manager = object()
     owner = {"session_id": session.session_id, "conversation_id": conversation.id, "mcp_manager": manager,
              "conversation_run_generation": claim.generation, "message_id": "assistant", "turn_id": "turn", "task_id": "task"}
+    permission = PermissionChecker(PermissionSettings(), tmp_path).build_context(mode="confirm")
+    owner["permission_context_provider"] = lambda: permission
     bootstrap = object.__new__(AppBootstrap)
     bootstrap.ws_manager = SimpleNamespace(iter_sessions=lambda: [session])
     bootstrap.get_mcp_manager_for_workspace = lambda workspace: manager

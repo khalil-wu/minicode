@@ -199,11 +199,12 @@ def test_delete_cleanup_uses_existing_control_response_waiter() -> None:
                 "response": {"subtype": "success", "response": {"action": "approve"}},
             })
             assert payload["request"]["subtype"] == "conversation_resources_cleanup"
+            assert payload["request"]["workspace_root"] == "C:/execution"
             assert not self.approval_response_owner_error(request_id, response)
             assert self._resolve_pending_approval(request_id, response)
 
     session = Session()
-    target = SimpleNamespace(id="owner", workspace_root="C:/workspace", worktree_path="")
+    target = SimpleNamespace(id="owner", workspace_root="C:/workspace", worktree_path="C:/worktree", execution_cwd="C:/execution")
     result = asyncio.run(conversation_handlers._request_conversation_resource_cleanup(session, target))
     assert result["action"] == "approve"
     assert session.turn_wait_state.waiter_ids() == set()
@@ -216,6 +217,7 @@ def test_delete_checks_then_cleans_local_resources_then_removes_worktree(tmp_pat
     events = []
     session = SimpleNamespace(
         emit_command_result=AsyncMock(),
+        ws_manager=None, is_connected=False,
         conversation_repo=SimpleNamespace(delete_conversation=lambda _: events.append("delete") or True,
             store_instance_id=lambda: "frontend-harness-fixture"),
     )
@@ -243,6 +245,8 @@ def test_delete_checks_then_cleans_local_resources_then_removes_worktree(tmp_pat
     monkeypatch.setattr(conversation_handlers, "_cleanup_conversation_worktree", worktree)
     monkeypatch.setattr(conversation_handlers, "_request_conversation_resource_cleanup", renderer)
     monkeypatch.setattr(conversation_handlers, "_purge_conversation_replay_state", AsyncMock(return_value=({}, [])))
+    runtime_cleanup = AsyncMock(return_value=({}, []))
+    monkeypatch.setattr(conversation_handlers, "_purge_conversation_runtime_state", runtime_cleanup)
     monkeypatch.setattr(conversation_handlers, "_schedule_long_term_memory_forgetting", lambda *args: None)
     monkeypatch.setattr(conversation_handlers, "_all_live_sessions", lambda *args: [])
     monkeypatch.setattr(conversation_handlers, "_broadcast_conversation_lists", AsyncMock(return_value=[]))
@@ -252,3 +256,8 @@ def test_delete_checks_then_cleans_local_resources_then_removes_worktree(tmp_pat
         expected = expected[:expected.index(failure) + 1]
     assert events == expected
     assert session.emit_command_result.await_args.args[0] == "conversation.delete"
+    if failure is None:
+        runtime_cleanup.assert_awaited_once_with(session, "owner")
+        assert session.emit_command_result.await_args.kwargs["level"] == "success"
+    else:
+        runtime_cleanup.assert_not_awaited()

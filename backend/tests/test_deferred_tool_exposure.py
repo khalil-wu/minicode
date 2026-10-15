@@ -15,6 +15,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.llm.base import ToolCallEvent
 from backend.llm.openai_adapter import OpenAIAdapter, _responses_function_call_output_item
+from backend.llm.provider_contracts import ModelDefinition
 from backend.mcp.client import MCPCallResult, MCPToolDef
 from backend.mcp.registry import MCPToolProxy
 from backend.services.tool_registry_factory import build_tool_registry
@@ -67,10 +68,13 @@ def test_native_search_namespace_call_and_journal_recovery_use_the_actual_respon
         ])]])
         settings = LLMSettings(api_key="fixture", model="fixture", base_url="https://fixture.invalid/v1", wire_api="responses",
             tool_mode="direct", supports_search_tool=True, max_tokens=1024)
+        selected = ModelDefinition(provider=settings.provider, id=settings.model, name="Search-capable Responses fixture",
+            api="openai-responses", base_url=settings.base_url, tool_mode="direct", supports_search_tool=True)
         async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
             adapter = OpenAIAdapter(settings, http_client=client)
-            state, builder, journal, events, _ = await run_model(tmp_path, adapter, [tool])
+            state, builder, journal, events, owner = await run_model(tmp_path, adapter, [tool], model_info=selected)
             assert state.terminal_status == "completed", state.stopped_reason
+            assert owner.model_execution.model_info is selected
             assert [(name, args) for name, args, _ in calls] == [("inspect_counter", {})]
             assert calls[0][2]["conversation_id"] == "code-conv"
             first_tools = endpoint.requests[0]["tools"]

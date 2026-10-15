@@ -434,7 +434,10 @@ async def test_git_launch_review_real_fsmonitor_and_commit_boundary(tmp_path, mo
                                    workspace_root=root, sandbox_policy=readonly)
     result = await git_tools.GitStatusTool(root).execute({}, context)
     assert not result.is_error, result.content
-    assert b"MINICODE_FSMONITOR_ATTEMPTED" in captured[-1].stderr
+    status_result, location_result = captured
+    assert status_result.args == ["git", "--no-optional-locks", "status", "--porcelain=v1", "--branch", "-z"]
+    assert location_result.args == ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"]
+    assert b"MINICODE_FSMONITOR_ATTEMPTED" in status_result.stderr
     assert not (outside / "marker").exists()
     assert not (root / ".git" / "index.lock").exists()
     for tool, args in [(git_tools.GitDiffTool(root), {}), (git_tools.GitLogTool(root), {})]:

@@ -10,16 +10,17 @@ import pytest
 from backend.agent.context import ContextBuilder
 from backend.agent.loop_session import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, AppConfig, LLMSettings, TokenBudget, permission_settings_from_config
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
-from backend.permissions.context import PermissionContext
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.edit_file import EditFileTool
@@ -102,10 +103,16 @@ def query_fixture(tmp_path):
     sessions = []
 
     def create(provider, registry):
+        config = AppConfig(llm=LLMSettings(api_key="", provider="custom", model="committed-diff-fixture", tool_mode="direct"),
+            agent=AgentSettings(max_iterations=10, max_turn_seconds=30, code_mode_only=False),
+            permissions=permission_settings_from_config({}), config_layer_stack=ConfigLayerStack((
+                ConfigLayer(ConfigLayerSource("user", file=str(workspace.parent / "config.toml")), {}),
+            )))
+        checker = PermissionChecker(config.permissions, workspace)
         store = ArtifactStore(storage_dir=tmp_path / "artifacts")
         owner = AgentSession(llm=provider, tool_registry=registry, artifact_store=store,
-            permission_checker=PermissionChecker(PermissionSettings(), workspace),
-            agent_settings=AgentSettings(max_iterations=10, max_turn_seconds=30), token_budget=TokenBudget(),
+            permission_checker=checker,
+            agent_settings=config.agent, token_budget=TokenBudget(),
             context_builder=ContextBuilder(llm=provider))
         sessions.append(owner)
         emitted = []
@@ -114,10 +121,10 @@ def query_fixture(tmp_path):
             emitted.append(AgentEvent(type=event_type, data=deepcopy(data)))
 
         state = AgentState(user_message="Create a simple page and inspect it", workspace_root=workspace, conversation_id="page-conversation")
-        run_context = RunContext(agent_runtime=runtime)
+        run_context = RunContext(agent_runtime=runtime, model_execution=ModelExecutionSnapshot.capture(config, provider))
         submission = QuerySubmission(session=owner, state=state, user_message=state.user_message,
             runtime=AgentLoopSessionContext(session_id="page-session", workspace_root=workspace,
-                permission_context=PermissionContext(mode="bypass"), run_context=run_context, emit_event=emit))
+                permission_context=checker.build_context(mode="bypass"), run_context=run_context, emit_event=emit))
         return submission, emitted, run_context
 
     yield workspace, create
@@ -156,6 +163,9 @@ def test_query_diff_keeps_committed_edits_through_browser_command_and_user_write
         return [event async for event in QueryEngine().submit(submission)]
 
     events = asyncio.run(run())
+    results = {event.data["id"]: event.data for event in events if event.type == "tool_result"}
+    assert results["edit-page"]["status"] == "success", results["edit-page"]
+    assert results["style"]["status"] == "success", results["style"]
     diffs = [event for event in emitted + events if event.type == "turn.diff.updated"]
     assert [event.data["status"] for event in events if event.type == "done"] == ["completed"]
     assert len(diffs) == 2

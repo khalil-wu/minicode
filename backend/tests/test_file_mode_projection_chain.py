@@ -115,7 +115,8 @@ async def test_git_action_settles_waiting_caller_after_scoped_diff_event(tmp_pat
     assert result.data["command"] == "diff.git_stage_file"
     assert result.data["level"] == "success"
     assert result.data["data"] == {
-        "ok": True, "conversation_id": "owner", "workspace_root": str(tmp_path), "request_id": "stage-one",
+        "ok": True, "conversation_id": "owner", "workspace_root": str(tmp_path),
+        "execution_cwd": str(tmp_path), "request_id": "stage-one",
     }
 
 

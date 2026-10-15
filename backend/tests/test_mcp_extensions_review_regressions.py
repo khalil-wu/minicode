@@ -30,14 +30,17 @@ def test_mcp_schema_keeps_wire_literals_and_only_projects_schema_prose():
         "allOf": [{"description": "\u212a", "properties": {"choice": {"$ref": "#/$defs/choice"}}}],
     }
     original = copy.deepcopy(schema)
+    calls = []
 
     class Session:
         async def list_tools(self, cursor=None):
             return types.ListToolsResult(tools=[types.Tool(name="wire_values", description="description", inputSchema=schema)])
 
-        async def call_tool(self, name, arguments, **kwargs):
-            invalid = not Draft202012Validator(original).is_valid(arguments)
-            return types.CallToolResult(content=[types.TextContent(type="text", text="rejected" if invalid else "accepted")], isError=invalid)
+        async def send_request(self, request, result_type, *, request_read_timeout_seconds):
+            calls.append(request.model_dump(mode="json", by_alias=True, exclude_none=True))
+            assert request.root.method == "tools/call" and request.root.params.name == "wire_values"
+            invalid = not Draft202012Validator(original).is_valid(request.root.params.arguments)
+            return result_type.model_validate({"content": [{"type": "text", "text": "rejected" if invalid else "accepted"}], "isError": invalid})
 
     async def run():
         client = MCPClient("schema-verification")
@@ -56,6 +59,7 @@ def test_mcp_schema_keeps_wire_literals_and_only_projects_schema_prose():
         result = await client.call_tool("wire_values", {"choice": "\u212a"})
         assert result.is_error is False
         assert result.text == "accepted"
+        assert calls == [{"method": "tools/call", "params": {"name": "wire_values", "arguments": {"choice": "\u212a"}}}]
         assert schema == original
 
     asyncio.run(run())

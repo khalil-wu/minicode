@@ -109,7 +109,8 @@ async def test_actual_http_failure_is_private_bounded_and_does_not_copy_untruste
             await send_json(writer, answer({"secret": "PRIVATE_RESPONSE_BODY_DO_NOT_LOG"} if kind == "object_choice" else "PRIVATE_RESPONSE_BODY_DO_NOT_LOG"))
     async with http_endpoint(respond) as server:
         sampler = DecisionsSampler("PRIVATE_EXPLICIT_FIXTURE_KEY", url=server.url + "/v1/decisions", proxy_mode="direct")
-        sampler.deadline = .04
+        if kind == "timeout":
+            sampler.deadline = .04
         try:
             result = await sampler.spawn("Actual policy", evidence(), checkpoint=None, max_input_tokens=128000)
             assert result["outcome"] == "failure" and result["reason"] == reason and result["risk"] is None

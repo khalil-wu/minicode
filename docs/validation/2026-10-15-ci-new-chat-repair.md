@@ -1,6 +1,6 @@
 # 新会话、项目操作与 CI 修复
 
-当前状态：本地分区验证和真实桌面检查已完成第一批；GitHub 整体 CI、8311 项后端/root 完整运行仍在复验，不能据此宣布整个产品完成。用户要求先把 CI 修好，再继续 `2026-10-15-source-internal-evidence-delivery.md` 的剩余工作，后续按该顺序推进。官方账号功能仍排除，字体保留现状。
+当前状态：本地分区验证和真实桌面检查已完成，普通客户端已运行该前端；GitHub 整体 CI、8311 项后端/root 完整运行仍在复验，不能据此宣布整个产品完成。用户要求先把 CI 修好，再继续 `2026-10-15-source-internal-evidence-delivery.md` 的剩余工作，后续按该顺序推进。官方账号功能仍排除，字体保留现状。
 
 ## 用户报告的问题
 
@@ -15,7 +15,7 @@
 ## 本地与桌面证据
 
 - 前端全量：352 文件、4234/4234，通过且无跳过、无 unhandled。首轮 37 个旧失败与两项退出错误保留，按真实 Source 契约修正；见 `output/ci-repair-20261015/frontend-full-results.json`。
-- TypeScript、Vite 候选构建、bundle budget 与 UI debt 通过。候选位于 `frontend/.tmp/ci-repair-latest`，没有覆盖用户正使用的 `frontend/dist`。
+- TypeScript、Vite 候选构建、bundle budget 与 UI debt 通过。用户退出原客户端后，候选从 `frontend/.tmp/ci-repair-latest` 推广到 `frontend/dist`。普通客户端 PID 9916 的标题为 MiniCode、Responding=true，真实 `/health` 为 ready=true；推广后 index/entry/CSS 三个 SHA 与原候选完全一致，见 `frontend-promoted-identity.json`。未操作用户会话或草稿。
 - 候选 entry `assets/index-srAOTZkG.js`，index SHA256 `37e36bddeaae4eb425c007e2357b8115e71dc3af6604987c4a70f416648b1f04`；完整身份见 `frontend-stage-identity.json`。
 - 原生 Electron 项目动作两项实际功能通过，8 张最终图由分区 agent 与 Root 分别逐张查看；真实 bundled 3.11.9、原生 preload/WS/持久 manifest，0 模型 POST、0 工作区移除、用户普通窗口未操作。原项目与项目外草稿均可见地恢复。证据：`output/playwright/sidebar-actions-20261015/`。
 - 新会话原生检查使用实际 3.11、真实 UI 新建与 WS 权威回执，包含连续创建和目录落盘。原始第二张图只抓到了切换中间帧；没有把缓存 inputValue 当作可见输入框。随后复用同一原 profile 冷启动与切换，实际等待输入框可见、检查草稿并逐张看图，未新增模型请求或重新创建聊天。证据：`output/playwright/new-chat-python311-20261015` 与 `-settled`。
@@ -34,14 +34,22 @@ Source manifest 原先记录 Windows 参考 checkout 的 CRLF 字节，而 Git �
 
 kernel/protocol/duplicate-tools/module-size、3.11 compileall 与 diff check 均通过，预算未提高。backend failure 展示步骤绑定实际 test step 的失败，不再在前置 gate 失败后读取根本没有产生的测试日志。
 
-最后两个未验的测试改动暂不纳入第一批提交：`frontend/tests/e2e/electron-multi-agent.spec.ts` 与 `backend/tests/test_codex_context_window_ws.py`。它们在各自隔离环境继续修正并验证；第一批推送后以实际 GitHub 结果继续收敛，不宣称全绿。
+第一批 `878b2721` 之后，`2146695c` 已包含实际验证的 Electron multi-agent E2E 和 context-window WS fixture；两者原来暂缓提交的状态仅属于历史第一批。multi-agent E2E 在隔离原生 Electron 中 1 passed / 0 failed / 0 skipped，前序失败保留，见 `output/playwright/ci-repair-multi-agent-20261015/repair-delivery.json`。
+
+最新已完成结果来自 GitHub run `38726756627`，HEAD `2146695c`：前端、Electron 集成、Windows harness、Linux 原生策略构建成功；Linux backend 为 6332 passed / 147 failed / 27 skipped（6506 tests），Root suite 尚在运行；Desktop 在配置 sandbox helper 时失败。原始 backend XML/log 下载于 `output/ci-repair-20261015/github-2146695c-backend/`，失败明细为 `github-2146695c-backend-failures.json`。本地分区修复正在逐项处理这份真实失败列表，不降低门槛或将 skip 计入通过。
+
+Electron 43 的模块在首次 `require("electron")` 时才下载可执行文件，CI 的 `npm ci` 后尚无 `dist/chrome-sandbox`。配置步骤现先实际加载 Electron，再从模块返回的可执行路径定位 sandbox helper，保留 root:root/4755；没有关闭 sandbox。该修复的实际 Ubuntu 结果仍待后续 run。
+
+另两批冻结 fixture 以 bundled Python 3.11 统一通过：模型/工具能力 156/156、projection/context 101/101，均 0 skip，完整证据为 `capability-source-delivery.json` 和 `backend-projection-context-final.xml`。范围彼此及全量有交叉，不累加。
 
 ## 手动清理
 
-用户要求自行删除剩余旧测试产物。已提供本地脚本 `output/cleanup-old-test-fixtures-manual-20261015.ps1`，限定 16 个旧测试路径，执行前核对绝对路径仍位于旧 output 子树、拒绝链接。执行命令：
+用户要求自行删除剩余旧测试产物。已提供本地脚本 `output/cleanup-old-test-fixtures-manual-20261015.ps1`，限定 16 个旧测试路径，以及 3 个精确登记的已退出 QA/旧 dist 路径，执行前核对绝对路径、拒绝链接。执行命令：
 
 ```powershell
 & 'C:\Desktop\MiniCode\output\cleanup-old-test-fixtures-manual-20261015.ps1'
 ```
 
 本轮没有代替用户执行这个手动脚本。
+
+两处已结束 QA 目录及 `frontend/.tmp/previous-dist-before-ci-repair` 的自动删除均被自动审批审查以 `blocked by policy` 拒绝；没有切换工具绕过。最新运行中的 `frontend/dist` 不在该删除清单。

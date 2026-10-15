@@ -16,7 +16,7 @@ from backend.llm.openai_adapter import OpenAIAdapter
 from backend.llm.reasoning_effort import reasoning_effort_wire_value
 from backend.services.llm_adapter_factory import _openai_compatible_settings
 from backend.config import AppConfig, LLMSettings
-from backend.services.llm_config_service import llm_model_updated_payload
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.ws.handler import WebSocketSession
 
 
@@ -42,7 +42,12 @@ async def test_real_error_contract_is_avoided_on_the_first_request_without_disab
         body = json.loads(request.content)
         requests.append(body)
         assert body["reasoning"]["effort"] == "xhigh"
-        assert {item["name"] for item in body["tools"]} == {"tool_exec", "tool_search", "tool_wait", "update_plan"}
+        assert len(body["tools"]) == 4
+        assert {item["name"] for item in body["tools"] if item["type"] == "function"} == {"tool_exec", "tool_wait", "update_plan"}
+        assert [item for item in body["tools"] if item["type"] == "tool_search"] == [{
+            "type": "tool_search", "execution": "client", "description": "tool_search",
+            "parameters": {"type": "object", "properties": {}},
+        }]
         assert codex_multi_agent_mode("gpt-6.1-sol", True) in body["instructions"]
         event = {"type": "response.completed", "response": {"id": "ultra-wire-fixture", "status": "completed", "output": [
             {"type": "message", "id": "answer", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "OK", "annotations": []}]}]}}
@@ -80,13 +85,20 @@ async def test_real_error_contract_is_avoided_on_the_first_request_without_disab
 def test_restored_session_projects_the_saved_policy_without_rebinding(configured, canonical, wire):
     source = {"model": "gpt-6.1-sol", "api_key": "fixture-key", "base_url": "https://fixture.test/v1", "wire_api": "responses",
         "reasoning_effort": "", "proxy_mode": "direct", "model_metadata": {}}
-    selection = llm_model_updated_payload(provider="custom", selected_model=source["model"],
-        available_models=[source["model"]], workspace_root=None, settings_data={"llm": {"custom": source}},
-        configured_reasoning_effort=configured)
-    session = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key="fixture-key", provider="custom",
-        model=source["model"], reasoning_effort=configured)), provider="custom", llm=object(),
-        _llm_selection_payload=lambda: selection)
+    config = AppConfig(llm=LLMSettings(api_key="fixture-key", provider="custom", model=source["model"], reasoning_effort=configured),
+        config_layer_stack=ConfigLayerStack((ConfigLayer(ConfigLayerSource("user"), {"llm": {"custom": source}}),)))
+    selected_client = object()
+    session = SimpleNamespace(config=config, provider="custom", llm=selected_client, selected_model=source["model"],
+        available_models=[source["model"]], models_source="settings", active_conversation_id="restored-ultra",
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: None),
+        _model_runtime_for_conversation=lambda _: None, default_model_selection=lambda _: (config, None),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: SimpleNamespace(model_selection={"selection_mode": "model"})),
+        _model_override_active=True)
+    session._llm_selection_payload = lambda: WebSocketSession._llm_selection_payload(session)
     caps = WebSocketSession._provider_capabilities_payload(session)
     assert caps["effective_reasoning_effort"] == canonical
     assert caps["wire_reasoning_effort"] == wire
     assert caps["configured_reasoning_effort"] == session.config.llm.reasoning_effort == configured
+    assert caps["model_selection_mode"] == "model"
+    assert caps["default_model_selection"] is None and caps["available_model_options"] == []
+    assert session.llm is selected_client

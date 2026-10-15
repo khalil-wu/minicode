@@ -147,30 +147,38 @@ async def test_task_acceptance_persists_pending_identity_and_detach_before_a_slo
     result = await tool._start_background_subtask(description="Queued work", prompt="The complete original instruction.",
         agent_type="general-purpose", context=context, subagent_metadata={"detach_from_parent": True, "_task_name": "queued_worker"})
     ident = result.runtime_metadata["subagent_id"]
-    record = runtime.get_subagent(ident)
-    assert result.status == "accepted" and status_for_result(result) == "success"
-    assert record.status == "pending" and record.started_at == 0
-    assert record.input_prompt == "The complete original instruction."
-    assert record.parent_tool_call_id == "spawn-call"
-    assert record.detach_from_parent and not record.cancel_with_parent
-    assert record.resume_config["model"] == "fixture-model"
-    assert "api_key" not in json.dumps(record.resume_config)
-    assert result.runtime_metadata["delegations"] == [{"agent_id": ident, "name": "queued_worker", "status": "pending",
-                                                       "started_at": 0, "accepted_at": record.accepted_at}]
-    assert runtime.cancel_child_subagent_tasks(parent.run_id) == []
-    assert runtime.has_live_subagent_task(ident)
-    assert not [event for event in emitted if event[0] == "subagent.start"]
     worker = runtime._subagent_tasks[ident]
-    runtime.cancel_subagent_task(ident, reason="user_stopped_pending")
-    await asyncio.gather(worker, return_exceptions=True)
-    await asyncio.sleep(0)
-    await asyncio.gather(*context.run_context.lifecycle_cleanup_tasks, return_exceptions=False)
-    terminal = runtime.get_subagent(ident)
-    assert terminal.status == "cancelled" and terminal.started_at == 0
-    assert runtime.get_subagent_snapshot(ident)["result"]["terminal_reason"] == "user_stopped_pending"
-    assert not [event for event in emitted if event[0] == "subagent.start"]
-    assert [event for event in emitted if event[0] == "subagent.done"][0][1]["child_started"] is False
-    runtime.close(release_lease=True)
+    try:
+        record = runtime.get_subagent(ident)
+        assert result.status == "accepted" and status_for_result(result) == "success"
+        assert record.status == "pending" and record.started_at == 0
+        assert record.input_prompt == "The complete original instruction."
+        assert record.parent_tool_call_id == "spawn-call"
+        assert record.detach_from_parent and not record.cancel_with_parent
+        assert record.resume_config["model"] == "fixture-model"
+        assert "api_key" not in json.dumps(record.resume_config)
+        assert record.agent_path == f"{parent.agent_path}/queued_worker"
+        assert result.runtime_metadata["delegations"] == [{"agent_id": ident, "name": "queued_worker", "agent_path": record.agent_path,
+            "status": "pending", "started_at": 0, "accepted_at": record.accepted_at}]
+        assert runtime.cancel_child_subagent_tasks(parent.run_id) == []
+        assert runtime.has_live_subagent_task(ident)
+        assert not [event for event in emitted if event[0] == "subagent.start"]
+        runtime.cancel_subagent_task(ident, reason="user_stopped_pending")
+        await asyncio.gather(worker, return_exceptions=True)
+        await asyncio.sleep(0)
+        await asyncio.gather(*context.run_context.lifecycle_cleanup_tasks, return_exceptions=False)
+        terminal = runtime.get_subagent(ident)
+        assert terminal.status == "cancelled" and terminal.started_at == 0
+        assert runtime.get_subagent_snapshot(ident)["result"]["terminal_reason"] == "user_stopped_pending"
+        assert not [event for event in emitted if event[0] == "subagent.start"]
+        assert [event for event in emitted if event[0] == "subagent.done"][0][1]["child_started"] is False
+    finally:
+        if not worker.done():
+            runtime.cancel_subagent_task(ident, reason="fixture_cleanup")
+        await asyncio.gather(worker, return_exceptions=True)
+        await asyncio.sleep(0)
+        await asyncio.gather(*context.run_context.lifecycle_cleanup_tasks, return_exceptions=False)
+        runtime.close(release_lease=True)
 
 
 @pytest.mark.asyncio
