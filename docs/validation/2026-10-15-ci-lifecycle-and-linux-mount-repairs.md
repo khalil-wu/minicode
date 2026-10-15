@@ -27,7 +27,11 @@ Bubblewrap 现独立使用私有 tmpfs/`ro-bind-data`，并把精确 host target
 
 Root 审阅还发现 generic missing DENY 文件漏了 Source 的 `--perms 000`，已在同批补齐；新 Linux 节点同时核对普通文件类型、mode 000、读写拒绝，以及 host 后写入真实内容仍不可见且不会被最终清理删除。
 
-本地最新独立节点为 95 passed、12 skipped、0 failed。9 个新 Linux 实机节点在 Windows 明确跳过，等待 GitHub Linux 真实 bwrap；其余 3 个是原平台 skip。具体哈希、原始结果和 Linux 场景入口在 `git-mount-target-delivery.json`、`git-mount-target-report.md`。
+本地最新独立节点为 96 passed、12 skipped、0 failed。9 个新 Linux 实机节点在 Windows 明确跳过，等待 GitHub Linux 真实 bwrap；其余 3 个是原平台 skip。具体哈希、原始结果和 Linux 场景入口在 `git-mount-target-delivery.json`、`git-mount-target-report.md`。
+
+随后真实 run `38746809493`（`d0912a5c`）六项 job 通过；Backend 为 6535 tests、6506 passed、2 failed、27 skipped。原三个通知失败已消失，真实 Git、普通/interactive/PTY 完成、interactive 终止、重叠 runner、registry parent deny 和 generic DENY 实机节点均通过。两处失败来自新专项误以为 `SandboxRunner.run` 在 `Task.cancel()` 后向调用者抛错；生产实际等待进程/输出回收后返回 `SandboxResult(exit_code=-1, cancelled=True)`。这两项原失败保留，不计作通过，按真实契约继续修 fixture，生产取消行为不因此更改。
+
+取消 fixture 已改验精确 cancelled/exit/无错误/无 cleanup pending、原进程 returncode/wait 和真实文件保全，并补一场跨平台真实子进程取消回执验证。本文件本地 8 passed、9 Linux skipped；两个 Linux 取消节点仍等下一轮 CI。上轮实际环境为 Linux 6.17.0-1022-azure、Git 2.55.0、bubblewrap 0.9.0、Python 3.11.17，原 job 日志另存 `github-d0912a5c-backend-job.log`。
 
 ## 桌面 smoke 正常退出
 

@@ -223,6 +223,41 @@ owner.close()
         first.close()
 
 
+def test_runner_task_cancellation_returns_cancelled_result_after_real_child_exit(tmp_path):
+    runner = SandboxRunner(SandboxPolicy.bypass())
+    started = tmp_path / "real-child-started"
+    code = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text('started'); time.sleep(60)"
+
+    async def scenario():
+        invocation = asyncio.create_task(runner.run("controlled real child", cwd=tmp_path,
+            argv=[sys.executable, "-c", code, str(started)]))
+        try:
+            async def wait_started():
+                while not started.exists():
+                    if invocation.done():
+                        pytest.fail(f"real cancellation child did not start: {invocation.result()}")
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(wait_started(), 15)
+            child = runner.process
+            assert child is not None and child.returncode is None
+            invocation.cancel()
+            result = await asyncio.wait_for(invocation, 15)
+            assert result.cancelled and result.exit_code == -1 and not result.success, result
+            assert not result.timed_out and not result.sandbox_unavailable and not result.execution_error, result
+            assert not result.cleanup_pending and result.cleanup_reason == "", result
+            assert child.returncode is not None
+            await asyncio.wait_for(child.wait(), 5)
+            assert runner.process is None
+            assert await runner.cleanup()
+        finally:
+            if not invocation.done():
+                invocation.cancel()
+                await asyncio.gather(invocation, return_exceptions=True)
+            assert await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Requires the real Linux bwrap namespace and POSIX FD transport")
 @pytest.mark.parametrize("entry", ["normal", "interactive", "pty"])
 @pytest.mark.parametrize("cancel", [False, True], ids=["complete", "cancel"])
@@ -283,13 +318,20 @@ print("ACTUAL_BIND_DATA_MASKS_OK", flush=True)
             assert targets is not None and len(targets.preserved_fds) == 12 and max(targets.preserved_fds) >= 10
             assert runner._sandbox_ready_file.exists()
             assert (root / ".gitmodules").is_dir() and all(path.is_file() for path in missing)
+            child = runner.process
+            assert child is not None and child.returncode is None
             if cancel:
                 if invocation is not None:
                     invocation.cancel()
-                    with pytest.raises(asyncio.CancelledError):
-                        await invocation
+                    result = await asyncio.wait_for(invocation, 15)
+                    assert result.cancelled and result.exit_code == -1 and not result.success, result
+                    assert not result.timed_out and not result.sandbox_unavailable and not result.execution_error, result
+                    assert not result.cleanup_pending and result.cleanup_reason == "", result
                 else:
                     assert await runner.terminate(process)
+                assert child.returncode is not None
+                await asyncio.wait_for(child.wait(), 5)
+                assert runner.process is None and runner._bubblewrap_mount_targets is None
             else:
                 release.write_text("continue", encoding="utf-8")
                 if invocation is not None:
