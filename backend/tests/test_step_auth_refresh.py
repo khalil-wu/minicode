@@ -34,11 +34,11 @@ async def fixture_for(tmp_path, monkeypatch, runtime, provider, client, *, retri
         raise AssertionError("Unexpected fixture model request")
     fixture = setup(tmp_path, monkeypatch, unused)
     fixture.adapters = []
-    def build(settings):
-        adapter = OpenAIAdapter(settings, http_client=client)
-        fixture.adapters.append(adapter)
-        return adapter
-    monkeypatch.setattr("backend.services.llm_adapter_factory.OpenAIAdapter", build)
+    class FixtureOpenAIAdapter(OpenAIAdapter):
+        def __init__(self, settings):
+            super().__init__(settings, http_client=client)
+            fixture.adapters.append(self)
+    monkeypatch.setattr("backend.services.llm_adapter_factory.OpenAIAdapter", FixtureOpenAIAdapter)
     await runtime.refresh_provider_auth(provider)
     config = replace(fixture.config,
         llm=replace(fixture.config.llm, provider=provider, model="model-1", reasoning_effort="off"),

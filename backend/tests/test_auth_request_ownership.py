@@ -49,11 +49,11 @@ async def test_changed_request_auth_replaces_adapter_and_preserves_inflight_leas
     host = SimpleNamespace()
     config = AppConfig(llm=LLMSettings(api_key="", provider=provider, model="model-1"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
-        def build(settings):
-            adapter = OpenAIAdapter(settings, http_client=client)
-            adapters.append(adapter)
-            return adapter
-        monkeypatch.setattr("backend.services.llm_adapter_factory.OpenAIAdapter", build)
+        class FixtureOpenAIAdapter(OpenAIAdapter):
+            def __init__(self, settings):
+                super().__init__(settings, http_client=client)
+                adapters.append(self)
+        monkeypatch.setattr("backend.services.llm_adapter_factory.OpenAIAdapter", FixtureOpenAIAdapter)
         await runtime.refresh_provider_auth(provider)
         revision = runtime.revision
         async def request_old():
