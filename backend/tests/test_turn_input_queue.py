@@ -50,6 +50,20 @@ def test_turn_input_queue_preserves_fifo_and_original_commands() -> None:
     assert queue.sealed
 
 
+def test_completed_tool_receipt_reopens_same_turn_mailbox_without_new_epoch():
+    queue = TurnInputQueue()
+    epoch = queue.begin_turn("owned-turn")
+    assert queue.defer_mailbox_to_next_turn("owned-turn")
+    assert not queue.mailbox_deliverable("owned-turn")
+    assert not queue.accept_mailbox_delivery_for_current_turn("foreign-turn")
+    assert queue.accept_mailbox_delivery_for_current_turn("owned-turn")
+    assert queue.mailbox_deliverable("owned-turn")
+    assert queue.turn_epoch == epoch
+    queue.seal_and_drain_commands()
+    assert not queue.accept_mailbox_delivery_for_current_turn("owned-turn")
+    assert queue.sealed
+
+
 def test_turn_input_preserves_structured_skill_and_plugin_mentions() -> None:
     queue = TurnInputQueue()
     command = UserCommand(
@@ -306,10 +320,11 @@ def test_legacy_v3_inflight_state_is_recovered_and_upgraded(tmp_path: Path) -> N
         for command in queue.pending_client_commands()
     ] == ["cmd-legacy"]
     upgraded = json.loads(queue.path.read_text(encoding="utf-8"))
-    assert upgraded["version"] == 5
+    assert upgraded["version"] == 7
     assert upgraded["inflight"] == {}
     assert upgraded["turn_inputs"] == {}
     assert upgraded["client_inflight"] == {}
+    assert upgraded["client_cancelled"] == {}
 
 
 def test_process_exit_releases_owner_lease_for_crash_recovery(tmp_path: Path) -> None:

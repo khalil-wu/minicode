@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,8 @@ class QueryJournalRecorder:
     terminal_intent_key: tuple[str, str] | None = None
     tool_names: dict[str, str] = field(default_factory=dict)
     agent_messages: dict[str, dict[str, str]] = field(default_factory=dict)
+    last_completed_answer_source: str = "retained"
+    last_completed_answer_item_id: str = ""
     agent_message_receipts: dict[str, tuple[int, float]] = field(
         default_factory=dict
     )
@@ -122,7 +125,9 @@ class QueryJournalRecorder:
         if event.type == "artifact.preview":
             self.lifecycle("artifact_preview", data)
             return
-        if (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"} and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user"}:
+        if event.type == 'runtime.span' and data.get('event') == 'tool.started':
+            self.journal.append_tool_execution_started(data)
+        if (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"} and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"}:
             self.lifecycle("nested_tool_event", {"event_type": event.type, **data})
             return
         if event.type == "item.started":
@@ -134,6 +139,8 @@ class QueryJournalRecorder:
                     "source": str(item.get("source") or "pending"),
                 }
                 self.agent_message_receipts.pop(item_id, None)
+            elif item.get("type") == "context_compaction":
+                self.lifecycle("context_compaction_item", {"event_type": event.type, "item": dict(item), "transcript_only": True})
             return
         if event.type == "agent_message.delta":
             self._record_agent_message_delta(data)
@@ -141,9 +148,12 @@ class QueryJournalRecorder:
         if event.type == "item.completed":
             self._record_completed_item(data)
             return
-        if event.type == "tool_call" and str(
-            data.get("status") or "running"
-        ) != "pending":
+        if event.type == "tool_call":
+            if data.get('streaming_announcement') is True:
+                self.lifecycle('tool_announcement', {**data, 'transcript_only': True})
+                return
+            if str(data.get('status') or 'running') == 'pending' and data.get('command_presentation') is None:
+                return
             call_id = str(data.get("id") or data.get("tool_call_id") or "").strip()
             tool_name = str(data.get("name") or data.get("tool_name") or "").strip()
             if call_id and tool_name:
@@ -152,6 +162,14 @@ class QueryJournalRecorder:
             return
         if event.type == "tool_result":
             call_id = str(data.get("id") or data.get("tool_call_id") or "").strip()
+            message = next((item for item in reversed(self.context_builder._history)
+                if item.role == "tool" and item.tool_call_id == call_id), None)
+            if message is not None:
+                for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output"):
+                    body = getattr(message, field)
+                    if body is not None:
+                        data[field] = deepcopy(body)
+                        data["model_content"] = message.content
             tool_name = self.tool_names.get(call_id) or str(
                 data.get("name") or data.get("tool_name") or ""
             ).strip()
@@ -174,7 +192,7 @@ class QueryJournalRecorder:
                 },
             )
             return
-        if event.type in {"approval_request", "ask_user"}:
+        if event.type in {"approval_request", "ask_user", "request_user_input"}:
             call_id = str(data.get("tool_call_id") or data.get("id") or "").strip()
             tool_name = str(data.get("tool_name") or data.get("name") or "").strip()
             if call_id and tool_name:
@@ -215,6 +233,8 @@ class QueryJournalRecorder:
                     "run_id": str(data.get("run_id") or ""),
                     "status": str(data.get("status") or "completed"),
                     "terminal_intent_event_id": self.terminal_intent_event_id,
+                    **{key: data[key] for key in ("started_at", "completed_at", "duration_ms")
+                       if data.get(key) is not None},
                 },
             )
             self.runtime_terminal_receipt_recorded = True
@@ -230,10 +250,15 @@ class QueryJournalRecorder:
             return
         data = event.data
         nested = (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"}
-        if nested and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user"}:
+        if event.type == "runtime.span" and data.get("event") == "tool.started":
+            await to_thread_cancel_safe(self.record_event, event)
+        elif nested and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"}:
             await to_thread_cancel_safe(self.record_event, event)
         elif event.type == "item.started":
-            self.record_event(event)
+            if event.data["item"]["type"] == "context_compaction":
+                await to_thread_cancel_safe(self.record_event, event)
+            else:
+                self.record_event(event)
         elif event.type == "agent_message.delta":
             receipt = self._agent_message_delta_receipt(data)
             if receipt is not None:
@@ -245,7 +270,7 @@ class QueryJournalRecorder:
         elif event.type in {
             "agent.lifecycle.cleanup", "turn.diff.updated", "artifact.preview",
             "item.completed", "tool_call", "tool_result", "context_compacted",
-            "approval_request", "ask_user", "error", "agent.terminal.intent",
+            "approval_request", "ask_user", "request_user_input", "error", "agent.terminal.intent",
             "agent.run.completed",
         }:
             await to_thread_cancel_safe(self.record_event, event)
@@ -273,10 +298,18 @@ class QueryJournalRecorder:
         terminal_context_snapshot = self.context_builder.export_snapshot()
         from backend.conversations.context_delta import context_snapshot_delta
         projection_owner = conversation_projection_owner_fields(self.metadata, terminal_context_snapshot)
+        completed_item = self.agent_messages.get(self.last_completed_answer_item_id)
+        item_projection = (
+            {"item_id": self.last_completed_answer_item_id}
+            if completed_item is not None and completed_item["content"] == assistant_content
+            else {"message_only": True} if completed_item is not None else {}
+        )
         self.journal.append(
             "assistant",
             {
                 "content": assistant_content,
+                "answer_source": self.last_completed_answer_source,
+                **item_projection,
                 "status": status,
                 "reason": reason,
                 "conversation_id": self.conversation_id,
@@ -395,11 +428,16 @@ class QueryJournalRecorder:
 
     def _record_completed_item(self, data: dict[str, Any]) -> None:
         item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        if item.get("type") == "context_compaction":
+            self.lifecycle("context_compaction_item", {"event_type": "item.completed", "item": dict(item), "transcript_only": True})
+            return
         if item.get("type") != "agent_message":
             return
         item_id = str(item.get("id") or "agent-message").strip()
         content = str(item.get("text") or "")
         source = str(item.get("source") or "model_final")
+        self.last_completed_answer_source = source
+        self.last_completed_answer_item_id = item_id
         self.agent_messages[item_id] = {"content": content, "source": source}
         if self.journal is None:
             return
@@ -455,6 +493,8 @@ def record_setup_failure(
                 "run_id": str(completion_event.data.get("run_id") or ""),
                 "status": str(completion_event.data.get("status") or "failed"),
                 "terminal_intent_event_id": "",
+                **{key: completion_event.data[key] for key in ("started_at", "completed_at", "duration_ms")
+                   if completion_event.data.get(key) is not None},
             },
         )
     uncertain = journal.unresolved_tool_uses()

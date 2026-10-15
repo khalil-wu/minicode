@@ -1,19 +1,12 @@
-const GLYPHS = ["orbit", "links", "facets", "petal", "bloom", "spark"] as const;
-const COLORS = ["teal", "blue", "violet", "rose", "amber", "green"] as const;
-
-export type AgentIdentityGlyph = typeof GLYPHS[number];
-export type AgentIdentityColor = typeof COLORS[number];
+import { AGENT_AVATAR_ART } from "./agent-avatar-assets";
 
 /** An agent keeps its identity when its title, status or position changes. */
-export function agentIdentity(identityKey: string): { glyph: AgentIdentityGlyph; color: AgentIdentityColor } {
-  let hash = 2166136261;
-  for (const character of identityKey) {
-    hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619);
+export function agentIdentity(identityKey: string): { index: number; light: string; dark: string } {
+  // Codex desktop KOc/qOc: use UTF-16 code units and its full 28-art palette.
+  let hash = 0;
+  for (let index = 0; index < identityKey.length; index += 1) {
+    hash = (hash * 31 + identityKey.charCodeAt(index)) % 2147483647;
   }
-  const value = hash >>> 0;
-  const identityIndex = (value >>> 8) % COLORS.length;
-  return {
-    glyph: GLYPHS[identityIndex],
-    color: COLORS[identityIndex],
-  };
+  const index = hash % AGENT_AVATAR_ART.length;
+  return { index, ...AGENT_AVATAR_ART[index] };
 }

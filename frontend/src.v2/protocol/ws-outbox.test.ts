@@ -14,6 +14,7 @@ import {
 import { pushToast } from "../overlays/ToastContainer";
 import {
   embeddedBrowserCloseConversation,
+  desktop,
   isDesktop,
   ptyKillConversation,
 } from "../desktop/runtime";
@@ -23,6 +24,7 @@ vi.mock("../overlays/ToastContainer", () => ({
 }));
 
 vi.mock("../desktop/runtime", () => ({
+  desktop: vi.fn(),
   embeddedBrowserCloseConversation: vi.fn(),
   isDesktop: vi.fn(),
   ptyKillConversation: vi.fn(),
@@ -36,6 +38,33 @@ describe("ws-outbox", () => {
     vi.mocked(isDesktop).mockReturnValue(false);
     vi.mocked(embeddedBrowserCloseConversation).mockResolvedValue(0);
     vi.mocked(ptyKillConversation).mockResolvedValue(0);
+  });
+
+  it.each(["success", "error"])("notification resolution waits for the real %s result rather than a transport receipt", async level => {
+    const hideNotifications = vi.fn(async () => 0);
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(desktop).mockReturnValue({ hideNotifications } as never);
+    const commands: import("./events").ClientCommand[] = [];
+    registerWebSocketSender(command => { commands.push(command); return true; });
+    const pending = sendPromptResponseCommand({ type: "control_response", request_id: "actual-request", conversation_id: "original-conversation", turn_id: "original-turn", message_id: "original-message", task_id: "original-task",
+      response: { subtype: "success", response: { action: "approve" } } });
+    await Promise.resolve();
+    expect(hideNotifications).not.toHaveBeenCalled();
+    resolveClientCommandResult({ type: "command.result", command: "control_response", level, message: level === "error" ? "Actual refusal" : "", client_command_id: commands[0].client_command_id });
+    await pending;
+    if (level === "success") expect(hideNotifications).toHaveBeenCalledExactlyOnceWith({ conversationId: "original-conversation", requestId: "actual-request", turnId: "original-turn", messageId: "original-message", taskId: "original-task" });
+    else expect(hideNotifications).not.toHaveBeenCalled();
+  });
+
+  it("an unconfirmed response withdrawn on disconnect leaves its notification and request available for retry", async () => {
+    const hideNotifications = vi.fn(async () => 0);
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(desktop).mockReturnValue({ hideNotifications } as never);
+    registerWebSocketSender(() => true);
+    const pending = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "actual-request", conversation_id: "original-conversation", client_command_id: "actual-pending" });
+    rejectPendingPromptResponseResults("Actual connection loss");
+    await expect(pending).rejects.toThrow("Actual connection loss");
+    expect(hideNotifications).not.toHaveBeenCalled();
   });
 
   it("reports offline commands instead of silently succeeding", () => {

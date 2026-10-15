@@ -15,12 +15,13 @@ from backend.agent.state import AgentState
 from backend.config import AgentSettings, LLMSettings, load_llm_settings
 from backend.conversations.repository import ConversationRepository
 from backend.llm.anthropic_adapter import AnthropicAdapter
-from backend.llm.base import LLMTurnContext, LLMMessage, StreamEventType, estimate_llm_message_tokens
+from backend.llm.base import LLMTurnContext, LLMMessage, StreamEventType, ToolCallEvent, estimate_llm_message_tokens
 from backend.llm.model_runtime import ModelRuntime
 from backend.llm.native_compaction import native_compaction_windows
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.llm.capabilities import capabilities_from_openai_settings
 from backend.services.llm_adapter_factory import build_provider_adapter
+from backend.tools.base import ToolResult
 
 
 def settings(**kwargs):
@@ -183,6 +184,25 @@ def test_local_compaction_preserves_an_existing_native_window_and_provider_scope
     asyncio.run(scenario())
 
 
+def test_native_in_turn_compaction_keeps_the_live_tool_call_outside_the_encrypted_replacement():
+    async def scenario():
+        endpoint = Endpoint()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+            adapter = OpenAIAdapter(settings(), http_client=client)
+            builder = ContextBuilder(llm=adapter)
+            builder.append_user("Historical input")
+            active = builder.append_assistant_tool_calls([ToolCallEvent(id="native-active", name="compact_owned", arguments={})])
+            await builder.compact(manual=True)
+            assert builder._history[-1] is active
+            compact_body = next(body for url, body, _headers in endpoint.requests if url.endswith("/compact"))
+            assert all(item.get("call_id") != "native-active" for item in compact_body["input"])
+            builder.append_tool_result("native-active", "compact_owned", ToolResult("Actual native compaction committed"))
+            builder.settle_streamed_tool_message(active)
+            assert builder._history[-1].tool_call_id == "native-active"
+            assert native_compaction_windows(builder._history[0])
+    asyncio.run(scenario())
+
+
 def test_corrupt_native_snapshot_fails_instead_of_dropping_the_unknown_provider_item():
     snapshot = {"context_schema_version": 2, "history": [{"role": "assistant", "provider_items": [
         {"type": "responses_compaction", "origin": "fixture", "output": []}
@@ -270,20 +290,26 @@ def test_runtime_mode_updates_append_after_native_context_without_rewriting_it()
         async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
             adapter = OpenAIAdapter(settings(), http_client=client)
             builder = ContextBuilder(llm=adapter)
-            state = AgentState(user_message="original", prompt_context={"agent_mode": "plan"})
+            state = AgentState(user_message="original", prompt_context={"collaboration_mode": "plan"})
             await builder.start_turn("original", state)
             await builder.compact(restore_state=state)
-            await builder.build(state)
+            request = adapter._build_responses_input(await builder.build(state))
             before = deepcopy(adapter._build_responses_input(builder._history))
-            assert "mode: plan" in before[-1]["content"]
+            collaboration = [item for item in request if item.get("role") == "developer"
+                and "<collaboration_mode>" in item.get("content", "")]
+            assert len(collaboration) == 1
+            assert "Plan Mode" in collaboration[0]["content"]
             await builder.build(state)
             assert adapter._build_responses_input(builder._history) == before
-            state.prompt_context["agent_mode"] = "build"
-            await builder.build(state)
+            state.prompt_context["collaboration_mode"] = "default"
+            request = adapter._build_responses_input(await builder.build(state))
             after = adapter._build_responses_input(builder._history)
-            assert after[:len(before)] == before
-            assert len(after) == len(before) + 1
-            assert "mode: build" in after[-1]["content"]
+            assert after == before
+            collaboration = [item for item in request if item.get("role") == "developer"
+                and "<collaboration_mode>" in item.get("content", "")]
+            assert len(collaboration) == 1
+            assert "Default" in collaboration[0]["content"]
+            assert "Plan Mode" not in collaboration[0]["content"]
             assert after[:len(endpoint.output)] == endpoint.output
     asyncio.run(scenario())
 

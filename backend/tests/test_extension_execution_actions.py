@@ -51,7 +51,7 @@ class Command(BaseTool):
         return ToolResult("fixture command completed")
 
 
-async def run_child(tmp_path, monkeypatch, factory, behavior, *, mode="bypass", history=(), command=None, settings=None, expect_cancel=False, approval=None, on_event=None):
+async def run_child(tmp_path, monkeypatch, factory, behavior, *, mode="bypass", history=(), command=None, settings=None, expect_cancel=False, approval=None, on_event=None, permission_settings=None):
     parent = setup(tmp_path, monkeypatch, behavior)
     parent.builder.append_user("PARENT_HISTORY_MUST_NOT_CHANGE")
     runner = await bind(parent, tmp_path, factory)
@@ -68,8 +68,12 @@ async def run_child(tmp_path, monkeypatch, factory, behavior, *, mode="bypass", 
     journal = ExecutionJournal("child-actions", base_dir=tmp_path / "child-journal")
     owner = RunContext(agent_runtime=parent.runtime, lifecycle_runtime=runner, execution_journal=journal,
         model_execution=replace(parent.owner.model_execution, config=replace(parent.config, agent=settings or parent.config.agent)))
+    # Host-supplied require_confirm is an explicit ask, including in bypass.
+    # Only the approval branch of this fixture requests that restriction.
+    child_permissions = permission_settings if permission_settings is not None else PermissionSettings(
+        auto_allow=["wrapper"], require_confirm=["run_command"] if mode == "confirm" else [], require_diff_review=[])
     session = AgentSession(llm=parent.model, tool_registry=registry, artifact_store=parent.session.artifact_store,
-        permission_checker=PermissionChecker(PermissionSettings(auto_allow=["wrapper"], require_confirm=["run_command"]), workspace),
+        permission_checker=PermissionChecker(child_permissions, workspace),
         agent_settings=settings or parent.config.agent, token_budget=parent.config.token_budget,
         context_builder=builder, lifecycle_observer_factory=lifecycle_observer_factory, approval_handler=approval)
     state = AgentState(user_message="Check the requested extension behavior", workspace_root=workspace, conversation_id="conv_child_actions")
@@ -77,7 +81,7 @@ async def run_child(tmp_path, monkeypatch, factory, behavior, *, mode="bypass", 
     try:
         async with asyncio.timeout(12), aclosing(QueryEngine().submit(QuerySubmission(session=session, state=state,
             user_message=state.user_message, runtime=AgentLoopSessionContext(session_id="child-actions", task_id="child-actions",
-                workspace_root=workspace, permission_context=PermissionContext(mode=mode), run_context=owner,
+                workspace_root=workspace, permission_context=session.permission_checker.build_context(mode=mode), run_context=owner,
                 metadata={"assistant_message_id": "assistant_actions"})))) as stream:
             try:
                 async for event in stream:
@@ -135,15 +139,57 @@ async def test_exec_uses_child_scope_and_canonical_facts_without_model_history_o
     parent, builder, journal, owner, state, events, command = await run_child(tmp_path, monkeypatch, factory, behavior,
         mode="confirm" if requires_approval else "bypass", approval=approval if requires_approval else None, on_event=on_event)
     assert state.terminal_status == "completed", (state.stopped_reason, events)
+    assert (tmp_path / "child" / "marker.txt").exists(), [event.data for event in events if event.type in {"tool_result", "error", "permission_decision"}]
     assert (tmp_path / "child" / "marker.txt").read_text() == "fixture-write"
     assert not (tmp_path / "marker.txt").exists()
     assert observations == [str(tmp_path / "child")]
     assert len(command.calls) == 1
     assert len(approved) == int(requires_approval)
     assert command.calls[0].run_context is owner
+    assert command.calls[0].permission.mode == ("confirm" if requires_approval else "bypass")
+    assert command.calls[0].permission.approval_policy == ("on-request" if requires_approval else "never")
     nested = [event for event in events if event.type == "tool_result" and event.data.get("call_source", {}).get("kind") == "extension"]
     assert len(nested) == 1
     assert not any(event.type == "done" and event.data.get("reason") == "not a model terminal" for event in events)
+    assert [message["name"] for message in journal.reconstruct_history() if message["role"] == "tool"] == ["wrapper"]
+    assert [message.content for message in parent.builder._history] == ["PARENT_HISTORY_MUST_NOT_CHANGE"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["body", "observer"])
+async def test_nested_extension_exec_preserves_explicit_child_ask_in_bypass(tmp_path, monkeypatch, origin):
+    results = []
+    def factory(api):
+        async def invoke():
+            result = await api.exec("must-not-write-without-approval")
+            results.append(result)
+            return result
+        async def body(params, ctx):
+            return await invoke() if origin == "body" else "wrapper completed"
+        async def observe(event, ctx):
+            if event.get("tool_name") == "wrapper":
+                await invoke()
+        api.register_tool({"name": "wrapper", "description": "Preserve an explicit child command rule",
+            "parameters": {"type": "object"}, "execute": body})
+        if origin == "observer":
+            api.on("tool_execution_start", observe)
+    async def behavior(model, messages):
+        if len(model.inputs) == 1:
+            return ToolCallEvent(id="wrapper-call", name="wrapper", arguments={})
+        return None
+    parent, builder, journal, owner, state, events, command = await run_child(
+        tmp_path, monkeypatch, factory, behavior, permission_settings=PermissionSettings(
+            auto_allow=["wrapper"], require_confirm=["run_command"], require_diff_review=[]))
+    assert not command.calls and not (tmp_path / "child" / "marker.txt").exists()
+    nested = [event for event in events if event.type == "tool_result" and event.data.get("call_source", {}).get("kind") == "extension"]
+    assert len(nested) == 1 and nested[0].data["is_error"]
+    # The extension receives the complete canonical result; the frontend
+    # projects its summary and does not publish internal permission events.
+    assert len(results) == 1 and results[0].is_error
+    assert "approval_policy:never" in results[0].content
+    assert results[0].request_digest == nested[0].data["request_digest"]
+    assert not any(event.type == "approval_request" for event in events)
+    assert not journal.unresolved_tool_uses()
     assert [message["name"] for message in journal.reconstruct_history() if message["role"] == "tool"] == ["wrapper"]
     assert [message.content for message in parent.builder._history] == ["PARENT_HISTORY_MUST_NOT_CHANGE"]
 

@@ -31,7 +31,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
   const owner = s.conversations.find((conversation) => conversation.id === eventConversationId);
   const ownerWorkspaceRoot = isActiveEvent
     ? activeWorkspaceRoot
-    : normalizeWorkspaceRoot(owner?.worktreePath || owner?.workspaceRoot) || activeWorkspaceRoot;
+    : normalizeWorkspaceRoot(owner?.executionCwd || owner?.worktreePath || owner?.workspaceRoot) || activeWorkspaceRoot;
   const isKnownConversation = Boolean(
     eventConversationId
     && (

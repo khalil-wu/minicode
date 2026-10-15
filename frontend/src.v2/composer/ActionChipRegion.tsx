@@ -1,9 +1,11 @@
+import { useI18n } from "../i18n";
 import { Blocks, Folder, MessageSquareText, X } from "lucide-react";
 import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
 import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
 
 export const ContextChipRegion = () => {
+  const { t: tr } = useI18n();
   const actionChip = useAppStore((s) => s.actionChip);
   const mentionResults = useAppStore((s) => s.mentionResults);
   const selectedMentions = useAppStore((s) => s.selectedMentions);
@@ -29,7 +31,7 @@ export const ContextChipRegion = () => {
           {item.kind === "file" ? (
             <button
               type="button"
-              aria-label={`打开 ${item.name}`}
+              aria-label={tr("打开 {name}", { name: item.name })}
               onClick={() => openContextReference(item)}
               style={mentionLabelButtonStyle}
             >
@@ -54,7 +56,7 @@ export const ContextChipRegion = () => {
           )}
           <button
             type="button"
-            aria-label={`从上下文中移除 ${item.name}`}
+            aria-label={tr("从上下文中移除 {name}", { name: item.name })}
             onClick={() => removeSelectedMention(item.path)}
             style={tokenRemoveStyle}
           >
@@ -79,7 +81,7 @@ export const ContextChipRegion = () => {
               <span style={mentionNameStyle}>@{item.name}</span>
             </button>
           ))}
-          <button type="button" onClick={() => setMentionResults([])} aria-label="清空上下文引用" style={dismissStyle}>
+          <button type="button" onClick={() => setMentionResults([])} aria-label={tr("清空上下文引用")} style={dismissStyle}>
             <X size={14} />
           </button>
         </>
@@ -91,10 +93,9 @@ export const ContextChipRegion = () => {
             clearSelectedMentions();
           }}
           style={clearAllStyle}
-          aria-label="清空上下文引用"
+          aria-label={tr("清空上下文引用")}
         >
-          清空
-        </button>
+          {tr("清空")}</button>
       )}
     </div>
   );

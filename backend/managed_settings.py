@@ -330,8 +330,6 @@ def _parse_json_object(
     source: str,
     errors: list[str],
 ) -> dict[str, Any] | None:
-    if not raw.strip():
-        return {}
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -499,6 +497,13 @@ def _managed_settings_validation_error(payload: Mapping[str, Any]) -> str:
     permissions = payload.get("permissions")
     if permissions is not None and not isinstance(permissions, Mapping):
         return "permissions must be an object"
+    if "approval_policy" in payload:
+        from backend.permissions.approval_policy import ApprovalPolicy
+
+        try:
+            ApprovalPolicy.parse(payload["approval_policy"])
+        except ValueError as error:
+            return str(error)
     return ""
 
 

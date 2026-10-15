@@ -60,7 +60,9 @@ def test_permission_metadata_failure_keeps_the_stricter_level_and_is_logged(
 
     tool = SimpleNamespace(
         name="broken_metadata_tool",
+        policy_identity="broken_metadata_tool",
         policy_aliases=(),
+        policy_deny_aliases=(),
         permission=PermissionLevel.DIFF_REVIEW,
         check_permission=lambda _args, _context: None,
         is_read_only=lambda _args: False,

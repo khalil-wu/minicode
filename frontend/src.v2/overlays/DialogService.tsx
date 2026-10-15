@@ -1,12 +1,15 @@
+import { AppLanguageBridge, useI18n } from "../i18n";
 import { createRoot } from "react-dom/client";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface ConfirmOptions {
   title?: string;
-  message: string;
+  message: ReactNode;
+  titleIcon?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  cancelDisabled?: boolean;
   danger?: boolean;
 }
 
@@ -17,6 +20,7 @@ interface PromptOptions {
   placeholder?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  allowEmpty?: boolean;
 }
 
 interface AlertOptions {
@@ -35,11 +39,22 @@ export function showConfirm(options: ConfirmOptions): Promise<boolean> {
       container.remove();
     };
     root.render(
-      <ConfirmDialog
+      <AppLanguageBridge><ConfirmDialog
         {...options}
         onResult={(ok) => { cleanup(); resolve(ok); }}
-      />,
+      /></AppLanguageBridge>,
     );
+  });
+}
+
+/** A secondary action is distinct from closing the dialog. */
+export function showChoice(options: ConfirmOptions): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const finish = (result: boolean | null) => { root.unmount(); container.remove(); resolve(result); };
+    root.render(<AppLanguageBridge><ConfirmDialog {...options} onResult={finish} onDismiss={() => finish(null)} /></AppLanguageBridge>);
   });
 }
 
@@ -53,10 +68,10 @@ export function showAlert(options: AlertOptions): Promise<void> {
       container.remove();
     };
     root.render(
-      <AlertDialog
+      <AppLanguageBridge><AlertDialog
         {...options}
         onClose={() => { cleanup(); resolve(); }}
-      />,
+      /></AppLanguageBridge>,
     );
   });
 }
@@ -71,10 +86,10 @@ export function showPrompt(options: PromptOptions): Promise<string | null> {
       container.remove();
     };
     root.render(
-      <PromptDialog
+      <AppLanguageBridge><PromptDialog
         {...options}
         onResult={(val) => { cleanup(); resolve(val); }}
-      />,
+      /></AppLanguageBridge>,
     );
   });
 }
@@ -115,18 +130,22 @@ const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; l
 const ConfirmDialog = ({
   title,
   message,
-  confirmLabel = "确认",
-  cancelLabel = "取消",
+  titleIcon,
+  confirmLabel,
+  cancelLabel,
+  cancelDisabled,
   danger,
   onResult,
-}: ConfirmOptions & { onResult: (ok: boolean) => void }) => {
+  onDismiss,
+}: ConfirmOptions & { onResult: (ok: boolean) => void; onDismiss?: () => void }) => {
+  const { t: tr } = useI18n();
   return (
-    <Backdrop label={title || "确认操作"} onDismiss={() => onResult(false)}>
-      {title && <div style={titleStyle}>{title}</div>}
+    <Backdrop label={title || tr("确认操作")} onDismiss={onDismiss ?? (() => onResult(false))}>
+      {title && <div style={{ ...titleStyle, display: "flex", alignItems: "center", gap: 8 }}>{titleIcon}{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
-        <button type="button" className="mc-dialog-btn" onClick={() => onResult(false)} autoFocus={Boolean(danger)} style={cancelBtnStyle}>
-          {cancelLabel}
+        <button type="button" className="mc-dialog-btn" disabled={cancelDisabled} onClick={() => onResult(false)} autoFocus={Boolean(danger) && !cancelDisabled} style={cancelBtnStyle}>
+          {cancelLabel ?? tr("取消")}
         </button>
         <button
           type="button"
@@ -135,7 +154,7 @@ const ConfirmDialog = ({
           autoFocus={!danger}
           style={{ ...confirmBtnStyle, background: danger ? "var(--state-danger)" : "var(--accent-primary)" }}
         >
-          {confirmLabel}
+          {confirmLabel ?? tr("确认")}
         </button>
       </div>
     </Backdrop>
@@ -145,16 +164,17 @@ const ConfirmDialog = ({
 const AlertDialog = ({
   title,
   message,
-  confirmLabel = "确定",
+  confirmLabel,
   onClose,
 }: AlertOptions & { onClose: () => void }) => {
+  const { t: tr } = useI18n();
   return (
-    <Backdrop label={title || "提示"} onDismiss={onClose}>
+    <Backdrop label={title || tr("提示")} onDismiss={onClose}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
         <button type="button" className="mc-dialog-btn" onClick={onClose} autoFocus style={confirmBtnStyle}>
-          {confirmLabel}
+          {confirmLabel ?? tr("确定")}
         </button>
       </div>
     </Backdrop>
@@ -166,10 +186,12 @@ const PromptDialog = ({
   message,
   defaultValue = "",
   placeholder,
-  confirmLabel = "确定",
-  cancelLabel = "取消",
+  confirmLabel,
+  cancelLabel,
+  allowEmpty = false,
   onResult,
 }: PromptOptions & { onResult: (val: string | null) => void }) => {
+  const { t: tr } = useI18n();
   const [value, setValue] = useState(defaultValue);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -178,10 +200,10 @@ const PromptDialog = ({
     inputRef.current?.select();
   }, []);
 
-  const submit = () => onResult(value || null);
+  const submit = () => onResult(allowEmpty ? value : value || null);
 
   return (
-    <Backdrop label={title || "需要输入"} onDismiss={() => onResult(null)}>
+    <Backdrop label={title || tr("需要输入")} onDismiss={() => onResult(null)}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <input
@@ -201,10 +223,10 @@ const PromptDialog = ({
       />
       <div style={actionsStyle}>
         <button type="button" className="mc-dialog-btn" onClick={() => onResult(null)} style={cancelBtnStyle}>
-          {cancelLabel}
+          {cancelLabel ?? tr("取消")}
         </button>
         <button type="button" className="mc-dialog-btn" onClick={submit} style={confirmBtnStyle}>
-          {confirmLabel}
+          {confirmLabel ?? tr("确定")}
         </button>
       </div>
     </Backdrop>

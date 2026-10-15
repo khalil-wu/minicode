@@ -26,6 +26,7 @@ from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
+from backend.tasks.scheduler import ScheduledTask, ScheduledTaskRun
 from backend.tools.base import BaseTool, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
 
@@ -376,11 +377,11 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
                     conversation_id=conversation_id,
                 )
             return await scheduled_task_runner.run_scheduled_task(
-                SimpleNamespace(
+                ScheduledTask(
                     id="schedule", name="audit", prompt="inspect", workspace_root=str(tmp_path),
-                    conversation_id=conversation_id, permission_mode="confirm", isolation="workspace",
+                    conversation_id=conversation_id, permission_mode="confirm", isolation="workspace", kind="heartbeat",
                 ),
-                SimpleNamespace(id="scheduled-lifecycle", conversation_id=conversation_id),
+                ScheduledTaskRun(id="scheduled-lifecycle", conversation_id=conversation_id),
                 bootstrap=bootstrap,
             )
 

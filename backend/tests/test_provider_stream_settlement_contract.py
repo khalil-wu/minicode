@@ -8,6 +8,7 @@ from backend.agent.provider_stream_settlement import (
     settle_provider_stream,
 )
 from backend.llm.base import UsageInfo
+from backend.agent.provider_attempt import ProviderAttempt
 
 
 class _Kernel:
@@ -33,7 +34,7 @@ def _settle(*, provider_done: bool):
                 retry_budget_boundary=None,
                 budget_runtime=_Budget(),
                 turn_kernel=kernel,
-                provider_attempt=object(),
+                provider_attempt=ProviderAttempt("test-iteration", 0, "test-span", 0),
                 finish_reason="stop" if provider_done else "",
                 provider_stream_steered=False,
                 rebuild_context_and_retry=False,

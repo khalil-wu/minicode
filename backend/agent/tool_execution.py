@@ -17,6 +17,7 @@ from typing import Any
 from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key
 from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 from backend.agent.context import ContextBuilder
+from backend.agent.context_window import CONTEXT_TOOL_NAMES
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
 from backend.agent.final_tool_request import (
@@ -215,11 +216,27 @@ def _authorize_final_tool_request(
         )
 
     tool = tool_registry.get_tool(tc.name)
+    policy_identity = tool.policy_identity if tool is not None else tc.name
+    from backend.permissions.grants import permission_context_with_grants
+
+    permission_context = permission_context_with_grants(permission_context or tool_ctx.permission, tool_ctx)
+    from backend.mcp.registry import MCPToolProxy
+
+    if isinstance(tool, MCPToolProxy):
+        permission_context = replace(permission_context,
+            captured_mcp_approval_store=tool_ctx.run_context.mcp_tool_approvals if tool_ctx.run_context is not None else None,
+            captured_mcp_permission_profile=(
+            tool_ctx.sandbox_policy.resolve(cwd=tool_ctx.workspace_root) if tool_ctx.sandbox_policy is not None else None))
+    bound_request = _bound_final_tool_request(tc)
+    if bound_request is not None and bound_request.policy_identity != policy_identity:
+        return FinalToolAuthorization(request=bound_request,
+            error="The tool identity changed while this request was pending; submit the action again.",
+            error_kind="approval_stale")
     if tool is not None:
         validation_error = validate_tool_input(tool, tc.arguments)
         if validation_error:
             try:
-                rejected_request = FinalExecutableToolRequest.freeze(tc)
+                rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
             except Exception:
                 rejected_request = None
             return FinalToolAuthorization(
@@ -231,7 +248,7 @@ def _authorize_final_tool_request(
     required_reason = missing_required_tool_argument_reason(None, tc, tool_registry)
     if required_reason:
         try:
-            rejected_request = FinalExecutableToolRequest.freeze(tc)
+            rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
         except Exception:
             rejected_request = None
         return FinalToolAuthorization(
@@ -242,7 +259,7 @@ def _authorize_final_tool_request(
     policy_reason = toolset_policy_guard_reason(tc, tool_registry, tool_ctx)
     if policy_reason:
         try:
-            rejected_request = FinalExecutableToolRequest.freeze(tc)
+            rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
         except Exception:
             rejected_request = None
         return FinalToolAuthorization(
@@ -254,7 +271,7 @@ def _authorize_final_tool_request(
         scope_reason = subagent_scope_guard_reason(tc, tool_registry, tool_ctx)
         if scope_reason:
             try:
-                rejected_request = FinalExecutableToolRequest.freeze(tc)
+                rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
             except Exception:
                 rejected_request = None
             return FinalToolAuthorization(
@@ -264,12 +281,33 @@ def _authorize_final_tool_request(
             )
 
     try:
-        request = FinalExecutableToolRequest.freeze(tc)
+        request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
     except Exception as exc:
         return FinalToolAuthorization(
             error=f"Tool '{tc.name}' arguments could not be frozen ({type(exc).__name__}).",
             error_kind="security_boundary",
         )
+
+    from backend.tools.command_tool import RunCommandTool
+    if isinstance(tool, RunCommandTool):
+        # Normalize the existing persisted MiniCode escalation field once at
+        # admission; exposed schemas and frozen execution use Source's enum.
+        if "with_escalated_permissions" in tc.arguments:
+            canonical = dict(tc.arguments)
+            old_escalation = canonical.pop("with_escalated_permissions")
+            canonical.setdefault("sandbox_permissions", "require_escalated" if old_escalation else "use_default")
+            tc.arguments = canonical
+            request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
+        if bound_request is not None and bound_request.exec_policy is not None and bound_request.matches_arguments(tc.arguments):
+            request = bound_request
+        else:
+            from backend.permissions.native_execpolicy import NativeExecPolicyError, NativeExecPolicyProcessError
+            try:
+                native_decision = tool.capture_exec_policy(request, tool_ctx, permission_context)
+            except (NativeExecPolicyError, NativeExecPolicyProcessError, ValueError, OSError) as error:
+                return FinalToolAuthorization(request=request, error=str(error), error_kind="exec_policy")
+            request = request.with_exec_policy(native_decision)
+        permission_context = replace(permission_context, captured_exec_policy=request.exec_policy)
 
     try:
         decision_args = deepcopy(dict(tc.arguments))
@@ -329,12 +367,15 @@ def _detached_tool_diff(
         args = deepcopy(dict(tc.arguments or {}))
     except Exception:
         return None
-    return generate_diff(
+    diff = generate_diff(
         tc.name,
         args,
         workspace_root=workspace_root,
         tool_ctx=tool_ctx,
     )
+    if tc.name == "apply_patch" and diff is not None:
+        tc._apply_patch_review_hashes = args["_expected_hashes"]
+    return diff
 
 
 def _execution_arguments_for_tool(
@@ -345,9 +386,9 @@ def _execution_arguments_for_tool(
 ) -> dict[str, Any]:
     """Return a mutable execution-only copy of the canonical arguments.
 
-    File mutation tools receive the runtime-owned optimistic-concurrency guard
-    here. It is derived from read-time state rather than replayed from review
-    metadata and must not rewrite the canonical approved request.
+    File mutation tools receive their runtime-owned disk snapshot here.
+    Patch snapshots bind to the actual preview; whole-file write snapshots
+    retain their read-time state. Neither rewrites the canonical request.
     """
 
     execution_args = deepcopy(dict(tc.arguments or {}))
@@ -367,6 +408,9 @@ def _execution_arguments_for_tool(
             )
     elif tc.name == "apply_patch":
         execution_args.pop("_expected_hashes", None)
+        reviewed_hashes = getattr(tc, "_apply_patch_review_hashes", None)
+        if reviewed_hashes is not None:
+            execution_args["_expected_hashes"] = deepcopy(reviewed_hashes)
     return execution_args
 
 
@@ -896,7 +940,7 @@ def invalid_tool_call_guard_reason(
             f"Duplicate tool-call id for side-effectful tool '{name}' was not executed. "
             "Issue one new call with a unique id if the action is still needed."
         )
-    if tool_registry.get_tool(name) is None and name not in CONTROL_TOOL_NAMES:
+    if tool_registry.get_tool(name) is None:
         available_names = tool_registry.list_tools()
         suggestions = difflib.get_close_matches(name, available_names, n=5, cutoff=0.25)
         available = ", ".join(suggestions) or ", ".join(available_names[:5]) or "none"
@@ -1159,7 +1203,8 @@ async def _run_authorized_tool(
                 managed = tm.create(
                     kind="tool_run",
                     awaitable=tool_registry.execute(
-                        tc.name, execution_args, context=tool_ctx
+                        tc.name, execution_args, context=tool_ctx,
+                        expected_policy_identity=_bound_final_tool_request(tc).policy_identity if _bound_final_tool_request(tc) is not None else "",
                     ),
                 )
                 # This caller owns the execution, unlike independent manager
@@ -1172,7 +1217,8 @@ async def _run_authorized_tool(
                 )
         else:
             result = await tool_registry.execute(
-                tc.name, execution_args, context=tool_ctx
+                tc.name, execution_args, context=tool_ctx,
+                expected_policy_identity=_bound_final_tool_request(tc).policy_identity if _bound_final_tool_request(tc) is not None else "",
             )
     finally:
         if owner_token is not None:
@@ -1218,13 +1264,29 @@ async def _run_authorized_tool(
 
     result = await _apply_extension_post_tool_hook(tc, result, tool_ctx)
 
-    if hook_mgr and not result.is_error:
+    terminal_hook = result.runtime_metadata.get("terminal_hook")
+    hook_name, hook_input = _tool_hook_request(tc)
+    hook_call_id = tc.id
+    hook_output = result.runtime_metadata.get("hook_output", result.content or "")
+    hook_ready = True
+    hook_success = not result.is_error
+    if terminal_hook is not None:
+        hook_ready = terminal_hook["ready"]
+        if hook_ready:
+            hook_name = terminal_hook["tool_name"]
+            hook_input = terminal_hook["tool_input"]
+            hook_call_id = terminal_hook["tool_use_id"]
+            hook_output = terminal_hook["output"]
+            hook_success = True
+    elif tc.name == "run_command":
+        hook_success = result.runtime_metadata.get("command_completed", False)
+    if hook_mgr and hook_ready and hook_success:
         try:
             post = await hook_mgr.run_post_tool(
-                tc.name,
-                tc.arguments,
-                result.content or "",
-                tool_call_id=tc.id,
+                hook_name,
+                hook_input,
+                hook_output,
+                tool_call_id=hook_call_id,
                 session_id=tool_ctx.session_id,
                 permission_mode=tool_ctx.permission.mode,
             )
@@ -1243,13 +1305,13 @@ async def _run_authorized_tool(
             # successful result.
         except Exception as exc:
             logger.warning("post_tool hook failed: %s", exc)
-    elif hook_mgr and result.is_error:
+    elif hook_mgr and hook_ready and not hook_success:
         try:
             post = await hook_mgr.run_post_tool_failure(
-                tc.name,
-                tc.arguments,
-                result.content or "",
-                tool_call_id=tc.id,
+                hook_name,
+                hook_input,
+                hook_output,
+                tool_call_id=hook_call_id,
                 session_id=tool_ctx.session_id,
                 permission_mode=tool_ctx.permission.mode,
             )
@@ -1344,11 +1406,13 @@ async def _apply_pre_tool_hook_owned(
 ) -> ToolResult | None:
     tc.arguments = dict(tc.arguments or {})
     hook_mgr = _tool_hook_manager(tool_ctx)
-    if hook_mgr is not None and tc.name != "exit_plan_mode":
+    terminal_interaction = tc.name == "monitor" and tc.arguments.get("action", "status") in {"status", "write_stdin"}
+    if hook_mgr is not None and tc.name != "exit_plan_mode" and not terminal_interaction:
         try:
+            hook_name, hook_input = _tool_hook_request(tc)
             pre = await hook_mgr.run_pre_tool(
-                tc.name,
-                tc.arguments,
+                hook_name,
+                hook_input,
                 tool_call_id=tc.id,
                 session_id=tool_ctx.session_id,
                 permission_mode=tool_ctx.permission.mode,
@@ -1369,7 +1433,11 @@ async def _apply_pre_tool_hook_owned(
                     content=f"Tool blocked by hook: {pre.message}", is_error=True
                 )
             if isinstance(pre.updated_input, dict):
-                tc.arguments = dict(pre.updated_input)
+                if tc.name == "run_command":
+                    if "command" in pre.updated_input:
+                        tc.arguments = {**tc.arguments, "command": pre.updated_input["command"]}
+                else:
+                    tc.arguments = dict(pre.updated_input)
         except Exception as exc:
             # Pre-tool hooks run inside the call try: a crashing hook
             # yields an error tool_result and the tool does NOT run. The
@@ -1421,7 +1489,18 @@ async def _apply_pre_tool_hook_owned(
                 display_summary="Extension hook failed",
             )
     setattr(tc, "_pre_tool_hook_applied", True)
+    async_service = tool_ctx.run_context.guardian_async_service if tool_ctx.run_context is not None else None
+    if async_service is not None:
+        await async_service.on_tool_start(tc, tool_ctx, tool_ctx.tool_registry)
     return None
+
+
+def _tool_hook_request(tc: ToolCallEvent) -> tuple[str, dict[str, Any]]:
+    # Codex's shell hook payload contains only the original command. Its
+    # shell/login/tty and permission arguments remain owned by the executor.
+    if tc.name == "run_command":
+        return "Bash", {"command": tc.arguments.get("command")}
+    return tc.name, dict(tc.arguments)
 
 
 def _tool_lifecycle_runtime(
@@ -1748,11 +1827,15 @@ def _tool_runtime_span_event(
     if event == "tool.started":
         started_at = observed_at
         tool_ctx.tool_span_started_at[tc.id] = started_at
+        if getattr(tc, "_command_presentation", None) is not None:
+            setattr(tc, "_command_execution_started_at", started_at)
     elif event == "tool.completed":
         started_at = tool_ctx.tool_span_started_at.pop(tc.id, observed_at)
         ended_at = max(started_at, observed_at)
         payload_data["service_duration_ms"] = duration_ms
         duration_ms = ended_at - started_at
+        if getattr(tc, "_command_presentation", None) is not None and getattr(tc, "_command_execution_started_at", None) is None:
+            started_at = ended_at = duration_ms = None
     return runtime_span_from_tool_context(
         event,
         span_id=f"tool:{tc.id}",
@@ -1879,11 +1962,20 @@ def tool_context_with_live_output(
     )
     call_metadata = dict(tool_ctx.metadata)
     call_metadata[_STREAMED_TOOL_OUTPUT_IDS_KEY] = shared_streamed_ids
+    from backend.permissions.grants import permission_context_with_grants
+
     call_context = replace(
         tool_ctx,
+        permission=permission_context_with_grants(tool_ctx.permission, tool_ctx),
         tool_call_id=tc.id,
         iteration_id=iteration_id,
         metadata=call_metadata,
+        authorization_digest=_final_tool_request_digest(tc),
+        authorization_policy_identity=(
+            _bound_final_tool_request(tc).policy_identity
+            if _bound_final_tool_request(tc) is not None else tc.name
+        ),
+        exec_policy_decision=(_bound_final_tool_request(tc).exec_policy if _bound_final_tool_request(tc) is not None else None),
     )
     if not _tool_streams_output(tc.name, tool_registry):
         return call_context
@@ -1987,7 +2079,12 @@ def store_result(
     limitation = result.limitation or ""
     started_at = _tool_start_times(state).get(tc.id)
     duration_ms = result.duration_ms
-    if duration_ms is None and isinstance(started_at, (int, float)):
+    command_presentation = getattr(tc, "_command_presentation", None)
+    command_execution_started_at = getattr(tc, "_command_execution_started_at", None)
+    if command_presentation is not None and command_execution_started_at is None:
+        # An approved/declined proposal is not an OS execution measurement.
+        duration_ms = None
+    elif duration_ms is None and isinstance(started_at, (int, float)):
         duration_ms = int(max(0.0, time.time() - started_at) * 1000)
 
     # Per-tool result budget. Tools that self-bound and artifact their overflow
@@ -2016,6 +2113,9 @@ def store_result(
         diff=diff,
         tool_registry=tool_registry,
     )
+    from backend.agent.command_actions import command_actions_for_tool
+
+    command_actions = command_actions_for_tool(tc.name, tc.arguments, getattr(tool_ctx, "workspace_root", None))
     issue = classify_tool_issue(tc, result_for_issue, final_status)
     issue_projection = issue.projection if issue else ""
     tool_projection = projection_for_tool(tc.name, tool_registry)
@@ -2047,14 +2147,15 @@ def store_result(
         result_kind=result_kind,
         limitation=limitation or truncated.limitation,
     )
-    context_result = truncated
+    context_result = replace(truncated, runtime_metadata={**truncated.runtime_metadata,
+        "_private_model_only": tool_projection.private_model_only})
     hook_context = [
         *(getattr(tc, "_hook_model_context", None) or ()),
         *result.runtime_metadata.get("hook_model_context", ()),
     ]
     if hook_context:
         context_result = replace(
-            truncated,
+            context_result,
             content=f"{truncated.content}\n\nHook context:\n" + "\n\n".join(hook_context),
         )
     if tool_ctx is not None and tool_ctx.result_sink is not None:
@@ -2068,10 +2169,19 @@ def store_result(
             conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
             workspace_root=getattr(tool_ctx, "workspace_root", None),
         )
+    from backend.mcp.registry import MCPAcceptedResultIdentity
+
+    mcp_identity = result.runtime_metadata.get("mcp_accepted_result_identity")
+    if isinstance(mcp_identity, MCPAcceptedResultIdentity) and tool_ctx is not None and tool_ctx.run_context is not None:
+        node_repl = tool_ctx.run_context.node_repl_review_evidence
+        if node_repl is not None and tool_ctx.model_execution is not None:
+            node_repl.accept_mcp_result(server=mcp_identity.server, tool=mcp_identity.tool,
+                source=tool_ctx.source_for_call(tc.id), call_id=tc.id, result=result,
+                execution=tool_ctx.model_execution)
     committed_record = state.record_tool_call(
         tc.name,
         tc.arguments,
-        context_result.to_context_string(),
+        context_result.content if tc.name == "request_user_input" or tc.name in CONTEXT_TOOL_NAMES else context_result.to_context_string(),
         artifact_id=truncated.artifact_id,
         is_error=truncated.is_error,
         mutates=_tool_mutates(tc.name, tool_registry, tc.arguments),
@@ -2095,13 +2205,22 @@ def store_result(
         artifact_kind=truncated.artifact_kind,
         artifact_media_type=truncated.artifact_media_type,
         artifact_bytes=truncated.artifact_bytes,
+        delegations=truncated.runtime_metadata.get("delegations"),
         command_id=str(truncated.runtime_metadata.get("command_id") or ""),
         output_cursor=truncated.runtime_metadata.get("next_cursor"),
         call_source=asdict(tool_ctx.source_for_call(tc.id)) if tool_ctx is not None and tool_ctx.source_for_call(tc.id).kind != "direct" else None,
         tool_call_id=tc.id,
+        command_actions=command_actions,
+        stdout_preview=truncated.runtime_metadata.get("stdout_preview"),
+        stderr_preview=truncated.runtime_metadata.get("stderr_preview"),
+        exit_code=truncated.runtime_metadata.get("exit_code"),
+        recipient_id=truncated.runtime_metadata.get("recipient") if tc.name in {"send_message", "followup_task"} and truncated.runtime_metadata.get("recipient") not in {None, "*", "parent"} else None,
+        recipient_ids=truncated.runtime_metadata.get("recipient_ids") if tc.name in {"send_message", "followup_task"} else None,
     )
     if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.tool_execution_gate is not None:
         tool_ctx.run_context.tool_execution_gate.complete(tc.id)
+    if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.guardian_async_service is not None:
+        tool_ctx.run_context.guardian_async_service.on_tool_finish(tc.id)
     if truncated.evidence_type:
         state.evidence_records.append(
             EvidenceRecord(
@@ -2154,11 +2273,35 @@ def store_result(
         artifact_kind=truncated.artifact_kind or "",
         artifact_media_type=truncated.artifact_media_type or "",
         artifact_bytes=truncated.artifact_bytes,
+        delegations=truncated.runtime_metadata.get("delegations"),
+        command_actions=command_actions,
     )
     # Transport consumers add their own owner/envelope fields to event.data.
+    if command_presentation is not None:
+        result_event.data["command_presentation"] = deepcopy(command_presentation)
+        result_event.data["streaming_announcement"] = False
+        if command_execution_started_at is not None:
+            result_event.data["execution_started_at"] = command_execution_started_at
+    for key in ("stdout_preview", "stderr_preview", "exit_code"):
+        if truncated.runtime_metadata.get(key) is not None:
+            result_event.data[key] = truncated.runtime_metadata[key]
+    if committed_record.recipient_id is not None:
+        result_event.data["recipient_id"] = committed_record.recipient_id
+    if committed_record.recipient_ids:
+        result_event.data["recipient_ids"] = list(committed_record.recipient_ids)
     # Keep the completed observation independent before that mutable handoff.
     result_event.data["completed_at_ms"] = int(time.time() * 1000)
+    if tool_projection.private_model_only:
+        result_event.data["private_model_only"] = True
+        committed_record.private_model_only = True
     committed_record.result_payload = deepcopy(result_event.data)
+    if truncated.mcp_result is not None:
+        committed_record.result_payload["mcp_result"] = deepcopy(truncated.mcp_result)
+    if truncated.code_mode_output is not None:
+        committed_record.result_payload["code_mode_output"] = deepcopy(truncated.code_mode_output)
+        committed_record.result_payload["code_mode_raw_output"] = deepcopy(truncated.runtime_metadata["code_mode_raw_output"])
+    if truncated.history_notes_output is not None:
+        committed_record.result_payload["history_notes_output"] = deepcopy(truncated.history_notes_output)
     return result_event
 
 
@@ -2320,7 +2463,6 @@ def generate_diff(
                 patch_text,
                 tool_ctx,
                 expected_hashes=expected_hashes,
-                read_time_hashes=read_time_hashes,
             )
             if payload is not None:
                 args["_expected_hashes"] = expected_hashes

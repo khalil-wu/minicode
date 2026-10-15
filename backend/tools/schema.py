@@ -91,7 +91,7 @@ def _strip_unavailable_tool_references(description: str, visible: set[str]) -> s
         "web_fetch",
         "read_artifact",
         "tool_search",
-        "ask_user",
+        "request_user_input",
         "task_status",
         "task_stop",
         "send_message",

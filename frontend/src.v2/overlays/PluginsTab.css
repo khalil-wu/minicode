@@ -24,6 +24,16 @@
 .plugin-detail-link { border: 0; padding: 0; text-align: left; background: transparent; color: var(--text-primary); font: inherit; font-weight: var(--fw-semibold); }
 .plugin-detail-link:hover { color: var(--accent-primary); }
 .plugin-settings-toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.plugin-settings-toolbar { gap: 10px; align-items: center; }
+.settings-page-heading-actions .plugin-settings-toolbar { margin-bottom: 0; }
+.plugin-detail-breadcrumb { display: flex; align-items: center; gap: 10px; color: var(--text-muted); margin-bottom: 24px; }
+.plugin-detail-breadcrumb .plugin-detail-back { margin: 0; }
+.plugin-detail-breadcrumb .plugin-detail-back svg { transform: rotate(-90deg); }
+.plugin-detail-registration { color: var(--text-muted); }
+.plugin-detail-registration > summary { cursor: pointer; width: fit-content; }
+.plugin-starter-prompts { display: flex; flex-direction: column; gap: 10px; padding: 20px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-soft); }
+.plugin-starter-prompts button { display: flex; gap: 14px; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-full); background: var(--surface-base); color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.plugin-starter-prompts button svg { flex-shrink: 0; transform: rotate(-90deg); }
 
 .plugin-center-link {
   width: 100%;
@@ -96,6 +106,10 @@
   width: 15px;
   height: 15px;
 }
+
+.plugin-catalog-section { display: grid; gap: 18px; padding: 0; margin-bottom: 26px; }
+.plugin-catalog-list { padding: 0; border: 0; background: transparent; box-shadow: none; }
+.plugin-catalog-section .plugin-empty { align-items: flex-start; text-align: left; min-height: 180px; border: 0; background: transparent; box-shadow: none; }
 
 .plugin-summary {
   display: grid;

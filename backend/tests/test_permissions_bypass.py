@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from backend.artifact.store import ArtifactStore
-from backend.config import PermissionSettings
+from backend.config import PermissionSettings, permission_settings_from_config
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.base import PermissionLevel
@@ -22,7 +22,7 @@ from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 
 
 def _checker(td: str) -> PermissionChecker:
-    return PermissionChecker(settings=PermissionSettings(), workspace_root=Path(td))
+    return PermissionChecker(settings=permission_settings_from_config({}), workspace_root=Path(td))
 
 
 def test_bypass_keeps_cc_safety_boundary_for_git_metadata_paths():
@@ -69,58 +69,35 @@ def test_bypass_allows_normal_workspace_write():
     assert decision.capability_allowed
 
 
+def _native_full_access_requirement(command):
+    from backend.permissions.native_execpolicy import NativeExecPolicyRuntime
+    return NativeExecPolicyRuntime().invoke({"operation": "command_requirement", "sources": [], "environment_sources": [],
+        "ignore_allow_prefix_rules": False, "command": ["bash", "-lc", command], "configured_shell": "bash",
+        "shell_mode": "normal", "approval_policy": "never", "prefix_rule": None,
+        "permission_profile": {"managed": False, "file_system": {"kind": "unrestricted", "full_disk_write": True}},
+        "windows_sandbox_level": "disabled", "sandbox_permissions": "use_default"})["requirement"]
+
+
 def test_bypass_distinguishes_destructive_substitution_from_normal_expansion(tmp_path: Path) -> None:
-    checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
-    tool = RunCommandTool(ArtifactStore(storage_dir=str(tmp_path)))
-    context = PermissionContext(mode="bypass")
-
     for command in ("$(rm -rf /)", "`rm -rf /`"):
-        decision = checker.evaluate(
-            "run_command",
-            {"command": command},
-            context=context,
-            tool=tool,
-        )
-        assert decision.permission_level.value == "confirm"
-        assert decision.matched_rule_source == "capability_boundary"
-
+        assert _native_full_access_requirement(command)["kind"] == "forbidden"
     for command in ("echo $(date)", 'Write-Output "$(Get-Location)"', 'printf "%s" "${PYTHONPATH}"'):
-        decision = checker.evaluate(
-            "run_command", {"command": command}, context=context, tool=tool,
-        )
-        assert decision.decision == "allow"
+        assert _native_full_access_requirement(command)["kind"] == "skip"
 
 
-def test_bypass_keeps_destructive_git_and_external_commands_at_confirmation_boundary(
-    tmp_path: Path,
-) -> None:
-    checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
-    tool = RunCommandTool(ArtifactStore(storage_dir=str(tmp_path)))
-    context = PermissionContext(mode="bypass")
-
-    for command in (
-        "git checkout .",
-        "git restore -- .",
-        "git stash clear",
-        "git commit --amend",
-        "kubectl delete pod api",
-        "terraform destroy",
-        "DROP TABLE users",
-    ):
-        decision = checker.evaluate(
-            "run_command",
-            {"command": command},
-            context=context,
-            tool=tool,
-        )
-        assert decision.permission_level is PermissionLevel.CONFIRM, command
+def test_source_full_access_does_not_add_git_sql_cloud_confirmation_keywords(tmp_path: Path) -> None:
+    # Source Never + unrestricted relies on the caller's actual permissions;
+    # it does not add MiniCode's old git/SQL/cloud keyword confirmation floor.
+    for command in ("git checkout .", "git restore -- .", "git stash clear", "git commit --amend",
+        "kubectl delete pod api", "terraform destroy", "DROP TABLE users"):
+        assert _native_full_access_requirement(command)["kind"] == "skip"
 
 
 def test_auto_approval_rechecks_capability_boundary_for_outside_path(tmp_path: Path) -> None:
     class _Runtime(SessionApprovalRuntimeMixin):
         pass
 
-    checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
+    checker = PermissionChecker(settings=permission_settings_from_config({}), workspace_root=tmp_path)
     context = PermissionContext(mode="auto", workspace_root=tmp_path)
     registry = CapabilityRegistry()
     registry.register(ReadFileTool(ArtifactStore(storage_dir=str(tmp_path / "artifacts"))))
@@ -162,7 +139,7 @@ def test_reply_attachment_paths_use_the_active_filesystem_policy(tmp_path: Path)
     allowed_file.write_text("ok", encoding="utf-8")
     denied_file.write_text("private", encoding="utf-8")
 
-    checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
+    checker = PermissionChecker(settings=permission_settings_from_config({}), workspace_root=tmp_path)
     context = PermissionContext(
         mode="auto",
         workspace_root=tmp_path,

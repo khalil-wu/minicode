@@ -20,6 +20,7 @@ from backend.tools.monitor_tool import MonitorTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.sleep_tool import SleepTool
 from backend.tools.tool_search import ToolSearchTool
+from backend.tools.toolsets import ToolsetPolicy
 
 
 def _grammar(language):
@@ -203,16 +204,18 @@ def test_tool_search_registry_and_permission_changes_refresh_activation():
         registry.register(search)
         state = AgentState(user_message="audit")
         checker = PermissionChecker(PermissionSettings())
-        context = ToolExecutionContext(permission=PermissionContext(), tool_registry=registry, permission_checker=checker, metadata={"_agent_state": state})
-        result = await search.execute({"query": "select:sleep"}, context)
-        assert json.loads(result.content)["activated"] == ["sleep"]
+        context = ToolExecutionContext(permission=PermissionContext(), tool_registry=registry, permission_checker=checker,
+            metadata={"_agent_state": state, "_toolset_policy": ToolsetPolicy(supports_search_tool=True)})
+        result = await search.execute({"query": "sleep"}, context)
+        assert [tool["name"] for namespace in result.tool_search_output for tool in namespace["tools"]] == ["sleep"]
+        assert state.loaded_deferred_tools == {"sleep"}
         context.permission = replace(context.permission, tool_deny_rules=["sleep"])
-        result = await search.execute({"query": "select:sleep"}, context)
-        assert json.loads(result.content)["matches"] == []
+        result = await search.execute({"query": "sleep"}, context)
+        assert result.tool_search_output == []
         context.permission = replace(context.permission, tool_deny_rules=[])
         registry.unregister("sleep")
-        result = await search.execute({"query": "select:sleep"}, context)
-        assert json.loads(result.content)["matches"] == []
+        result = await search.execute({"query": "sleep"}, context)
+        assert result.tool_search_output == []
     asyncio.run(run())
 
 

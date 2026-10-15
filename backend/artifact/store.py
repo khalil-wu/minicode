@@ -669,6 +669,9 @@ class ArtifactStore:
         source_conversation_id: str,
         target_conversation_id: str,
         workspace_root: str | Path | None = None,
+        *,
+        artifact_ids: set[str] | None = None,
+        source_workspace_root: str | Path | None = None,
     ) -> int:
         """Grant a cloned/forked transcript access to immutable tool artifacts."""
 
@@ -678,12 +681,17 @@ class ArtifactStore:
             return 0
         shared = 0
         for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
-            content_path = self._storage_dir / f"{meta_path.name.removesuffix(META_SIDECAR_SUFFIX)}{CONTENT_UNIT_SUFFIX}"
+            artifact_id = meta_path.name.removesuffix(META_SIDECAR_SUFFIX)
+            if artifact_ids is not None and artifact_id not in artifact_ids:
+                continue
+            content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
             with file_mutation_locks([meta_path, content_path]):
                 sidecar = _read_meta_sidecar(meta_path)
                 if sidecar is None:
                     continue
                 scopes = sidecar.owner_scopes
+                if source_workspace_root is not None and not owner_scope_matches(scopes, source, source_workspace_root):
+                    continue
                 updated_scopes = grant_owner_scope(
                     scopes,
                     source_conversation_id=source,

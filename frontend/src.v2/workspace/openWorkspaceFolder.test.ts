@@ -1,5 +1,6 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { sendChatMessage, resetSendDeduplication } from "../chat/sendChatMessage";
+import { sendChatMessage, resetPendingUserMessagesForTests } from "../chat/sendChatMessage";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { openWorkspaceFolder } from "./openWorkspaceFolder";
@@ -48,7 +49,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 describe("openWorkspaceFolder", () => {
   beforeEach(() => {
     sent.length = 0;
-    resetSendDeduplication();
+    resetPendingUserMessagesForTests();
     vi.clearAllMocks();
     runtimeMocks.isDesktop.mockReturnValue(true);
     runtimeMocks.pickWorkspaceDirectory.mockResolvedValue("C:\\Desktop\\MiniCode");

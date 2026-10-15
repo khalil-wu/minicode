@@ -247,6 +247,7 @@ class WriteFileTool(BaseTool):
                     record_file_hash(context, path, content_hash(content))
                     get_global_file_cache().invalidate(path)
                     invalidate_workspace_file_caches(
+                        changed_paths=(path,), workspace_root=workspace_root,
                         file_tree_changed=not existed or path.name == ".gitignore"
                     )
                     return previous, existed

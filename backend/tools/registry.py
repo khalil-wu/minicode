@@ -356,6 +356,8 @@ class CapabilityRegistry:
         """
         out: dict[str, dict[str, Any]] = {}
         for name, tool in self._tools.items():
+            if tool.private_model_only:
+                continue
             meta = tool.to_runtime_metadata()
             if permission_context:
                 if permission_checker:
@@ -397,15 +399,16 @@ class CapabilityRegistry:
             permission_context=permission_context,
             materialize_schema=False,
         )
+        views = [view for view in views if not self._tools[view.name].private_model_only]
         return {
             "version": self._version,
             "tools": deepcopy(
-                self.get_schemas(
+                [schema for schema in self.get_schemas(
                     permission_checker=permission_checker,
                     permission_context=permission_context,
                     toolset_policy=toolset_policy,
                     mcp_registry_version=mcp_registry_version,
-                )
+                ) if not self._tools[schema["function"]["name"]].private_model_only]
             ),
             "tool_views": [
                 self._build_tool_view_metadata(view)
@@ -603,6 +606,7 @@ class CapabilityRegistry:
             cache_key = (
                 f"{permission_context.mode}"
                 f"_{permission_context.approval_policy}"
+                f"_{tuple(sorted((permission_context.granular_approval or {}).items()))}"
                 f"_{hash(frozenset(permission_context.tool_deny_rules))}"
                 f"_{overrides_hash}"
                 f"_{active_policy.cache_key()}_{direct_fingerprint}"
@@ -657,9 +661,11 @@ class CapabilityRegistry:
                     continue
                 parameters = function.get("parameters") or {}
                 args = code_mode_parameters(parameters)
+                result_schema = nested.get("_minicode_output_schema")
+                result_type = f" -> Promise<{code_mode_parameters(result_schema)}>" if result_schema is not None else ""
                 description = str(function.get("description") or "")
                 accessor = f"tools.{name}" if name.isidentifier() else f"tools[{json.dumps(name)}]"
-                catalog.append(f"- {accessor}({args}): {description}")
+                catalog.append(f"- {accessor}({args}){result_type}: {description}")
             directory = "\n\nNested tools available through tools.name(args):\n" + "\n".join(catalog)
             directory += "\nUse ALL_TOOLS to inspect complete schemas before calling unfamiliar tools."
             for schema in schemas:
@@ -679,6 +685,7 @@ class CapabilityRegistry:
         args: dict[str, Any],
         *,
         context: ToolExecutionContext | None = None,
+        expected_policy_identity: str = "",
     ) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
@@ -686,6 +693,9 @@ class CapabilityRegistry:
                 content=f"Tool '{name}' does not exist. Available: {', '.join(self._tools.keys())}",
                 is_error=True,
             )
+        if expected_policy_identity and tool.policy_identity != expected_policy_identity:
+            return ToolResult(content="The tool identity changed while this request was pending; submit the action again.",
+                is_error=True, status="blocked", error_kind="approval_stale")
 
         validation_error = validate_tool_input(tool, args)
         if validation_error:
@@ -828,6 +838,7 @@ class CapabilityRegistry:
         }
 
     def _build_capability_summary(self, views: list[Any]) -> dict[str, Any]:
+        views = [view for view in views if not self._tools[view.name].private_model_only]
         tool_names = {str(view.name) for view in views if view.schema_available}
         exposure_counts = Counter(str(view.exposure) for view in views)
         mcp_resource_bridge = {"list_mcp_resources", "read_mcp_resource"} <= tool_names

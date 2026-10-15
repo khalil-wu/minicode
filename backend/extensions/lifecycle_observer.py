@@ -250,13 +250,7 @@ class ExtensionLifecycleObserver:
         emit = getattr(self.runner, "emit", None)
         if not callable(emit):
             return []
-        try:
-            result = await emit(dict(event))
-        except Exception as exc:
-            # Extension callbacks are isolated by ExtensionRunner.  A stale
-            # generation or a host adapter failure must not stop the turn.
-            logger.debug("Extension lifecycle event failed: %s", exc, exc_info=True)
-            return []
+        result = await emit(dict(event))
         # The native runner returns an array.  Treating an accidental string as
         # a generic Sequence would expose one-character handler results and
         # make lifecycle aggregation silently corrupt the message boundary.
@@ -457,23 +451,16 @@ class ExtensionLifecycleObserver:
         before_handler = getattr(self.runner, "emit_before_agent_start", None)
         before_result: Any = None
         if callable(before_handler):
-            try:
-                before_result = await before_handler(
-                    str(self.user_message or ""),
-                    _clone(list(self.images)) if self.images else None,
-                    str(metadata.get("system_prompt") or ""),
-                    (
-                        dict(metadata.get("system_prompt_options"))
-                        if isinstance(metadata.get("system_prompt_options"), Mapping)
-                        else {}
-                    ),
-                )
-            except Exception as exc:
-                logger.debug(
-                    "before_agent_start aggregation failed: %s",
-                    exc,
-                    exc_info=True,
-                )
+            before_result = await before_handler(
+                str(self.user_message or ""),
+                _clone(list(self.images)) if self.images else None,
+                str(metadata.get("system_prompt") or ""),
+                (
+                    dict(metadata.get("system_prompt_options"))
+                    if isinstance(metadata.get("system_prompt_options"), Mapping)
+                    else {}
+                ),
+            )
         else:
             results = await self._emit(before_agent_start)
             for value in results:

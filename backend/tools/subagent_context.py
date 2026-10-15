@@ -239,7 +239,7 @@ AGENT_HARD_DENIED_TOOLS = frozenset(
         "team_list",
         "team_delete",
         "task_output",
-        "ask_user",
+        "request_user_input",
         "update_plan",
         "enter_plan_mode",
         "exit_plan_mode",
@@ -251,7 +251,7 @@ AGENT_TASK_COORDINATION_TOOLS = frozenset(
     {"task_create", "task_get", "task_list", "task_update"}
 )
 AGENT_MESSAGE_TOOLS = frozenset({"send_message", "message_list"})
-AGENT_LIFECYCLE_TOOLS = frozenset({"task_status", "task_stop"})
+AGENT_LIFECYCLE_TOOLS = frozenset({"task_status", "task_stop", "followup_task"})
 AGENT_SCHEDULE_TOOLS = frozenset(
     {"schedule_cron", "schedule_cron_list", "schedule_cron_delete"}
 )
@@ -362,17 +362,14 @@ def execution_profile_for_background_resume(
 ) -> AgentExecutionProfile:
     """Move a durable child into background delivery without widening it.
 
-    A completed foreground child resumes through the async controller and must
-    receive the narrow positive background surface. A delegating child
-    already owns explicit delegation/lifecycle capabilities, so retain those
-    independently modelled capabilities while changing only its delivery.
-    Persistent teammates keep their persistent ownership unchanged.
+    The async controller changes delivery, not the capabilities that were
+    explicitly granted to this child. Restore its communication, task and
+    lifecycle profile as saved. A child originally created with a constrained
+    background profile and a persistent teammate keep that original profile.
     """
 
     if profile.delivery in {"background", "persistent"}:
         return profile
-    if profile.delegation == "none" and not profile.agent_lifecycle:
-        return build_agent_execution_profile(background=True)
     return replace(profile, delivery="background")
 
 
@@ -593,7 +590,10 @@ def build_subagent_permission_context(
             parent_permission.mode,
         )
 
-    forced_read_only = bool(read_only or agent_type in {"explore", "plan"})
+    from backend.agents.source_roles import is_legacy_read_only_role
+
+    captured_config = parent_context.model_execution.config if parent_context and parent_context.model_execution is not None else None
+    forced_read_only = bool(read_only or is_legacy_read_only_role(agent_type, parent_context.workspace_root if parent_context else None, config=captured_config))
     # Roles and read-only task contracts restrict tool execution, not the
     # parent's approval/network profile. Only an explicit required-plan gate
     # or a requested narrower permission mode replaces that live snapshot.
@@ -628,7 +628,7 @@ def build_subagent_permission_context(
     from backend.config_requirements import permission_mode_requirements
 
     mode_approval_policy, mode_sandbox = permission_mode_requirements(mode)
-    approval_policy = parent_permission.approval_policy if mode == parent_permission.mode else mode_approval_policy
+    approval_policy = parent_permission.approval_policy if mode == parent_permission.mode or (parent_permission.approval_policy == "granular" and mode != "bypass") else mode_approval_policy
     sandbox_mode = (
         "read-only" if mode == "plan" or parent_permission.sandbox_mode == "read-only"
         else mode_sandbox if mode != parent_permission.mode
@@ -730,10 +730,16 @@ def build_subagent_prompt(
     *,
     get_custom_agent: Callable[[str], Any | None] | None = None,
 ) -> str:
-    if agent_type not in BUILTIN_AGENT_TYPES and get_custom_agent is not None:
+    from backend.agents.source_roles import SOURCE_ROLE_NAMES, SourceAgentRole
+
+    if get_custom_agent is not None:
         custom = get_custom_agent(agent_type)
+        if isinstance(custom, SourceAgentRole):
+            return prompt
         if custom and getattr(custom, "prompt", ""):
             return f"{custom.prompt}\n\nTask:\n{prompt}".strip()
+    if agent_type in SOURCE_ROLE_NAMES:
+        return prompt
     if agent_type == "explore":
         # cc exploreAgent.ts system prompt: read-only specialist with
         # explicit prohibitions and parallel-search guidance.

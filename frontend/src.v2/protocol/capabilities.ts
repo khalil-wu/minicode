@@ -1,5 +1,15 @@
 export type CapabilitySource = "doctor" | "status" | "runtime" | "unknown";
 
+export type ApprovalPolicy = "on-request" | "untrusted" | "never" | {
+  granular: {
+    sandbox_approval: boolean;
+    rules: boolean;
+    skill_approval: boolean;
+    request_permissions: boolean;
+    mcp_elicitations: boolean;
+  };
+};
+
 export interface DoctorPayload {
   backend?: Record<string, unknown>;
   llm?: Record<string, unknown>;
@@ -31,6 +41,9 @@ export interface AgentCapabilitiesPayload {
 export interface AgentProviderCapabilities {
   provider?: unknown;
   model?: unknown;
+  model_selection_mode?: "default" | "model";
+  default_model_selection?: { provider: string; model: string; reasoning_effort: string; conversation_id: string; working_directory: string } | null;
+  available_model_options?: { model: string; reasoning_effort_levels: string[]; default_reasoning_effort: string }[];
   wire_api?: unknown;
   provider_id?: unknown;
   base_url?: unknown;
@@ -73,8 +86,12 @@ export interface AgentCapabilityFeatureFlag {
 
 export interface AgentCapabilityPermission {
   mode?: string;
+  available_modes?: ("confirm" | "auto" | "plan" | "bypass")[];
   profile?: string;
   source?: string;
+  approval_policy?: ApprovalPolicy;
+  sandbox_mode?: string;
+  managed_requirements_source?: string | null;
   workspace_scope?: string;
   sandbox_status?: {
     os?: string;

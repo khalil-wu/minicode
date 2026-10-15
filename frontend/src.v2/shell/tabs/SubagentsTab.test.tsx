@@ -72,7 +72,8 @@ describe("SubagentsTab", () => {
     expect(screen.getByText("6.1 Sol · high")).toBeTruthy();
     expect(screen.queryByText("parent-only-model")).toBeNull();
     expect(useAppStore.getState().subagents[0]).toMatchObject({ id: "historical-child", status: "done",
-      teammateName: "Historical review", agentPath: "/root/historical_review", model: "gpt-6.1-sol", provider: "child-provider" });
+      displayName: "Historical review", agentPath: "/root/historical_review", model: "gpt-6.1-sol", provider: "child-provider" });
+    expect(useAppStore.getState().subagents[0].teammateName).toBeUndefined();
     expect(useAppStore.getState().subagents[0].objective).toBeUndefined();
     expect(useAppStore.getState().subagents[0].durationMs).toBeUndefined();
     expect(useAppStore.getState().subagents[0].lastEventAt).toBeUndefined();
@@ -232,8 +233,9 @@ describe("SubagentsTab", () => {
 
     render(<SubagentsTab />);
 
-    expect(screen.getByText("暂无子智能体")).toBeTruthy();
-    expect(screen.getByText("MiniCode 拆分任务后，委派工作会显示在这里。")).toBeTruthy();
+    expect(screen.getByText("已开启 · 0")).toBeTruthy();
+    expect(screen.getByText("没有已开启的子代理")).toBeTruthy();
+    expect(screen.queryByText("完成 · 0")).toBeNull();
   });
 
   it("groups concise task rows by user-facing state", () => {
@@ -242,7 +244,7 @@ describe("SubagentsTab", () => {
     expect(screen.getByRole("region", { name: "进行中，1 项" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "已完成，1 项" })).toBeTruthy();
     expect(screen.getByText("验证测试结果")).toBeTruthy();
-    expect(screen.getByText("正在检查测试结果")).toBeTruthy();
+    expect(screen.queryByText("正在检查测试结果")).toBeNull();
     expect(screen.getByText("定位界面问题")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "结论" })).toBeNull();
     expect(screen.getByText("已开启 · 1")).toBeTruthy();
@@ -270,7 +272,7 @@ describe("SubagentsTab", () => {
 
     expect(screen.getByRole("region", { name: "子智能体任务详情：定位界面问题" })).toBeTruthy();
     await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
-    const result = screen.getByText("保留结果").closest("details")!;
+    const result = screen.getByLabelText("保留结果");
     expect(within(result).getByText("侧栏应只展示任务、状态和结果。")).toBeTruthy();
     expect(result.closest(".subagents-transcript")).toBeNull();
     expect(screen.getByText("此任务保留了结果，暂无可回放的工作记录。")).toBeTruthy();
@@ -304,22 +306,14 @@ describe("SubagentsTab", () => {
     render(<SubagentsTab />);
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查实现质量" }));
 
-    expect(sendClientCommandMock).toHaveBeenCalledWith({
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith({
       type: "subagent.status",
       subagent_id: "subagent-result",
       include_result: true,
       conversation_id: "conversation-1",
       workspace_root: "C:\\workspace",
-    });
-    await waitFor(() => expect(screen.getByText("获取结果")).toBeTruthy());
-    fireEvent.click(screen.getByText("获取结果"));
-    expect(sendClientCommandMock).toHaveBeenCalledWith({
-      type: "subagent.status",
-      subagent_id: "subagent-result",
-      include_result: true,
-      conversation_id: "conversation-1",
-      workspace_root: "C:\\workspace",
-    });
+    }));
+    expect(screen.queryByRole("button", { name: "获取结果" })).toBeNull();
   });
 
   it("keeps runtime counters and result envelopes out of the transcript", async () => {
@@ -346,7 +340,7 @@ describe("SubagentsTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：调研石家庄天气" }));
 
     await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
-    expect(within(screen.getByText("保留结果").closest("details")!).getByText("石家庄今天晴，最高 31°C")).toBeTruthy();
+    expect(within(screen.getByLabelText("保留结果")).getByText("石家庄今天晴，最高 31°C")).toBeTruthy();
     expect(container.textContent).not.toMatch(/call_a7bb|46\.1s|iteration|tool call/i);
   });
 
@@ -420,8 +414,8 @@ describe("SubagentsTab", () => {
     render(<SubagentsTab />);
 
     expect(await screen.findByText("Terminal subagent subagent-gap has no durable transcript.")).toBeTruthy();
-    expect(within(screen.getByText("保留结果").closest("details")!).getByText("This must not become a fake final answer.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(within(screen.getByLabelText("保留结果")).getByText("This must not become a fake final answer.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
   });
 
   it.each([false, true])("keeps the durable startup error visible with prior transcript=%s", async (hasHistory) => {
@@ -506,7 +500,6 @@ describe("SubagentsTab", () => {
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "结论" })).toBeTruthy());
     expect(screen.queryByText("正在读取关键文件")).toBeNull();
-    expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     expect(screen.getByText("正在读取关键文件")).toBeTruthy();
     expect(container.querySelector(".user-cell-wrap")).toBeNull();
@@ -634,19 +627,19 @@ describe("SubagentsTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     container.querySelectorAll<HTMLButtonElement>("button.agent-loop-timeline-group-title[aria-expanded=\"false\"]").forEach((button) => fireEvent.click(button));
 
-    const readCell = screen.getAllByText("读取文件", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
-    const searchCell = screen.getAllByText("搜索", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const readCell = screen.getAllByText("已读取", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const searchCell = screen.getAllByText("已搜索", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
     expect(readCell).toBeTruthy();
     expect(searchCell).toBeTruthy();
     fireEvent.click(within(readCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));
     fireEvent.click(within(searchCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));
-    expect(within(readCell as HTMLElement).getAllByText("src/app.ts").length).toBeGreaterThan(0);
+    expect(within(readCell as HTMLElement).getByTitle("src/app.ts")).toBeTruthy();
     expect(within(searchCell as HTMLElement).getByText("src/app.ts:1")).toBeTruthy();
 
     expect(container.querySelector(".exec-cell")?.getAttribute("data-status")).toBe("success");
     expect(container.querySelector(".exec-cell")?.textContent).toContain("npm test");
     expect(screen.getByText("npm test")).toBeTruthy();
-    expect(screen.getByText("编辑文件", { exact: true })).toBeTruthy();
+    expect(screen.getByText("已编辑", { exact: true, selector: ".activity-cell-name" })).toBeTruthy();
     expect(screen.getByText("修复完成")).toBeTruthy();
     expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
 
@@ -657,7 +650,36 @@ describe("SubagentsTab", () => {
     expect(replyArea.compareDocumentPosition(diffArea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(container.querySelectorAll(".chat-turn")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "查看变更" })).toBeNull();
+    expect(screen.getByRole("button", { name: "查看变更" })).toBeTruthy();
+  });
+
+  it.each([
+    ["C:\\workspace", true], ["C:\\workspace\\.minicode\\worktrees\\child", false], [undefined, false],
+  ] as const)("uses actual child workspace %s for file review and only enables same-workspace revert", async (workspaceRoot, canRevert) => {
+    sendClientCommandAwaitResultMock.mockResolvedValue({ type: "command.result", command: "subagent.transcript", level: "success", message: "", data: {
+      ...(workspaceRoot ? { workspace_root: workspaceRoot } : {}), seq: 3,
+      messages: [{ id: "child-workspace-turn", role: "assistant", content: "已修正布局", timestamp: 1,
+        terminal_status: "completed", completed_at: 2000, is_streaming: false, blocks: [
+          { type: "tool_call", record: { id: "workspace-edit", name: "edit_file", args: { path: "src/layout.ts" },
+            status: "success", result_kind: "edit", activity_kind: "fileChange", started_at: 1, finished_at: 2,
+            diff: { plus: 1, minus: 1, files: [{ path: "src/layout.ts", plus: 1, minus: 1, patch: "@@ -1 +1 @@\n-old\n+new" }] } } },
+          { type: "text", item_id: "workspace-answer", content: "已修正布局", source: "model_final", status: "completed" },
+        ] }],
+    } });
+    useAppStore.setState({ focusedSubagentId: "child-workspace", subagents: [{ id: "child-workspace", role: "build", status: "done", displayName: "Layout" }] });
+    render(<SubagentsTab />);
+    expect(await screen.findByRole("button", { name: "查看变更" })).toBeTruthy();
+    expect(Boolean(screen.queryByRole("button", { name: "撤销" }))).toBe(canRevert);
+    expect(useAppStore.getState().subagents[0].workspaceRoot).toBe(workspaceRoot);
+    fireEvent.click(screen.getByRole("button", { name: "查看变更" }));
+    expect(useAppStore.getState().diffReview).toMatchObject({
+      conversationId: "conversation-1", workspaceRoot: workspaceRoot ?? "", mode: "view",
+    });
+    expect(useAppStore.getState().diffReview?.diff).toContain("+new");
+    if (!workspaceRoot) {
+      expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "file.read" }));
+      expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "diff.git_revert_patch" }));
+    }
   });
 
   it("loads the durable transcript once and does not poll on ordinary progress", async () => {
@@ -873,15 +895,30 @@ describe("SubagentsTab", () => {
 
     render(<SubagentsTab />);
 
-    expect(screen.getByRole("region", { name: "需要处理，2 项" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "已完成，1 项" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: /需要处理/ })).toBeNull();
     expect(screen.getByText("已保留结果")).toBeTruthy();
-    expect(screen.getByText("已保留可用结果")).toBeTruthy();
-    expect(screen.getByText("已停止")).toBeTruthy();
-    expect(screen.getByText("已由你停止")).toBeTruthy();
+    expect(screen.queryByText("已保留可用结果")).toBeNull();
+    expect(screen.queryByText("已停止")).toBeNull();
+    expect(useAppStore.getState().subagents).toHaveLength(2);
+    expect(screen.queryByText("已由你停止")).toBeNull();
     expect(screen.queryByText(/deadline|cancelled|partial/i)).toBeNull();
   });
 
-  it("keeps a long completed history compact", () => {
+  it("excludes failed and interrupted agents from the overview while retaining their original detail records", async () => {
+    useAppStore.setState({ subagents: [{ id: "failed-child", role: "reviewer", status: "error", displayName: "Failed child", resultError: "actual provider response" },
+      { id: "cancelled-child", role: "reviewer", status: "cancelled", displayName: "Cancelled child" }] });
+    render(<SubagentsTab />);
+    expect(screen.queryByRole("button", { name: "打开子智能体任务：Failed child" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开子智能体任务：Cancelled child" })).toBeNull();
+    expect(useAppStore.getState().subagents).toHaveLength(2);
+    act(() => useAppStore.getState().setFocusedSubagentId("failed-child"));
+    expect(screen.getByRole("region", { name: "子智能体任务详情：Failed child" })).toBeTruthy();
+    expect(screen.getByText("actual provider response")).toBeTruthy();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+  });
+
+  it("reveals every real completed task with the current Codex ten-row disclosure", () => {
     const completed: SubagentState[] = Array.from({ length: 14 }, (_, index) => ({
       id: `subagent-completed-${index}`,
       role: "reviewer",
@@ -892,9 +929,51 @@ describe("SubagentsTab", () => {
 
     render(<SubagentsTab />);
 
-    expect(screen.queryByText("已完成任务 14")).toBeNull();
-    fireEvent.click(screen.getByText("再显示 4 项"));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(10);
+    fireEvent.click(screen.getByRole("button", { name: "再显示 4 个已完成子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(14);
     expect(screen.getByText("已完成任务 14")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起已完成子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(10);
+    expect(useAppStore.getState().subagents).toHaveLength(14);
+  });
+
+  it("shows the real objective and elapsed clock while keeping recency for finished work", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    useAppStore.setState({ subagents: [
+      { id: "running-clock", role: "reviewer", status: "running", displayName: "Layout audit",
+        objective: "**检查**页面的布局与真实交互", startedAt: 98_100, lastProgressAt: 99_900 },
+      { id: "waiting-input", role: "explore", status: "blocked", displayName: "Waiting audit",
+        objective: "等待配置结果", startedAt: 98_100, needsInput: true },
+      { id: "finished-clock", role: "reviewer", status: "done", displayName: "Completed audit", completedAt: 99_900 },
+    ] });
+    try {
+      render(<SubagentsTab />);
+      const running = screen.getByRole("button", { name: "打开子智能体任务：Layout audit" });
+      expect(within(running).getByText("检查页面的布局与真实交互")).toBeTruthy();
+      expect(within(running).getByText("1秒")).toBeTruthy();
+      expect(within(running).queryByText("刚刚")).toBeNull();
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Completed audit" })).getByText("刚刚")).toBeTruthy();
+      expect(screen.getByRole("region", { name: "进行中，2 项" })).toBeTruthy();
+      expect(screen.queryByRole("region", { name: /需要处理/ })).toBeNull();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(within(running).getByText("3秒")).toBeTruthy();
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it("reveals all active agents and keeps each conversation's disclosure choice", () => {
+    useAppStore.setState({ subagents: Array.from({ length: 6 }, (_, index) => ({
+      id: `active-${index}`, role: "reviewer", status: "running", displayName: `Review ${index}`, objective: `检查区域 ${index}`,
+    })) });
+    render(<SubagentsTab />);
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: "再显示 2 个进行中子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(6);
+    act(() => useAppStore.setState({ conversationId: "another-owner" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(4);
+    act(() => useAppStore.setState({ conversationId: "conversation-1" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(6);
   });
 
   it("keeps internal message rows out of the ordinary panel", () => {
@@ -910,7 +989,7 @@ describe("SubagentsTab", () => {
     render(<SubagentsTab />);
 
     expect(screen.queryByText(/Message from run-1/)).toBeNull();
-    expect(screen.getByText("暂无子智能体")).toBeTruthy();
+    expect(screen.getByText("没有已开启的子代理")).toBeTruthy();
   });
 
 });

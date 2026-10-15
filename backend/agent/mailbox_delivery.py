@@ -212,19 +212,15 @@ async def _handle_parent_plan_approval_requests(
         raw_surfaced = metadata.get("_surfaced_plan_request_ids")
         if isinstance(raw_surfaced, list):
             surfaced_ids = [str(item) for item in raw_surfaced if str(item).strip()]
-    try:
-        messages = runtime.list_swarm_messages(
-            # The leader is addressed through Claude's stable virtual mailbox;
-            # ``parent_run_id`` is an ownership fence, never the recipient id.
-            participant_id="parent",
-            conversation_id=conversation_id,
-            since_seq=0,
-            limit=1000,
-            message_kind="plan_approval_request",
-        )
-    except Exception as exc:
-        logger.warning("parent plan approval mailbox read failed: %s", exc)
-        return 0
+    messages = runtime.list_swarm_messages(
+        # The leader is addressed through Claude's stable virtual mailbox;
+        # ``parent_run_id`` is an ownership fence, never the recipient id.
+        participant_id="parent",
+        conversation_id=conversation_id,
+        since_seq=0,
+        limit=1000,
+        message_kind="plan_approval_request",
+    )
 
     handled = 0
     for message in messages:
@@ -269,29 +265,24 @@ async def _handle_parent_plan_approval_requests(
             # it unanswered; the requester's deadline converts silence into
             # an explicit rejection on its own.
             if request_id not in surfaced_ids:
-                surfaced_ids.append(request_id)
-                if isinstance(metadata, dict):
-                    metadata["_surfaced_plan_request_ids"] = surfaced_ids[-256:]
                 if emit_event is not None:
-                    try:
-                        await emit_event(
-                            "subagent.plan_approval_requested",
-                            {
-                                "conversation_id": conversation_id,
-                                "subagent_id": sender_id,
-                                "request_id": request_id,
-                                "teammate_name": str(
-                                    getattr(sender, "teammate_name", "") or ""
-                                ),
-                                "team_name": str(getattr(message, "team_name", "") or ""),
-                                "plan_file_path": str(request.get("plan_file_path") or ""),
-                                "plan_content": str(request.get("plan_content") or ""),
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "plan approval surface event failed: %s", exc
-                        )
+                    await emit_event(
+                        "subagent.plan_approval_requested",
+                        {
+                            "conversation_id": conversation_id,
+                            "subagent_id": sender_id,
+                            "request_id": request_id,
+                            "teammate_name": str(
+                                getattr(sender, "teammate_name", "") or ""
+                            ),
+                            "team_name": str(getattr(message, "team_name", "") or ""),
+                            "plan_file_path": str(request.get("plan_file_path") or ""),
+                            "plan_content": str(request.get("plan_content") or ""),
+                        },
+                    )
+                    surfaced_ids.append(request_id)
+                    if isinstance(metadata, dict):
+                        metadata["_surfaced_plan_request_ids"] = surfaced_ids[-256:]
                 else:
                     logger.warning(
                         "Teammate plan request %s from %s awaits user review; no client channel available.",

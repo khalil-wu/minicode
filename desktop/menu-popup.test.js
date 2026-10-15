@@ -59,7 +59,7 @@ test("menu IPC accepts only its enum from the trusted main frame", async () => {
   const webContents = { mainFrame, getURL: () => mainFrame.url };
   const window = { webContents, isDestroyed: () => false };
   const calls = [];
-  moduleBox.exports.init({ getMainWindow: () => window, popupApplicationMenu: (key) => { calls.push(key); return Promise.resolve(); } });
+  moduleBox.exports.init({ getWindowForSender: (sender) => sender === window.webContents ? window : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), popupApplicationMenu: (key) => { calls.push(key); return Promise.resolve(); } });
   moduleBox.exports.registerIpcHandlers();
   const popup = handlers.get("minicode:menu:popup");
   const owned = { sender: webContents, senderFrame: mainFrame };

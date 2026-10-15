@@ -1,0 +1,8 @@
+[
+  "pdf", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "ico", "webp",
+  "mov", "mp4", "m4v", "avi", "mkv", "webm", "mpg", "mpeg",
+  "mp3", "wav", "m4a", "aac", "aiff", "aif", "flac", "caf",
+  "zip", "tar", "gz", "tgz", "bz2", "tbz", "xz", "txz", "7z", "rar",
+  "sketch", "fig", "psd", "ai", "indd", "xd",
+  "doc", "docx", "xls", "xlsm", "xlsx", "csv", "ppt", "pptx", "key", "pages", "numbers", "html"
+]

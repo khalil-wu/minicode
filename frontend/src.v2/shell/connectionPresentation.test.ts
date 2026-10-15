@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { getConnectionPresentation } from "./connectionPresentation";
+import { getConnectionPresentation as connectionPresentation } from "./connectionPresentation";
+import { translate } from "../i18n";
+const getConnectionPresentation = (input: Parameters<typeof connectionPresentation>[0]) => connectionPresentation(input, (key, values) => translate("zh-CN", key, values));
 
 describe("getConnectionPresentation", () => {
   it("distinguishes healthy, preview, connecting, and unavailable states", () => {

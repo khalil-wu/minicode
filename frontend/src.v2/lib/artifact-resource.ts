@@ -3,6 +3,7 @@ import {
   attachmentRawResourceUrlWithToken,
   workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
+import { conversationBrowserRawUrl } from "../protocol/conversation-browser";
 
 /** Sources whose bytes are protected by the session/conversation owner scope. */
 export type ScopedArtifactSource = "artifact" | "attachment";
@@ -11,7 +12,7 @@ export interface ArtifactResourceInput {
   artifactId?: string;
   conversationId?: string;
   sessionId?: string;
-  source?: ScopedArtifactSource | "workspace" | "local";
+  source?: ScopedArtifactSource | "workspace" | "browser" | "local";
   originalUrl?: string;
   isConnected: boolean;
 }
@@ -62,6 +63,12 @@ export const artifactResourceUrl = ({
   if (source === "workspace") {
     const resource = new URL(originalUrl!);
     return workspaceRawResourceUrlWithToken(resource.searchParams.get("path")!, resource.searchParams.get("workspace_root")!);
+  }
+  if (source === "browser") {
+    if (!isConnected) return "";
+    const resource = new URL(originalUrl!);
+    return conversationBrowserRawUrl({ conversationId: resource.searchParams.get("conversation_id")!,
+      executionCwd: resource.searchParams.get("execution_cwd")! }, resource.searchParams.get("path")!);
   }
 
   const id = String(artifactId || "").trim();

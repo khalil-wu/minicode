@@ -91,6 +91,16 @@ class ToolResult:
     # Audio stays binary until selected for playback; the shared result
     # boundary persists it and gives the model an explicit artifact reference.
     audios: list[dict[str, str]] = field(default_factory=list, repr=False)
+    # MCP's native public CallToolResult, independent of display summaries,
+    # truncation and artifact promotion. Top-level _meta stays client-private.
+    mcp_result: dict[str, Any] | None = field(default=None, repr=False)
+    tool_search_output: list[dict[str, Any]] | None = field(default=None, repr=False)
+    # Ordered Code Mode body, budgeted once by its output presenter. The UI
+    # receipt and complete runtime output are independent projections.
+    code_mode_output: list[dict[str, Any]] | None = field(default=None, repr=False)
+    # History/Notes service already applies the issuing model's budget before
+    # encryption. Preserve its native body independently of local log text.
+    history_notes_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.
@@ -145,7 +155,6 @@ def execution_exception_result(
         is_error=True,
         status="failed",
         error_kind="execution_error",
-        user_summary="工具执行失败。",
         developer_detail=str(exc),
         recoverable=True,
         projection="error",
@@ -456,6 +465,12 @@ class ToolSchema:
     # Optional native text format plus the canonical argument receiving it.
     # Kept local until a provider selects its supported wire representation.
     freeform: dict[str, Any] | None = None
+    # Native Code Mode result declarations. This is local runtime metadata,
+    # not an unsupported OpenAI function-schema extension.
+    output_schema: dict[str, Any] | None = None
+    namespace: str = ""
+    namespace_description: str = ""
+    namespace_tool_name: str = ""
 
     @staticmethod
     def _supports_openai_strict(schema: Any) -> bool:
@@ -508,6 +523,14 @@ class ToolSchema:
             tool["function"]["strict"] = True
         if self.freeform is not None:
             tool["_minicode_freeform"] = self.freeform
+        if self.output_schema is not None:
+            tool["_minicode_output_schema"] = self.output_schema
+        if self.namespace:
+            tool["_minicode_namespace"] = {
+                "name": self.namespace,
+                "description": self.namespace_description,
+                "tool_name": self.namespace_tool_name,
+            }
         return tool
 
     def to_summary(self) -> str:
@@ -522,6 +545,10 @@ class ToolSchema:
             parameters=self.parameters,
             strict=self.strict,
             freeform=self.freeform,
+            output_schema=self.output_schema,
+            namespace=self.namespace,
+            namespace_description=self.namespace_description,
+            namespace_tool_name=self.namespace_tool_name,
         )
 
 
@@ -530,9 +557,9 @@ class BaseTool(ABC):
 
     name: str
     description: str
-    # External tools keep raw and historical model identities for policy
-    # matching when the current model-facing name is sanitized or shortened.
+    # Grant-safe aliases are separate from historical restriction aliases.
     policy_aliases: tuple[str, ...] = ()
+    policy_deny_aliases: tuple[str, ...] = ()
     permission: PermissionLevel = PermissionLevel.AUTO
     read_only: bool = False
     orchestrates_tools: bool = False
@@ -573,6 +600,7 @@ class BaseTool(ABC):
     activity_kind: str | None = None
     display_label: str | None = None
     projection_visibility: str = "timeline"
+    private_model_only: bool = False
     # Max characters of result content kept inline before the global truncation
     # backstop fires. Tools that already self-bound and store overflow as an
     # artifact (read_file, web_fetch, run_command) set this to None to skip the
@@ -660,6 +688,7 @@ class BaseTool(ABC):
         permission = self.permission
         permission_value = permission.value if isinstance(permission, PermissionLevel) else PermissionLevel.AUTO.value
         metadata = {
+            "policy_identity": self.policy_identity,
             "permission": permission_value,
             "read_only": self.read_only,
             "destructive": self.destructive,
@@ -687,6 +716,7 @@ class BaseTool(ABC):
             "activity_kind": self.activity_kind,
             "display_label": self.display_label,
             "visibility": self.projection_visibility,
+            "private_model_only": self.private_model_only,
         }
         return {key: value for key, value in metadata.items() if value}
 
@@ -845,7 +875,6 @@ class BaseTool(ABC):
             content=f"Error: {detail}",
             is_error=True,
             error_kind="execution_error",
-            user_summary="工具执行失败。",
             developer_detail=detail,
             recoverable=True,
             projection="error",

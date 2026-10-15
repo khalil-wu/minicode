@@ -14,7 +14,8 @@ from backend.tools.write_file import WriteFileTool
 
 @pytest.mark.parametrize("source", ["content_rule", "session_override", "static_policy"])
 @pytest.mark.parametrize("approval_policy,expected", [("on-request", "ask"), ("never", "deny")])
-def test_plan_read_preserves_explicit_approval_rules(tmp_path, source, approval_policy, expected):
+@pytest.mark.parametrize("requirements_source", ["", "managed/requirements.toml"])
+def test_plan_read_preserves_explicit_approval_rules(tmp_path, source, approval_policy, expected, requirements_source):
     settings = PermissionSettings()
     overrides = {}
     if source == "content_rule":
@@ -27,9 +28,13 @@ def test_plan_read_preserves_explicit_approval_rules(tmp_path, source, approval_
     tool = ReadFileTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
     decision = checker.evaluate(tool.name, {"file_path": "note.txt"}, tool=tool,
         context=PermissionContext(mode="plan", workspace_root=tmp_path,
-            session_overrides=overrides, approval_policy=approval_policy))
+            session_overrides=overrides, approval_policy=approval_policy, requirements_source=requirements_source))
     assert decision.decision == expected
-    assert decision.matched_rule_source == (source if expected == "ask" else "managed_requirements")
+    assert decision.matched_rule_source == (source if expected == "ask" else "managed_requirements" if requirements_source else "approval_policy")
+    if requirements_source:
+        assert decision.scope["requirements_source"] == requirements_source
+    else:
+        assert "requirements_source" not in decision.scope
 
 
 def test_plan_keeps_read_defaults_and_exit_confirmation(tmp_path):

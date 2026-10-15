@@ -335,13 +335,24 @@ def test_git_environment_selectors_cannot_replace_the_selected_private_repositor
         # behavior on two generated repositories; it never writes either repo.
         with monkeypatch.context() as prior:
             prior.setattr(git_support, "_is_git_repository_env", lambda name: False)
+            before_raw = await git_support._run_git(
+                ["git", "status", "--porcelain=v1", "--branch", "-z"],
+                root=selected, cwd=selected, context=context, sandbox_policy=policy,
+            )
             before = await registry.execute("git_status", {}, context=context)
         after = await registry.execute("git_status", {}, context=context)
-        assert "foreign.txt" in before.content and "selected.txt" not in before.content
+        # The raw launcher reproduces the environment selector redirect, while
+        # the independent public workspace boundary now hides that foreign name.
+        assert before_raw.returncode == 0
+        before_raw_text = before_raw.stdout.decode("utf-8")
+        assert "foreign.txt" in before_raw_text and "selected.txt" not in before_raw_text
+        assert "foreign.txt" not in before.content and "selected.txt" not in before.content
+        assert not after.is_error, after.content
         assert "selected.txt" in after.content and "foreign.txt" not in after.content
         assert context.sandbox_policy is policy
         output = Path(os.environ["MINICODE_STATE_ROOT"]).parent / f"selector-{source}-{'mixed' if mixed_case else 'upper'}.json"
-        output.write_text(json.dumps({"source": source, "mixed_case": mixed_case, "control_filter_off": before.content, "after": after.content,
+        output.write_text(json.dumps({"source": source, "mixed_case": mixed_case, "control_filter_off_raw": before_raw_text,
+            "control_filter_off_public": before.content, "after": after.content,
             "selected_repository": str(selected), "foreign_repository": str(foreign), "writes_by_tool": 0}, indent=2), encoding="utf-8")
     asyncio.run(run())
 

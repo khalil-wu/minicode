@@ -143,6 +143,9 @@ async def run_owned_rest_chat(
     query_claim: ConversationQueryClaim,
     run_context: RunContext,
     conversation_snapshot: dict[str, Any] | None = None,
+    automation_kind: str | None = None,
+    notification_policy: str | None = None,
+    turn_trigger: str | None = None,
 ) -> dict[str, Any]:
     if conversation_id:
         active_claim = conversation_query_guards().active_claim(conversation_id)
@@ -166,9 +169,25 @@ async def run_owned_rest_chat(
             "iterations": 0,
             "tool_calls": [],
         }
+    owner = None
+    if conversation_id:
+        from backend.conversations.repository import ConversationRepository
+
+        repository = ConversationRepository()
+        owner = repository.get_conversation(conversation_id)
+        if owner is not None and workspace_root is None:
+            from pathlib import Path
+
+            owner = repository.bind_execution_cwd(owner.id, owner.execution_cwd or str(Path.cwd()))
+            workspace_root = Path(owner.execution_cwd)
     config = load_config(cwd=workspace_root)
 
     artifact_store = ArtifactStore()
+    if owner is not None and not owner.workspace_root and not owner.projectless_output_dir:
+        from backend.services.tool_registry_factory import get_attachment_store
+
+        get_attachment_store().share_for_conversation(owner.id, owner.id, owner.execution_cwd, source_workspace_root="")
+        artifact_store.share_for_conversation(owner.id, owner.id, owner.execution_cwd, source_workspace_root="")
     mcp_manager = getattr(bootstrap, "mcp_manager", None)
     ensure_mcp_manager = getattr(bootstrap, "ensure_mcp_manager", None)
     if callable(ensure_mcp_manager):
@@ -235,6 +254,8 @@ async def run_owned_rest_chat(
     run_context.cost_session_id = session_id
     run_context.requires_explicit_workspace = bool(workspace_root)
     run_context.connected_mcp_servers = tuple(connected_mcp_servers)
+    from backend.agent.turn_input import user_input_origin_from_trigger
+
     runtime = AgentLoopSessionContext(
         permission_context=(
             run_context.permission_context_provider()
@@ -255,6 +276,14 @@ async def run_owned_rest_chat(
                 f"assistant_schedule_{run_id}" if run_id else f"assistant_rest_{journal_turn_id}"
             ),
             "user_message_id": f"schedule_{run_id}" if run_id else "",
+            "automation_kind": automation_kind,
+            "notification_policy": notification_policy,
+            "input_origin": user_input_origin_from_trigger(turn_trigger),
+            **({"_source_responses_metadata": {"turn_trigger": turn_trigger}} if turn_trigger is not None else {}),
+            **({"projectless_context": {
+                "cwd": str(workspace_root), "output_directory": owner.projectless_output_dir,
+                "browser_root": owner.projectless_browser_root,
+            }} if owner is not None and not owner.workspace_root and owner.projectless_output_dir else {}),
         },
         run_context=run_context,
     )
@@ -368,6 +397,7 @@ def reserve_attachment_upload_context(
                 session.active_conversation_id = conversation.id
 
         fixed_conversation_id = conversation.id
+        conversation = session.session_lifecycle.bind_execution_for_operation(conversation)
         owner_workspace_root = session.session_lifecycle.workspace_root_for_conversation(conversation)
         if workspace_root and canonical_workspace_root(workspace_root) != canonical_workspace_root(owner_workspace_root):
             raise ChatApiServiceError(409, "The target conversation belongs to another workspace.")

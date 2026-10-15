@@ -388,9 +388,14 @@ def test_ownerless_or_malformed_attachment_metadata_fails_closed_for_scoped_read
     }
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
 
+    original_bytes = payload_path.read_bytes()
     assert store.get("legacy") is None
-    assert store.share_for_conversation("conv-a", "conv-b", tmp_path) == 0
-    assert store.delete_for_conversation("conv-a") == 0
+    with pytest.raises(ValueError, match="owner scope fields must be strings"):
+        store.share_for_conversation("conv-a", "conv-b", tmp_path)
+    with pytest.raises(ValueError, match="owner scope fields must be strings"):
+        store.delete_for_conversation("conv-a")
+    assert payload_path.read_bytes() == original_bytes
+    assert store.get("legacy", conversation_id="conv-b", workspace_root=str(tmp_path)) is None
 
 
 def test_artifact_service_uses_the_same_scope_for_content_and_metadata(tmp_path) -> None:

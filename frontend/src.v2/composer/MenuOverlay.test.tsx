@@ -70,7 +70,7 @@ describe("MenuOverlay mentions", () => {
   });
 
   it.each(["tree", "search"])("does not cache a %s response that arrives after the picker unmounts", async (mode) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     let complete!: (items: unknown[]) => void;
     const source = mode === "tree" ? fsListTree : fsSearchFiles;
     source.mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
@@ -143,7 +143,7 @@ describe("MenuOverlay mentions", () => {
   });
 
   it("debounces and caches @ file searches while typing", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     fsSearchFiles.mockResolvedValue([
       { name: "README.md", path: "README.md", kind: "file" },
     ]);

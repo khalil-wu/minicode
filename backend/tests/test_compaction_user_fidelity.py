@@ -7,7 +7,7 @@ import pytest
 
 from backend.agent.compaction import retain_user_inputs
 from backend.agent.attachment_policy import AttachmentUnavailableError, build_attachment_input_plan
-from backend.agent.context import COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, ContextBuilder, clone_context_builder
+from backend.agent.context import COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, CompactionNoopError, ContextBuilder, clone_context_builder
 from backend.agent.state import AgentState
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMMessage, ToolCallEvent, estimate_text_tokens
@@ -22,6 +22,75 @@ class SummaryModel:
     async def simple_chat(self, messages, *, max_tokens=None):
         self.calls.append((messages, max_tokens))
         return "Continue the investigation."
+
+
+def test_source_manual_compaction_sends_the_actual_short_window_without_the_automatic_tail_threshold():
+    async def scenario():
+        model = SummaryModel()
+        builder = ContextBuilder(llm=model)
+        original = "Keep the user's current API and all attachments."
+        await builder.start_turn(original, AgentState(user_message=original))
+        builder.append_assistant("The requested implementation has been inspected.")
+        before = builder.export_snapshot()
+        with pytest.raises(CompactionNoopError):
+            await builder.compact()
+        assert model.calls == []
+        assert builder.export_snapshot() == before
+        assert await builder.compact(manual=True) == "Continue the investigation."
+        assert len(model.calls) == 1
+        assert original in model.calls[0][0][-1].content
+        assert "implementation has been inspected" in model.calls[0][0][-1].content
+        assert [message.content for message in builder._history if message.is_user_input] == [original]
+        snapshot = builder.export_snapshot()
+        cold = ContextBuilder(llm=model)
+        cold.load_snapshot(snapshot)
+        assert [message.content for message in cold._history if message.is_user_input] == [original]
+        assert cold.export_snapshot()["compaction_count"] == 1
+    asyncio.run(scenario())
+
+
+def test_source_manual_compaction_keeps_current_media_references_outside_the_model_written_summary():
+    async def scenario():
+        model = SummaryModel()
+        builder = ContextBuilder(llm=model)
+        await builder.start_turn("Keep this original image and file.", AgentState(user_message="Keep this original image and file."))
+        image = {"media_type": "image/png", "data": "iVBORw0KGgo="}
+        attachment = {"artifact_id": "actual-image-reference", "file_name": "original.png", "media_type": "image/png", "kind": "image"}
+        builder._history[0].images = [image]
+        builder._history[0].attachment_refs = [attachment]
+        builder.append_assistant("Inspected the original image.")
+        await builder.compact(manual=True)
+        summary = next(message for message in builder._history if message.content.startswith(COMPACTION_SUMMARY_PREFIX))
+        assert summary.images == [image]
+        assert summary.attachment_refs == [attachment]
+        cold = ContextBuilder(llm=model)
+        cold.load_snapshot(builder.export_snapshot())
+        assert any(message.attachment_refs == [attachment] for message in cold._history)
+    asyncio.run(scenario())
+
+
+def test_in_turn_manual_compaction_retains_the_live_tool_message_and_results_arriving_during_summary():
+    async def scenario():
+        model = SummaryModel()
+        builder = ContextBuilder(llm=model)
+        await builder.start_turn("Keep the user's approved scope.", AgentState(user_message="Keep the user's approved scope."))
+        builder.append_assistant("Completed historical work.")
+        active = builder.append_assistant_tool_calls([
+            ToolCallEvent(id="compact-active", name="compact_owned", arguments={}),
+            ToolCallEvent(id="peer-active", name="read_file", arguments={"path": "source.py"}),
+        ])
+        async def summarize(messages, **kwargs):
+            assert any(message is active for message in builder._history)
+            builder.append_tool_result("peer-active", "read_file", ToolResult("Actual peer result"))
+            return "Historical work preserved."
+        model.simple_chat = summarize
+        await builder.compact(manual=True)
+        assert any(message is active for message in builder._history)
+        builder.append_tool_result("compact-active", "compact_owned", ToolResult("Actual compaction committed"))
+        builder.settle_streamed_tool_message(active)
+        index = next(index for index, message in enumerate(builder._history) if message is active)
+        assert [message.tool_call_id for message in builder._history[index + 1:]] == ["compact-active", "peer-active"]
+    asyncio.run(scenario())
 
 
 def test_two_compactions_preserve_user_constraints_and_tool_pairs_through_cold_restore():

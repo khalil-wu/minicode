@@ -19,6 +19,9 @@ from backend.ws.handlers.conversation import HANDLERS as _conversation
 from backend.ws.handlers.misc import HANDLERS as _misc
 from backend.ws.handlers.diff import HANDLERS as _diff
 from backend.ws.handlers.preview import HANDLERS as _preview
+from backend.ws.handlers.code_review import HANDLERS as _code_review
+from backend.ws.handlers.guardian import HANDLERS as _guardian
+from backend.ws.handlers.sidebar import HANDLERS as _sidebar
 
 def _merge_domain_handlers(
     domains: tuple[tuple[str, dict[str, Callable[..., Any]]], ...],
@@ -52,6 +55,9 @@ HANDLERS: dict[str, Callable[..., Any]] = _merge_domain_handlers(
         ("misc", _misc),
         ("diff", _diff),
         ("preview", _preview),
+        ("code_review", _code_review),
+        ("guardian", _guardian),
+        ("sidebar", _sidebar),
     )
 )
 

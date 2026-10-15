@@ -29,7 +29,7 @@ export function focusInspectorEntry(entry: InspectorEntry) {
       target_kind: entry.targetKind,
       target_id: entry.targetId,
       conversation_id: conversationId,
-      workspace_root: conversation?.worktreePath || conversation?.workspaceRoot
+      workspace_root: conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot
         || (conversationId === state.conversationId ? state.workingDirectory : undefined) || undefined,
     });
   }

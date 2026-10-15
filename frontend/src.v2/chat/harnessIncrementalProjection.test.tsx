@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { useAppStore } from "../stores";
 import type { ChatMessage, ContentBlock } from "../stores/types";
 import { createRecentTurnProjectionCache, projectMessagesToTurns, projectRecentMessagesToTurns } from "./chatSurfaceState";
@@ -53,13 +53,14 @@ it("invalidates recent topology for an arbitrary older hidden-state change", () 
   expect(projectRecentMessagesToTurns(changed, true, 40, cache).totalTurnCount).toBe(99);
 });
 
-it("windows a large live process group and keeps an older failure visible", () => {
+it("retains every loaded operation in a large group, including its oldest failure", () => {
   const cells = projectMessagesToTurns([assistant()], true)[0].committedCells;
   cells[0] = { ...cells[0], status: "failed" } as typeof cells[number];
   render(<AgentTimeline cells={cells} isRunning renderCell={({ key, cell }) => <div key={key} data-testid="process-cell">{cell.id}</div>} />);
-  expect(screen.getAllByTestId("process-cell")).toHaveLength(41);
-  fireEvent.click(screen.getByRole("button", { name: /显示更早的操作/ }));
-  expect(screen.getAllByTestId("process-cell")).toHaveLength(81);
+  expect(screen.getAllByTestId("process-cell")).toHaveLength(1000);
+  expect(screen.getByText("t0")).toBeTruthy();
+  expect(screen.getByText("t999")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /显示更早的操作/ })).toBeNull();
 });
 
 it("prepends a page without replacing a newer streaming tail", async () => {

@@ -113,17 +113,24 @@ def _project_files(
 
 
 def build_project_index(
-    service: WorkspaceService, *, include_dependencies: bool = True,
+    service: WorkspaceService, *, include_dependencies: bool = False,
+    include_dependency_paths: bool = False,
     stop: threading.Event | None = None,
     cached_files: dict[str, CachedProjectIndexFile] | None = None,
     updated_files: dict[str, CachedProjectIndexFile] | None = None,
     dirty_paths: frozenset[str] = frozenset(),
+    incremental: bool = False,
+    dependency_paths: tuple[str, ...] = (),
 ) -> WorkspaceProjectIndexResponse:
     root = service.workspace_root_path()
     application_roots = sensitive_files.application_state_roots()
     files: list[WorkspaceProjectIndexFile] = []
     issues: list[WorkspaceProjectIndexIssue] = []
     cached_files = cached_files or {}
+    # Content edits can reuse the established tree. Create/delete/type changes
+    # still require name discovery, including ignore rules and protected roots.
+    incremental = incremental and all((root / path).is_file() for path in dirty_paths)
+    dependencies = set(dependency_paths) if incremental else set()
 
     def check_cancelled() -> None:
         if stop is not None and stop.is_set():
@@ -137,7 +144,7 @@ def build_project_index(
             cached = cached_files.get(relative)
             if (cached is not None and relative not in dirty_paths
                     and cached.file.size_bytes <= service._max_file_bytes
-                    and cached.version == _file_version(path.lstat())):
+                    and (incremental or cached.version == _file_version(path.lstat()))):
                 return cached
             snapshot, metadata = service._read_indexed_file_snapshot(path, root=root, application_roots=application_roots)
             check_cancelled()
@@ -149,11 +156,26 @@ def build_project_index(
         else:
             return CachedProjectIndexFile(_file_version(metadata), WorkspaceProjectIndexFile(**snapshot.model_dump(), kind=kind))
 
+    def scan_entries() -> Iterator[tuple[Path, ProjectIndexFileKind]]:
+        if incremental:
+            for relative, cached in cached_files.items():
+                path = root / relative
+                if ((include_dependencies or "node_modules" not in relative.split("/"))
+                        and not is_protected_write_path(path, application_roots=application_roots, resolved_path=path)):
+                    yield path, cached.file.kind
+            return
+        for path, kind in _project_files(root, include_dependencies=include_dependencies or include_dependency_paths,
+                application_roots=application_roots, check_cancelled=check_cancelled):
+            if "node_modules" in path.relative_to(root).parts:
+                dependencies.add(path.relative_to(root).as_posix())
+                if not include_dependencies:
+                    continue
+            yield path, kind
+
     # Bound submitted work as well as the I/O pool. Executor.map eagerly
     # queued the complete tree, leaving thousands of reads after HTTP abort.
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="workspace-index") as readers:
-        entries = iter(_project_files(root, include_dependencies=include_dependencies,
-            application_roots=application_roots, check_cancelled=check_cancelled))
+        entries = scan_entries()
         pending = set()
         exhausted = False
         try:
@@ -183,4 +205,4 @@ def build_project_index(
     check_cancelled()
     files.sort(key=lambda file: file.path)
     issues.sort(key=lambda issue: issue.path)
-    return WorkspaceProjectIndexResponse(workspace_root=str(root), files=files, complete=not issues, issues=issues)
+    return WorkspaceProjectIndexResponse(workspace_root=str(root), files=files, dependency_paths=sorted(dependencies) if include_dependencies or include_dependency_paths else None, complete=not issues, issues=issues)

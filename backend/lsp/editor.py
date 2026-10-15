@@ -7,11 +7,13 @@ language servers keep their separate permission-bound manager.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 from backend.config import PROJECT_ROOT
 from backend.runtime_env import sanitized_subprocess_env
@@ -66,10 +68,67 @@ class EditorLanguageProcess:
         return path
 
 
+class EditorLanguageStateError(RuntimeError):
+    """The renderer retired or superseded this document snapshot."""
+
+
+@dataclass
+class EditorDocumentState:
+    document_id: str
+    snapshot_revision: int
+    model_version: int
+    path: str
+
+
 class EditorLanguageServers:
     def __init__(self):
-        self.clients: dict[tuple[str, str], LSPClient] = {}
-        self.locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self.clients: dict[tuple[str, str, str, str], LSPClient] = {}
+        self.locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
+        self.documents: dict[tuple[str, str, str, str], dict[str, EditorDocumentState]] = {}
+        self.closed_clients: set[tuple[str, str]] = set()
+        self.closed_documents: set[tuple[str, str, str]] = set()
+        self.closed_windows: set[str] = set()
+        self.window_bindings: dict[str, tuple[str, str]] = {}
+        self.operations: dict[tuple[str, str, str, str], tuple[asyncio.Task[Any], set[str]]] = {}
+
+    def bind_browser_window(self, instance_id: str, owner_id: str, binding_token: str) -> bool:
+        bound = self.window_bindings.get(instance_id)
+        if bound is None:
+            self.window_bindings[instance_id] = (owner_id, binding_token)
+            return True
+        return bound[0] == owner_id and hmac.compare_digest(bound[1], binding_token)
+
+    def _check_snapshot(self, key, documents, snapshot_revision):
+        if key[0] in self.closed_windows:
+            raise EditorLanguageStateError("The editor window was closed.")
+        if key[:2] in self.closed_clients:
+            raise EditorLanguageStateError("The editor language client was released.")
+        owned = self.documents.get(key, {})
+        for document in documents:
+            if (*key[:2], document["document_id"]) in self.closed_documents:
+                raise EditorLanguageStateError("The editor document was closed.")
+            previous = owned.get(os.path.normcase(document["path"]))
+            if previous is not None and snapshot_revision < previous.snapshot_revision:
+                raise EditorLanguageStateError("The editor document snapshot was superseded.")
+
+    async def _await_document_operation(self, key, documents, snapshot_revision, operation: Callable[[], Coroutine[Any, Any, Any]]):
+        self._check_snapshot(key, documents, snapshot_revision)
+        task = asyncio.create_task(operation())
+        self.operations[key] = (task, {document["document_id"] for document in documents})
+        try:
+            return await task
+        except asyncio.CancelledError:
+            # Lifecycle cancellation has a concrete 409 receipt. External
+            # request cancellation keeps its original cancellation semantics.
+            self._check_snapshot(key, documents, snapshot_revision)
+            raise
+        finally:
+            self.operations.pop(key)
+
+    def _cancel_document_operations(self, owner, document_ids: set[str] | None = None):
+        for key, (task, dependencies) in self.operations.items():
+            if key[:2] == owner and (document_ids is None or dependencies & document_ids):
+                task.cancel()
 
     async def request(
         self,
@@ -78,13 +137,20 @@ class EditorLanguageServers:
         method: str,
         documents: list[dict],
         params: dict,
+        *,
+        window_instance_id: str,
+        client_id: str,
+        snapshot_revision: int,
     ) -> dict:
-        key = (str(root), language)
+        key = (window_instance_id, client_id, str(root), language)
+        self._check_snapshot(key, documents, snapshot_revision)
         async with self.locks.setdefault(key, asyncio.Lock()):
+            self._check_snapshot(key, documents, snapshot_revision)
             client = self.clients.get(key)
             if client is None or not client.is_running():
                 if client is not None:
                     await client.stop()
+                self._check_snapshot(key, documents, snapshot_revision)
                 resources = os.environ.get("MINICODE_APP_RESOURCES_DIR")
                 editor_resources = os.environ.get("MINICODE_EDITOR_LANGUAGE_SERVICES_DIR")
                 directory = (
@@ -98,7 +164,7 @@ class EditorLanguageServers:
                     command = str(entry) if entry.is_file() else shutil.which("clangd")
                     if not command:
                         raise RuntimeError("C/C++ 语言服务尚未准备，请运行 desktop 的 npm run clangd:prepare。")
-                    flags, driver_args = await cpp_compiler_configuration(language)
+                    flags, driver_args = await self._await_document_operation(key, documents, snapshot_revision, lambda: cpp_compiler_configuration(language))
                     # Requests are serialized by this client. Let clangd finish
                     # its current document parse before handling completion;
                     # otherwise a new include can return an empty symbol list.
@@ -121,6 +187,7 @@ class EditorLanguageServers:
                         )
                     args = [str(entry), "--stdio"]
                     initialization_options = None
+                self._check_snapshot(key, documents, snapshot_revision)
                 client = LSPClient(
                     command,
                     args,
@@ -129,7 +196,7 @@ class EditorLanguageServers:
                     initialization_options=initialization_options,
                 )
                 self.clients[key] = client
-                await client.start()
+                await self._await_document_operation(key, documents, snapshot_revision, client.start)
                 settings = (
                     {
                         "python": {
@@ -154,8 +221,23 @@ class EditorLanguageServers:
                 await client._send_notification(
                     "workspace/didChangeConfiguration", {"settings": settings}
                 )
+            # A close can arrive while startup is awaiting the server. Retire
+            # that snapshot before publishing any didOpen/didChange message.
+            self._check_snapshot(key, documents, snapshot_revision)
+            owned = self.documents.setdefault(key, {})
             for document in documents:
-                await client._sync_file(document["path"], document["content"], document.get("language"))
+                self._check_snapshot(key, documents, snapshot_revision)
+                path_key = os.path.normcase(document["path"])
+                previous = owned.get(path_key)
+                if previous is not None and previous.document_id != document["document_id"]:
+                    self.closed_documents.add((*key[:2], previous.document_id))
+                    await client.close_file(previous.path)
+                owned[path_key] = EditorDocumentState(
+                    document["document_id"], snapshot_revision, document["model_version"], document["path"],
+                )
+                await self._await_document_operation(key, documents, snapshot_revision,
+                    lambda: client._sync_file(document["path"], document["content"], document.get("language")))
+            self._check_snapshot(key, documents, snapshot_revision)
             if method == "diagnostics":
                 path = documents[0]["path"]
                 expected = client._opened_files[path][0]
@@ -170,38 +252,83 @@ class EditorLanguageServers:
                             return snapshot["diagnostics"]
                         await client.diagnostics_changed.wait()
 
-                result = await asyncio.wait_for(current_diagnostics(), 15)
+                result = await self._await_document_operation(key, documents, snapshot_revision, lambda: asyncio.wait_for(current_diagnostics(), 15))
             elif method == "formatting" and language == "python":
-                process = await spawn_exec(
-                    sys.executable,
-                    "-m",
-                    "ruff",
-                    "format",
-                    "--stdin-filename",
-                    documents[0]["path"],
-                    "-",
-                    cwd=root,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await communicate(
-                    process,
-                    input_data=documents[0]["content"].encode("utf-8"),
-                    timeout=15,
-                )
-                if process.returncode:
-                    raise RuntimeError(stderr.decode("utf-8", errors="replace").strip())
-                result = {"text": stdout.decode("utf-8")}
+                async def format_python():
+                    process = await spawn_exec(
+                        sys.executable, "-m", "ruff", "format", "--stdin-filename", documents[0]["path"], "-",
+                        cwd=root, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await communicate(process, input_data=documents[0]["content"].encode("utf-8"), timeout=15)
+                    if process.returncode:
+                        raise RuntimeError(stderr.decode("utf-8", errors="replace").strip())
+                    return {"text": stdout.decode("utf-8")}
+                result = await self._await_document_operation(key, documents, snapshot_revision, format_python)
             else:
-                result = await client._send_request(f"textDocument/{method}", params)
-            return {"result": result, "capabilities": client.capabilities}
+                result = await self._await_document_operation(key, documents, snapshot_revision, lambda: client._send_request(f"textDocument/{method}", params))
+            self._check_snapshot(key, documents, snapshot_revision)
+            return {"result": result, "capabilities": client.capabilities, "snapshot_revision": snapshot_revision}
+
+    async def _stop_context(self, key):
+        client = self.clients.get(key)
+        if client is not None:
+            await client.stop()
+            self.clients.pop(key)
+        self.documents.pop(key, None)
+
+    async def close_documents(self, *, window_instance_id: str, client_id: str, document_ids: list[str]):
+        owner = (window_instance_id, client_id)
+        closed = set(document_ids)
+        # This fence precedes the lock: queued requests and startup cannot
+        # reopen a model whose onWillDispose has already reached this endpoint.
+        self.closed_documents.update((*owner, document_id) for document_id in closed)
+        self._cancel_document_operations(owner, closed)
+        for key, lock in [(key, lock) for key, lock in self.locks.items() if key[:2] == owner]:
+            async with lock:
+                owned = self.documents.get(key, {})
+                client = self.clients.get(key)
+                for path, document in list(owned.items()):
+                    if document.document_id in closed:
+                        if client is not None and client.is_running():
+                            await client.close_file(document.path)
+                        owned.pop(path)
+                if not owned:
+                    await self._stop_context(key)
+
+    async def release_client(self, *, window_instance_id: str, client_id: str):
+        owner = (window_instance_id, client_id)
+        self.closed_clients.add(owner)
+        self._cancel_document_operations(owner)
+        failures = []
+        for key, lock in [(key, lock) for key, lock in self.locks.items() if key[:2] == owner]:
+            async with lock:
+                try:
+                    await self._stop_context(key)
+                except (RuntimeError, OSError) as exc:
+                    failures.append(str(exc))
+                else:
+                    self.locks.pop(key, None)
+        if failures:
+            raise RuntimeError("Editor language processes remain owned: " + "; ".join(failures))
+        self.closed_documents = {entry for entry in self.closed_documents if entry[:2] != owner}
+
+    async def release_window(self, window_instance_id: str):
+        self.closed_windows.add(window_instance_id)
+        owners = {key[:2] for key in self.locks if key[0] == window_instance_id}
+        results = await asyncio.gather(*(self.release_client(window_instance_id=window, client_id=client) for window, client in owners), return_exceptions=True)
+        failures = [str(result) for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RuntimeError("Editor language window cleanup failed: " + "; ".join(failures))
 
     async def shutdown(self):
-        for client in self.clients.values():
-            await client.stop()
-        self.clients.clear()
-        self.locks.clear()
+        owners = {key[:2] for key in self.locks}
+        results = await asyncio.gather(*(self.release_client(window_instance_id=window, client_id=client) for window, client in owners), return_exceptions=True)
+        failures = [str(result) for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RuntimeError("Editor language shutdown failed: " + "; ".join(failures))
+        self.closed_clients.clear()
+        self.closed_documents.clear()
+        self.closed_windows.clear()
 
 
 editor_language_servers = EditorLanguageServers()

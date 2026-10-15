@@ -300,7 +300,7 @@ class ExtensionExecutionActions:
         options = options or {}
         before = context_ledger_snapshot(query.context_builder)
         summary = await query.context_builder.compact(
-            focus=str(options.get("customInstructions") or options.get("focus") or ""), restore_state=query.state)
+            focus=str(options.get("customInstructions") or options.get("focus") or ""), restore_state=query.state, manual=True)
         event = build_context_compacted_event(summary, before, context_ledger_snapshot(query.context_builder))
         await query.run_context.publish_nested_event(event)
         return summary

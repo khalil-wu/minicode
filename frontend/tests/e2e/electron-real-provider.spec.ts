@@ -595,7 +595,7 @@ test.describe("real provider desktop multi-agent path", () => {
       const mailboxFact = `MAILBOX_FACT=${Date.now()}`;
       await writeFile(path.join(workspace, "mailbox-followup.txt"), mailboxFact + "\n", "utf8");
       await composer.fill([
-        `Use send_message to resume the existing agent ${resumedId}.`,
+        `Use followup_task to resume the existing agent ${resumedId}.`,
         "Tell it to read only mailbox-followup.txt and return its exact line, then finish.",
         "Wait for the renewed result. Do not spawn another agent or read the file yourself.",
         "Report the returned exact line and the marker MAILBOX_E2E_OK.",

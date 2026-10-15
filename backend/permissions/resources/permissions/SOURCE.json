@@ -1,0 +1,15 @@
+{
+  "source": "https://github.com/openai/codex",
+  "commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "permissions_instructions_sha256": "fa783b0e7751cf36527e8e13d29398b4775fc0375c25d8a1ea12fee2a97286c7",
+  "files": {
+    "source-text.json": "0f30bd6e854bf086229d2a7ba47cdd2fb2ff16f8b9d62d2e086edbb6a123a8fd",
+    "approval_policy/never.md": "f1ec1052cf999984a2ed8edca7d9b3546e5c3ada7e37b343f7ab060a7a8b5c21",
+    "approval_policy/on_request.md": "60b3cb1cf23220483f59c490036b49bce2d03a107a9477527725c95728ddc1c0",
+    "approval_policy/on_request_rule_request_permission.md": "31baaf062ee9502bc995cb033009bc70bff6b02ee9e21a585069a1e1c1304076",
+    "approval_policy/unless_trusted.md": "1a8f6f653b3873a63c68b6f4f3f46fa2ca7da8a0a7252bff0ca8b784c55e3e8a",
+    "sandbox_mode/danger_full_access.md": "986e1d2f9608bb4ce6e9f310247fad0bf517595bfa6d92cad17702e0f3737609",
+    "sandbox_mode/read_only.md": "b26128a0ee2a87413c1a79c84c5ff4106368974d18787742fb8e8680ddcdfbe9",
+    "sandbox_mode/workspace_write.md": "d1c6e62138fd15ca46e12709cd3fa545137aa97637ab04ca9ababd2941de4dda"
+  }
+}

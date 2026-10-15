@@ -20,6 +20,8 @@ from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.config_requirements import normalize_string_array
 from backend.feature_flags import FeatureFlags, coerce_feature_bool, load_feature_flags
 from backend.llm.model_catalog import responses_model_catalog_entry
+from backend.llm.model_request_policy import ModelRequestPolicy
+from backend.permissions.approval_policy import ApprovalPolicy
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
 
 from backend.config_helpers import (
@@ -109,6 +111,8 @@ from backend.config_providers import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from backend.agent.token_budget_activation import TokenBudgetStartupConfig
+    from backend.agent.context_window import ContextWindowConfig
     from backend.agent.policies import (
         StreamRetryPolicy,
     )
@@ -212,7 +216,7 @@ class PermissionSettings:
             "list_files",
             "grep_files",
             "glob_files",
-            "ask_user",
+            "request_user_input",
             "read_artifact",
             "memory_list",
             "memory_read",
@@ -275,6 +279,12 @@ class PermissionSettings:
     content_allow_rules: list[str] = field(default_factory=list)
     content_ask_rules: list[str] = field(default_factory=list)
     content_deny_rules: list[str] = field(default_factory=list)
+    # A host that constructs PermissionSettings supplies explicit policy.
+    # Config loading records which approval lists came from builtin routing,
+    # so granted path authority can skip that routing without skipping a user
+    # or managed rule that happens to contain the same tool name.
+    builtin_approval_routing: frozenset[str] = frozenset()
+    approval_policy: ApprovalPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +366,9 @@ class AppConfig:
     ui: UISettings = field(default_factory=UISettings)
     feature_flags: FeatureFlags = field(default_factory=FeatureFlags)
     config_layer_stack: "ConfigLayerStack | None" = None
+    model_request_policy: "ModelRequestPolicy | None" = None
+    token_budget_startup_config: "TokenBudgetStartupConfig | None" = None
+    context_window_config: "ContextWindowConfig | None" = None
 
 
 def _scoped_vault_name(provider: str, base_url: str) -> str:
@@ -612,7 +625,7 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
     if parsed_rule is None:
         raise ValueError("Invalid permission content rule")
     if parsed_rule.tool_glob in {"run_command", "terminal_*"} and parsed_rule.content:
-        command_prefix = parsed_rule.content[:-2].strip() if parsed_rule.content.endswith(":*") else ""
+        command_prefix = parsed_rule.content.removesuffix(":*").strip()
         if command_prefix_uses_unsafe_wrapper(command_prefix):
             raise ValueError("Refusing a permanent permission rule for a shell or command wrapper")
     settings_data = _load_settings_json()
@@ -644,6 +657,8 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
            else load_llm_settings(settings_data, resolve_credentials=False))
 
     permissions = permission_settings_from_config(settings_data)
+    if permissions.approval_policy is not None:
+        config_layer_stack.requirements.ensure_approval_policy(permissions.approval_policy)
 
     # Agent 参数来自 settings.json
     raw_agent_data = settings_data.get("agent", {})
@@ -776,6 +791,7 @@ def permission_settings_from_config(settings_data: Mapping[str, Any]) -> Permiss
     perm_data = raw_perm_data if isinstance(raw_perm_data, Mapping) else {}
     default_permissions = PermissionSettings()
     return PermissionSettings(
+        approval_policy=ApprovalPolicy.parse(settings_data["approval_policy"]) if "approval_policy" in settings_data else None,
         auto_allow=_configured_string_list(
             perm_data.get("auto_allow"),
             default_permissions.auto_allow,
@@ -790,6 +806,9 @@ def permission_settings_from_config(settings_data: Mapping[str, Any]) -> Permiss
             perm_data.get("require_diff_review"),
             default_permissions.require_diff_review,
             field_name="permissions.require_diff_review",
+        ),
+        builtin_approval_routing=frozenset(
+            name for name in ("require_confirm", "require_diff_review") if name not in perm_data
         ),
         always_deny=_configured_string_list(
             perm_data.get("always_deny"), [], field_name="permissions.always_deny"

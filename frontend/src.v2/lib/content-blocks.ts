@@ -150,10 +150,11 @@ export function isFinalAnswerBlock(block: ContentBlock): boolean {
 }
 
 export function getAnswerTextFromBlocks(blocks: ContentBlock[]): string {
-  return blocks
-    .filter((block): block is Extract<ContentBlock, { type: "text" }> =>
-      block.type === "text" && isFinalAnswerBlock(block),
-    )
-    .map((block) => block.content)
-    .join("");
+  // Each item already merges its own content parts. Match the harness/Codex
+  // accepted result: the latest visible completed item owns the answer.
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index];
+    if (block.type === "text" && isFinalAnswerBlock(block)) return block.content;
+  }
+  return "";
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from backend.llm.base import LLMMessage, ToolCallEvent
 from backend.llm.capabilities import ProviderCapabilities
 from backend.llm.openai_adapter import _openai_chat_messages
 from backend.ws.command_dispatcher import SessionCommandDispatcher
+from backend.ws.handlers.session import emit_session_usage_snapshot
 
 
 @pytest.mark.parametrize("command_type", ["llm.model.set", "llm.config.set"])
@@ -31,6 +32,7 @@ def test_model_selection_finishes_before_following_image_message(command_type):
         )
         dispatcher = object.__new__(SessionCommandDispatcher)
         dispatcher._session = session
+        dispatcher._regeneration_transitions = {}
         async def handle(command):
             if command.type == command_type:
                 entered.set()
@@ -145,4 +147,61 @@ def test_mixed_pdf_image_text_and_code_keep_originals_across_model_switches(tmp_
             for ref, entry in zip(refs, entries):
                 assert store.get_native_data(ref["artifact_id"], conversation_id=owner, workspace_root=str(root)) == entry[-1]
                 assert store.get_native_data(ref["artifact_id"], conversation_id="another-owner", workspace_root=str(root)) is None
+    asyncio.run(scenario())
+
+
+def test_cold_image_usage_is_read_only_and_model_build_restores_owned_pixels(tmp_path):
+    async def scenario():
+        root = tmp_path / "project"
+        root.mkdir()
+        owner = "cold-image-owner"
+        store = AttachmentStore(tmp_path / "attachments")
+        ref = {"artifact_id": "cold-image", "kind": "image", "file_name": "image.png", "media_type": "image/png"}
+        pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOioAAAAASUVORK5CYII="
+        store.save(artifact_id=ref["artifact_id"], content="", native_data=pixels, metadata={
+            "conversation_id": owner, "workspace_root": str(root), "attachment": ref,
+        })
+        builder = ContextBuilder(conversation_id=owner, workspace_root=root)
+        builder._attachment_store = store
+        state = AgentState(user_message="Read this image", conversation_id=owner, workspace_root=root, attachments=[ref])
+        await builder.start_turn(state.user_message, state)
+        snapshot = builder.export_snapshot()
+        cold = ContextBuilder(conversation_id=owner, workspace_root=root)
+        cold._attachment_store = store
+        cold.load_snapshot(snapshot)
+        canonical_before = cold.export_snapshot()["history"]
+        assert not cold._history[-1].images[0].get("data")
+        with patch.object(store, "get_payload", side_effect=AssertionError("Budget inspection must not restore pixels")):
+            assert cold.get_budget_snapshot(state)["used"] > 0
+        assert cold.export_snapshot()["history"] == canonical_before
+        request = await cold.build(state)
+        assert request[-1].images[0]["data"] == pixels
+        assert cold._history[-1].images[0]["data"] == pixels
+        assert sum(message.is_user_input for message in cold._history) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("previous_owner", [None, "other-conversation"])
+def test_usage_inspect_renders_the_active_conversation_workspace(tmp_path, previous_owner):
+    async def scenario():
+        root = tmp_path / "project"
+        root.mkdir()
+        owner = "active-conversation"
+        builder = ContextBuilder(conversation_id=owner, workspace_root=root)
+        session = SimpleNamespace(
+            session_id="usage-snapshot", active_conversation_id=owner,
+            last_agent_state=AgentState(user_message="", conversation_id=previous_owner) if previous_owner else None,
+            session_lifecycle=SimpleNamespace(current_workspace_root=lambda: root),
+            refresh_tool_registry_if_mcp_changed=lambda: None,
+            context_builder=builder,
+            tool_registry=SimpleNamespace(get_schemas=lambda **_kwargs: []),
+            permission_checker=None, permission_context=None,
+            runtime_toolset_policy=lambda _registry: None, send_event=AsyncMock(),
+        )
+        with patch.object(builder, "get_budget_snapshot", wraps=builder.get_budget_snapshot) as budget:
+            await emit_session_usage_snapshot(session)
+        active_state = budget.call_args.kwargs["state"]
+        assert active_state.conversation_id == owner
+        assert active_state.workspace_root == root
+        assert session.send_event.await_count == 2
     asyncio.run(scenario())

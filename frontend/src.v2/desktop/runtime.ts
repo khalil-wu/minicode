@@ -157,6 +157,11 @@ export interface EmbeddedBrowserSettings {
   permissions: string[];
 }
 
+export interface EmbeddedBrowserSettingsSnapshot {
+  downloadPolicy: EmbeddedBrowserSettings["downloadPolicy"];
+  sitePermissions: Record<string, string[]>;
+}
+
 export interface UpdateActivitySnapshot {
   runtimeReady: boolean;
   activeTurns: string[];
@@ -165,6 +170,8 @@ export interface UpdateActivitySnapshot {
   uploadingAttachments: string[];
   dirtyEditors: string[];
   backgroundTasks: string[];
+  pendingDrafts: string[];
+  draftStates: string[];
 }
 
 export interface UpdatePreflightCheck {
@@ -198,18 +205,77 @@ export interface UpdateStatus {
   message?: string;
 }
 
+export type FileOpenTargetId = "minicode" | "system" | "vscode" | "vscodeInsiders" | "visualStudio" | "cursor" | "sublimeText" | "zed" | "antigravity" | "githubDesktop" | "fileManager" | "terminal" | "gitBash" | "cmder" | "wsl" | "androidStudio" | "intellij" | "rider" | "pycharm" | "webstorm" | "phpstorm";
+export interface FileOpenTarget {
+  id: FileOpenTargetId;
+  label: string;
+  kind: "editor" | "terminal" | "fileManager" | "systemDefault";
+  icon?: string;
+  hidden?: boolean;
+}
+export interface OpenPreferredPathOptions {
+  targetId?: FileOpenTargetId;
+  workspaceRoot?: string;
+  persistPreferredTargetPath?: string;
+  column?: number;
+}
+export interface DesktopPreferences {
+  defaultTaskDirectory: string;
+  defaultPermissionMode: "confirm" | "plan" | "auto" | "bypass";
+  showFullAccess: boolean;
+  localeOverride: "zh-CN" | "en-US" | null;
+  systemLocale: string;
+  fileOpenTarget: FileOpenTargetId;
+  fileOpenTargetPerPath: Record<string, FileOpenTargetId>;
+  fileOpenTargets: FileOpenTarget[];
+  terminalShell: "powershell" | "pwsh" | "cmd" | "gitBash" | "wsl" | "system";
+  terminalShellTargets: Array<{ id: DesktopPreferences["terminalShell"]; label: string }>;
+  confirmBeforeClose: "never" | "keyboardOnly" | "always";
+  turnCompletionNotifications: "never" | "onlyWhenUnfocused" | "always";
+  permissionNotifications: boolean;
+  questionNotifications: boolean;
+  urlOpenTarget: "in-app-browser" | "external-browser";
+  localUrlOpenTarget: "in-app-browser" | "external-browser";
+  showFullUrl: boolean;
+  annotationScreenshotsMode: "always" | "necessary";
+}
+export interface BrowserHistoryVisit { id: string; url: string; title: string; visitTime: number; source: "agent" | "other" }
+export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
+export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
+
 interface MiniCodeDesktop {
+  preferences: {
+    chooseTaskDirectory(): Promise<DesktopPreferences | null>;
+    get(): Promise<DesktopPreferences>;
+    set(patch: Partial<Omit<DesktopPreferences, "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale">>): Promise<DesktopPreferences>;
+    onChanged(callback: (preferences: DesktopPreferences) => void): () => void;
+  };
+  openPreferredPath(target: string, line?: number, options?: OpenPreferredPathOptions): Promise<{ openInEditor: boolean; path: string }>;
+  saveFile(filename: string, bytes: Uint8Array): Promise<boolean>;
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
+    consumeInitialNavigation(): boolean;
+    openConversation(conversationId: string): Promise<{ windowOwnerId: string; windowInstanceId: string }>;
+    getState(): Promise<{ isMaximized: boolean; isFocused: boolean }>;
+    onStateChanged(callback: (state: { isMaximized: boolean; isFocused: boolean }) => void): () => void;
     minimize(): Promise<void>;
     maximize(): Promise<void>;
     close(): Promise<void>;
+    captureUnloadIntent(): { id: string; action: "close" | "reload"; ignoreCache: boolean };
+    resumeUnload(id: string): Promise<boolean>;
   };
   notify(payload: {
+    kind: "completion" | "permission" | "question";
     title: string;
     body: string;
     target?: { kind: "conversation"; conversationId: string };
+    requestId?: string;
+    conversationVisible?: boolean;
+    turnId?: string;
+    messageId?: string;
+    taskId?: string;
   }): Promise<void>;
+  hideNotifications(selector: { conversationId: string; requestId?: string; onlyIfFocused?: boolean; turnId?: string; messageId?: string; taskId?: string }): Promise<number>;
   onDeepLink(callback: (payload: {
     id: string;
     target: { kind: "conversation"; conversationId: string } | { kind: "url"; url: string };
@@ -269,6 +335,8 @@ interface MiniCodeDesktop {
     popup(key: DesktopMenuKey): Promise<void>;
   };
   browser: {
+    history(query: { text?: string; source?: "all" | "agent" | "other" }): Promise<BrowserHistoryVisit[]>;
+    removeHistory(ids: string[]): Promise<boolean>;
     discover(endpoint?: string): Promise<BrowserDiscoveryResult>;
     captureScreenshot(endpoint: string | undefined, targetId: string): Promise<BrowserScreenshotResult>;
     navigate(endpoint: string | undefined, targetId: string, url: string): Promise<BrowserActionResult>;
@@ -276,6 +344,8 @@ interface MiniCodeDesktop {
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
   };
   embeddedBrowser: {
+    capture(payload: BrowserCaptureRequest): Promise<BrowserCaptureImage>;
+    clearBrowsingData(): Promise<boolean>;
     create(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
     list(payload: { conversationId: string }): Promise<EmbeddedBrowserState[]>;
     activate(payload: { id: string; conversationId: string }): Promise<boolean>;
@@ -285,6 +355,7 @@ interface MiniCodeDesktop {
     inspect(payload: { id: string; conversationId: string; kind: "console" | "network" | "element" | "region" }): Promise<EmbeddedBrowserInspectionResult>;
     getSettings(payload: { url: string }): Promise<EmbeddedBrowserSettings>;
     setSettings(payload: { downloadPolicy?: "block" | "ask" | "allow"; origin?: string; permission?: string; allowed?: boolean }): Promise<EmbeddedBrowserSettings>;
+    onSettingsChanged(callback: (settings: EmbeddedBrowserSettingsSnapshot) => void): () => void;
     clearSiteData(payload: { id: string; conversationId: string }): Promise<boolean>;
     close(payload: { id: string; conversationId: string }): Promise<boolean>;
     closeConversation(conversationId: string): Promise<number>;
@@ -295,6 +366,10 @@ interface MiniCodeDesktop {
 declare global {
   interface Window {
     __MINICODE_RUNTIME__?: {
+      windowOwnerId?: string;
+      windowInstanceId?: string;
+      windowBindingToken?: string;
+      initialNavigation?: { conversationId: string | null } | null;
       apiBaseUrl?: string;
       wsBaseUrl?: string;
       runtimeToken?: string;
@@ -307,6 +382,23 @@ export const runtime = () =>
   typeof window !== "undefined" ? window.__MINICODE_RUNTIME__ : undefined;
 
 export const desktop = (): MiniCodeDesktop | undefined => runtime()?.desktop;
+export const getDesktopPreferences = () => desktop()!.preferences.get();
+export const setDesktopPreferences = (patch: Partial<Omit<DesktopPreferences, "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale">>) => desktop()!.preferences.set(patch);
+
+export function desktopNotificationConversationVisible(conversationId: string, activeConversationId: string | null, settingsOpen: boolean, switchingConversationId: string | null): boolean {
+  if (document.visibilityState !== "visible" || settingsOpen || switchingConversationId || conversationId !== activeConversationId) return false;
+  const pane = document.querySelector<HTMLElement>(".chat-pane");
+  for (let node = pane; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (node.hidden || style.display === "none" || style.visibility === "hidden") return false;
+  }
+  return pane !== null;
+}
+export const onDesktopPreferencesChanged = (callback: (preferences: DesktopPreferences) => void) => desktop()!.preferences.onChanged(callback);
+export const browserHistorySearch = (query: { text?: string; source?: "all" | "agent" | "other" }) => desktop()!.browser.history(query);
+export const browserHistoryRemove = (ids: string[]) => desktop()!.browser.removeHistory(ids);
+export const embeddedBrowserClearBrowsingData = () => desktop()!.embeddedBrowser.clearBrowsingData();
+export const embeddedBrowserCapture = (payload: BrowserCaptureRequest) => desktop()!.embeddedBrowser.capture(payload);
 
 export const isDesktop = (): boolean =>
   Boolean(desktop()?.platformInfo?.isDesktop);
@@ -659,6 +751,8 @@ export const embeddedBrowserRunAction = (
 export const embeddedBrowserInspect = (conversationId: string, id: string, kind: "console" | "network" | "element" | "region") =>
   desktop()?.embeddedBrowser.inspect({ id, kind, conversationId });
 export const embeddedBrowserGetSettings = (url: string) => desktop()?.embeddedBrowser.getSettings({ url });
+export const onEmbeddedBrowserSettingsChanged = (callback: (settings: EmbeddedBrowserSettingsSnapshot) => void) =>
+  desktop()?.embeddedBrowser.onSettingsChanged(callback);
 export const embeddedBrowserSetSettings = (payload: {
   downloadPolicy?: "block" | "ask" | "allow";
   origin?: string;

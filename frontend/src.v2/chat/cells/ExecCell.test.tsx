@@ -27,9 +27,10 @@ describe("ExecCell", () => {
       />,
     );
 
-    expect(screen.getByText("已运行")).toBeTruthy();
+    expect(screen.getByText("已在1s内运行")).toBeTruthy();
+    expect(container.querySelector(".exec-cell-header-button")?.getAttribute("data-processing")).toBe("false");
     expect(screen.getByText(command)).toBeTruthy();
-    expect(screen.queryByText("exit 0 · 1s")).toBeNull();
+    expect(container.querySelector(".exec-cell-output-status")).toBeNull();
     expect(container.querySelector(".exec-cell-header-button")).toBeTruthy();
     expect(container.querySelector(".exec-cell-output-stack")).toBeNull();
     expect(container.querySelector(".exec-cell-collapsed-output")).toBeNull();
@@ -47,19 +48,19 @@ describe("ExecCell", () => {
     expect(container.querySelector(".exec-cell-expanded-heading")).toBeNull();
     expect(screen.getByText("Shell")).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制命令输出" })).toBeTruthy();
-    expect(screen.getByText("命令已在 1s 内运行完成")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制命令" })).toBeTruthy();
+    expect(screen.getByText("命令已在1s内运行完成")).toBeTruthy();
+    expect(screen.queryByText(command)).toBeNull();
     expect(screen.getByText("成功")).toBeTruthy();
     expect(screen.getByText("$ " + command)).toBeTruthy();
     expect(screen.getByText("7 passed")).toBeTruthy();
-    expect(screen.getByText(/exit 0 · 1s/)).toBeTruthy();
+    expect(container.querySelector(".exec-cell-output-toolbar")).toBeNull();
   });
 
-  it("keeps a running command stoppable without opening a result card", () => {
-    const stop = vi.fn();
+  it("keeps a running command compact with interruption owned by the composer", () => {
     const { container } = render(
       <ExecCell
         isActive
-        onStop={stop}
         cell={{
           kind: "exec",
           id: "exec-running",
@@ -68,14 +69,15 @@ describe("ExecCell", () => {
           stdoutPreview: ["running"],
           stderrPreview: [],
           collapsed: true,
-          createdAt: 1,
+          createdAt: Date.now(),
         }}
       />,
     );
 
     expect(screen.getByText("正在运行")).toBeTruthy();
+    expect(container.querySelector(".exec-cell-header-button")?.getAttribute("data-processing")).toBe("true");
     expect(screen.getByText("npm test -- --runInBand")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "停止命令" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "停止命令" })).toBeNull();
     expect(container.querySelector(".exec-cell-expanded")).toBeNull();
     expect(screen.queryByText("running")).toBeNull();
   });
@@ -122,7 +124,7 @@ describe("ExecCell", () => {
     expect(screen.getByText("1:foo")).toBeTruthy();
   });
 
-  it("preserves background and partial lifecycle labels in the flat row", () => {
+  it("preserves background startup and keeps partial results inside disclosure", () => {
     const { rerender } = render(
       <ExecCell
         cell={{
@@ -158,24 +160,65 @@ describe("ExecCell", () => {
         }}
       />,
     );
-    expect(screen.getByText("命令未完整结束")).toBeTruthy();
-    expect(screen.getAllByText("命令未完整结束").length).toBeGreaterThan(0);
+    expect(screen.getByText("运行命令")).toBeTruthy();
+    expect(screen.queryByText("退出码 未知")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /展开命令详情/ }));
+    expect(screen.getByText("退出码 未知")).toBeTruthy();
+    expect(screen.getByText("half of the suite ran")).toBeTruthy();
   });
 
-  it("copies the actual command, stdout and stderr", async () => {
+  it("copies actual command and output independently without protocol decoration", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     render(<ExecCell cell={{ kind: "exec", id: "copy", command: "npm test", status: "success", stdoutPreview: ["passed"], stderrPreview: ["warning"], collapsed: false, createdAt: 1 }} />);
     fireEvent.click(screen.getByRole("button", { name: "复制命令输出" }));
-    expect(writeText).toHaveBeenCalledWith("$ npm test\npassed\nwarning");
+    expect(writeText).toHaveBeenCalledWith("passed\nwarning");
     expect(await screen.findByRole("button", { name: "已复制命令输出" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "复制命令" }));
+    expect(writeText).toHaveBeenLastCalledWith("npm test");
+    expect(await screen.findByRole("button", { name: "已复制命令" })).toBeTruthy();
+  });
+
+  it("expands the full original command while retaining literal output and a neutral exit footer", () => {
+    const command = "python -c \"print('line 1'); print('line 2'); print('line 3')\"";
+    const { container } = render(<ExecCell cell={{ kind: "exec", id: "original-failure", command: "python …", originalCommand: command,
+      status: "failed", exitCode: 7, stdoutPreview: ["literal stdout"], stderrPreview: ["actual error"], collapsed: false, createdAt: 1 }} />);
+    const fullCommand = screen.getByRole("button", { name: `展开完整命令：${command}` });
+    expect(fullCommand.getAttribute("data-expanded")).toBe("false");
+    fireEvent.click(fullCommand);
+    expect(fullCommand.getAttribute("data-expanded")).toBe("true");
+    expect(fullCommand.textContent).toBe(`$ ${command}`);
+    expect(container.querySelector(".exec-cell-output-stdout")?.textContent).toBe("literal stdout");
+    expect(container.querySelector(".exec-cell-output-stderr")?.textContent).toBe("actual error");
+    expect(screen.getByText("退出码 7")).toBeTruthy();
+    expect(screen.queryByText("失败")).toBeNull();
+    expect(screen.queryByText("成功")).toBeNull();
+  });
+
+  it("does not add a running badge or placeholder to an empty live shell", () => {
+    const { container } = render(<ExecCell cell={{ kind: "exec", id: "empty-live", command: "npm test", status: "running",
+      stdoutPreview: [], stderrPreview: [], collapsed: false, createdAt: Date.now() }} />);
+    expect(container.querySelector(".exec-cell-output-pre")?.textContent).toBe("");
+    expect(container.querySelector(".exec-cell-output-status")).toBeNull();
+    expect(screen.queryByText("运行中")).toBeNull();
+    expect(screen.queryByText("等待输出…")).toBeNull();
+    expect(screen.queryByText("无输出")).toBeNull();
+  });
+
+  it("shows a real stopped receipt inside disclosure", () => {
+    render(<ExecCell cell={{ kind: "exec", id: "stopped", command: "npm test", status: "cancelled",
+      stdoutPreview: ["partial stdout"], stderrPreview: [], collapsed: false, createdAt: 1 }} />);
+    expect(screen.getByText("已停止")).toBeTruthy();
+    expect(screen.getByText("partial stdout")).toBeTruthy();
+    expect(screen.queryByText("失败")).toBeNull();
+    expect(screen.queryByText("成功")).toBeNull();
   });
 });
 
 
 it.each([
   ["pending_approval", "等待批准运行命令"],
-  ["failed", "命令运行失败"],
+  ["failed", "运行命令"],
 ] as const)("does not claim a %s command already executed", (status, title) => {
   render(<ExecCell cell={{ kind: "exec", id: "exec-not-performed", command: "python -m pytest", status,
     stdoutPreview: [], stderrPreview: [], collapsed: true, createdAt: 1 }} />);

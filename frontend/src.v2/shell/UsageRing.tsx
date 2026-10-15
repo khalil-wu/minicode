@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useId, type CSSProperties } from "react";
 import type { BudgetBucket, ContextLedgerCategory, ContextUsage } from "../stores/types";
 import "./UsageRing.css";
@@ -23,6 +24,7 @@ export const UsageRing = ({
   contextUsage: ContextUsage | null;
   totalBudgetPercent: number;
 }) => {
+  const { t: tr } = useI18n();
   const detailsId = useId();
   const hasContextUsage = Boolean(contextUsage && contextUsage.limit > 0);
   const hasBudgetUsage = !hasContextUsage && (
@@ -35,7 +37,7 @@ export const UsageRing = ({
     : 0;
   // budget_update buckets describe prompt use, not a task spending limit.
   const percent = clampPercent(hasContextUsage ? contextPercent : (totalBudgetPercent ?? 0));
-  const label = usageKnown ? `${Math.round(percent * 100)}%` : "暂无数据";
+  const label = usageKnown ? `${Math.round(percent * 100)}%` : tr("暂无数据");
   const ledger = contextUsage?.ledger;
   const segments = (ledger ? ledger.entries.map((entry) => ({
     key: entry.category, label: entry.label, tokens: entry.estimated_tokens, color: categoryColors[entry.category],
@@ -47,8 +49,8 @@ export const UsageRing = ({
   return (
     <span className="mc-usage-ring">
       <span
-        aria-label={usageKnown ? `会话用量 ${label}` : "用量暂无数据"}
-        aria-valuetext={usageKnown ? `已使用 ${label}` : "暂无用量数据"}
+        aria-label={usageKnown ? tr("会话用量 {label}", { label }) : tr("用量暂无数据")}
+        aria-valuetext={usageKnown ? tr("已使用 {label}", { label }) : tr("暂无用量数据")}
         aria-describedby={detailsId}
         role="meter"
         aria-valuemin={0}
@@ -61,13 +63,13 @@ export const UsageRing = ({
       </span>
       <span className="mc-usage-ring-label">{label}</span>
       <span id={detailsId} className="mc-usage-details" role="tooltip">
-        <span className="mc-usage-details-heading"><strong>用量</strong><span>{label}</span></span>
+        <span className="mc-usage-details-heading"><strong>{tr("用量")}</strong><span>{label}</span></span>
         {hasContextUsage && contextUsage && <span className="mc-usage-details-total">{formatCount(contextUsage.used)} / {formatCount(contextUsage.limit)} tokens</span>}
         {segments.length > 0 && <>
           <span className="mc-usage-details-bar" aria-hidden="true">
             {segments.map((segment) => <span key={segment.key} style={{ width: `${segment.tokens / segmentTotal * 100}%`, background: segment.color }} />)}
           </span>
-          <span className="mc-usage-details-caption">{ledger ? "组成 · 后端估算" : "组成"}</span>
+          <span className="mc-usage-details-caption">{ledger ? tr("组成 · 后端估算") : tr("组成")}</span>
           <span className="mc-usage-details-segments">
             {segments.map((segment) => <span key={segment.key} className="mc-usage-details-segment" style={{ "--usage-segment-color": segment.color } as CSSProperties}>
               <span className="mc-usage-details-dot" aria-hidden="true" />

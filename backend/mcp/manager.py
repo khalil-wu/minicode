@@ -8,7 +8,8 @@ import logging
 import math
 import os
 import re
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from collections.abc import Mapping
@@ -174,6 +175,7 @@ class MCPServerConfig:
     disabled_tools: list[str] = field(default_factory=list)
     default_tools_approval_mode: str | None = None
     tool_approval_modes: dict[str, str] = field(default_factory=dict)
+    tool_output_token_limits: dict[str, int] = field(default_factory=dict)
     enabled: bool = True
     disabled_reason: str = ""
 
@@ -234,6 +236,8 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
         for tool_name, mode in config.tool_approval_modes.items()
     ):
         raise ValueError("tool approval modes must map non-empty tool names to valid modes")
+    if any(type(limit) is not int or limit <= 0 for limit in config.tool_output_token_limits.values()):
+        raise ValueError("tool output_token_limit must be a positive integer")
     if transport == "stdio":
         incompatible = [
             field_name
@@ -306,6 +310,7 @@ class MCPServerState:
     client: MCPClient | None = None
     status: ServerStatus = ServerStatus.OFFLINE
     tools: list[MCPToolDef] = field(default_factory=list)
+    raw_tools: list[MCPToolDef] = field(default_factory=list)
     retry_count: int = 0
     last_error: str = ""
     last_exception: BaseException | None = None
@@ -630,6 +635,10 @@ class MCPServerManager:
         return allowed
 
     def _load_plugin_configs(self, *, config_stack: Any | None = None) -> list[MCPServerConfig]:
+        if config_stack is None:
+            from backend.config import load_config_layer_stack
+
+            config_stack = load_config_layer_stack(cwd=self.workspace_root)
         try:
             from backend.plugins.manager import PluginManager
         except Exception as exc:
@@ -651,7 +660,9 @@ class MCPServerManager:
                 if not manifest_path.is_file():
                     continue
                 try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    from backend.plugins.manifest import _read_plugin_manifest
+
+                    manifest = _read_plugin_manifest(manifest_path)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
                     raise RuntimeError(
                         f"Failed to read plugin manifest {manifest_path}: {exc}"
@@ -700,6 +711,13 @@ class MCPServerManager:
 
                 for servers in server_maps:
                     for server_index, (name, raw_config) in enumerate(servers.items()):
+                        plugin_settings = config_stack.effective_config().get("plugins", {}).get(plugin_id, {})
+                        policy_override = plugin_settings.get("mcp_servers", {}).get(name, {})
+                        raw_config = deepcopy(raw_config)
+                        if "default_tools_approval_mode" in policy_override:
+                            raw_config["default_tools_approval_mode"] = policy_override["default_tools_approval_mode"]
+                        for tool_name, tool_policy in policy_override.get("tools", {}).items():
+                            raw_config.setdefault("tools", {}).setdefault(tool_name, {}).update(tool_policy)
                         config = self._config_from_mapping(
                             f"plugin:{plugin_id}:{name}",
                             raw_config,
@@ -989,6 +1007,7 @@ class MCPServerManager:
                 field="default_tools_approval_mode",
             )
             tool_approval_modes = _tool_approval_modes(conf.get("tools"))
+            tool_output_token_limits = _tool_output_token_limits(conf.get("tools"))
         except ValueError as exc:
             raise ValueError(
                 f"MCP server '{name}' from {source} has invalid policy/config: {exc}"
@@ -1039,6 +1058,7 @@ class MCPServerManager:
             disabled_tools=disabled_tools,
             default_tools_approval_mode=default_tools_approval_mode,
             tool_approval_modes=tool_approval_modes,
+            tool_output_token_limits=tool_output_token_limits,
         )
         try:
             validate_mcp_server_config(config)
@@ -1115,6 +1135,13 @@ class MCPServerManager:
         for name, config in desired.items():
             current = self._servers.get(name)
             changed = current is None or not _same_runtime_config(current.config, config)
+            if changed and current is not None and current.status == ServerStatus.CONNECTED and _same_connection_config(current.config, config):
+                async with self._connection_locks[name]:
+                    current.config = config
+                    if current.status == ServerStatus.CONNECTED:
+                        current.tools = _filter_mcp_tools(config, current.raw_tools)
+                    await self._notify_status(name, current.status)
+                continue
             if changed:
                 if current is not None:
                     await self.stop_server(name)
@@ -1188,6 +1215,7 @@ class MCPServerManager:
                 return
             state.status = ServerStatus.OFFLINE
             state.tools = []
+            state.raw_tools = []
             state.last_error = ""
             state.last_exception = None
             state.operation_failures.pop("credential_store", None)
@@ -1248,6 +1276,7 @@ class MCPServerManager:
             state.client = None
             state.status = ServerStatus.OFFLINE
             state.tools = []
+            state.raw_tools = []
             state.retry_count = 0
             state.last_error = ""
             state.last_exception = None
@@ -1384,6 +1413,13 @@ class MCPServerManager:
             if state.status == ServerStatus.CONNECTED and state.tools:
                 result[name] = state.tools
         return result
+
+    async def wait_for_server_startup(self, server_name: str) -> None:
+        """Wait for this server's admitted connection attempt to settle."""
+        lock = self._connection_locks.get(server_name)
+        if lock is not None:
+            async with lock:
+                pass
 
     def get_client(self, server_name: str) -> MCPClient | None:
         state = self._servers.get(server_name)
@@ -1561,7 +1597,8 @@ class MCPServerManager:
                         )
                 except Exception as exc:
                     restore_failures.append((uri, exc))
-            state.tools = _filter_mcp_tools(state.config, await client.list_tools())
+            state.raw_tools = await client.list_tools()
+            state.tools = _filter_mcp_tools(state.config, state.raw_tools)
             stored_auth_status = self._stored_auth_status(state.config)
             state.auth_status = (
                 MCPAuthStatus.OAUTH
@@ -1664,7 +1701,8 @@ class MCPServerManager:
             return state
 
         config_changed = not _same_runtime_config(state.config, config)
-        if state.client is not None and (config_changed or not state.client.connected):
+        connection_changed = not _same_connection_config(state.config, config)
+        if state.client is not None and (connection_changed or not state.client.connected):
             stale_client = state.client
             try:
                 closed = await stale_client.close()
@@ -1687,10 +1725,14 @@ class MCPServerManager:
             state.client = None
             state.status = ServerStatus.OFFLINE
             state.tools = []
+            state.raw_tools = []
             state.operation_failures.pop("cleanup", None)
         if _mcp_server_identity(state.config) != _mcp_server_identity(config):
             self._resource_subscriptions.pop(config.name, None)
         state.config = config
+        if config_changed and not connection_changed and state.status == ServerStatus.CONNECTED:
+            state.tools = _filter_mcp_tools(config, state.raw_tools)
+            await self._notify_status(config.name, state.status)
         stored_auth_status = self._stored_auth_status(config)
         if (
             config_changed
@@ -1821,7 +1863,8 @@ class MCPServerManager:
                     if state.client is not client or not client.connected:
                         continue
                     state.status = ServerStatus.CONNECTED
-                    state.tools = _filter_mcp_tools(state.config, tools)
+                    state.raw_tools = tools
+                    state.tools = _filter_mcp_tools(state.config, state.raw_tools)
                     state.last_error = ""
                     state.last_exception = None
                     state.operation_failures.pop("tool_catalog", None)
@@ -2018,7 +2061,7 @@ def _tool_approval_modes(value: Any) -> dict[str, str]:
             raise ValueError("tools contains an invalid tool name")
         if not isinstance(raw_config, Mapping):
             raise ValueError(f"tools.{tool_name} must be an object")
-        unknown_fields = sorted(set(raw_config) - {"approval_mode"})
+        unknown_fields = sorted(set(raw_config) - {"approval_mode", "output_token_limit"})
         if unknown_fields:
             raise ValueError(
                 f"tools.{tool_name} contains unsupported fields: "
@@ -2111,9 +2154,33 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
         and left.disabled_tools == right.disabled_tools
         and left.default_tools_approval_mode == right.default_tools_approval_mode
         and left.tool_approval_modes == right.tool_approval_modes
+        and left.tool_output_token_limits == right.tool_output_token_limits
         and left.enabled == right.enabled
         and left.disabled_reason == right.disabled_reason
     )
+
+
+def _tool_output_token_limits(value: Any) -> dict[str, int]:
+    limits = {}
+    for name, tool_config in (value or {}).items():
+        limit = tool_config.get("output_token_limit")
+        if limit is not None:
+            if type(limit) is not int or limit <= 0:
+                raise ValueError(f"tools.{name}.output_token_limit must be a positive integer")
+            limits[name] = limit
+    return limits
+
+
+def _same_connection_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
+    return _same_runtime_config(replace(
+        left,
+        enabled_tools=right.enabled_tools,
+        disabled_tools=right.disabled_tools,
+        default_tools_approval_mode=right.default_tools_approval_mode,
+        tool_approval_modes=right.tool_approval_modes,
+        tool_output_token_limits=right.tool_output_token_limits,
+        supports_parallel_tool_calls=right.supports_parallel_tool_calls,
+    ), right)
 
 
 def _mcp_server_identity(config: MCPServerConfig, *, include_scope: bool = True) -> tuple[Any, ...]:

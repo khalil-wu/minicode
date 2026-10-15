@@ -173,7 +173,10 @@ async def settle_provider_stream(
             None,
         )
         if callable(record_actual_usage):
-            record_actual_usage(usage, provider_raw=provider_raw_done)
+            # The aggregate starts as UsageInfo(0) for billing. Only a real
+            # provider UsageEvent/DONE usage may replace context estimates.
+            record_actual_usage(usage if provider_attempt.usage_reported else None,
+                                provider_raw=provider_raw_done)
         stream_text.sanitize(scrub_thinking_tags)
     yield ProviderStreamSettlement(
         action=action,

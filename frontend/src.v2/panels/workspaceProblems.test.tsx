@@ -37,7 +37,7 @@ vi.mock('./monacoLanguageServices', async (original) => ({
     })
   },
   getWorkspaceTypeScriptWorker: vi.fn(async () => runtime.service),
-  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: async () => [], configurationDiagnostics: async () => [], addConfigurationFiles: async () => {} })),
+  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: async () => [], dependencyRequests: async () => [], configurationDiagnostics: async () => [], addConfigurationFiles: async () => {} })),
 }))
 beforeAll(() => { ['typescript', 'javascript', 'json'].forEach((id) => monaco.languages.register({ id })) })
 beforeEach(() => {

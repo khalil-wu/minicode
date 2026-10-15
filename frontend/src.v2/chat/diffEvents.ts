@@ -82,8 +82,9 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
     }
     case "diff.git_working_tree": {
       const ev = e as GitDiffWorkingTreeEvent;
+      if (s.pendingConversationSwitchId || s.pendingConversationCreateId) return true;
       if (!eventTargetsCurrentWorkspace(ev)) return true;
-      if (s.gitChanges.workingTreeRequestId && ev.request_id !== s.gitChanges.workingTreeRequestId) return true;
+      if (!s.gitChanges.workingTreeRequestId || ev.request_id !== s.gitChanges.workingTreeRequestId) return true;
       s.setGitChanges({
         isGitRepo: ev.is_git_repo,
         ...(ev.is_git_repo === false ? { staged: [] } : {}),
@@ -95,8 +96,9 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
     }
     case "diff.git_staged": {
       const ev = e as GitDiffStagedEvent;
+      if (s.pendingConversationSwitchId || s.pendingConversationCreateId) return true;
       if (!eventTargetsCurrentWorkspace(ev)) return true;
-      if (s.gitChanges.stagedRequestId && ev.request_id !== s.gitChanges.stagedRequestId) return true;
+      if (!s.gitChanges.stagedRequestId || ev.request_id !== s.gitChanges.stagedRequestId) return true;
       s.setGitChanges({
         isGitRepo: ev.is_git_repo,
         ...(ev.is_git_repo === false ? { workingTree: [], untracked: [] } : {}),

@@ -25,6 +25,7 @@ export interface ConversationResourcePage {
   total: number
   has_more: boolean
   after: string
+  read_errors?: { artifact_id: string; error_type: string; message: string }[]
 }
 
 export interface BackgroundCommandDetail {

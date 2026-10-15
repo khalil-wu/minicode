@@ -2,11 +2,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "./index";
 import { cachedEditorDrafts, cachedEditorWorkspaceIndex, flushEditorDrafts, loadEditorDrafts, resetEditorDraftStorageForTests } from "./editor-drafts";
-import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, restoreWorkspaceEditorDrafts } from "./shared-helpers";
+import { cacheEditorStateForWorkspace, clearEditorWorkspaceBufferCacheForTests, dirtyEditorFiles, editorStateForWorkspace, loadEditorViewState, loadPersistedEditorTabs, persistEditorTabs, persistEditorViewState, restoreWorkspaceEditorDrafts } from "./shared-helpers";
 
 const root = "C:/draft-storage";
 const key = root.toLowerCase();
 beforeEach(async () => {
+  window.__MINICODE_RUNTIME__ = { ...window.__MINICODE_RUNTIME__, windowOwnerId: "primary" };
   localStorage.clear();
   clearEditorWorkspaceBufferCacheForTests();
   useAppStore.setState({ workingDirectory: root, editorTabs: [], activeTabPath: null, activeEditorPath: null, editorOpenRequests: [] });
@@ -21,6 +22,74 @@ const restart = async () => {
 };
 
 describe("durable editor drafts", () => {
+  it("cold reopens two windows' different buffers and selections for the same workspace and path", async () => {
+    persistEditorTabs([authoredTab("app.ts", "primary content")], root, { activeTabPath: "app.ts", activeEditorPath: null });
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "secondary-1" };
+    persistEditorTabs([authoredTab("app.ts", "secondary content"), authoredTab("other.ts", "secondary only")], root, { activeTabPath: "other.ts", activeEditorPath: "app.ts" });
+    await restart();
+    const secondary = await loadEditorDrafts(key, [], "unused-secondary-source");
+    expect(secondary.get("app.ts")?.content).toBe("secondary content");
+    expect(cachedEditorWorkspaceIndex(key)).toMatchObject({ paths: ["app.ts", "other.ts"], activeTabPath: "other.ts", activeEditorPath: "app.ts" });
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
+    const primary = await loadEditorDrafts(key, [], "unused-primary-source");
+    expect([...primary.keys()]).toEqual(["app.ts"]);
+    expect(primary.get("app.ts")?.content).toBe("primary content");
+    expect(cachedEditorWorkspaceIndex(key)).toMatchObject({ paths: ["app.ts"], activeTabPath: "app.ts", activeEditorPath: null });
+  });
+
+  it("scopes local tab indexes, view state and hidden editor activity to their actual window", () => {
+    localStorage.setItem(`minicode.editor.tabs:${JSON.stringify(["primary", key])}`, JSON.stringify(["primary.ts"]));
+    localStorage.setItem(`minicode.editor.tabs:${JSON.stringify(["secondary-1", key])}`, JSON.stringify(["secondary.ts"]));
+    persistEditorViewState(root, "app.ts", { kind: "code", state: { cursor: 11 } });
+    cacheEditorStateForWorkspace(root, [authoredTab("primary.ts", "primary hidden")], "primary.ts", null);
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "secondary-1" };
+    persistEditorViewState(root, "app.ts", { kind: "code", state: { cursor: 22 } });
+    cacheEditorStateForWorkspace(root, [authoredTab("secondary.ts", "secondary hidden")], "secondary.ts", null);
+    expect(loadPersistedEditorTabs(root).map(tab => tab.path)).toEqual(["secondary.ts"]);
+    expect(loadEditorViewState(root, "app.ts")?.state).toEqual({ cursor: 22 });
+    expect(dirtyEditorFiles({ workingDirectory: "", editorTabs: [] })).toEqual([key + "/secondary.ts"]);
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
+    expect(loadPersistedEditorTabs(root).map(tab => tab.path)).toEqual(["primary.ts"]);
+    expect(loadEditorViewState(root, "app.ts")?.state).toEqual({ cursor: 11 });
+    expect(dirtyEditorFiles({ workingDirectory: "", editorTabs: [] })).toEqual([key + "/primary.ts"]);
+  });
+
+  it("only the native primary can recover an unscoped localStorage body, then preserves it at the old IDB key", async () => {
+    const legacyKey = "minicode.editor.drafts:" + key;
+    localStorage.setItem("minicode.editor.tabs:" + key, JSON.stringify(["legacy.ts"]));
+    localStorage.setItem(legacyKey, JSON.stringify([authoredTab("legacy.ts", "legacy body")]));
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "secondary-1" };
+    expect(loadPersistedEditorTabs(root)).toEqual([]);
+    expect(await restoreWorkspaceEditorDrafts(root)).toEqual([]);
+    expect(localStorage.getItem(legacyKey)).not.toBeNull();
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
+    expect((await restoreWorkspaceEditorDrafts(root))[0].content).toBe("legacy body");
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("minicode-editor-drafts", 2);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const request = db.transaction("drafts").objectStore("drafts").get([key, "legacy.ts"]);
+    expect(await new Promise(resolve => { request.onsuccess = () => resolve(request.result.tab.content); })).toBe("legacy body");
+    db.close();
+  });
+
+  it("atomically assigns legacy browser recovery to one upgrading window and retains the original rows", async () => {
+    const legacy = [authoredTab("legacy.ts", "browser legacy body")];
+    const legacyKey = "minicode.editor.drafts:" + key;
+    localStorage.setItem(legacyKey, JSON.stringify(legacy));
+    const [first, second] = await Promise.all([
+      loadEditorDrafts(key, legacy, legacyKey, undefined, "browser-first"),
+      loadEditorDrafts(key, legacy, legacyKey, undefined, "browser-second"),
+    ]);
+    expect(first.get("legacy.ts")?.content).toBe("browser legacy body");
+    expect(second.size).toBe(0);
+    await restart();
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "browser-first" };
+    expect((await loadEditorDrafts(key, [], legacyKey)).get("legacy.ts")?.content).toBe("browser legacy body");
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "browser-second" };
+    expect((await loadEditorDrafts(key, legacy, legacyKey)).size).toBe(0);
+  });
+
   it("commits large drafts by file and never sends their bodies through localStorage", async () => {
     const writes = vi.spyOn(Storage.prototype, "setItem");
     const body = "A".repeat(600000);
@@ -211,6 +280,25 @@ describe("durable editor drafts", () => {
     put.mockRestore();
   });
 
+  it("retains both the previous durable body and last authored buffer after an actual abort, then flush retries without another edit", async () => {
+    useAppStore.setState({ editorTabs: [authoredTab("app.ts", "previous committed body")] });
+    await flushEditorDrafts();
+    const put = IDBObjectStore.prototype.put;
+    const failing = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (...args) {
+      const request = put.apply(this, args);
+      if (this.name === "drafts" && this.transaction.db.name === "minicode-editor-drafts") this.add(args[0]);
+      return request;
+    });
+    useAppStore.getState().updateTabContent("app.ts", "last authored body");
+    await expect(flushEditorDrafts()).rejects.toMatchObject({ name: "ConstraintError" });
+    expect(useAppStore.getState().editorTabs[0].content).toBe("last authored body");
+    expect(cachedEditorDrafts(key)?.get("app.ts")?.content).toBe("previous committed body");
+    failing.mockRestore();
+    await flushEditorDrafts();
+    await restart();
+    expect((await loadEditorDrafts(key, [], "unused-legacy-source")).get("app.ts")?.content).toBe("last authored body");
+  });
+
   it("does not overwrite a newer authored buffer when a cold restore finishes after switching away", async () => {
     useAppStore.setState({ editorTabs: [authoredTab()] });
     await restart();
@@ -244,20 +332,26 @@ describe("durable editor drafts", () => {
     expect(cachedEditorDrafts(key)?.size).toBe(0);
   });
 
-  it("keeps the window open until the final queued draft commits, without saving user files", async () => {
+  it.each(["close", "reload"] as const)("keeps the window open until the queued draft commits and resumes the actual %s intent without saving user files", async action => {
     const close = vi.fn(async () => true);
+    const intent = { id: `editor-${action}`, action, ignoreCache: action === "reload" };
+    const captureUnloadIntent = vi.fn(() => intent);
+    const resumeUnload = vi.fn(async () => true);
     const previousRuntime = window.__MINICODE_RUNTIME__;
-    window.__MINICODE_RUNTIME__ = { desktop: { windowControls: { close } } as never };
+    window.__MINICODE_RUNTIME__ = { ...previousRuntime, desktop: { windowControls: { close, captureUnloadIntent, resumeUnload } } as never };
     useAppStore.setState({ editorTabs: [authoredTab()] });
     useAppStore.getState().updateTabContent("app.ts", "last authored change");
     const unload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(unload);
     expect(unload.defaultPrevented).toBe(true);
     expect(close).not.toHaveBeenCalled();
+    expect(resumeUnload).not.toHaveBeenCalled();
     await flushEditorDrafts();
     await Promise.resolve();
     expect(cachedEditorDrafts(key)?.get("app.ts")?.content).toBe("last authored change");
-    expect(close).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(resumeUnload).toHaveBeenCalledExactlyOnceWith(intent.id));
+    expect(captureUnloadIntent).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
     window.__MINICODE_RUNTIME__ = previousRuntime;
   });
 });

@@ -15,11 +15,15 @@ const embeddedBrowserManager = require("./embedded-browser-manager");
 const embeddedBrowserBridge = require("./embedded-browser-bridge");
 const ptyManager = require("./pty-manager");
 const windowManager = require("./window-manager");
+const { releaseEditorWindow, closeWindowsAfterDraftCommit } = require("./window-lifecycle");
+const { externalBackendHostContract, verifyExternalBackendHostContract } = require("./backend-host-contract");
 const ipcHandlers = require("./ipc-handlers");
 const updater = require("./updater");
 const crashReporting = require("./crash-reporter");
 const { setupWindowsSandbox } = require("./windows-sandbox-setup");
 const { popupApplicationMenu } = require("./menu-popup");
+const desktopPreferences = require("./preferences");
+const browserHistory = require("./browser-history");
 
 // html.to.design capture is an explicitly enabled development aid. Keep the
 // dependency out of the packaged startup path and save captures locally.
@@ -74,7 +78,7 @@ const RUNTIME_TOKEN =
   crypto.randomBytes(32).toString("hex");
 // Embedded tool admission is a backend capability. The general API token is
 // visible to the main renderer, so it cannot attest backend-owned navigation.
-const EMBEDDED_BROWSER_TOKEN = crypto.randomBytes(32).toString("hex");
+const EMBEDDED_BROWSER_TOKEN = MANAGE_BACKEND ? crypto.randomBytes(32).toString("hex") : String(process.env.MINICODE_EMBEDDED_BROWSER_TOKEN || "");
 
 function resolvePythonCommand() {
   if (process.env.MINICODE_PYTHON) return process.env.MINICODE_PYTHON;
@@ -183,6 +187,10 @@ if (process.env.MINICODE_USER_DATA_DIR) {
 } else {
   app.setPath("userData", path.join(app.getPath("appData"), require("./package.json").name));
 }
+desktopPreferences.init(path.join(app.getPath("userData"), "desktop-preferences.json"), {
+  defaultTaskDirectory: process.env.MINICODE_DEFAULT_TASK_DIRECTORY || path.join(app.getPath("documents"), "MiniCode"),
+});
+browserHistory.init(path.join(app.getPath("userData"), "browser-history.json"));
 crashReporting.init({ crashReporter, app, logger: appendDesktopLog });
 
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -350,6 +358,10 @@ function buildDiagnosticsPayload() {
     },
     windows: {
       hasMainWindow: Boolean(windowManager.getMainWindow() && !windowManager.getMainWindow().isDestroyed()),
+      registered: windowManager.getMainWindows().map((window) => {
+        const record = windowManager.getWindowRecord(window);
+        return { windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId };
+      }),
       hasStartupFailureWindow: Boolean(startupFailureWindow && !startupFailureWindow.isDestroyed()),
       savedState: windowManager.readWindowState(),
     },
@@ -428,6 +440,38 @@ function getBackendRuntimeConfig() {
   };
 }
 
+function getWindowRuntimeConfig(window) {
+  const record = windowManager.getWindowRecord(window);
+  return { ...getBackendRuntimeConfig(), windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId, windowBindingToken: record.windowBindingToken };
+}
+
+const windowCleanupTasks = new Map();
+let desktopCleanupFailed = false;
+
+function releaseWindowResources(record, retry = false) {
+  if (record.cleanupTask && !retry) return record.cleanupTask;
+  const runtime = { ...record.runtime, windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId,
+    desktopLifecycleToken: EMBEDDED_BROWSER_TOKEN };
+  embeddedBrowserBridge.releaseWindow(record.windowInstanceId);
+  embeddedBrowserManager.releaseWindow(record.windowInstanceId);
+  const cleanupTask = Promise.all([
+    ptyManager.releaseWindow(record.windowInstanceId),
+    releaseEditorWindow(runtime),
+  ]);
+  record.cleanupTask = cleanupTask;
+  record.cleanupError = null;
+  windowCleanupTasks.set(record, cleanupTask);
+  void cleanupTask.then(() => {
+    if (windowCleanupTasks.get(record) === cleanupTask) windowCleanupTasks.delete(record);
+  }, (error) => {
+    // Retain the rejected operation until the next explicit shutdown attempt
+    // retries this same owner. The error must remain observable by drain.
+    if (record.cleanupTask === cleanupTask) record.cleanupError = error;
+    appendDesktopLog(`[desktop] window ${record.windowInstanceId} cleanup failed: ${error.message}`);
+  });
+  return record.cleanupTask;
+}
+
 async function launchManagedBackend() {
   return backendSidecar.launchBackendSidecar({
     resolveRuntime: resolveBackendRuntime,
@@ -437,19 +481,16 @@ async function launchManagedBackend() {
 }
 
 function publishBackendRuntimeChange(previousRuntime, nextRuntime) {
+  for (const win of windowManager.getMainWindows()) windowManager.getWindowRecord(win).runtime = { ...nextRuntime };
   if (
     previousRuntime.apiBaseUrl === nextRuntime.apiBaseUrl
     && previousRuntime.wsBaseUrl === nextRuntime.wsBaseUrl
   ) {
     return;
   }
-  const win = windowManager.getMainWindow();
-  if (!win || win.isDestroyed()) return;
-  win.webContents.send("minicode:runtime:changed", {
-    revision: nextRuntime.revision,
-    apiBaseUrl: nextRuntime.apiBaseUrl,
-    wsBaseUrl: nextRuntime.wsBaseUrl,
-  });
+  for (const win of windowManager.getMainWindows()) {
+    win.webContents.send("minicode:runtime:changed", getWindowRuntimeConfig(win));
+  }
 }
 
 async function restartManagedBackend(reason) {
@@ -518,35 +559,70 @@ function normalizeDeepLinkTarget(target) {
   return { kind: "url", url: urlStr };
 }
 
-function dispatchDeepLink(target) {
+function dispatchDeepLink(target, win = windowManager.getFocusedMainWindow()) {
   const normalizedTarget = normalizeDeepLinkTarget(target);
   if (!normalizedTarget) return false;
 
-  pendingDeepLink = { id: crypto.randomUUID(), target: normalizedTarget };
-  const win = windowManager.getMainWindow();
+  pendingDeepLink = { id: crypto.randomUUID(), target: normalizedTarget, windowInstanceId: win ? windowManager.getWindowRecord(win).windowInstanceId : null };
   if (win && !win.isDestroyed()) {
-    windowManager.focusMainWindow();
-    win.webContents.send("minicode:deep-link", pendingDeepLink);
+    windowManager.focusMainWindow(win);
+    win.webContents.send("minicode:deep-link", { id: pendingDeepLink.id, target: pendingDeepLink.target });
   }
   return true;
 }
 
-function acknowledgeDeepLink(id) {
+function getPendingDeepLink(win) {
+  if (!pendingDeepLink) return null;
+  const { windowInstanceId } = windowManager.getWindowRecord(win);
+  if (!pendingDeepLink.windowInstanceId) pendingDeepLink.windowInstanceId = windowInstanceId;
+  return pendingDeepLink.windowInstanceId === windowInstanceId ? { id: pendingDeepLink.id, target: pendingDeepLink.target } : null;
+}
+
+function acknowledgeDeepLink(id, win) {
   if (!pendingDeepLink || pendingDeepLink.id !== String(id || "")) return false;
+  if (pendingDeepLink.windowInstanceId !== windowManager.getWindowRecord(win).windowInstanceId) return false;
   pendingDeepLink = null;
   return true;
 }
 
 function sendWorkbenchMenuEvent(channel) {
-  const win = windowManager.getMainWindow();
+  const win = windowManager.getFocusedMainWindow();
   if (!win || win.isDestroyed()) return false;
   win.webContents.send(channel);
-  windowManager.focusMainWindow();
+  windowManager.focusMainWindow(win);
   return true;
 }
 
-function showDesktopNotification(payload) {
+const desktopNotifications = new Map();
+
+function hideDesktopNotifications(selector, owner) {
+  if (selector.onlyIfFocused && !owner.isFocused()) return 0;
+  let hidden = 0;
+  for (const [notification, receipt] of desktopNotifications) {
+    if (receipt.conversationId !== selector.conversationId) continue;
+    if (selector.requestId != null && receipt.requestId !== selector.requestId) continue;
+    if (["turnId", "messageId", "taskId"].some((key) => selector[key] != null && receipt[key] !== selector[key])) continue;
+    notification.close();
+    desktopNotifications.delete(notification);
+    hidden += 1;
+  }
+  return hidden;
+}
+
+function showDesktopNotification(payload, owner) {
+  const focused = windowManager.getMainWindows().some((window) => window.isFocused());
+  if (!desktopPreferences.shouldNotify(payload.kind, focused)) return false;
+  if ((payload.kind === "permission" || payload.kind === "question")
+    && payload.conversationVisible && owner.isFocused()) return false;
   if (!Notification.isSupported()) return false;
+
+  const notificationTarget = normalizeDeepLinkTarget(payload?.target);
+  if (payload.kind === "completion" && payload.messageId && [...desktopNotifications.values()].some((receipt) =>
+    receipt.kind === "completion" && receipt.messageId === payload.messageId
+    && receipt.conversationId === notificationTarget?.conversationId)) return false;
+  if (payload.requestId && [...desktopNotifications.values()].some((receipt) =>
+    receipt.requestId === payload.requestId && receipt.conversationId === notificationTarget?.conversationId
+    && ["turnId", "messageId", "taskId"].every((key) => receipt[key] === payload[key]))) return false;
 
   const notification = new Notification({
     title:
@@ -557,19 +633,27 @@ function showDesktopNotification(payload) {
     silent: false,
     icon: DESKTOP_ICON_PATH,
   });
-  const notificationTarget = normalizeDeepLinkTarget(payload?.target);
-
   notification.on("click", () => {
-    windowManager.focusMainWindow();
-    if (notificationTarget) dispatchDeepLink(notificationTarget);
+    const win = owner && !owner.isDestroyed() ? owner : windowManager.getFocusedMainWindow();
+    windowManager.focusMainWindow(win);
+    if (notificationTarget) dispatchDeepLink(notificationTarget, win);
   });
+  notification.on("close", () => desktopNotifications.delete(notification));
 
   notification.show();
+  desktopNotifications.set(notification, {
+    kind: payload.kind,
+    requestId: payload.requestId,
+    conversationId: notificationTarget?.conversationId,
+    turnId: payload.turnId,
+    messageId: payload.messageId,
+    taskId: payload.taskId,
+  });
   return true;
 }
 
 async function captureCurrentWindowForFigma() {
-  const win = BrowserWindow.getFocusedWindow() || windowManager.getMainWindow();
+  const win = windowManager.getFocusedMainWindow();
   if (!figmaCaptureSdk || !win || win.isDestroyed()) {
     dialog.showErrorBox(
       "Figma capture unavailable",
@@ -614,7 +698,10 @@ function buildApplicationMenu() {
         {
           label: "新建窗口",
           accelerator: "Ctrl+Shift+N",
-          click: () => { void windowManager.createMainWindow(); },
+          click: () => {
+            if (!windowManager.getMainWindow()) { void attemptAppStartup("new-window"); return; }
+            void windowManager.createNewWindow().catch((error) => { appendDesktopLog(`[desktop] new window failed: ${error.message}`); dialog.showErrorBox("New window failed", error.message); });
+          },
         },
         {
           label: "新建聊天",
@@ -642,6 +729,7 @@ function buildApplicationMenu() {
           click: () => { sendWorkbenchMenuEvent("minicode:menu:settings"); },
         },
         { type: "separator" },
+        { label: "关闭窗口", accelerator: "Ctrl+W", click: () => { void windowManager.requestCloseWindow(windowManager.getFocusedMainWindow(), "keyboard"); } },
         { role: "quit", label: "退出" },
       ],
     },
@@ -685,11 +773,14 @@ function buildApplicationMenu() {
           label: "重新加载",
           accelerator: "F5",
           click: () => {
-            const win = windowManager.getMainWindow();
-            if (win && !win.isDestroyed()) win.reload();
+            const win = windowManager.getFocusedMainWindow();
+            if (win && !win.isDestroyed()) windowManager.reloadWindow(win);
           },
         },
-        { role: "forceReload", label: "强制重新加载" },
+        { label: "强制重新加载", accelerator: "Ctrl+Shift+R", click: () => {
+          const win = windowManager.getFocusedMainWindow();
+          if (win) windowManager.reloadWindow(win, true);
+        } },
         { role: "toggleDevTools", label: "切换开发者工具" },
         { type: "separator" },
         { role: "togglefullscreen", label: "全屏" },
@@ -731,7 +822,15 @@ function buildApplicationMenu() {
       ],
     },
   ];
-
+  const locale = desktopPreferences.getPreferences().localeOverride ?? app.getLocale();
+  if (!/^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale)) {
+    const labels = { "文件": "File", "新建窗口": "New Window", "新建聊天": "New Chat", "快速聊天": "Quick Chat", "打开文件夹…": "Open Folder…", "扩展市场": "Extensions", "设置…": "Settings…", "关闭窗口": "Close Window", "退出": "Quit", "编辑": "Edit", "撤销": "Undo", "重做": "Redo", "剪切": "Cut", "复制": "Copy", "粘贴": "Paste", "全选": "Select All", "视图": "View", "放大": "Zoom In", "缩小": "Zoom Out", "恢复实际大小": "Actual Size", "切换侧边栏": "Toggle Sidebar", "切换上下文面板": "Toggle Context Panel", "切换终端": "Toggle Terminal", "重新加载": "Reload", "强制重新加载": "Force Reload", "切换开发者工具": "Toggle Developer Tools", "全屏": "Full Screen", "捕获当前窗口到 Figma…": "Capture Window to Figma…", "窗口": "Window", "最小化": "Minimize", "帮助": "Help", "显示桌面日志": "Show Desktop Logs", "导出诊断信息": "Export Diagnostics" };
+    const localizeItems = (items) => items.forEach((item) => {
+      if (item.label) item.label = labels[item.label];
+      if (item.submenu) localizeItems(item.submenu);
+    });
+    localizeItems(template);
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
@@ -881,7 +980,7 @@ ptyManager.init({
   pty,
   sanitizedPtyEnv: utils.sanitizedPtyEnv,
   appendDesktopLog,
-  getMainWindow: () => windowManager.getMainWindow(),
+  getWindowByInstanceId: windowManager.getWindowByInstanceId,
   assertTrustedPath: security.assertTrustedPath,
 });
 
@@ -893,36 +992,50 @@ windowManager.init({
   desktopIconPath: DESKTOP_ICON_PATH,
   frontendDevUrl: FRONTEND_DEV_URL,
   getAppRoot,
-  onMainWindowCreated: (mainWindow) => {
-    closeStartupFailureWindow();
-    updater.invalidateActivity("activity.renderer_created");
-    mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) updater.invalidateActivity("activity.renderer_navigation");
+  onMainWindowCreated: (mainWindow, record) => {
+    record.runtime = getBackendRuntimeConfig();
+    updater.registerWindow(record.windowInstanceId);
+    mainWindow.webContents.on("did-navigate", () => {
+      updater.invalidateActivity(record.windowInstanceId, "activity.renderer_navigation");
     });
     mainWindow.webContents.on("render-process-gone", () => {
-      updater.invalidateActivity("activity.renderer_gone");
-    });
-    mainWindow.on("closed", () => {
-      updater.invalidateActivity("activity.renderer_closed");
+      updater.invalidateActivity(record.windowInstanceId, "activity.renderer_gone");
     });
   },
+  onMainWindowClosed: (_mainWindow, record) => {
+    updater.unregisterWindow(record.windowInstanceId);
+    void releaseWindowResources(record);
+    if (pendingDeepLink?.windowInstanceId === record.windowInstanceId) pendingDeepLink.windowInstanceId = null;
+  },
+  onMainWindowCloseCancelled: () => { appQuitRequested = false; backendSidecar.resetStopRequested(); },
   onDiagnosticIncident: recordDiagnosticIncident,
 });
 
 embeddedBrowserManager.init({
   appendDesktopLog,
-  getMainWindow: () => windowManager.getMainWindow(),
+  getWindowByInstanceId: windowManager.getWindowByInstanceId,
+  getMainWindows: windowManager.getMainWindows,
   assessBrowserNavigationPolicy: cdpBridge.assessBrowserNavigationPolicy,
+  browserHistory,
 });
 
 embeddedBrowserBridge.init({
   manager: embeddedBrowserManager,
+  getWindowRecordByInstanceId: windowManager.getWindowRecordByInstanceId,
   token: EMBEDDED_BROWSER_TOKEN,
+  endpoint: MANAGE_BACKEND ? "" : process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT,
   appendDesktopLog,
 });
 
 ipcHandlers.init({
-  popupApplicationMenu: (key) => popupApplicationMenu(Menu.getApplicationMenu(), key, windowManager.getMainWindow()),
+  desktopPreferences,
+  onLocaleChanged: buildApplicationMenu,
+  browserHistory,
+  getMainWindows: windowManager.getMainWindows,
+  createNewWindow: windowManager.createNewWindow,
+  focusMainWindow: windowManager.focusMainWindow,
+  requestCloseWindow: windowManager.requestCloseWindow,
+  popupApplicationMenu: (key, window) => popupApplicationMenu(Menu.getApplicationMenu(), key, window),
   setupWindowsSandbox: () => setupWindowsSandbox({
     scriptPath: app.isPackaged
       ? path.join(process.resourcesPath, "windows-sandbox", "setup-desktop-user-sandbox.ps1")
@@ -933,12 +1046,16 @@ ipcHandlers.init({
     powershellCommand: process.platform === "win32"
       ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "",
   }),
-  getMainWindow: () => windowManager.getMainWindow(),
+  getWindowForSender: windowManager.getWindowForSender,
+  getWindowRecord: windowManager.getWindowRecord,
+  captureUnloadIntent: windowManager.captureUnloadIntent,
+  resumeUnload: windowManager.resumeUnload,
   getStartupFailureWindow: () => startupFailureWindow,
   showDesktopNotification,
+  hideDesktopNotifications,
   dispatchDeepLink,
   acknowledgeDeepLink,
-  getPendingDeepLink: () => pendingDeepLink,
+  getPendingDeepLink,
   attemptAppStartup,
   get startupFailureState() { return startupFailureState; },
   getDesktopLogPath: utils.getDesktopLogPath,
@@ -953,7 +1070,7 @@ ipcHandlers.init({
   embeddedBrowserManager,
   ptyManager,
   updater,
-  getRuntimeConfig: getBackendRuntimeConfig,
+  getRuntimeConfig: getWindowRuntimeConfig,
   getLastPickedWorkspaceRoot: () => lastPickedWorkspaceRoot,
   setLastPickedWorkspaceRoot: (v) => { lastPickedWorkspaceRoot = v; },
 });
@@ -963,17 +1080,25 @@ ipcHandlers.init({
 // ---------------------------------------------------------------------------
 
 async function attemptAppStartup(source = "startup") {
+  if (rollbackPreparationInProgress) return false;
   if (startupRetryInFlight) return false;
 
   startupRetryInFlight = true;
   appendDesktopLog(`[desktop] startup attempt (${source})`);
   try {
+    if (desktopCleanupFailed) await drainDesktopResources();
     backendSidecar.resetStopRequested();
+    const externalContract = MANAGE_BACKEND ? null : externalBackendHostContract();
+    // Desktop WebSocket admission proves its window binding through this
+    // native endpoint before the backend can publish a connected session.
+    process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT = await embeddedBrowserBridge.start();
+    process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = EMBEDDED_BROWSER_TOKEN;
     if (MANAGE_BACKEND) {
       await launchManagedBackend();
     } else {
       const runtime = await resolveBackendRuntime();
       await backendSidecar.waitForBackendReady(runtime.apiBaseUrl, BACKEND_STARTUP_TIMEOUT_MS);
+      await verifyExternalBackendHostContract(runtime.apiBaseUrl, RUNTIME_TOKEN, externalContract);
     }
     await windowManager.createMainWindow();
     closeStartupFailureWindow();
@@ -1002,7 +1127,7 @@ app.on("second-instance", (_event, argv) => {
   if (deepLink) {
     dispatchDeepLink(deepLink);
   }
-  windowManager.focusMainWindow();
+  windowManager.focusMainWindow(windowManager.getFocusedMainWindow());
 });
 
 app.on("open-url", (event, url) => {
@@ -1012,32 +1137,72 @@ app.on("open-url", (event, url) => {
 
 let quitCleanupComplete = false;
 let quitCleanupStarted = false;
+let appQuitRequested = false;
+let rollbackPreparationInProgress = false;
+
+async function drainDesktopResources() {
+  try {
+    windowManager.clearWindowStateSaveTimer();
+    windowManager.persistWindowState();
+    const pending = Array.from(windowCleanupTasks, ([record, task]) =>
+      desktopCleanupFailed && record.cleanupError ? releaseWindowResources(record, true) : task);
+    await Promise.all(pending);
+    await ptyManager.killAllSessions();
+    await backendSidecar.stopBackendSidecar();
+    if (backendSidecar.getBackendProcess()) throw new Error("The backend is still running; rollback data cannot be prepared.");
+    const bridgeStop = embeddedBrowserBridge.stop();
+    try {
+      embeddedBrowserManager.disposeAll();
+    } finally {
+      await bridgeStop;
+    }
+    desktopCleanupFailed = false;
+  } catch (error) {
+    desktopCleanupFailed = true;
+    throw error;
+  }
+}
+
+async function prepareAutomaticRollback() {
+  rollbackPreparationInProgress = true;
+  backendSidecar.requestBackendStop();
+  try {
+    await closeWindowsAfterDraftCommit(windowManager.getMainWindows());
+    await drainDesktopResources();
+    const pythonCommand = app.isPackaged && process.platform === "win32"
+      ? path.join(process.resourcesPath, "python-runtime", "python.exe") : PYTHON_COMMAND;
+    return await updater.prepareRollbackData({ pythonCommand, backendRoot: getAppRoot(), stateRoot: app.getPath("userData") });
+  } catch (error) {
+    rollbackPreparationInProgress = false;
+    throw error;
+  }
+}
 app.on("before-quit", (event) => {
   if (quitCleanupComplete) return;
   event.preventDefault();
+  if (rollbackPreparationInProgress) return;
+  appQuitRequested = true;
+  backendSidecar.requestBackendStop();
+  const windows = windowManager.getMainWindows();
+  if (windows.length > 0) {
+    for (const window of windows) window.close();
+    return;
+  }
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
-  windowManager.clearWindowStateSaveTimer();
-  windowManager.persistWindowState();
-  void Promise.allSettled([
-    ptyManager.killAllSessions(),
-    backendSidecar.stopBackendSidecar(),
-    (async () => {
-      const bridgeStop = embeddedBrowserBridge.stop();
-      try {
-        embeddedBrowserManager.disposeAll();
-      } finally {
-        await bridgeStop;
-      }
-    })(),
-  ]).finally(() => {
+  void drainDesktopResources().then(() => {
     quitCleanupComplete = true;
     app.quit();
+  }).catch(async (error) => {
+    quitCleanupStarted = false;
+    appendDesktopLog(`[desktop] shutdown failed: ${error.message}`);
+    await createStartupFailureWindow(serializeError(error, "MiniCode could not finish shutting down its owned resources."));
   });
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  if (rollbackPreparationInProgress) return;
+  if (appQuitRequested || process.platform !== "darwin") {
     app.quit();
   }
 });
@@ -1072,34 +1237,26 @@ app.whenReady().then(async () => {
   }
   buildApplicationMenu();
   ipcHandlers.registerIpcHandlers();
-  // The embedded browser bridge is an optional control surface.  A listen
-  // failure here must be visible evidence and must not silently kill the
-  // rest of startup (updater + backend + window never ran when this await
-  // rejected, leaving the app hung with no UI).
-  let embeddedBrowserEndpoint = "";
-  try {
-    embeddedBrowserEndpoint = await embeddedBrowserBridge.start();
-  } catch (error) {
-    appendDesktopLog(
-      `[desktop] embedded browser bridge failed to start: ${
-        error instanceof Error ? error.stack || error.message : String(error)
-      }`,
-    );
-    appendDesktopLog("[desktop] continuing startup without the embedded browser bridge");
-  }
-  process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT = embeddedBrowserEndpoint;
-  process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = EMBEDDED_BROWSER_TOKEN;
   appendDesktopLog("[desktop] app ready");
   const initialDeepLink = process.argv.find(
     (arg) => typeof arg === "string" && arg.startsWith("minicode://"),
   );
   if (initialDeepLink) dispatchDeepLink(initialDeepLink);
-  const rollbackLaunched = await updater.init({
-    app,
-    getMainWindow: () => windowManager.getMainWindow(),
-    logger: appendDesktopLog,
-    getActivePtySessions: () => ptyManager.listActiveSessions(),
-  });
+  let rollbackLaunched;
+  try {
+    rollbackLaunched = await updater.init({
+      app,
+      getMainWindows: windowManager.getMainWindows,
+      getWindowRecord: windowManager.getWindowRecord,
+      logger: appendDesktopLog,
+      getActivePtySessions: () => ptyManager.listActiveSessions(),
+      prepareRollback: prepareAutomaticRollback,
+      completeRollback: () => { rollbackPreparationInProgress = false; },
+    });
+  } catch (error) {
+    await createStartupFailureWindow(serializeError(error, "MiniCode could not safely prepare the previous version. Current user content was preserved."));
+    return;
+  }
   if (rollbackLaunched) return;
   const startupSucceeded = await attemptAppStartup("when-ready");
   if (startupSucceeded) updater.markHealthy();

@@ -139,6 +139,8 @@ async def _admit_fake_turn(kwargs) -> None:
         history_start=history_start,
         history_end=context.history_length,
     )
+    await kwargs["metadata"]["report_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
+    await kwargs["metadata"]["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
 
 
 async def _fake_control_request_loop(*args, **kwargs):

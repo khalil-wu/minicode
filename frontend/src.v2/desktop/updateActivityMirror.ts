@@ -2,6 +2,8 @@ import type { AppStore } from "../stores/types";
 import { useAppStore } from "../stores";
 import { desktop, type UpdateActivitySnapshot } from "./runtime";
 import { dirtyEditorFiles } from "../stores/shared-helpers";
+import { collectComposerDrafts, composerWindowOwnerId } from "../stores/composer-drafts";
+import { hasPendingEditorDrafts } from "../stores/editor-drafts";
 
 const sortedUnique = (values: Array<string | null | undefined>): string[] => (
   [...new Set(values.map((value) => value?.trim() || "").filter(Boolean))].sort()
@@ -42,6 +44,7 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
     ...Object.values(state.sideChats).flatMap((thread) => thread.attachments ?? []),
     ...Object.values(state.conversationWorkbenchStates)
       .flatMap((workbench) => workbench.attachments ?? []),
+    ...Object.values(state.workspaceComposerDrafts).flatMap(draft => draft.attachments),
   ];
   const runtimeTaskIds = (state.runtimeSession?.running_tasks ?? []).map((item, index) => {
     if (typeof item === "string") return item;
@@ -79,8 +82,24 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
           .filter((task) => task.status === "running" || task.status === "stalled" || task.cleanupPending)
           .map((task) => task.id),
         ...runtimeTaskIds,
+        ...(state.runtimeSession?.active_subagents ?? []).map(agent => agent.id),
+        ...(state.runtimeSession?.queued_user_messages ?? []).map(input => input.message_id),
+        ...(state.runtimeSession?.pending_turn_inputs ?? []).map(input => input.message_id),
+        ...[...state.subagents, ...Object.values(state.conversationAgentStates).flatMap(frame => frame.subagents)]
+          .filter(agent => ["pending", "running", "blocked"].includes(agent.status)).map(agent => agent.id),
       ],
     ),
+    pendingDrafts: [
+      ...(!state.composerDraftsReady ? [`${composerWindowOwnerId()}:recovery`] : []),
+      ...(state.composerDraftStoragePending ? [`${composerWindowOwnerId()}:commit`] : []),
+      ...(state.composerDraftStorageError ? [`${composerWindowOwnerId()}:storage-error`] : []),
+      ...(hasPendingEditorDrafts() ? [`${composerWindowOwnerId()}:editor-commit`] : []),
+      ...(state.editorTabs.some(tab => tab.recoveryPending || tab.draftRestorePending) ? [`${composerWindowOwnerId()}:editor-recovery`] : []),
+    ],
+    draftStates: [
+      `${composerWindowOwnerId()}:revision:${state.composerDraftRevision}`,
+      ...collectComposerDrafts(state, state.composerDraftRevision).records.keys(),
+    ].sort(),
   };
 };
 
@@ -111,6 +130,18 @@ const selectUpdateActivityInputs = (state: AppStore) => ({
   editorTabs: state.editorTabs,
   workingDirectory: state.workingDirectory,
   backgroundTasks: state.backgroundTasks,
+  subagents: state.subagents,
+  conversationAgentStates: state.conversationAgentStates,
+  workspaceComposerDrafts: state.workspaceComposerDrafts,
+  composerDraftsReady: state.composerDraftsReady,
+  composerDraftStoragePending: state.composerDraftStoragePending,
+  composerDraftStorageError: state.composerDraftStorageError,
+  composerDraftRevision: state.composerDraftRevision,
+  draft: state.draft,
+  quotedMessage: state.quotedMessage,
+  selectedMentions: state.selectedMentions,
+  selectedSkills: state.selectedSkills,
+  allowedRemoteImageDomains: state.allowedRemoteImageDomains,
 });
 
 type UpdateActivityInputs = ReturnType<typeof selectUpdateActivityInputs>;

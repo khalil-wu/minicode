@@ -53,6 +53,7 @@ async def test_query_hooks_select_child_model_without_writing_parent_preferences
     runner = await bind(fixture, tmp_path, factory)
     child_model = Model(replace(fixture.model._settings, model="model-b"), behavior)
     child_snapshot = replace(parent.model_execution, model="model-b", llm=child_model,
+        model_info=parent.model_execution.model_runtime.get_model("custom", "model-b"),
         config=replace(fixture.config, llm=child_model._settings,
             token_budget=replace(fixture.config.token_budget, total=32768)))
     child = RunContext(agent_runtime=parent.agent_runtime, execution_journal=parent.execution_journal,
@@ -93,7 +94,8 @@ async def test_concurrent_tool_and_provider_callbacks_keep_separate_owners(tmp_p
 
     fixture = setup(tmp_path, monkeypatch, None)
     runner = await bind(fixture, tmp_path, factory)
-    child = RunContext(model_execution=replace(fixture.owner.model_execution, model="model-b"))
+    child = RunContext(model_execution=replace(fixture.owner.model_execution, model="model-b",
+        model_info=fixture.owner.model_execution.model_runtime.get_model("custom", "model-b")))
     tool_context = ToolExecutionContext(permission=PermissionContext(), run_context=child)
     try:
         await asyncio.gather(

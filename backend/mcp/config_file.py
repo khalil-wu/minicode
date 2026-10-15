@@ -323,7 +323,7 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"MCP server '{name}' tools contains an invalid name.")
             if not isinstance(tool_config, dict):
                 raise ValueError(f"MCP server '{name}' tools.{tool_name} must be an object.")
-            unknown_tool_fields = sorted(set(tool_config) - {"approval_mode"})
+            unknown_tool_fields = sorted(set(tool_config) - {"approval_mode", "output_token_limit"})
             if unknown_tool_fields:
                 raise ValueError(
                     f"MCP server '{name}' tools.{tool_name} contains unsupported fields: "
@@ -334,6 +334,9 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     f"MCP server '{name}' tools.{tool_name}.approval_mode is invalid."
                 )
+            limit = tool_config.get("output_token_limit")
+            if limit is not None and (type(limit) is not int or limit <= 0):
+                raise ValueError(f"MCP server '{name}' tools.{tool_name}.output_token_limit must be a positive integer.")
 
     if "requires_user_action" in normalized and not isinstance(normalized["requires_user_action"], bool):
         raise ValueError(f"MCP server '{name}' requires_user_action must be a boolean.")

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import logging
 import threading
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,9 @@ from backend.agent.context import ContextBuilder
 from backend.agent.loop_session import mcp_registry_version
 from backend.agent.run_context import RunContext
 from backend.agent.query_engine import QueryEngine
-from backend.agent.message import AgentEvent
+from backend.agent.runtime import default_runtime_if_initialized
+from backend.agent.message import AgentEvent, UserCommand
+from backend.atomic_io import await_task_despite_cancellation
 from backend.agent.provider_protocol import provider_raw_from_event_data
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
@@ -57,6 +60,7 @@ from backend.ws.agent_runner import (
 )
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.command_dispatcher import SessionCommandDispatcher
+from backend.ws.conversation_stream import bind_response_origin, response_origin
 from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.command_handlers import SessionCommandHandlersMixin
 from backend.ws.conversation_runtime import ConversationRuntime
@@ -86,6 +90,7 @@ _NOTIFICATION_HOOK_EVENT_TYPES = frozenset(
         "approval_request",
         "approval.file_diff",
         "ask_user",
+        "request_user_input",
         "approval.cancelled",
         "idle_prompt",
         "auth_success",
@@ -111,6 +116,8 @@ CONVERSATION_SCOPED_EVENT_TYPES = {
     "tool_call",
     "tool_output_delta",
     "tool_result",
+    "guardian_assessment",
+    "guardian_warning",
     "agent.progress",
     "runtime.span",
     "task.update",
@@ -119,6 +126,7 @@ CONVERSATION_SCOPED_EVENT_TYPES = {
     "approval.cancelled",
     "approval.file_diff",
     "ask_user",
+    "request_user_input",
     "context_usage",
     "context_compacted",
     "context_forked",
@@ -152,6 +160,7 @@ CONVERSATION_SCOPED_EVENT_TYPES = {
     "checkpoint.run.list",
     "checkpoint.run.resume",
     "file.changed",
+    "workspace.project_index.invalidated",
     "git.pr_status",
     "terminal.output",
     "terminal.exit",
@@ -206,6 +215,7 @@ WORKSPACE_SCOPED_EVENT_TYPES = {
     "checkpoint.run.list",
     "checkpoint.run.resume",
     "file.changed",
+    "workspace.project_index.invalidated",
     "git.pr_status",
     "diff.git_working_tree",
     "diff.git_staged",
@@ -258,8 +268,14 @@ class WebSocketSession(
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
         ws_manager: Any | None = None,
         replay_state: ReplayState | None = None,
+        window_instance_id: str = "",
+        window_owner_id: str = "",
+        window_binding_token: str = "",
     ) -> None:
         self.session_id = session_id
+        self.window_instance_id = window_instance_id
+        self.window_owner_id = window_owner_id
+        self._window_binding_token = window_binding_token
         self.ws_manager = ws_manager
         self._cleanup_tasks: set[asyncio.Task[Any]] = set()
         self.event_outbox = EventOutbox(
@@ -375,6 +391,7 @@ class WebSocketSession(
         self.checkpoint_manager = CheckpointManager()
         self.conversation_repo = ConversationRepository(CONVERSATION_DATA_DIR)
         self.run_manager = SessionRunManager(self)
+        self.execution_cleanup_tasks: set[asyncio.Task[Any]] = set()
         # The WebSocket host owns transport/session concerns only. QueryEngine
         # owns the loop implementation and the complete setup/run/finalize
         # lifecycle, so no host-level loop injection can bypass that boundary.
@@ -441,8 +458,11 @@ class WebSocketSession(
     def mark_disconnected(self) -> None:
         self.event_outbox.mark_disconnected()
 
-    def attach_websocket(self, websocket: WebSocket) -> tuple[WebSocket, int]:
+    def attach_websocket(self, websocket: WebSocket, *, window_instance_id: str = "", window_owner_id: str = "", window_binding_token: str = "") -> tuple[WebSocket, int]:
         previous, generation = self.event_outbox.attach_websocket(websocket)
+        self.window_instance_id = window_instance_id
+        self.window_owner_id = window_owner_id
+        self._window_binding_token = window_binding_token
         self.run_manager.recheck_watched_parent_notifications()
         return previous, generation
 
@@ -537,11 +557,28 @@ class WebSocketSession(
         )
         queued_user_messages = self.run_manager.queued_user_message_snapshot()
         pending_turn_inputs = self.run_manager.pending_turn_input_snapshot()
-        active_stream_conversation_ids = sorted(
+        runtime = default_runtime_if_initialized()
+        active_subagents = runtime.active_subagent_snapshot() if runtime is not None else []
+        active_stream_conversation_ids = {
             str(conversation_id)
             for conversation_id, task in self.run_manager.run_tasks.items()
             if conversation_id and task is not None and not task.done()
-        )
+            and not self._conversation_streams.get(conversation_id, {}).get("terminal_fenced")
+        }
+        active_task_id = (self.run_manager.active_task_id
+            if self.active_conversation_id in active_stream_conversation_ids else None)
+        if self.ws_manager is not None:
+            for conversation_id, owner in self.ws_manager.observed_conversation_owners(self).items():
+                task = owner.run_manager.running_task_for(conversation_id)
+                state = owner._conversation_streams.get(conversation_id, {})
+                if task is not None and not task.done() and not state.get("terminal_fenced"):
+                    active_stream_conversation_ids.add(conversation_id)
+                    if conversation_id == self.active_conversation_id:
+                        active_task_id = owner.run_manager.run_task_ids.get(conversation_id)
+                pending_turn_inputs.extend(item for item in owner.run_manager.pending_turn_input_snapshot()
+                    if item["conversation_id"] == conversation_id)
+                pending_approvals.extend(item for item in owner._pending_approval_runtime_items()
+                    if item.get("conversation_id") == conversation_id)
         active = self.conversation_repo.get_conversation_summary(self.active_conversation_id) if self.active_conversation_id else None
         if active is not None and (
             getattr(active, "archived", False)
@@ -549,8 +586,7 @@ class WebSocketSession(
         ):
             active = None
             self.active_conversation_id = None
-        workspace_context = self.session_lifecycle.workspace_context_for_conversation(active) if active is not None else None
-        workspace_root = workspace_context.root_path.resolve() if workspace_context is not None else None
+        workspace_root = self.session_lifecycle.current_workspace_root() if active is not None else None
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
             worktree_path=getattr(active, "worktree_path", "") if active is not None else "",
@@ -580,14 +616,19 @@ class WebSocketSession(
             "active_conversation": project_public_conversation_summary(active)
             if active is not None
             else None,
-            "active_task_id": self.run_manager.active_task_id,
-            "active_stream_conversation_ids": active_stream_conversation_ids,
+            "active_task_id": active_task_id,
+            "active_stream_conversation_ids": sorted(active_stream_conversation_ids),
+            "active_subagents": active_subagents,
             "selected_model": self.selected_model or None,
             "invoked_skill_names": invoked_skill_names,
             "permission_mode": self.permission_context.mode,
+            "agent_mode": active.agent_mode if active is not None else "build",
+            # The renderer compares whole public snapshot revisions. The
+            # private record.agent_mode_revision versions configuration only.
+            "agent_mode_revision": active.revision if active is not None else 0,
             "permission_profile": permission_payload["profile"],
             "permission_source": self.permission_context.source,
-            "approval_policy": self.permission_context.approval_policy,
+            "approval_policy": self.permission_context.approval_policy_value(),
             "sandbox_mode": self.permission_context.sandbox_mode,
             "managed_requirements_source": self.permission_context.requirements_source or None,
             "workspace_scope": workspace_scope,
@@ -625,11 +666,19 @@ class WebSocketSession(
             "unavailable_action": "await_probe",
             "reason": "Sandbox capability probe has not completed",
         }
+        from backend.config import get_config_requirements
+
+        requirements = self.config.config_layer_stack.requirements if self.config.config_layer_stack is not None else get_config_requirements()
+        from backend.permissions.approval_policy import policy_for_mode
+
+        available_modes = [mode for mode in ("confirm", "auto", "plan", "bypass")
+            if requirements.resolve_permission_mode(mode, approval_policy=policy_for_mode(mode, self.config.permissions.approval_policy))[1] is None]
         return {
             "mode": self.permission_context.mode,
+            "available_modes": available_modes,
             "profile": profile,
             "source": self.permission_context.source,
-            "approval_policy": self.permission_context.approval_policy,
+            "approval_policy": self.permission_context.approval_policy_value(),
             "sandbox_mode": self.permission_context.sandbox_mode,
             "managed_requirements_source": self.permission_context.requirements_source or None,
             "workspace_scope": workspace_scope or getattr(self.permission_context, "workspace_scope", "computer"),
@@ -671,6 +720,7 @@ class WebSocketSession(
             workspace_root=self.session_lifecycle.current_workspace_root(),
             permission_mode=self.permission_context.mode,
             hosted_web_search=hosted_search,
+            supports_search_tool=model.supports_search_tool if model is not None else self.config.llm.supports_search_tool,
             tool_mode="code_mode" if selection is not None else tool_mode,
         )
 
@@ -735,13 +785,14 @@ class WebSocketSession(
         # adapter. Its composer describes the selected catalog/config contract;
         # execution snapshots keep the capabilities of their own bound clients.
         selection = self._llm_selection_payload()
+        model_controls = {key: selection[key] for key in ("default_model_selection", "model_selection_mode", "available_model_options")}
         if selection["models_source"] == "unavailable":
-            return ProviderCapabilities(
+            return {**ProviderCapabilities(
                 provider=selection["provider"], provider_id=selection["provider_id"], model=selection["model"],
                 configured_reasoning_effort=selection["configured_reasoning_effort"],
                 streaming=False, tool_calling=False, reasoning_effort_supported=False,
                 confidence="unavailable", limitations=("provider_catalog_unavailable",),
-            ).to_dict()
+            ).to_dict(), **model_controls}
         fields = {key: selection[key] for key in (
             "model", "base_url", "wire_api", "context_window", "context_window_source", "context_window_verified",
             "max_context_window", "max_context_window_source", "max_context_window_verified",
@@ -753,7 +804,7 @@ class WebSocketSession(
         fields["reasoning_effort_levels"] = tuple(selection["reasoning_effort_levels"] if selection["wire_api"] != "anthropic" else selection["declared_reasoning_effort_levels"])
         fields["input_modalities"] = tuple(selection["input_modalities"])
         declared = replace(self.config.llm, provider=self.provider, **fields)
-        return capabilities_from_settings(declared, provider=self.provider).to_dict()
+        return {**capabilities_from_settings(declared, provider=self.provider).to_dict(), **model_controls}
 
     def runtime_capability_snapshot(
         self, *, skill_catalog: list[dict[str, Any]] | None = None, include_catalogs: bool = True,
@@ -905,6 +956,8 @@ class WebSocketSession(
         cancel_event: asyncio.Event,
         run_context: RunContext | None = None,
     ) -> None:
+        if self.ws_manager is not None:
+            self.ws_manager.load_conversation_execution(conversation_id, self)
         self.run_manager.register(
             conversation_id=conversation_id,
             task=task,
@@ -913,6 +966,8 @@ class WebSocketSession(
             active_conversation_id=self.active_conversation_id,
             run_context=run_context,
         )
+        if self.ws_manager is not None:
+            self.ws_manager.register_conversation_execution_owner(conversation_id, self)
 
     def _cleanup_agent_run(
         self,
@@ -952,6 +1007,8 @@ class WebSocketSession(
         if not had_inflight_user_message and not queue_owned_run:
             self.schedule_next_queued_user_message(conversation_id)
         self.run_manager.recheck_parent_notification_wake(conversation_id)
+        if self.ws_manager is not None:
+            self.ws_manager.note_execution_activity(conversation_id)
 
     async def start_agent_run(
         self,
@@ -977,25 +1034,54 @@ class WebSocketSession(
         target_conversation_id = str(conversation_id or "").strip()
         if not target_conversation_id:
             raise ValueError("conversation_id is required")
+        if self.ws_manager is not None:
+            self.ws_manager.load_conversation_execution(target_conversation_id, self)
 
         run_context = RunContext(
             turn_input_queue=self.run_manager.turn_input_queue(target_conversation_id),
+            window_binding_token=self._window_binding_token,
         )
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
+        if run_metadata.get("client_command_id") and not run_metadata.get("_client_queue_key"):
+            run_metadata["_client_queue_key"] = self.run_manager.durable_client_commands.path.stem
+        run_metadata["window_instance_id"] = self.window_instance_id
+        run_metadata["window_owner_id"] = self.window_owner_id
         run_metadata.setdefault("user_message_id", f"user_{uuid.uuid4().hex}")
         assistant_message_id = (
             _client_assistant_message_id(run_metadata)
             or f"assistant_{uuid.uuid4().hex[:8]}"
         )
         run_metadata["assistant_message_id"] = assistant_message_id
-        admission_restored = bool(run_metadata.get("_turn_admission_restored"))
+        submitted_command = UserCommand(type="user_message", data={
+            **run_metadata, "content": content, "attachments": list(attachments or []),
+            "conversation_id": target_conversation_id,
+        })
+        run_metadata.setdefault("_submitted_command", {
+            "type": submitted_command.type,
+            "data": {**{key: value for key, value in submitted_command.data.items() if not key.startswith("_")},
+                     "content": run_metadata.get("submitted_content", content)},
+        })
+        def record_user_cancelled(reason: str) -> None:
+            if not run_metadata.get("_turn_admitted") and run_metadata.get("client_command_id"):
+                captured = run_metadata["_submitted_command"]
+                original = UserCommand(type=captured["type"], data={**captured["data"], **{
+                    key: submitted_command.data[key] for key in ("conversation_id", "user_message_id", "assistant_message_id")
+                    if key in submitted_command.data
+                }})
+                if run_metadata.get("_client_queue_key"):
+                    original.data["_client_queue_key"] = run_metadata["_client_queue_key"]
+                self.command_dispatcher.record_cancelled_user_message(original, reason=reason)
+        run_context.record_user_cancelled = record_user_cancelled
         admission_required = not bool(run_metadata.get("_parent_notification_only"))
-        admission_future: asyncio.Future[None] | None = None
-        if admission_required and not admission_restored:
+        admission_future: asyncio.Future[dict[str, Any] | None] | None = None
+        if admission_required:
             admission_future = asyncio.get_running_loop().create_future()
             run_metadata["_turn_admission_future"] = admission_future
-        with self.event_outbox.bind_connection_generation(None):
+        origin = (self.ws_manager.session_for_input_origin(str(run_metadata["_client_queue_key"]))
+            if self.ws_manager is not None and run_metadata.get("_client_queue_key") else self)
+        origin_id = origin.session_id if origin is not None else None
+        with self.event_outbox.bind_connection_generation(None), bind_response_origin(origin_id, str(run_metadata.get("client_command_id") or "")):
             managed_run = self.task_manager.create(
                 "agent.run",
                 self._run_agent(
@@ -1129,6 +1215,22 @@ class WebSocketSession(
                 error_event.data["message_id"] = assistant_message_id
                 await self.send_event(error_event)
             finally:
+                if run_context.user_cancel_persistence is not None:
+                    try:
+                        await await_task_despite_cancellation(run_context.user_cancel_persistence)
+                    except Exception as exc:
+                        terminal_status = "failed"
+                        terminal_reason = "stop_persistence_failed"
+                        error_event = AgentEvent.error(
+                            f"Execution stopped, but MiniCode could not save the Stop state: {exc}",
+                            recoverable=False, error_type="stop_persistence_failed",
+                            error_code="runtime.stop_persistence_failed",
+                        )
+                        error_event.data.update({
+                            "conversation_id": target_conversation_id,
+                            "message_id": assistant_message_id,
+                        })
+                        await self.send_event(error_event)
                 # Terminal delivery for a durably admitted run belongs to
                 # QueryEngine's terminal transaction, and the pre-admission
                 # setup zone is closed by the runner's own startup_rejected /
@@ -1220,34 +1322,51 @@ class WebSocketSession(
                     cancel_event=run_cancel_event,
                 )
 
-        with self.event_outbox.bind_connection_generation(None):
+        with self.event_outbox.bind_connection_generation(None), bind_response_origin(origin_id, str(run_metadata.get("client_command_id") or "")):
             cleanup_task = asyncio.create_task(_wait_and_cleanup())
-            self.command_dispatcher.track_command_task(cleanup_task)
+            self.execution_cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self.execution_cleanup_tasks.discard)
+            if self.ws_manager is not None:
+                self.ws_manager.track_execution_cleanup(target_conversation_id, self, cleanup_task)
         if admission_future is not None:
             done, _pending = await asyncio.wait(
                 {admission_future, managed_run.task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if admission_future in done:
-                await admission_future
+                rejection = await admission_future
+                if rejection is not None:
+                    await self.send_event(AgentEvent(type="command.result", data=rejection))
             elif managed_run.task.cancelled():
                 # Cancellation before the runner's first step has no runner
                 # catch/finally. Its scheduler owns delivery and this accepted
                 # command must complete instead of replaying after reconnect.
                 await asyncio.shield(cleanup_task)
+                if not run_metadata.get("_turn_admitted"):
+                    if run_context.cancel_reason == "user_interrupted":
+                        if run_context.user_cancel_persistence is not None:
+                            await await_task_despite_cancellation(run_context.user_cancel_persistence)
+                        await self.command_dispatcher.emit_cancelled_user_message(submitted_command)
+                        return str(managed_run.id)
+                    raise RuntimeError("Agent run was cancelled before the user turn was durably admitted")
             else:
                 delivery_complete = self.run_manager.is_delivery_complete(
                     target_conversation_id,
                     str(managed_run.id),
                 )
-                if not delivery_complete:
+                if not delivery_complete and not run_metadata.get("_turn_admitted"):
                     await managed_run.task
+                if not run_metadata.get("_turn_admitted"):
                     raise RuntimeError(
                         "Agent run exited before the user turn was durably admitted"
                     )
         return str(managed_run.id)
 
     def schedule_next_queued_user_message(self, conversation_id: str) -> None:
+        if self.ws_manager is not None:
+            owner = self.ws_manager.execution_session_for_conversation(conversation_id)
+            if owner is not None and owner is not self:
+                return
         if (
             not conversation_id
             or self.session_lifecycle.is_shutting_down
@@ -1310,7 +1429,7 @@ class WebSocketSession(
                 )
 
         task = asyncio.create_task(_dispatch())
-        self.command_dispatcher.track_command_task(task)
+        self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
 
     async def cancel_agent_runs(
         self,
@@ -1430,7 +1549,7 @@ class WebSocketSession(
         conversation: Any,
         retry_from_message_id: str,
     ) -> dict[str, Any] | None:
-        return self.conversation_runtime.rewind_to_user_turn(
+        return self.conversation_runtime.prepare_retry_from_message(
             conversation=conversation,
             retry_from_message_id=retry_from_message_id,
         )
@@ -1444,15 +1563,34 @@ class WebSocketSession(
         envelope: bool = True,
         wait_for_delivery: bool = True,
     ) -> bool:
-        return await self.event_outbox.send_payload(
-            payload,
-            connection_generation=connection_generation,
-            log_context=log_context,
-            envelope=envelope,
-            wait_for_delivery=wait_for_delivery,
-        )
+        command_id = str(payload.get("client_command_id") or self.event_outbox.client_command_id)
+        origin = response_origin(command_id)
+        if origin != "" and origin != self.session_id and payload.get("type") in {"command.result", "approval.file_diff"}:
+            self.event_outbox.record_command_result(payload)
+            recipient = self.ws_manager.get_session(origin) if origin is not None else None
+            if recipient is not None:
+                return await recipient.event_outbox.send_payload(
+                    {**payload, "client_command_id": command_id}, connection_generation=recipient.connection_generation,
+                    log_context=log_context, envelope=envelope, wait_for_delivery=wait_for_delivery,
+                )
+            return False
+        command_scope = (self.event_outbox.bind_client_command("", "")
+            if origin != "" and origin != self.session_id else nullcontext())
+        with command_scope:
+            sent = await self.event_outbox.send_payload(
+                payload,
+                connection_generation=connection_generation,
+                log_context=log_context,
+                envelope=envelope,
+                wait_for_delivery=wait_for_delivery,
+            )
+        if self.ws_manager is not None:
+            await self.ws_manager.publish_conversation_payload(self, payload)
+            if payload.get("type") == "task.update" and "session" in payload:
+                self.ws_manager.schedule_observer_runtime_updates(self)
+        return sent
 
-    async def send_conversation_list(self, *, inventory: tuple[str, int, list[Any]] | None = None) -> None:
+    async def send_conversation_list(self, *, inventory: tuple[str, int, list[Any]] | None = None, archive_navigation: str | None = None) -> bool:
         list_with_revision = getattr(
             self.conversation_repo,
             "list_conversations_with_revision",
@@ -1509,11 +1647,15 @@ class WebSocketSession(
             "active_conversation": active,
             "session": self.runtime_snapshot(),
             "snapshot_at": snapshot_at,
+            **await asyncio.to_thread(self.conversation_repo.get_pinned_order, summaries),
+            **await asyncio.to_thread(self.conversation_repo.get_sidebar_order, summaries),
         }
         if inventory_instance_id is not None and inventory_revision is not None:
             payload["inventory_instance_id"] = inventory_instance_id
             payload["inventory_revision"] = inventory_revision
-        await self.send_payload(
+        if archive_navigation is not None:
+            payload["archive_navigation"] = archive_navigation
+        return await self.send_payload(
             payload,
             log_context="conversation.list",
         )
@@ -1681,38 +1823,7 @@ class WebSocketSession(
         # than passing the transformed control payload: ``ask_user`` is still
         # reduced as its source event type while its wire shape is
         # ``control_request``.
-        projection_data = dict(event.data)
-        for owner_key in ("conversation_id", "message_id", "turn_id"):
-            owner_value = payload.get(owner_key)
-            if owner_value not in (None, ""):
-                current_value = projection_data.get(owner_key)
-                if current_value is None or (
-                    isinstance(current_value, str) and not current_value.strip()
-                ):
-                    projection_data[owner_key] = owner_value
-        if event.type != "stream_resume":
-            projected_stream = apply_stream_event(
-                getattr(self, "_conversation_streams", {}),
-                target_conversation_id,
-                event.type,
-                projection_data,
-            )
-            if (projected_stream is not None
-                and payload.get("message_id") == projected_stream.get("message_id")
-                and (not payload.get("turn_id") or payload["turn_id"] == projected_stream.get("turn_id"))):
-                payload["source_event_seq"] = projected_stream["event_seq"]
-        if event.type in {"approval_request", "ask_user"}:
-            request_id = str(
-                payload.get("request_id")
-                or payload.get("tool_call_id")
-                or event.data.get("request_id")
-                or event.data.get("tool_call_id")
-                or ""
-            ).strip()
-            if request_id:
-                self.turn_wait_state.pending_approval_payloads[request_id] = dict(payload)
-
-        await self.send_payload(payload, log_context=f"event:{event.type}", wait_for_delivery=False)
+        await self._publish_stream_projection(event, payload, target_conversation_id)
         if event.type not in _NOTIFICATION_HOOK_EVENT_TYPES:
             return
         from backend.hooks.manager import get_hook_manager_for_session
@@ -1736,9 +1847,46 @@ class WebSocketSession(
 
         await run_notification_hook_for_event(event_type=event.type, payload=payload, hook_manager=hook_manager)
 
+    async def _publish_stream_projection(self, event: AgentEvent, payload: dict[str, Any], conversation_id: str) -> None:
+        boundary = (self.ws_manager.conversation_stream_lock(conversation_id)
+            if self.ws_manager is not None and conversation_id else nullcontext())
+        async with boundary:
+            projection_data = dict(event.data)
+            for owner_key in ("conversation_id", "message_id", "turn_id"):
+                owner_value = payload.get(owner_key)
+                if owner_value not in (None, "") and not projection_data.get(owner_key):
+                    projection_data[owner_key] = owner_value
+            if event.type != "stream_resume":
+                stream = apply_stream_event(self._conversation_streams, conversation_id, event.type, projection_data)
+                if (stream is not None and payload.get("message_id") == stream.get("message_id")
+                    and (not payload.get("turn_id") or payload["turn_id"] == stream.get("turn_id"))):
+                    payload["source_event_seq"] = stream["event_seq"]
+            if event.type in {"approval_request", "ask_user", "request_user_input"}:
+                request_id = str(payload.get("request_id") or payload.get("tool_call_id")
+                    or event.data.get("request_id") or event.data.get("tool_call_id") or "").strip()
+                if request_id:
+                    self.turn_wait_state.pending_approval_payloads[request_id] = dict(payload)
+            await self.send_payload(payload, log_context=f"event:{event.type}", wait_for_delivery=False)
+
     def _build_ws_payload(self, event: AgentEvent) -> dict[str, Any]:
         if event.type == "approval_request":
             return self.build_approval_request_payload(event)
+
+        if event.type == "request_user_input":
+            payload = {
+                "type": "control_request",
+                "request_id": event.data["tool_call_id"],
+                "request": {
+                    "subtype": "request_user_input",
+                    "tool_use_id": event.data["tool_call_id"],
+                    "questions": event.data["questions"],
+                    "isBlocking": event.data["isBlocking"],
+                },
+            }
+            for key in ("conversation_id", "turn_id", "message_id", "workspace_root", "permission_mode", "workspace_scope"):
+                if key in event.data:
+                    payload[key] = event.data[key]
+            return payload
 
         if event.type == "ask_user":
             request_id = str(event.data.get("tool_call_id", "")).strip()

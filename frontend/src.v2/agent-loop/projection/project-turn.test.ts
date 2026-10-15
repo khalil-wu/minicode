@@ -51,14 +51,25 @@ const baseTurn = (): ChatTurnState => ({
 });
 
 describe("agent-loop process detail projection", () => {
-  it("collapses commentary after a complete final answer in normal mode", () => {
+  it("keeps an unfinished proposed plan open even after its assistant item stops streaming", () => {
+    const turn = { ...baseTurn(), finalAnswerCell: { kind: "assistant_markdown" as const, id: "plan", markdownSource: "<proposed_plan>\n1. Partial plan", copyable: true, createdAt: 2 } };
+    expect(projectChatTurnToAgentLoop(turn).hasCompleteFinalAnswer).toBe(false);
+  });
+  it.each(["running", "failed", "partial"] as const)("does not fold incomplete image work with %s progress behind settled answer text", (status) => {
+    const turn: ChatTurnState = { ...baseTurn(), status: "streaming", finalAnswerCell: {
+      kind: "assistant_markdown", id: "answer", markdownSource: "正在交付生成结果。", copyable: true, createdAt: 2,
+      imageProgress: [{ type: "progress", id: "image", stage: "image_generation", status, message: "生成图像", timestamp: 1 }],
+    } };
+    expect(projectChatTurnToAgentLoop(turn).hasCompleteFinalAnswer).toBe(false);
+    expect(projectChatTurnToAgentLoop(turn).initialProcessExpanded).toBe(true);
+  });
+  it.each(["normal", "summary", "verbose"] as const)("collapses commentary after a complete final answer in %s mode", (mode) => {
     const turn: ChatTurnState = {
       ...baseTurn(),
       committedCells: [{ kind: "thinking", id: "narration", content: "Reviewing the files", source: "commentary", createdAt: 1 }],
       finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
     };
-    expect(projectChatTurnToAgentLoop(turn, undefined, "normal").initialProcessExpanded).toBe(false);
-    expect(projectChatTurnToAgentLoop(turn, undefined, "summary").initialProcessExpanded).toBe(false);
+    expect(projectChatTurnToAgentLoop(turn, undefined, mode).initialProcessExpanded).toBe(false);
   });
 
   it("keeps the useful trace in summary mode", () => {

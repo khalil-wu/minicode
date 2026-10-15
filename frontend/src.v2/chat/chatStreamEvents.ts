@@ -9,7 +9,7 @@ import type {
   StreamResumeEvent,
 } from "../protocol/events";
 import { isReplayedEvent as isReplayedChatEvent } from "../protocol/events";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-outbox";
 import { isInFlightProjection } from "../stores/shared-helpers";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
@@ -24,14 +24,15 @@ import {
 import { pushToast } from "../overlays/ToastContainer";
 import type { ChatMessage, ChatSlice, PendingToolCallResume } from "../stores/types";
 import { normalizeAgentErrorMessage } from "./errorMessages";
-import { resetSendDeduplication } from "./sendChatMessage";
 import { addInspectorPayload } from "./inspectorEntries";
 import { providerTracePayloadFromDone, type ProviderUsageSummary } from "./providerTrace";
-import { normalizeContentBlocks } from "./transcriptHydration";
+import { hydrateMessages, normalizeContentBlocks, type BackendTranscriptMessage } from "./transcriptHydration";
+import type { UserMessageItem } from "../protocol/streaming-types";
 import { projectArtifactPreviewEvent } from "./artifactEvents";
 import { isHiddenProviderReasoning } from "../lib/provider-reasoning";
 import { eventMessageId, stableTextHash } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
+import { notifyCompletedTurn } from "./completionNotifications";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
@@ -458,12 +459,25 @@ const streamResumeRejectionReason = (
   if (incomingTurnId && target?.turnId && target.turnId !== incomingTurnId) {
     return "turn_mismatch";
   }
-  const otherStreamingAssistant = messagesForConversation(owner).some((message) =>
+  const messages = messagesForConversation(owner);
+  const targetIndex = messages.findIndex((message) => message.role === "assistant" && message.id === targetMessageId);
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user" && !messages[index].queueState && !messages[index].steeredIntoMessageId) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (targetIndex >= 0 && targetIndex < latestUserIndex) return "newer_user_turn_exists";
+  const resumeBoundary = targetIndex >= 0 ? targetIndex : latestUserIndex;
+  const newerStreamingAssistant = messages.some((message, index) =>
     message.role === "assistant"
     && message.id !== targetMessageId
+    && index > resumeBoundary
+    && !message.queueState
     && Boolean(message.isStreaming || message.isThinkingStreaming),
   );
-  if (otherStreamingAssistant && !target?.isStreaming && !target?.isThinkingStreaming) {
+  if (newerStreamingAssistant) {
     return "newer_turn_is_streaming";
   }
 
@@ -722,11 +736,20 @@ const applyChatStreamEvent = (
     }
     case "item.started": {
       const ev = e as unknown as {
-        item?: { id?: string; type?: string; source?: string };
+        item?: { id?: string; type?: string; source?: string; started_at?: number };
       };
       const messageId = eventMessageId(e);
+      if (ev.item?.type === "context_compaction" && !messageId) {
+        s.upsertSystemMessage(ev.item.id!, "", { conversationId, process: { id: ev.item.id!, itemKind: "context_compaction", content: "",
+          source: ev.item.source, status: "running", startedAt: ev.item.started_at, timestamp: ev.item.started_at } });
+        return true;
+      }
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
-      if (ev.item?.type === "agent_message") {
+      if (ev.item?.type === "user_message") {
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+        const item = ev.item as unknown as UserMessageItem;
+        s.recordTurnUserInput(hydrateMessages([item.message as BackendTranscriptMessage])[0], conversationId!, messageId!);
+      } else if (ev.item?.type === "agent_message") {
         // An item start is an ordered content boundary. Settle reasoning first
         // so a pending final reasoning delta cannot land behind the empty text
         // block created below and split one reasoning item into two cells.
@@ -737,6 +760,10 @@ const applyChatStreamEvent = (
           messageId,
           ev.item.source,
         );
+      } else if (ev.item?.type === "context_compaction") {
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+        s.appendProcessItem({ id: ev.item.id!, itemKind: "context_compaction", content: "", source: ev.item.source,
+          status: "running", startedAt: ev.item.started_at, timestamp: ev.item.started_at }, conversationId, messageId);
       }
       return true;
     }
@@ -757,15 +784,24 @@ const applyChatStreamEvent = (
     }
     case "item.completed": {
       const ev = e as unknown as {
-        item?: { id?: string; type?: string; text?: string; source?: string; status?: string };
+        item?: { id?: string; type?: string; text?: string; source?: string; status?: string; started_at?: number; finished_at?: number };
         finish_reason?: string;
         provider_raw?: Record<string, unknown>;
         attachments?: Array<{ path: string; size: number; is_image: boolean }>;
       };
       const messageId = eventMessageId(e);
+      if (ev.item?.type === "context_compaction" && !messageId) {
+        s.upsertSystemMessage(ev.item.id!, "", { conversationId, process: { id: ev.item.id!, itemKind: "context_compaction", content: "",
+          source: ev.item.source, status: ev.item.status === "interrupted" ? "interrupted" : "completed", startedAt: ev.item.started_at,
+          finishedAt: ev.item.finished_at, timestamp: ev.item.started_at } });
+        return true;
+      }
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
-      if (ev.item?.type === "agent_message") {
+      if (ev.item?.type === "user_message") {
+        const item = ev.item as unknown as UserMessageItem;
+        s.recordTurnUserInput(hydrateMessages([item.message as BackendTranscriptMessage])[0], conversationId!, messageId!);
+      } else if (ev.item?.type === "agent_message") {
         s.completeAgentMessage(
           {
             id: ev.item.id || "agent-message",
@@ -788,6 +824,10 @@ const applyChatStreamEvent = (
             messageId,
           );
         }
+      } else if (ev.item?.type === "context_compaction") {
+        s.appendProcessItem({ id: ev.item.id!, itemKind: "context_compaction", content: "", source: ev.item.source,
+          status: ev.item.status === "interrupted" ? "interrupted" : "completed", startedAt: ev.item.started_at,
+          finishedAt: ev.item.finished_at, timestamp: ev.item.started_at }, conversationId, messageId);
       }
       return true;
     }
@@ -1338,7 +1378,6 @@ const applyChatStreamEvent = (
         Number.isFinite(durationMs) ? durationMs : undefined,
         String((e as unknown as { reason?: unknown }).reason || "").trim() || undefined,
       );
-      if (!replayed) resetSendDeduplication();
       if (metadataOnly) return true;
       // approval.cancelled is authoritative, but DONE is the terminal fence
       // for the turn. Clear prompts owned by this conversation as a fallback
@@ -1378,13 +1417,10 @@ const applyChatStreamEvent = (
             : state.diffReview,
         }));
       }
-      if (!replayed && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
-        const conversation = s.conversations.find((item) => item.id === conversationId);
-        void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
-          title: terminalStatus === "completed" ? "MiniCode 回复已就绪" : "MiniCode 回合已停止",
-          body: conversation?.title || "答复已就绪。",
-          ...(conversationId ? { target: { kind: "conversation" as const, conversationId } } : {}),
-        }));
+      if (!replayed && conversationId) {
+        notifyCompletedTurn(conversationId, (e as DoneEvent).completion_notification, {
+          turnId: eventTurnId(e) || undefined, messageId: terminalMessageId || messageId,
+        });
       }
       // Refresh the authoritative context/budget snapshot so the usage ring
       // reflects the turn that just completed (done carries token counts but
@@ -1407,6 +1443,8 @@ const applyChatStreamEvent = (
         replayed,
         ...(replayed && !messageId && !turnId ? { projected: false } : {}),
       });
+      if (!replayed && !messageId && !turnId && e.client_command_type?.startsWith("conversation.")
+        && e.client_command_id && rejectClientCommandResult(e.client_command_id, (e as { message?: string }).message || "会话操作失败。")) return true;
       const switchErrorCode = (e as { error_code?: string }).error_code;
       if (
         !replayed && !messageId && !turnId
@@ -1414,6 +1452,8 @@ const applyChatStreamEvent = (
         && ["conversation.not_found", "workspace_missing", "workspace_untrusted"].includes(switchErrorCode || "")
       ) {
         useAppStore.setState({ pendingConversationSwitchId: null });
+        pushToast(normalizeAgentErrorMessage((e as { message?: string }).message || "无法打开会话。"), "error", 6000);
+        return true;
       }
       if (!conversationId) {
         const globalError = e as unknown as {
@@ -1429,7 +1469,21 @@ const applyChatStreamEvent = (
         }
         return true;
       }
-      const commandError = e as unknown as { error_code?: string; message?: string };
+      const commandError = e as unknown as { error_code?: string; error_type?: string; message?: string };
+      if (commandError.error_code === "context.compact_failed") {
+        const failure = normalizeAgentErrorMessage(commandError.message || "压缩失败");
+        s.upsertSystemMessage("system-compact-status", failure, {
+          conversationId, title: "压缩失败", processing: false, failureMessage: failure,
+        });
+        return true;
+      }
+      if (
+        commandError.error_code === "context.nothing_to_compact"
+        || (commandError.error_type === "conversation_busy" && !messageId && !turnId)
+      ) {
+        if (!replayed) pushToast(normalizeAgentErrorMessage(commandError.message || "压缩失败"), "error", 6000);
+        return true;
+      }
       if (
         commandError.error_code === "context.budget_refresh_failed"
         || commandError.error_code === "context.live_projection_failed"
@@ -1454,7 +1508,6 @@ const applyChatStreamEvent = (
       if (err.error_code === "conversation.not_found") {
         if (!replayed) {
           recoverMissingConversation(conversationId);
-          resetSendDeduplication();
         }
         return true;
       }
@@ -1469,8 +1522,7 @@ const applyChatStreamEvent = (
         if (!replayed) clearMissingWorkspaceBinding(conversationId);
         s.finishAgentProgress(conversationId, "failed");
         s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
-        if (!replayed) resetSendDeduplication();
-        return true;
+          return true;
       }
       if (err.error_code === "agent.busy") {
         s.removeEmptyStreamingAssistant(conversationId, target.messageId);
@@ -1480,8 +1532,7 @@ const applyChatStreamEvent = (
         } else {
           clearStreamingFlagIfNoLiveAssistant(conversationId);
         }
-        if (!replayed) resetSendDeduplication();
-        return true;
+          return true;
       }
       const requestId = err.tool_call_id ?? err.request_id;
       if (requestId && !replayed) {
@@ -1507,7 +1558,6 @@ const applyChatStreamEvent = (
       }
       s.finishAgentProgress(conversationId, "failed");
       s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
-      if (!replayed) resetSendDeduplication();
       return true;
     }
     case "stream_resume": {
@@ -1515,6 +1565,7 @@ const applyChatStreamEvent = (
       const ev = e as unknown as {
         conversation_id?: string;
         turn_id?: string;
+        started_at?: number;
         phase?: string;
         stream_status?: string;
         event_seq?: number;
@@ -1551,7 +1602,7 @@ const applyChatStreamEvent = (
         });
         return true;
       }
-      s.resumeStreaming(resumeConversationId, toolStates, messageId, ev.turn_id, snapshotBlocks);
+      s.resumeStreaming(resumeConversationId, toolStates, messageId, ev.turn_id, snapshotBlocks, ev.started_at);
       const eventSeq = Number(ev.event_seq);
       if (Number.isSafeInteger(eventSeq) && eventSeq >= 0) {
         rememberResumeEventSeq(

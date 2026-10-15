@@ -103,7 +103,10 @@ def provider_error_details(event: Any):
     classification = classify_llm_error(classification_input)
     wire_provider_error_type = str(raw.get("provider_error_type") or "").strip()
     wire_error_type = str(raw.get("error_type") or "").strip()
-    if wire_provider_error_type:
+    usage_exhausted = any(value.casefold() in {
+        "usage_limit_reached", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached",
+    } for value in (provider_error_code, provider_error_schema_type))
+    if wire_provider_error_type and not usage_exhausted:
         try:
             provider_kind = ProviderErrorType(wire_provider_error_type)
         except ValueError:

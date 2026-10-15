@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from backend.config_requirements import (
     ConfigRequirements,
+    ConfigRequirementsError,
     RequirementsLayerEntry,
     load_config_requirements,
 )
@@ -175,6 +176,10 @@ class ConfigLayerStack:
     managed_policy_errors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.managed_policy_errors:
+            raise ConfigRequirementsError(
+                "Failed to load managed policy:\n" + "\n".join(self.managed_policy_errors)
+            )
         previous = -10_000
         previous_project: Path | None = None
         for layer in self.layers:
@@ -220,6 +225,10 @@ class ConfigLayerStack:
                 _deep_merge(merged, incoming)
         if apply_requirements:
             merged = self.requirements.apply_exact_to_config(merged)
+        if "approval_policy" in merged:
+            from backend.permissions.approval_policy import ApprovalPolicy
+
+            merged["approval_policy"] = ApprovalPolicy.parse(merged["approval_policy"]).to_wire()
         return merged
 
     def effective_user_config(self) -> dict[str, Any] | None:
@@ -319,6 +328,14 @@ class ConfigLayerStack:
         return origins
 
     def to_payload(self) -> dict[str, Any]:
+        from backend.config import permission_settings_from_config
+        from backend.permissions.patterns import legacy_mcp_allow_warnings
+
+        permissions = permission_settings_from_config(self.effective_config())
+        legacy_warnings = legacy_mcp_allow_warnings([
+            *permissions.auto_allow,
+            *permissions.content_allow_rules,
+        ])
         return {
             "fingerprint": self.fingerprint,
             "layers": [layer.to_payload() for layer in self.get_layers(include_disabled=True)],
@@ -326,7 +343,7 @@ class ConfigLayerStack:
                 path: metadata.to_payload() for path, metadata in sorted(self.origins().items())
             },
             "requirements": self.requirements.to_payload(),
-            "startup_warnings": list(self.startup_warnings),
+            "startup_warnings": [*self.startup_warnings, *legacy_warnings],
             "managed_policy_errors": list(self.managed_policy_errors),
         }
 

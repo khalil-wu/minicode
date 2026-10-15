@@ -55,6 +55,8 @@ async def _admit_query_submission(submission) -> None:
         history_start=history_start,
         history_end=context.history_length,
     )
+    await submission.runtime.metadata["report_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
+    await submission.runtime.metadata["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +131,7 @@ def test_websocket_reconnect_closes_resources_created_for_the_discarded_connecti
 
     class _Socket:
         def __init__(self) -> None:
+            self.headers = {}
             self.query_params = {"session_id": "session-reconnect"}
             self.closed = False
 
@@ -143,10 +146,12 @@ def test_websocket_reconnect_closes_resources_created_for_the_discarded_connecti
             self.llm = live_llm
             self.artifact_store = live_artifacts
             self.connection_generation = 4
+            self.window_owner_id = ""
             self.previous_socket = _Socket()
 
-        def attach_websocket(self, websocket):
+        def attach_websocket(self, websocket, *, window_instance_id, window_owner_id, window_binding_token):
             del websocket
+            assert (window_instance_id, window_owner_id, window_binding_token) == ("", "", "")
             self.connection_generation += 1
             return self.previous_socket, self.connection_generation
 
@@ -2236,6 +2241,9 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
     )
 
     class Repo:
+        def store_instance_id(self) -> str:
+            return "owned-delete-order-store"
+
         def get_conversation_summary(self, conversation_id: str):
             return target if conversation_id == target.id else None
 
@@ -2298,6 +2306,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
                 "level": "success",
                 "data": {
                     "conversation_id": target.id,
+                    "deleted": True,
                     "cleanup": {},
                     "cleanup_errors": [],
                 },

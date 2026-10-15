@@ -123,7 +123,7 @@ def default_model_thinking_level(model: Any, available: tuple[str, ...]) -> str:
     declared = str(getattr(model, "default_reasoning_effort", "") or "").strip().lower()
     if declared in available:
         return declared
-    if not bool(getattr(model, "reasoning", False)):
+    if not available or available == ("off",):
         return ""
     return clamp_model_thinking_level("medium", available)
 

@@ -85,6 +85,11 @@ class UpdatePlanTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        if context is not None and context.metadata.get("agent_mode") == "plan":
+            return ToolResult(
+                content="update_plan is a TODO/checklist tool and is not allowed in Plan mode.",
+                is_error=True,
+            )
         unexpected = set(args) - {"plan", "explanation"}
         if unexpected:
             return ToolResult(
@@ -359,11 +364,16 @@ class ExitPlanModeTool(BaseTool):
         else:
             from backend.agent.plans import merge_plan_constraints
             from backend.config_requirements import permission_mode_requirements
+            from backend.permissions.approval_policy import ApprovalPolicy, policy_for_mode
 
-            approval_policy, sandbox_mode = permission_mode_requirements(approved_permission_mode)
+            _, sandbox_mode = permission_mode_requirements(approved_permission_mode)
+            configured = ApprovalPolicy.from_context(context.permission) if context.permission.approval_policy == "granular" else None
+            approval_policy = policy_for_mode(approved_permission_mode, configured)
             context.permission = replace(
                 context.permission, mode=approved_permission_mode, pre_plan_mode=None,
-                approval_policy=approval_policy, sandbox_mode=sandbox_mode,
+                approval_policy=approval_policy.kind,
+                granular_approval=approval_policy.granular.to_dict() if approval_policy.granular is not None else None,
+                sandbox_mode=sandbox_mode,
                 filesystem_constraints=merge_plan_constraints(context.permission.filesystem_constraints, None),
             )
 
@@ -464,12 +474,17 @@ class EnterPlanModeTool(BaseTool):
                         else:
                             plan_path = get_plan_file_path(generate_plan_slug(workspace_root), workspace_root)
                         plan_constraints["plan_files"] = [str(plan_path)]
+                    from backend.permissions.approval_policy import ApprovalPolicy, policy_for_mode
+
+                    configured = ApprovalPolicy.from_context(context.permission) if context.permission.approval_policy == "granular" else None
+                    approval_policy = policy_for_mode("plan", configured)
                     context.permission = replace(
                         context.permission,
                         mode="plan",
                         source="enter_plan_mode",
                         pre_plan_mode=current.mode,
-                        approval_policy="on-request",
+                        approval_policy=approval_policy.kind,
+                        granular_approval=approval_policy.granular.to_dict() if approval_policy.granular is not None else None,
                         sandbox_mode="read-only",
                         filesystem_constraints=plan_constraints,
                     )

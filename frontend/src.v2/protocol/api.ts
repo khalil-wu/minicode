@@ -3,7 +3,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { safeJsonParse, safeURL } from "../lib/safe-parse";
 
 const RUNTIME = (globalThis as unknown as {
-  __MINICODE_RUNTIME__?: { apiBaseUrl?: string; wsBaseUrl?: string; runtimeToken?: string };
+  __MINICODE_RUNTIME__?: { apiBaseUrl?: string; wsBaseUrl?: string; runtimeToken?: string; windowBindingToken?: string };
 }).__MINICODE_RUNTIME__;
 
 const ENV = (import.meta as unknown as {
@@ -114,7 +114,9 @@ const base64UrlEncode = (value: string): string => {
 export const wsProtocols = (): string[] | undefined => {
   const token = runtimeToken();
   if (!token) return undefined;
-  return ["minicode", `minicode-token.${base64UrlEncode(token)}`];
+  return ["minicode", `minicode-token.${base64UrlEncode(token)}`,
+    ...(RUNTIME?.windowBindingToken ? [`minicode-window.${RUNTIME.windowBindingToken}`] : []),
+  ];
 };
 
 export const authHeaders = (headers?: HeadersInit): HeadersInit => {

@@ -14,13 +14,23 @@ import hashlib
 import logging
 import json
 import re
+import time
+from dataclasses import dataclass, replace
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class MCPAcceptedResultIdentity:
+    """Actual registered executor identity; never decoded from MCP wire data."""
+    server: str
+    tool: str
 
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
 
 from backend.artifact.store import ArtifactStore
 from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef
+from backend.permissions.patterns import legacy_mcp_allow_aliases, mcp_policy_identity
 from backend.tools.base import (
     BaseTool,
     PermissionLevel,
@@ -45,6 +55,7 @@ def _model_tool_names(proxies: list[MCPToolProxy], used_names: set[str]) -> dict
     namespaces: dict[str, set[str]] = {}
     tools: dict[tuple[str, str], set[str]] = {}
     candidates: list[tuple[str, str, str, str, tuple[str, str]]] = []
+    by_identity = {(proxy._server_name, proxy._tool_def.name): proxy for proxy in proxies}
     for proxy in proxies:
         server, raw_name = proxy._server_name, proxy._tool_def.name
         namespace = f"mcp__{normalize_name_for_mcp(server)}"
@@ -68,18 +79,21 @@ def _model_tool_names(proxies: list[MCPToolProxy], used_names: set[str]) -> dict
         if len(tools[(namespace, tool_name)]) > 1:
             tool_name += suffix(raw_identity)
         name = f"{namespace}__{tool_name}"
+        allocated_namespace, allocated_tool_name = namespace, tool_name
         attempt = 0
         while len(name) > 128 or name in used_names:
             hash_suffix = suffix(raw_identity if attempt == 0 else f"{raw_identity}\0{attempt}")
             room = 128 - len(namespace) - 2
-            name = (
-                f"{namespace}__{tool_name[:room - len(hash_suffix)]}{hash_suffix}"
-                if room >= len(hash_suffix)
-                else f"{namespace[:128 - len(hash_suffix) - 2]}__{hash_suffix}"
-            )
+            if room >= len(hash_suffix):
+                allocated_namespace, allocated_tool_name = namespace, tool_name[:room - len(hash_suffix)] + hash_suffix
+            else:
+                allocated_namespace, allocated_tool_name = namespace[:128 - len(hash_suffix) - 2], hash_suffix
+            name = f"{allocated_namespace}__{allocated_tool_name}"
             attempt += 1
         used_names.add(name)
         names[identity] = name
+        by_identity[identity].model_namespace = allocated_namespace
+        by_identity[identity].model_tool_name = allocated_tool_name
     return names
 
 
@@ -122,14 +136,22 @@ class MCPToolProxy(BaseTool):
         )
         self._server_contract = manager.get_server_contract(server_name) if manager is not None else None
 
-        self.name = (
-            f"mcp__{normalize_name_for_mcp(server_name)}__"
-            f"{normalize_name_for_mcp(tool_def.name)}"
+        self.model_namespace = f"mcp__{normalize_name_for_mcp(server_name)}"
+        self.model_tool_name = normalize_name_for_mcp(tool_def.name)
+        self.name = f"{self.model_namespace}__{self.model_tool_name}"
+        self.policy_aliases = (
+            self.policy_identity,
+            *legacy_mcp_allow_aliases(server_name, tool_def.name),
         )
-        self.policy_aliases = tuple(dict.fromkeys((
+        self.policy_deny_aliases = tuple(dict.fromkeys((
             f"mcp__{server_name}__{tool_def.name}", self.name,
         )))
         self.description = tool_def.description
+        properties = tool_def.input_schema.get("properties")
+        self.search_hint = " ".join(part for part in (
+            self.name, tool_def.name, server_name, tool_def.title or "", tool_def.description,
+            *sorted(properties if isinstance(properties, dict) else ()),
+        ) if part.strip())
         # Keep the qualified protocol name for execution and policy matching,
         # while projecting MCP calls the same way Codex does in its activity UI.
         self.activity_kind = "mcpToolCall"
@@ -138,11 +160,12 @@ class MCPToolProxy(BaseTool):
         # Map MCP annotations/_meta to local capability hints (Phase 3.2).
         ann = getattr(tool_def, "annotations", {}) or {}
         meta = getattr(tool_def, "meta", {}) or {}
-        self.destructive = bool(ann.get("destructiveHint", False))
-        self.open_world = bool(ann.get("openWorldHint", False))
-        self.read_only = bool(ann.get("readOnlyHint", False)) and not (
-            self.destructive or self.open_world
-        )
+        self._destructive_hint = ann.get("destructiveHint")
+        self._open_world_hint = ann.get("openWorldHint")
+        self._read_only_hint = ann.get("readOnlyHint")
+        self.destructive = self._destructive_hint is True
+        self.open_world = self._open_world_hint is True
+        self.read_only = self._read_only_hint is True
         # MCP _meta vendor extensions are namespaced; "anthropic/alwaysLoad" is
         # the only key with a cross-harness convention (cc Tool.ts).
         self.always_load = bool(meta.get("anthropic/alwaysLoad"))
@@ -156,14 +179,20 @@ class MCPToolProxy(BaseTool):
             getattr(server_config, "supports_parallel_tool_calls", False)
         )
         tool_modes = getattr(server_config, "tool_approval_modes", {}) or {}
+        self._output_token_limit = server_config.tool_output_token_limits.get(tool_def.name) if server_config is not None else None
         approval_mode = tool_modes.get(tool_def.name) or getattr(
             server_config,
             "default_tools_approval_mode",
             None,
         ) or "auto"
         self._approval_mode = approval_mode
+        self._approval_config = copy.deepcopy(server_config)
+        self._plugin_id = server_config.source.removeprefix("plugin:") if server_config is not None and server_config.source.startswith("plugin:") else None
 
-        auto_requires_approval = not self.read_only
+        # Source Auto preserves Option<bool>: D=true first, then R=true,
+        # otherwise only an explicit D=false and O=false need no approval.
+        auto_requires_approval = self.destructive or not self.read_only and not (
+            self._destructive_hint is False and self._open_world_hint is False)
         if approval_mode == "approve":
             requires_approval = False
         elif approval_mode == "prompt":
@@ -182,10 +211,7 @@ class MCPToolProxy(BaseTool):
 
     @property
     def policy_identity(self) -> str:
-        raw = f"mcp__{self._server_name}__{self._tool_def.name}"
-        # Rules use fnmatch syntax. An exact admitted tool name containing glob
-        # characters remains an exact rule when converted from its wire name.
-        return raw.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+        return mcp_policy_identity(self._server_name, self._tool_def.name)
 
     @property
     def _client(self) -> MCPClient | None:
@@ -195,9 +221,58 @@ class MCPToolProxy(BaseTool):
         return self._static_client
 
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
-        # Open-world MCP calls remain externally observable even when a server
-        # advertises readOnlyHint, so they are not safe read-only subagent work.
+        # Source read-only and parallel routing use this hint independently
+        # from Auto's destructive/open-world approval decision.
         return self.read_only
+
+    def check_permission(
+        self, args: dict[str, Any] | None = None, context: Any | None = None,
+    ) -> PermissionLevel | None:
+        # Source strict review precedes configured Approve, annotations,
+        # remembered approvals and Never's actual-profile preapproval.
+        if context is not None and context.strict_auto_review:
+            return PermissionLevel.CONFIRM
+        if self._approval_mode == "approve":
+            return PermissionLevel.AUTO
+        profile = context.captured_mcp_permission_profile if context is not None else None
+        if context is not None and context.approval_policy == "never" and profile is not None:
+            from backend.sandbox.policy import SandboxEnforcement
+
+            if profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL} or profile.full_disk_write:
+                return PermissionLevel.AUTO
+        key = self.session_approval_key()
+        store = context.captured_mcp_approval_store if context is not None else None
+        if key is not None and store is not None and key in store.session_approved:
+            return PermissionLevel.AUTO
+        return self.permission
+
+    def session_approval_key(self):
+        # mcp_tool_call.rs::session_mcp_tool_approval_key: only Auto can
+        # remember a tool; Prompt and Writes always normalize to one approval.
+        if self._approval_mode != "auto":
+            return None
+        # Hosted Apps keys require trusted account/connector metadata. This
+        # local MCP facade has no hosted Apps account producer; raw server meta
+        # is not account authority. Custom tools have no connector/link key.
+        if self._server_name == "codex_apps":
+            return None
+        return (self._server_name, self._plugin_id, None, None, self._tool_def.name)
+
+    def approval_snapshot(self) -> dict[str, Any]:
+        return {"server": self._server_name, "tool_name": self._tool_def.name,
+            "approval_mode": self._approval_mode, "allow_session_remember": self.session_approval_key() is not None,
+            "allow_persistent_approval": self.session_approval_key() is not None and self.persistent_approval_target() is not None}
+
+    def persistent_approval_target(self) -> dict[str, str] | None:
+        config = self._approval_config
+        if config is None or self._manager is None:
+            return None
+        if self._plugin_id is not None:
+            return {"kind": "plugin", "plugin_id": self._plugin_id,
+                "server": self._server_name.removeprefix(f"plugin:{self._plugin_id}:")}
+        if config.source in {"user", "project"} and config.config_path:
+            return {"kind": "custom", "path": config.config_path, "server": config.name}
+        return None
 
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
         # Remote tools that are not positively identified as reads are external
@@ -210,13 +285,15 @@ class MCPToolProxy(BaseTool):
         return TOOL_SIDE_EFFECT_EXTERNAL
 
     def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
-        if self._supports_parallel_tool_calls:
-            return True
-        return super().is_concurrency_safe(args)
+        return self._supports_parallel_tool_calls or self.read_only
 
     def get_schema(self) -> ToolSchema:
         """Build a ToolSchema from the MCP tool definition."""
-        params = self._tool_def.input_schema or {"type": "object", "properties": {}}
+        params = copy.deepcopy(self._tool_def.input_schema or {"type": "object", "properties": {}})
+        # tools/mcp_tool.rs inserts an object for missing or null root
+        # properties. The same admitted schema serves model and execution.
+        if params.get("properties") is None:
+            params["properties"] = {}
         description = (
             f"[MCP:{self._server_name}] {self.description}\n"
             f"Original tool: {self._tool_def.name}"
@@ -225,6 +302,16 @@ class MCPToolProxy(BaseTool):
             name=self.name,
             description=description,
             parameters=params,
+            namespace=self.model_namespace,
+            namespace_description=f"Tools in the {self.model_namespace} namespace.",
+            namespace_tool_name=self.model_tool_name,
+            # tools/mcp_tool.rs::mcp_call_tool_result_output_schema. This is
+            # Code Mode's result declaration, not a provider wire extension.
+            output_schema={"type": "object", "properties": {
+                "content": {"type": "array", "items": {"type": "object"}},
+                "structuredContent": copy.deepcopy(self._tool_def.output_schema or {}),
+                "isError": {"type": "boolean"}, "_meta": {"type": "object"},
+            }, "required": ["content"], "additionalProperties": False},
         )
 
     def model_schema(self) -> ToolSchema:
@@ -233,16 +320,29 @@ class MCPToolProxy(BaseTool):
         # OpenAI requires the root properties object even for no-argument MCP
         # tools; Codex adapts this at its model schema boundary too.
         parameters.setdefault("properties", {})
-        return ToolSchema(name=self.name, description=self.description, parameters=parameters)
+        return ToolSchema(name=self.name, description=self.description, parameters=parameters,
+            output_schema=schema.output_schema, namespace=schema.namespace,
+            namespace_description=schema.namespace_description, namespace_tool_name=schema.namespace_tool_name)
+
+    def to_runtime_metadata(self) -> dict[str, Any]:
+        metadata = super().to_runtime_metadata()
+        metadata["title"] = self._tool_def.title
+        metadata["output_schema"] = copy.deepcopy(self._tool_def.output_schema)
+        return metadata
 
     def get_spec(self):
         from backend.mcp.tool_spec_adapter import MCPToolSpecAdapter
 
-        return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(
+        spec = MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(
             self.name, policy_aliases=self.policy_aliases,
         )
+        return replace(
+            spec,
+            policy_identity=self.policy_identity,
+            policy_deny_aliases=self.policy_deny_aliases,
+        )
 
-    def _catalog_is_current(self) -> bool:
+    def _catalog_is_current(self, context=None) -> bool:
         """Reject a call whose model-visible MCP schema crossed a catalog change.
 
         Codex binds prepared MCP calls to a catalog revision.  Keep the same
@@ -277,6 +377,13 @@ class MCPToolProxy(BaseTool):
             "default_tools_approval_mode",
             None,
         ) or "auto"
+        from backend.permissions.context import ToolExecutionContext
+        # Persisting this exact approved request changes its own policy to
+        # Approve before dispatch. Its bound receipt survives that edit; other
+        # requests and any schema/connection change still need fresh admission.
+        own_persistent_approval = current_approval_mode == "approve" and isinstance(context, ToolExecutionContext) and (
+            context.authorization_policy_identity == self.policy_identity
+            and context.authorization_digest in context.metadata.get("_approved_request_digests", set()))
         same_contract = (
             dict(getattr(current, "input_schema", {}) or {})
             == dict(getattr(self._tool_def, "input_schema", {}) or {})
@@ -288,7 +395,11 @@ class MCPToolProxy(BaseTool):
             == dict(getattr(self._tool_def, "meta", {}) or {})
             and bool(getattr(current_server_config, "supports_parallel_tool_calls", False))
             == self._supports_parallel_tool_calls
-            and current_approval_mode == self._approval_mode
+            and (current_approval_mode == self._approval_mode or own_persistent_approval)
+            and current.title == self._tool_def.title
+            and current.output_schema == self._tool_def.output_schema
+            and (current_server_config.tool_output_token_limits.get(self._tool_def.name) if current_server_config is not None else None)
+            == self._output_token_limit
         )
         if same_contract:
             self._catalog_revision = current_revision
@@ -300,7 +411,7 @@ class MCPToolProxy(BaseTool):
         Tool annotations describe permission risk, not result immutability.
         Every invocation reaches the server so mutable remote state stays fresh.
         """
-        if not self._catalog_is_current():
+        if not self._catalog_is_current(context):
             return self._error_result(
                 f"MCP catalog changed for '{self._server_name}'. Refresh tools before calling '{self._tool_def.name}'."
             )
@@ -344,7 +455,20 @@ class MCPToolProxy(BaseTool):
                     # and elicitation stop with the originating turn instead of
                     # outliving a cancelled tool call in the shared MCP client.
                     "cancel_event": getattr(context, "cancel_event", None),
+                    "permission_context_provider": (
+                        run_context.permission_context_provider
+                        if run_context is not None and run_context.permission_context_provider is not None
+                        else lambda: context.permission
+                    ),
+                    # The prepared call publishes its actual sandbox authority;
+                    # Never alone does not preapprove an MCP permission prompt.
+                    "mcp_permission_profile": (
+                        context.sandbox_policy.resolve(cwd=context.workspace_root)
+                        if context.sandbox_policy is not None else None
+                    ),
                 }
+                request_owner.update({key: metadata[key] for key in ("message_id", "turn_id") if key in metadata})
+            call_started = time.monotonic()
             result: MCPCallResult = await client.call_tool(
                 self._tool_def.name,
                 args,
@@ -353,10 +477,9 @@ class MCPToolProxy(BaseTool):
         except Exception as exc:
             return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
 
-        result_text = result.summary_text
+        wall_time = time.monotonic() - call_started
         images: list[dict[str, str]] = []
         audios: list[dict[str, str]] = []
-        resource_text: list[str] = []
         resource_artifacts: list[dict[str, Any]] = []
         for block in result.content:
             if not isinstance(block, dict):
@@ -375,10 +498,6 @@ class MCPToolProxy(BaseTool):
                     })
                 continue
             if block_type == "resource_link":
-                uri = str(block.get("uri") or "").strip()
-                name = str(block.get("name") or uri).strip()
-                if uri:
-                    resource_text.append(f"[resource link: {name}] {uri}")
                 continue
             if block_type != "resource":
                 continue
@@ -391,7 +510,6 @@ class MCPToolProxy(BaseTool):
             ).strip()
             text_content = resource.get("text")
             if isinstance(text_content, str):
-                resource_text.append(f"[resource: {uri}]\n{text_content}")
                 continue
             blob = resource.get("blob")
             if isinstance(blob, str) and self._artifact_store is not None:
@@ -409,27 +527,18 @@ class MCPToolProxy(BaseTool):
                     "bytes": len(body),
                 })
 
-        content_parts = [part for part in (result.text.strip(), *resource_text) if part]
-        if result.structured_content is not None:
-            structured_text = json.dumps(result.structured_content, ensure_ascii=False)
-            if structured_text not in content_parts:
-                content_parts.append(structured_text)
-        if resource_artifacts:
-            content_parts.extend(
-                f"[resource artifact: {item['uri']} -> {item['artifact_id']}]"
-                for item in resource_artifacts
-            )
-        typed_content = "\n\n".join(content_parts) or result_text or (
-            "MCP tool execution failed" if result.is_error else ""
-        )
+        from backend.mcp.result_projection import mcp_log_output
+
+        public_result = result.public_result()
+        plain_log = mcp_log_output(public_result)
+        typed_content = f"Wall time: {wall_time:.4f} seconds\nOutput:" + ("\n" + plain_log if plain_log else "")
         first_artifact = resource_artifacts[0] if resource_artifacts else None
 
-        # Result sizing and artifact promotion belong to the shared tool
-        # execution path (Pi's 2,000-line/50-KiB contract). Keeping an MCP-only
-        # character threshold here caused a second, undocumented truncation
-        # policy and made the same tool behave differently through MCP.
+        # Raw CallToolResult is retained for Code Mode. ContextBuilder admits
+        # a separate model body with the issuing Source truncation policy.
         return ToolResult(
             content=typed_content,
+            mcp_result=public_result,
             is_error=result.is_error,
             images=images,
             audios=audios,
@@ -443,7 +552,10 @@ class MCPToolProxy(BaseTool):
             artifact_bytes=first_artifact["bytes"] if first_artifact else None,
             status="failed" if result.is_error else "success",
             runtime_metadata={
+                "mcp_accepted_result_identity": MCPAcceptedResultIdentity(self._server_name, self._tool_def.name),
                 "mcp": {"structuredContent": result.structured_content, "_meta": result.meta},
+                "mcp_output_token_limit": self._output_token_limit,
+                "mcp_wall_time_seconds": wall_time,
                 "mcp_resource_artifacts": resource_artifacts,
             },
         )
@@ -540,18 +652,18 @@ class MCPToolRegistry:
             identity = (proxy._server_name, proxy._tool_def.name)
             name = names[identity]
             old = previous.get(identity)
-            aliases = tuple(dict.fromkeys((
-                *proxy.policy_aliases,
-                *(old.policy_aliases if old is not None else ()),
+            deny_aliases = tuple(dict.fromkeys((
+                *proxy.policy_deny_aliases,
+                *(old.policy_deny_aliases if old is not None else ()),
                 *((old.name,) if old is not None else ()),
                 name,
             )))
-            if name != proxy.name or aliases != proxy.policy_aliases:
+            if name != proxy.name or deny_aliases != proxy.policy_deny_aliases:
                 # In-flight forks share tool instances. Rename a catalog copy
                 # so their already-admitted schemas keep their exact identity.
                 proxy = copy.copy(proxy)
                 proxy.name = name
-                proxy.policy_aliases = aliases
+                proxy.policy_deny_aliases = deny_aliases
             desired[name] = proxy
         for name in current_names:
             if name not in desired or self._tool_registry.get_tool(name) is not desired[name]:

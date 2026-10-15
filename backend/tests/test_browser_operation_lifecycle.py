@@ -120,7 +120,8 @@ async def test_embedded_interrupt_retains_remote_owner_until_observed_completion
     monkeypatch.setenv("MINICODE_EMBEDDED_BROWSER_ENDPOINT", "http://127.0.0.1:43123")
     monkeypatch.setattr(browser.httpx, "AsyncClient", Client)
     monkeypatch.setattr(browser, "BROWSER_OPERATION_SECONDS", 0.02 if interrupt == "timeout" else 30)
-    context = ToolExecutionContext(permission=PermissionContext(), conversation_id="owner", tool_call_id="browser-call")
+    context = ToolExecutionContext(permission=PermissionContext(), conversation_id="owner", tool_call_id="browser-call",
+        metadata={"window_instance_id": "fixture-window"}, window_binding_token="fixture-binding")
     task = asyncio.create_task(browser.BrowserControlTool().execute({"action": "evaluate", "expression": "fixture"}, context))
     await started.wait()
     try:
@@ -137,6 +138,8 @@ async def test_embedded_interrupt_retains_remote_owner_until_observed_completion
         assert context.pending_cleanup_tasks
         submitted_id = calls[0][1]["operation_id"]
         assert all(call[1]["operation_id"] == submitted_id for call in calls)
+        assert all(call[1]["window_instance_id"] == "fixture-window" for call in calls)
+        assert all(call[1]["window_binding_token"] == "fixture-binding" for call in calls)
         assert calls[0][2] is not None
         settled.set()
         await asyncio.gather(*list(context.pending_cleanup_tasks))

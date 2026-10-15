@@ -1,5 +1,5 @@
 .chat-pane {
-  --chat-context-card-expanded-width: 300px;
+  --chat-context-card-expanded-width: 320px;
   container: chat-pane / inline-size;
   position: relative;
   display: grid;
@@ -63,7 +63,7 @@
   display: flex;
   justify-content: center;
   flex: 0 0 auto;
-  padding: 10px 14px 0;
+  padding: 10px 14px 12px;
 }
 
 .chat-turn-change-button {
@@ -111,11 +111,11 @@
   flex-direction: column;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  background: var(--mc-context-card-expanded-bg);
+  background: var(--surface-page);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   line-height: 1.5;
-  box-shadow: none;
+  box-shadow: var(--shadow-soft);
   animation: mc-context-card-in var(--duration-fast) var(--easing-enter);
 }
 
@@ -275,6 +275,11 @@
 }
 
 .mc-chat-context-agent-summary {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   min-height: 28px;
   margin-left: 3px;
   padding: 0 2px;
@@ -284,6 +289,9 @@
   text-align: left;
   line-height: 1.5;
 }
+.mc-chat-context-sources-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mc-chat-context-source-add { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 26px; color: var(--text-muted); }
+.mc-chat-context-agent-finished { margin-left: auto; }
 
 .mc-chat-context-agent-summary > span { display: inline-block; white-space: nowrap; }
 

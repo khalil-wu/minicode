@@ -10,9 +10,9 @@ const { send, toast } = vi.hoisted(() => ({ send: vi.fn(), toast: vi.fn() }));
 vi.mock("../protocol/ws-outbox", async (original) => ({ ...await original(), sendClientCommandAwaitResult: send }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: toast }));
 let anchor: HTMLButtonElement;
-const menuProps = () => ({ anchor, menuId: "owned-menu", archived: false, isIsolated: true,
-  canReveal: false, canCopy: true, canMerge: true, onRename: vi.fn(), onReveal: vi.fn(), onCopy: vi.fn(),
-  onCleanup: vi.fn(), onHandoff: vi.fn(), onArchive: vi.fn(), onClone: vi.fn(), onMerge: vi.fn(), onExport: vi.fn(), onClose: vi.fn() });
+const menuProps = () => ({ anchor, menuId: "owned-menu", conversationId: "owner-a", archived: false, isIsolated: true,
+  canCopy: true, canHandoff: true, onRename: vi.fn(), onCopy: vi.fn(),
+  onPin: vi.fn(), onReadState: vi.fn(), onProjectChange: vi.fn(), onHandoff: vi.fn(), onArchive: vi.fn(), onCopyLink: vi.fn(), onCopyMarkdown: vi.fn(), onClose: vi.fn() });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -26,8 +26,8 @@ afterEach(() => { cleanup(); anchor.remove(); });
 it("keeps the selected conversation action while callbacks change", () => {
   const props = menuProps();
   const view = render(<ConversationMenu {...props} />);
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
-  const selected = screen.getByRole("menuitem", { name: "克隆会话" });
+  const selected = screen.getByRole("menuitem", { name: "复制", exact: true });
+  selected.focus();
   expect(document.activeElement).toBe(selected);
   view.rerender(<ConversationMenu {...props} onClose={vi.fn()} />);
   expect(document.activeElement).toBe(selected);
@@ -35,8 +35,8 @@ it("keeps the selected conversation action while callbacks change", () => {
 
 it("keeps the selected conversation action while anchor placement changes", () => {
   render(<ConversationMenu {...menuProps()} />);
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
-  const selected = screen.getByRole("menuitem", { name: "克隆会话" });
+  const selected = screen.getByRole("menuitem", { name: "复制", exact: true });
+  selected.focus();
   anchor.getBoundingClientRect = () => ({ top: 140, bottom: 165, left: 200, right: 224, width: 24, height: 25, x: 200, y: 140, toJSON: () => ({}) });
   fireEvent.resize(window);
   expect(document.activeElement).toBe(selected);

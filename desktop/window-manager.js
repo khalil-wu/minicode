@@ -2,7 +2,9 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { BrowserWindow, shell } = require("electron");
+const crypto = require("node:crypto");
+const { BrowserWindow, shell, dialog } = require("electron");
+const desktopPreferences = require("./preferences");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -22,8 +24,8 @@ const DEFAULT_WINDOW_STATE = {
 // State
 // ---------------------------------------------------------------------------
 
-let mainWindow = null;
-let windowStateSaveTimer = null;
+const mainWindows = new Map();
+const windowStateSaveTimers = new Map();
 
 // Dependencies injected via init()
 let appendDesktopLog = () => {};
@@ -34,6 +36,8 @@ let desktopIconPath;
 let frontendDevUrl = "";
 let getAppRoot = () => process.cwd();
 let onMainWindowCreated = null;
+let onMainWindowClosed = null;
+let onMainWindowCloseCancelled = () => {};
 let onDiagnosticIncident = null;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +53,8 @@ function init(deps) {
   if (typeof deps.frontendDevUrl === "string") frontendDevUrl = deps.frontendDevUrl;
   if (typeof deps.getAppRoot === "function") getAppRoot = deps.getAppRoot;
   if (typeof deps.onMainWindowCreated === "function") onMainWindowCreated = deps.onMainWindowCreated;
+  if (typeof deps.onMainWindowClosed === "function") onMainWindowClosed = deps.onMainWindowClosed;
+  if (typeof deps.onMainWindowCloseCancelled === "function") onMainWindowCloseCancelled = deps.onMainWindowCloseCancelled;
   if (typeof deps.onDiagnosticIncident === "function") onDiagnosticIncident = deps.onDiagnosticIncident;
 }
 
@@ -56,9 +62,9 @@ function init(deps) {
 // Window state persistence
 // ---------------------------------------------------------------------------
 
-function getWindowStateFilePath() {
+function getWindowStateFilePath(windowOwnerId = "primary") {
   const { app } = require("electron");
-  return path.join(app.getPath("userData"), "window-state.json");
+  return path.join(app.getPath("userData"), windowOwnerId === "primary" ? "window-state.json" : `window-state-${windowOwnerId}.json`);
 }
 
 function sanitizeWindowState(rawState) {
@@ -99,9 +105,9 @@ function sanitizeWindowState(rawState) {
   return nextState;
 }
 
-function readWindowState() {
+function readWindowState(windowOwnerId = "primary") {
   try {
-    const statePath = getWindowStateFilePath();
+    const statePath = getWindowStateFilePath(windowOwnerId);
     if (!fs.existsSync(statePath)) {
       return { ...DEFAULT_WINDOW_STATE };
     }
@@ -112,24 +118,28 @@ function readWindowState() {
   }
 }
 
-function persistWindowState() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return;
-  }
+function persistWindowState(window = null) {
+  const windows = window ? [window] : getMainWindows();
+  for (const win of windows) persistOneWindowState(win);
+}
+
+function persistOneWindowState(win) {
+  if (win.isDestroyed()) return;
+  const record = getWindowRecord(win);
 
   try {
-    const bounds = mainWindow.isMaximized()
-      ? mainWindow.getNormalBounds()
-      : mainWindow.getBounds();
+    const bounds = win.isMaximized()
+      ? win.getNormalBounds()
+      : win.getBounds();
     const payload = {
       ...DEFAULT_WINDOW_STATE,
       x: bounds.x,
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      isMaximized: mainWindow.isMaximized(),
+      isMaximized: win.isMaximized(),
     };
-    const statePath = getWindowStateFilePath();
+    const statePath = getWindowStateFilePath(record.windowOwnerId);
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
   } catch (error) {
@@ -137,20 +147,20 @@ function persistWindowState() {
   }
 }
 
-function queueWindowStatePersist() {
-  if (windowStateSaveTimer) {
-    clearTimeout(windowStateSaveTimer);
-  }
-  windowStateSaveTimer = setTimeout(() => {
-    windowStateSaveTimer = null;
-    persistWindowState();
-  }, 180);
+function queueWindowStatePersist(win = getMainWindow()) {
+  if (!win) return;
+  clearWindowStateSaveTimer(win);
+  windowStateSaveTimers.set(win, setTimeout(() => {
+    windowStateSaveTimers.delete(win);
+    persistWindowState(win);
+  }, 180));
 }
 
-function clearWindowStateSaveTimer() {
-  if (windowStateSaveTimer) {
-    clearTimeout(windowStateSaveTimer);
-    windowStateSaveTimer = null;
+function clearWindowStateSaveTimer(window = null) {
+  for (const [win, timer] of windowStateSaveTimers) {
+    if (window && win !== window) continue;
+    clearTimeout(timer);
+    windowStateSaveTimers.delete(win);
   }
 }
 
@@ -206,7 +216,7 @@ function getFrontendTarget() {
 // Main window
 // ---------------------------------------------------------------------------
 
-function focusMainWindow() {
+function focusMainWindow(mainWindow = getMainWindow()) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return false;
   }
@@ -217,6 +227,13 @@ function focusMainWindow() {
     mainWindow.show();
   }
   mainWindow.focus();
+  return true;
+}
+
+async function requestCloseWindow(window, source) {
+  const record = getWindowRecord(window);
+  record.closeSource = source;
+  window.close();
   return true;
 }
 
@@ -236,16 +253,30 @@ function isTrustedRendererUrl(target, candidateUrl) {
 }
 
 async function createMainWindow() {
+  const existing = getMainWindow();
+  if (existing) {
+    focusMainWindow(existing);
+    return existing;
+  }
+  return createNewWindow({ restoreLastConversation: true });
+}
+
+function nextWindowOwnerId() {
+  const owners = new Set(Array.from(mainWindows.values(), (record) => record.windowOwnerId));
+  if (!owners.has("primary")) return "primary";
+  let slot = 1;
+  while (owners.has(`secondary-${slot}`)) slot += 1;
+  return `secondary-${slot}`;
+}
+
+async function createNewWindow({ conversationId = null, restoreLastConversation = false } = {}) {
   const { app } = require("electron");
   const target = getFrontendTarget();
-  const savedWindowState = readWindowState();
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    focusMainWindow();
-    return mainWindow;
-  }
-
-  mainWindow = new BrowserWindow({
+  const windowOwnerId = nextWindowOwnerId();
+  const windowInstanceId = crypto.randomUUID();
+  const windowBindingToken = crypto.randomBytes(32).toString("hex");
+  const savedWindowState = readWindowState(windowOwnerId);
+  const mainWindow = new BrowserWindow({
     x: savedWindowState.x,
     y: savedWindowState.y,
     width: savedWindowState.width,
@@ -266,28 +297,75 @@ async function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      additionalArguments: getRendererAdditionalArguments(),
+      additionalArguments: [
+        ...getRendererAdditionalArguments(),
+        `--minicode-window-owner-id=${windowOwnerId}`,
+        `--minicode-window-instance-id=${windowInstanceId}`,
+      ],
     },
   });
+  const record = { window: mainWindow, webContents: mainWindow.webContents, windowOwnerId, windowInstanceId, windowBindingToken, initialNavigation: restoreLastConversation ? null : { conversationId },
+    nativeCloseAttempt: false, requestedReload: null, unloadIntent: null };
+  mainWindows.set(record.webContents, record);
+
+  if (onMainWindowCreated) onMainWindowCreated(mainWindow, record);
 
   mainWindow.on("ready-to-show", () => {
-    mainWindow?.show();
+    mainWindow.show();
   });
 
-  mainWindow.on("move", queueWindowStatePersist);
-  mainWindow.on("resize", queueWindowStatePersist);
-  mainWindow.on("maximize", queueWindowStatePersist);
-  mainWindow.on("unmaximize", queueWindowStatePersist);
+  mainWindow.on("move", () => queueWindowStatePersist(mainWindow));
+  mainWindow.on("resize", () => queueWindowStatePersist(mainWindow));
+  mainWindow.on("maximize", () => queueWindowStatePersist(mainWindow));
+  mainWindow.on("unmaximize", () => queueWindowStatePersist(mainWindow));
+  mainWindow.on("close", (event) => {
+    const source = record.closeSource ?? "native";
+    record.closeSource = undefined;
+    if (!record.closeConfirmed && desktopPreferences.needsCloseConfirmation(source)) {
+      event.preventDefault();
+      const locale = desktopPreferences.getPreferences().localeOverride ?? require("electron").app.getLocale();
+      const chinese = /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale);
+      void dialog.showMessageBox(mainWindow, {
+        type: "question", title: chinese ? "关闭窗口" : "Close window", message: chinese ? "关闭这个 MiniCode 窗口？" : "Close this MiniCode window?", buttons: chinese ? ["取消", "关闭"] : ["Cancel", "Close"], defaultId: 0, cancelId: 0,
+      }).then(({ response }) => {
+        if (response === 1) { record.closeConfirmed = true; mainWindow.close(); }
+        else onMainWindowCloseCancelled(mainWindow);
+      });
+      return;
+    }
+    record.nativeCloseAttempt = true;
+    record.requestedReload = null;
+    clearWindowStateSaveTimer(mainWindow);
+    persistWindowState(mainWindow);
+  });
 
   mainWindow.on("closed", () => {
-    persistWindowState();
-    mainWindow = null;
+    clearWindowStateSaveTimer(mainWindow);
+    mainWindows.delete(record.webContents);
+    if (onMainWindowClosed) onMainWindowClosed(mainWindow, record);
   });
 
-  attachRendererDiagnostics(mainWindow, "main");
+  attachRendererDiagnostics(mainWindow, `${windowOwnerId}/${windowInstanceId}`);
+
+  mainWindow.webContents.on("will-prevent-unload", () => {
+    record.nativeCloseAttempt = false;
+    record.closeConfirmed = false;
+  });
+  mainWindow.webContents.on("did-navigate", () => {
+    record.nativeCloseAttempt = false;
+    record.requestedReload = null;
+    record.unloadIntent = null;
+    record.closeConfirmed = false;
+    record.closeSource = undefined;
+  });
 
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
+    if ((input.control || input.meta) && !input.alt && input.key.toLowerCase() === "r") {
+      reloadWindow(mainWindow, input.shift === true);
+      event.preventDefault();
+      return;
+    }
     // Ctrl+` toggles terminal panel
     if (input.control && !input.alt && input.key === "`") {
       mainWindow.webContents.send("minicode:shortcut:terminal");
@@ -312,6 +390,11 @@ async function createMainWindow() {
     }
     return { action: "deny" };
   });
+  const publishWindowState = () => mainWindow.webContents.send("minicode:window:state", { isMaximized: mainWindow.isMaximized(), isFocused: mainWindow.isFocused() });
+  mainWindow.on("maximize", publishWindowState);
+  mainWindow.on("unmaximize", publishWindowState);
+  mainWindow.on("focus", publishWindowState);
+  mainWindow.on("blur", publishWindowState);
 
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (isTrustedRendererUrl(target, url)) return;
@@ -319,10 +402,15 @@ async function createMainWindow() {
     event.preventDefault();
   });
 
-  if (target.type === "url") {
-    await mainWindow.loadURL(target.value);
-  } else {
-    await mainWindow.loadFile(target.value);
+  try {
+    if (target.type === "url") {
+      await mainWindow.loadURL(target.value);
+    } else {
+      await mainWindow.loadFile(target.value);
+    }
+  } catch (error) {
+    mainWindow.destroy();
+    throw error;
   }
 
   if (!app.isPackaged && process.env.MINICODE_OPEN_DEVTOOLS === "1") {
@@ -333,10 +421,6 @@ async function createMainWindow() {
     mainWindow.maximize();
   }
 
-  if (typeof onMainWindowCreated === "function") {
-    onMainWindowCreated(mainWindow);
-  }
-
   return mainWindow;
 }
 
@@ -345,11 +429,66 @@ async function createMainWindow() {
 // ---------------------------------------------------------------------------
 
 function getMainWindow() {
-  return mainWindow;
+  const records = Array.from(mainWindows.values());
+  return (records.find((record) => record.windowOwnerId === "primary") || records[0])?.window || null;
 }
 
 function setMainWindow(win) {
-  mainWindow = win;
+  const current = getMainWindow();
+  if (current) mainWindows.delete(current.webContents);
+  if (win) mainWindows.set(win.webContents, { window: win, webContents: win.webContents, windowOwnerId: "primary", windowInstanceId: crypto.randomUUID(), windowBindingToken: crypto.randomBytes(32).toString("hex") });
+}
+
+function getMainWindows() {
+  return Array.from(mainWindows.values(), (record) => record.window);
+}
+
+function getWindowRecord(window) {
+  return mainWindows.get(window.webContents) || null;
+}
+
+function getWindowForSender(sender) {
+  return mainWindows.get(sender)?.window || null;
+}
+
+function getWindowByInstanceId(instanceId) {
+  return getWindowRecordByInstanceId(instanceId)?.window || null;
+}
+
+function getWindowRecordByInstanceId(instanceId) {
+  return Array.from(mainWindows.values()).find((record) => record.windowInstanceId === instanceId) || null;
+}
+
+function getFocusedMainWindow() {
+  const focused = BrowserWindow.getFocusedWindow();
+  return focused && getWindowRecord(focused) ? focused : getMainWindow();
+}
+
+function captureUnloadIntent(window) {
+  const record = getWindowRecord(window);
+  const intent = { id: crypto.randomUUID(), action: record.nativeCloseAttempt ? "close" : "reload",
+    ignoreCache: record.nativeCloseAttempt ? false : record.requestedReload === true };
+  record.requestedReload = null;
+  record.unloadIntent = { ...intent, closeConfirmed: record.closeConfirmed };
+  return intent;
+}
+
+function reloadWindow(window, ignoreCache = false) {
+  const record = getWindowRecord(window);
+  record.nativeCloseAttempt = false;
+  record.requestedReload = ignoreCache;
+  if (ignoreCache) window.webContents.reloadIgnoringCache();
+  else window.webContents.reload();
+}
+
+function resumeUnload(window, intentId) {
+  const record = getWindowRecord(window);
+  const intent = record.unloadIntent;
+  if (!intent || intent.id !== intentId) return false;
+  record.unloadIntent = null;
+  if (intent.action === "close") { record.closeConfirmed = intent.closeConfirmed; window.close(); }
+  else reloadWindow(window, intent.ignoreCache);
+  return true;
 }
 
 function readWindowStatePublic() {
@@ -372,9 +511,20 @@ module.exports = {
 
   // Window management
   createMainWindow,
+  createNewWindow,
   focusMainWindow,
   getMainWindow,
+  getMainWindows,
+  getWindowRecord,
+  getWindowForSender,
+  getWindowByInstanceId,
+  getWindowRecordByInstanceId,
+  getFocusedMainWindow,
+  captureUnloadIntent,
+  resumeUnload,
+  reloadWindow,
   setMainWindow,
+  requestCloseWindow,
 
   // Frontend target
   getFrontendTarget,

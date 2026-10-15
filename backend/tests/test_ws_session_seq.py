@@ -408,7 +408,8 @@ def test_sync_replays_old_done_and_resumes_new_turn_in_same_conversation() -> No
             )
 
         def runtime_snapshot(self) -> dict:
-            return {"session_id": self.session_id}
+            return {"session_id": self.session_id,
+                    "capabilities": {"provider_capabilities": {"provider_id": "provider", "base_url": "", "wire_api": "chat"}}}
 
         async def send_payload(self, payload: dict, **_kwargs) -> bool:
             self.sent.append(payload)

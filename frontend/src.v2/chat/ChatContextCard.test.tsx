@@ -154,13 +154,8 @@ describe("ChatContextCard", () => {
     expect(screen.getByRole("region", { name: "环境信息" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" }).title).toContain("codex/ui-polish");
-    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
-    expect(icon.src).toBe("https://docs.example.com/favicon.ico");
-    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('.brand-icon-remote')?.getAttribute('src')).toContain('https://www.google.com/s2/favicons?domain=');
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
-    fireEvent.load(icon);
-    expect(container.querySelector('[data-brand="website"] img')).toBe(icon);
-    expect(icon.hidden).toBe(false);
   });
 
   it("closes the summary without leaving a second toolbar glyph in Cowork", () => {
@@ -421,7 +416,7 @@ describe("ChatContextCard", () => {
       .toBe("artifact:shared-resource-id");
   });
 
-  it("restores persisted execution outputs without presenting them as generated files", () => {
+  it("keeps persisted orchestration outputs in the original records without adding normal context sources", () => {
     const firstAt = 1790857935157;
     const secondAt = 1790857961877;
     const messages = hydrateMessages([{
@@ -436,39 +431,19 @@ describe("ChatContextCard", () => {
       ],
     }]);
     useAppStore.setState({ messages, subagents: [], backgroundTasks: [] });
+    const original = JSON.stringify(messages);
     const attachments = collectAttachments(messages, "conv-active");
-    expect(attachments).toHaveLength(2);
-    expect(attachments).toEqual([
-      expect.objectContaining({ artifactId: "output-second", label: "代码执行输出", executionResult: true, occurredAt: secondAt, conversationId: "conv-active" }),
-      expect.objectContaining({ artifactId: "output-first", label: "代码执行输出", executionResult: true, occurredAt: firstAt, conversationId: "conv-active" }),
-    ]);
-
-    const scrollIntoView = vi.fn();
-    const ownTarget = document.createElement("div");
-    ownTarget.dataset.artifactId = "output-second";
-    ownTarget.dataset.artifactConversationId = "conv-active";
-    ownTarget.scrollIntoView = scrollIntoView;
-    const otherTarget = document.createElement("div");
-    otherTarget.dataset.artifactId = "output-second";
-    otherTarget.dataset.artifactConversationId = "conv-other";
-    otherTarget.scrollIntoView = vi.fn();
-    document.body.append(otherTarget, ownTarget);
+    expect(attachments).toEqual([]);
 
     render(<ChatContextCard />);
-    expect(screen.getByRole("region", { name: "来源摘要" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "来源摘要" })).toBeNull();
     expect(screen.queryByText("生成文件")).toBeNull();
     expect(screen.queryByText("Script completed")).toBeNull();
-    const outputButtons = screen.getAllByRole("button", { name: /^查看执行结果：代码执行输出/ });
-    expect(outputButtons).toHaveLength(2);
-    expect(outputButtons[0].textContent).not.toBe(outputButtons[1].textContent);
-    fireEvent.click(outputButtons[0]);
-    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
-    expect(otherTarget.scrollIntoView).not.toHaveBeenCalled();
-    ownTarget.remove();
-    otherTarget.remove();
+    expect(screen.queryByRole("button", { name: /^查看执行结果：代码执行输出/ })).toBeNull();
+    expect(JSON.stringify(messages)).toBe(original);
   });
 
-  it("uses the actual output path while retaining the call's separate execution result", () => {
+  it("keeps the actual output path without adding the call's transport artifact as a context source", () => {
     const messages = hydrateMessages([{
       id: "assistant-deliverables",
       role: "assistant",
@@ -482,14 +457,15 @@ describe("ChatContextCard", () => {
     }]);
     useAppStore.setState({ messages, subagents: [], backgroundTasks: [] });
     const attachments = collectAttachments(messages, "conv-active");
-    expect(attachments).toHaveLength(2);
+    expect(attachments).toHaveLength(1);
     expect(attachments.find((item) => item.source === "workspace")).toMatchObject({
       label: "audit.md", path: "reports/audit.md", conversationId: "conv-active",
     });
     render(<ChatContextCard />);
     expect(screen.getByRole("button", { name: "查看生成文件：audit.md" }).getAttribute("title")).toBe("reports/audit.md");
+    fireEvent.click(screen.getByRole("button", { name: "来源", exact: true }));
     expect(screen.getByText("reports/audit.md")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /^查看执行结果：代码执行输出/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^查看执行结果：代码执行输出/ })).toBeNull();
   });
 
   it("preserves explicit image metadata when its execution record is sparse", () => {

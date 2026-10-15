@@ -7,26 +7,21 @@ import { openAutomations } from "../lib/automations-navigation";
 import { openSettings } from "../lib/settings-navigation";
 import type { PanelKind, RightStackTab, WorkspaceSlice } from "../stores/types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { handleUserMessageAdmission } from "./sendChatMessage";
+import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
+import { cancelConversationComposerUploads } from "../composer/uploads";
+import { latestProjectionCommandIds } from "../protocol/command-projection";
+import { saveBlobFile } from "../lib/save-blob";
 
-export const downloadConversationExport = (
+export const downloadConversationExport = async (
   filename: string,
   content: string,
   mimeType = "application/json;charset=utf-8",
-): boolean => {
-  if (typeof document === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return false;
+): Promise<boolean> => {
   const safeFilename = (filename || "minicode-conversation.json")
     .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
     .slice(0, 180);
-  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = safeFilename || "minicode-conversation.json";
-  anchor.style.display = "none";
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  return true;
+  return saveBlobFile(new Blob([content], { type: mimeType }), safeFilename || "minicode-conversation.json");
 };
 
 const commandResultStatus = (level?: string): "completed" | "failed" => {
@@ -252,6 +247,22 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     };
   };
 
+  handleUserMessageAdmission(ev);
+  if (ev.command === "conversation.delete" && ev.data?.deleted === true && typeof ev.data.conversation_id === "string") {
+    const id = ev.data.conversation_id;
+    cancelConversationComposerUploads(id);
+    useAppStore.setState(state => {
+      const workbenches = { ...state.conversationWorkbenchStates };
+      const sideChats = { ...state.sideChats };
+      delete workbenches[id]; delete sideChats[id];
+      return { conversationWorkbenchStates: workbenches, sideChats };
+    });
+    void deleteConversationComposerDrafts(id).catch(error => {
+      useAppStore.setState({ composerDraftStorageError: error instanceof Error ? error.message : String(error) });
+      pushToast(`无法删除会话的输入恢复数据：${error instanceof Error ? error.message : String(error)}`, "error");
+    });
+  }
+
   // Resolve the owning operation before doing any generic presentation. A
   // settings page waiting on this result owns its inline state/toast; surfacing
   // the same MCP/plugin/scheduler result as agent progress mixes control-plane
@@ -264,8 +275,11 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     ev.command === "conversation.switch"
     && ev.level !== "success"
     && owner === useAppStore.getState().pendingConversationSwitchId
+    && (!e.client_command_id || !latestProjectionCommandIds.get("active-conversation")
+      || e.client_command_id === latestProjectionCommandIds.get("active-conversation"))
   ) {
     useAppStore.setState({ pendingConversationSwitchId: null });
+    useAppStore.getState().requestGitChanges();
     if (!consumedByCaller) pushToast(ev.message, toastType(ev.level), 7000);
   }
   const targetsActiveScope = () => owner !== undefined && typeof workspaceRoot === "string"
@@ -277,7 +291,8 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     const requestId = ev.command === "diff.git_working_tree"
       ? state.gitChanges.workingTreeRequestId
       : ev.command === "diff.git_staged" ? state.gitChanges.stagedRequestId : undefined;
-    if (requestId && e.client_command_id === requestId) {
+    if (requestId && e.client_command_id === requestId && targetsActiveScope()
+      && !state.pendingConversationSwitchId && !state.pendingConversationCreateId) {
       state.setGitChanges({ loading: false, error: ev.message || "无法加载 Git 更改" });
       if (!consumedByCaller) pushToast(ev.message || "无法加载 Git 更改", "error", 5000);
     }
@@ -333,36 +348,16 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     typeof ev.data?.content === "string" &&
     typeof ev.data?.filename === "string"
   ) {
-    if (!downloadConversationExport(ev.data.filename, ev.data.content, ev.data.mime_type)) {
-    pushToast("导出文件已生成，但当前环境无法开始下载。", "error", 5000);
-    }
+    void downloadConversationExport(ev.data.filename, ev.data.content, ev.data.mime_type)
+      .catch(error => pushToast(error instanceof Error ? error.message : String(error), "error", 5000));
   }
 
-  if (!consumedByCaller && targetsActiveScope() && isUserInvokedCommandResult(ev.command)) {
+  if (!consumedByCaller && targetsActiveScope() && isUserInvokedCommandResult(ev.command)
+    && (!e.client_command_type || isUserInvokedCommandResult(e.client_command_type))) {
     surfaceCommandResult(ev);
   }
 
   if (ev.command === "conversation.worktree.cleanup") {
-    if (targetsActiveScope() && ev.data?.needs_force && ev.data.conversation_id) {
-      const convId = ev.data.conversation_id;
-    const msg = ev.message || ev.data.error || "Worktree 中存在本地更改。";
-      import("../overlays/DialogService").then(({ showConfirm }) =>
-        showConfirm({
-      title: "清理 Worktree",
-          message: `${msg}\n\nForce cleanup and discard local changes?`,
-      confirmLabel: "强制清理",
-          danger: true,
-        }).then((ok) => {
-          if (ok && targetsActiveScope()) {
-            wsOutbox.sendClientCommand({
-              type: "conversation.worktree.cleanup",
-              conversation_id: convId,
-              force: true,
-            });
-          }
-        }),
-      );
-    }
     if (ev.data?.removed && ev.data.conversation_id) {
       const workspaceRoot = typeof ev.data.workspace_root === "string" ? ev.data.workspace_root : "";
       useAppStore.setState((state) => ({
@@ -372,6 +367,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
                 ...conversation,
                 gitIsolated: false,
                 worktreePath: undefined,
+                executionCwd: workspaceRoot || conversation.workspaceRoot,
                 gitBranch: undefined,
                 ...(workspaceRoot ? { workspaceRoot } : {}),
               }
@@ -383,56 +379,13 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     }
   }
 
-  if (ev.command === "conversation.worktree.handoff.preflight") {
-    const conversationId = typeof ev.data?.conversation_id === "string" ? ev.data.conversation_id : "";
-    const target = ev.data?.target === "local" ? "local" : "worktree";
-    const fingerprint = typeof ev.data?.fingerprint === "string" ? ev.data.fingerprint : "";
-    const checks = Array.isArray(ev.data?.checks) ? ev.data.checks as Array<{ severity?: string; message?: string }> : [];
-    const dirty = checks.some((check) => check.severity === "blocking" && /local changes|source\.dirty/i.test(String(check.message || "")));
-    if (targetsActiveScope() && !ev.data?.allowed && dirty && conversationId) {
-      import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
-        title: "检测到未提交改动",
-        message: "可将已跟踪和未跟踪文件暂存，并在目标工作区恢复。发生冲突时暂存内容会保留，可手动恢复。",
-        confirmLabel: "暂存后继续",
-        danger: true,
-      }).then((ok) => {
-        if (ok && targetsActiveScope()) wsOutbox.sendClientCommand({
-          type: "conversation.worktree.handoff.preflight",
-          conversation_id: conversationId,
-          target,
-          dirty_action: "stash",
-        });
-      }));
-    }
-    if (targetsActiveScope() && ev.data?.allowed && conversationId && fingerprint) {
-      const warnings = checks.filter((check) => check.severity === "warning").map((check) => check.message).filter(Boolean);
-      import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
-      title: target === "local" ? "将任务移到本地检出？" : "将任务移到受保护工作区？",
-        message: [
-          target === "local"
-        ? "MiniCode 将移除干净的受保护工作区，并把本地检出切换到此任务分支。"
-        : "MiniCode 将为此任务创建干净、隔离的 Worktree。",
-          ...warnings,
-        ].join("\n\n"),
-      confirmLabel: "移动任务",
-      }).then((ok) => {
-        if (ok && targetsActiveScope()) wsOutbox.sendClientCommand({
-          type: "conversation.worktree.handoff.execute",
-          conversation_id: conversationId,
-          target,
-          fingerprint,
-          dirty_action: ev.data?.dirty_action === "stash" ? "stash" : "block",
-        });
-      }));
-    }
-  }
-
   if (ev.command === "conversation.worktree.handoff.execute" && ev.data?.completed && ev.data.conversation_id) {
     const conversationId = String(ev.data.conversation_id);
     useAppStore.setState((state) => ({
       conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
         ...conversation,
         workspaceRoot: String(ev.data?.workspace_root || conversation.workspaceRoot || ""),
+        executionCwd: String(ev.data?.execution_cwd || ev.data?.worktree_path || ev.data?.workspace_root || "") || undefined,
         worktreePath: String(ev.data?.worktree_path || "") || undefined,
         gitBranch: String(ev.data?.git_branch || "") || undefined,
         gitIsolated: Boolean(ev.data?.git_isolated),

@@ -95,14 +95,14 @@ async def test_last_consumer_cancel_drains_bounded_real_workers_and_new_reader_r
                 active.remove(threading.get_ident())
 
     monkeypatch.setattr(service, "_read_indexed_file_snapshot", blocked_read)
-    cancelled = asyncio.create_task(runtime.read(service))
+    cancelled = asyncio.create_task(runtime.read(service, include_dependencies=True))
     try:
         await _until(started.is_set)
         cancelled.cancel()
         await _until(lambda: next(iter(runtime._workspaces.values())).scan.stop.is_set())
         assert not cancelled.done()
         assert len(reads) <= 8
-        replacement = asyncio.create_task(runtime.read(service))
+        replacement = asyncio.create_task(runtime.read(service, include_dependencies=True))
         await _until(lambda: next(iter(runtime._workspaces.values())).readers == 2)
         release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -133,8 +133,8 @@ async def test_workspace_cache_revalidates_content_names_dependencies_and_explic
 
     monkeypatch.setattr(service, "_read_indexed_file_snapshot", observed_read)
     try:
-        await runtime.read(service)
-        await runtime.read(service)
+        await runtime.read(service, include_dependencies=True)
+        await runtime.read(service, include_dependencies=True)
         assert len(reads) == 2
         old = (tmp_path / "source-0.ts").stat()
         (tmp_path / "source-0.ts").write_text("export const value0 = 9;", encoding="utf-8")
@@ -147,10 +147,10 @@ async def test_workspace_cache_revalidates_content_names_dependencies_and_explic
         dependency.unlink()
         replaced = dependency.with_name("replacement.d.ts")
         replaced.write_text("export declare const dependency: number;", encoding="utf-8")
-        renamed = await runtime.read(service)
+        renamed = await runtime.read(service, include_dependencies=True)
         assert {file.path for file in renamed.files} == {"renamed.ts", "node_modules/types/replacement.d.ts"}
         runtime.invalidate_all()
-        await runtime.read(service)
+        await runtime.read(service, include_dependencies=True)
         assert len(reads) == 7
         limited = await runtime.read(WorkspaceService(lambda: tmp_path, max_file_bytes=8))
         assert not limited.complete and limited.files == []

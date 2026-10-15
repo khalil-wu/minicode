@@ -207,9 +207,12 @@ class SendMessageTool(_AgentCoordinationTool):
     """Send a coordination message between agents."""
 
     name = "send_message"
+    delivery_mode = "queue_only"
     should_defer = False
     description = (
-        "Send a coordination message to another agent or the parent agent. "
+        "Queue a coordination message for another agent or the parent agent. "
+        "An active turn receives it at a message boundary; it does not start an idle or completed agent. "
+        "Use followup_task to request another turn. "
         "Use for parent-to-subagent or subagent-to-parent updates that should be visible in the Agents panel. "
         "Plan and permission approvals use the host review flow; this tool cannot send approval protocol messages."
     )
@@ -282,6 +285,8 @@ class SendMessageTool(_AgentCoordinationTool):
 
         runtime = _runtime(context)
         control = AgentControlPlane(context, runtime=runtime)
+        if self.delivery_mode == "trigger_turn" and not control.can_use_operation("followup"):
+            return self._error_result("The current agent cannot start a follow-up turn.")
         if recipient in {"*", "all"}:
             recipient = "*"
             if control.actor_is_subagent:
@@ -331,7 +336,7 @@ class SendMessageTool(_AgentCoordinationTool):
             recipient_record is not None
             and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
         )
-        if recipient_ended:
+        if recipient_ended and self.delivery_mode == "trigger_turn":
             registry = context.tool_registry if context is not None else None
             if registry is None and context is not None and isinstance(context.metadata, dict):
                 registry = context.metadata.pop("_tool_registry", None)
@@ -389,6 +394,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 summary=summary,
                 sender_mailbox_epoch=_actor_mailbox_epoch(context),
                 recipient_mailbox_epoch=recipient_epoch,
+                delivery_mode=self.delivery_mode,
             )
         except ValueError as exc:
             return self._error_result(str(exc))
@@ -416,6 +422,7 @@ class SendMessageTool(_AgentCoordinationTool):
             result_kind="subagent",
             runtime_metadata={
                 "delivery": delivery,
+                **({"recipient_ids": list(record.recipient_mailbox_epochs)} if recipient == "*" else {}),
                 "message_id": str(record.message_id or ""),
                 "sender": sender,
                 "recipient": recipient,
@@ -424,6 +431,29 @@ class SendMessageTool(_AgentCoordinationTool):
                 ),
             },
         )
+
+class FollowupTaskTool(SendMessageTool):
+    """Send a task that explicitly starts the recipient's next turn."""
+
+    name = "followup_task"
+    delivery_mode = "trigger_turn"
+    description = (
+        "Send a follow-up task to a target agent. Start a new turn when it is idle or completed; "
+        "deliver the task at a message boundary when it is already working. "
+        "The same agent identity, history, workspace and execution permissions are retained."
+    )
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(name=self.name, description=self.description, parameters={
+            "type": "object", "properties": {
+                "target": {"type": "string", "description": "Target agent id or canonical task name."},
+                "message": {"type": "string", "description": "The follow-up task to send."},
+            }, "required": ["target", "message"], "additionalProperties": False,
+        })
+
+    async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await super().execute({"recipient": args["target"], "message": args["message"]}, context=context)
+
 
 class MessageListTool(_AgentCoordinationTool):
     """Read the shared swarm mailbox for an agent or team participant."""

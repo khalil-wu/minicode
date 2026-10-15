@@ -12,6 +12,7 @@ from backend.agent.cache_metrics import (
     prompt_cache_saved_ms,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.run_events import public_provider_trace
 from backend.agent.prompt_cache import observe_prompt_cache_break
 from backend.agent.provider_protocol import (
     loop_metrics_payload,
@@ -124,7 +125,7 @@ class ProviderCompletionCoordinator:
                 "provider",
                 trace_id,
                 provider_trace_payload(
-                    provider_raw=raw_done,
+                    provider_raw=public_provider_trace(raw_done, stream_state.private_tool_call_ids),
                     usage=usage,
                     finish_reason=finish_reason,
                     iteration_id=iteration_id,

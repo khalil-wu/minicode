@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
 import type { AgentTurnStatus } from "../projection/project-turn";
 import { useSharedSecondTick } from "../../lib/shared-tick";
+import { useI18n, type Translate } from "../../i18n";
 
 type AgentProcessSummaryProps = {
   status: AgentTurnStatus;
@@ -9,8 +10,6 @@ type AgentProcessSummaryProps = {
   durationMs: number | null;
   startedAt?: number;
   failureMessage?: string;
-  canCollapse?: boolean;
-  canExpand?: boolean;
   position?: "top" | "bottom";
   onToggle: () => void;
 };
@@ -22,14 +21,13 @@ export function AgentProcessSummary({
   durationMs,
   startedAt,
   failureMessage,
-  canCollapse = status === "completed",
-  canExpand = false,
   position = "top",
   onToggle,
 }: AgentProcessSummaryProps) {
+  const { t } = useI18n();
   const running = status === "running";
   const now = useSharedSecondTick(running && startedAt !== undefined);
-  const statusLabel = running
+  const statusLabel = t(running
     ? "处理中"
     : status === "failed"
       ? "处理失败"
@@ -37,16 +35,16 @@ export function AgentProcessSummary({
         ? "部分完成"
         : status === "stopped"
           ? "已停止"
-          : "已处理";
-  const durationLabel = formatElapsedSeconds(running && startedAt !== undefined ? Math.max(0, now - startedAt) : durationMs);
+          : "已处理");
+  const durationLabel = formatElapsedSeconds(running && startedAt !== undefined ? Math.max(0, now - startedAt) : durationMs, t);
   const displayLabel = durationLabel
-    ? running || status === "completed" ? `已处理 ${durationLabel}` : `${statusLabel} · ${durationLabel}`
+    ? running || status === "completed" ? t("已处理 {duration}", { duration: durationLabel }) : `${statusLabel} · ${durationLabel}`
     : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
   const accessibleStatusLabel = summaryFailure
     ? `${displayLabel} · ${summaryFailure}`
-    : displayLabel || "处理完成";
+    : displayLabel || t("处理完成");
   const content = (
     <>
       {!running && status !== "completed" && (
@@ -74,7 +72,7 @@ export function AgentProcessSummary({
     </>
   );
 
-  if (!hasTimelineItems || (!canCollapse && !canExpand)) {
+  if (!hasTimelineItems) {
     return (
       <div
         className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap"
@@ -99,7 +97,7 @@ export function AgentProcessSummary({
       <button
         type="button"
         className="chat-turn-process-summary agent-loop-process-summary"
-        aria-label={processExpanded ? "收起处理步骤" : "展开处理步骤"}
+        aria-label={t(processExpanded ? "收起处理步骤" : "展开处理步骤")}
         aria-expanded={processExpanded}
         onClick={onToggle}
       >
@@ -110,7 +108,7 @@ export function AgentProcessSummary({
   );
 }
 
-function formatElapsedSeconds(durationMs: number | null): string {
+function formatElapsedSeconds(durationMs: number | null, t: Translate): string {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 1_000) return "";
   const seconds = Math.floor(durationMs / 1_000);
   if (seconds >= 60) {
@@ -119,9 +117,9 @@ function formatElapsedSeconds(durationMs: number | null): string {
     if (minutes >= 60) {
       const hours = Math.floor(minutes / 60);
       const remainingMinutes = minutes % 60;
-      return `${hours}小时${remainingMinutes ? `${remainingMinutes}分钟` : ""}${remainder ? `${remainder}秒` : ""}`;
+      return `${t("{hours}小时", { hours })}${remainingMinutes ? t("{minutes}分钟", { minutes: remainingMinutes }) : ""}${remainder ? t("{seconds}秒", { seconds: remainder }) : ""}`;
     }
-    return remainder > 0 ? `${minutes}分钟${remainder}秒` : `${minutes}分钟`;
+    return `${t("{minutes}分钟", { minutes })}${remainder > 0 ? t("{seconds}秒", { seconds: remainder }) : ""}`;
   }
-  return `${seconds}秒`;
+  return t("{seconds}秒", { seconds });
 }

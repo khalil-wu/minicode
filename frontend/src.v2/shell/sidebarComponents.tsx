@@ -1,18 +1,12 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useI18n } from "../i18n";
+import React, { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import {
-  Archive,
-  Copy,
-  CopyPlus,
-  Download,
-  FolderOpen,
-  GitBranch,
-  GitMerge,
-  Pencil,
-  RotateCcw,
-  XCircle,
-} from "lucide-react";
+import { RotateCcw } from "lucide-react";
+import { ContextMenu } from "../components/ContextMenu";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
+import { canOpenThreadWindow, openThreadWindow } from "./threadWindowActions";
+import { useWorkspaceOpenMenu } from "./useWorkspaceOpenMenu";
+import type { ConversationMeta } from "../stores/types";
 
 // ── Small shared components ────────────────────────────────────────────
 
@@ -30,6 +24,7 @@ export const IconAction = ({
   expanded,
   controls,
   disabled,
+  hasPopup = true,
 }: {
   children: React.ReactNode;
   label: string;
@@ -38,6 +33,7 @@ export const IconAction = ({
   expanded?: boolean;
   controls?: string;
   disabled?: boolean;
+  hasPopup?: boolean;
 }) => (
   <button
     ref={buttonRef}
@@ -45,7 +41,7 @@ export const IconAction = ({
     onClick={onClick}
     title={label}
     aria-label={label}
-    aria-haspopup="menu"
+    aria-haspopup={hasPopup ? "menu" : undefined}
     aria-expanded={expanded}
     aria-controls={controls}
     disabled={disabled}
@@ -103,198 +99,74 @@ export const MenuItem = ({
   </button>
 );
 
-const MenuDivider = () => (
-  <div style={{ height: 1, margin: "4px 2px", background: "var(--border-subtle)" }} />
-);
+export const threadMenuIcon = (name: "copy" | "local" | "worktree" | "rename" | "archive" | "pin" | "unpin" | "read" | "project" | "pin-row" | "pin-row-filled" | "new-window") => <span aria-hidden="true" style={{
+  width: 16, height: 16, background: "currentColor", mask: `url(${import.meta.env.BASE_URL}apps/thread-${name}.svg) center / contain no-repeat`,
+}} />;
 
 export const ConversationMenu = ({
-  anchor,
-  menuId,
-  archived,
-  isIsolated,
-  canReveal,
-  canCopy,
-  canMerge = false,
-  onRename,
-  onReveal,
-  onCopy,
-  onCleanup,
-  onHandoff,
-  onArchive,
-  onClone,
-  onMerge,
-  onExport,
-  onClose,
+  anchor, menuId, conversationId, workspaceRoot, conversationType, environment, archived, isIsolated, canCopy, canHandoff,
+  pinned = false, hasUnreadTurn = false, currentProject = "", projectOptions = [], onPin, onReadState, onProjectChange,
+  onRename, onCopy, onCopyLink, onCopyMarkdown, onHandoff, onArchive, onClose,
 }: {
   anchor: HTMLElement | null;
   menuId: string;
+  conversationId: string;
+  workspaceRoot?: string;
+  conversationType?: ConversationMeta["conversationType"];
+  environment?: ConversationMeta["environment"];
   archived: boolean;
   isIsolated: boolean;
-  canReveal: boolean;
   canCopy: boolean;
-  canMerge?: boolean;
+  canHandoff: boolean;
+  pinned?: boolean;
+  hasUnreadTurn?: boolean;
+  currentProject?: string;
+  projectOptions?: { id: string; name: string }[];
+  onPin: () => void;
+  onReadState: () => void;
+  onProjectChange: (projectId: string) => void;
   onRename: () => void;
-  onReveal: () => void;
   onCopy: () => void;
-  onCleanup: () => void;
+  onCopyLink: () => void;
+  onCopyMarkdown: () => void;
   onHandoff: () => void;
   onArchive: () => void;
-  onClone: () => void;
-  onMerge: () => void;
-  onExport: () => void;
   onClose: () => void;
 }) => {
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState<{
-    top: number;
-    left: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
-
-  useLayoutEffect(() => {
-    if (!anchor) return;
-
-    const placeMenu = () => {
-      if (!anchor.isConnected) return;
-      const rect = anchor.getBoundingClientRect();
-      const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
-      const viewportHeight = document.documentElement.clientHeight || window.innerHeight || 768;
-      const margin = 8;
-      const gap = 6;
-      const width = Math.min(236, Math.max(160, viewportWidth - margin * 2));
-      const measuredHeight = menuRef.current?.scrollHeight || 320;
-      const spaceBelow = Math.max(0, viewportHeight - rect.bottom - gap - margin);
-      const spaceAbove = Math.max(0, rect.top - gap - margin);
-      const openAbove = spaceBelow < Math.min(measuredHeight, 240) && spaceAbove > spaceBelow;
-      const availableHeight = openAbove ? spaceAbove : spaceBelow;
-      const maxHeight = Math.max(96, Math.min(measuredHeight, availableHeight, viewportHeight - margin * 2));
-      const maxLeft = Math.max(margin, viewportWidth - margin - width);
-      const left = Math.min(Math.max(margin, rect.right - width), maxLeft);
-      const preferredTop = openAbove ? rect.top - gap - maxHeight : rect.bottom + gap;
-      const top = Math.max(margin, Math.min(preferredTop, viewportHeight - margin - maxHeight));
-
-      setPosition((current) => {
-        const next = { top, left, width, maxHeight };
-        if (
-          current
-          && current.top === next.top
-          && current.left === next.left
-          && current.width === next.width
-          && current.maxHeight === next.maxHeight
-        ) return current;
-        return next;
-      });
-    };
-
-    placeMenu();
-    const frame = window.requestAnimationFrame(placeMenu);
-    window.addEventListener("resize", placeMenu);
-    window.addEventListener("scroll", placeMenu, true);
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(placeMenu);
-    observer?.observe(anchor);
-    if (menuRef.current) observer?.observe(menuRef.current);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", placeMenu);
-      window.removeEventListener("scroll", placeMenu, true);
-      observer?.disconnect();
-    };
-  }, [anchor, archived, canCopy, canMerge, canReveal, isIsolated]);
-
-  const menuReady = position !== null;
+  const { t: tr } = useI18n();
+  const workspaceItems = useWorkspaceOpenMenu(!environment || environment === "local" ? workspaceRoot : undefined, true);
+  const windowItems = [
+    ...(canOpenThreadWindow({ archived, conversationType, environment }) ? [{ label: tr("在新窗口中打开"), icon: threadMenuIcon("new-window"), onClick: () => void openThreadWindow(conversationId) }] : []),
+    ...workspaceItems,
+  ];
   useEffect(() => {
-    if (menuReady) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
-  }, [anchor, menuReady]);
-
-  useEffect(() => {
-    const menu = menuRef.current;
-    if (!menu || !position) return;
-    const items = () => Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node) || menu.contains(target) || anchor?.contains(target)) return;
-      onClose();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      const available = items();
-      if (event.key === "Escape" || event.key === "Tab") {
-        if (event.key === "Escape") event.preventDefault();
-        event.stopPropagation();
-        onClose();
-        anchor?.focus();
-        return;
-      }
-      if (!available.length) return;
-      const current = Math.max(0, available.indexOf(document.activeElement as HTMLButtonElement));
-      let next: number | null = null;
-      if (event.key === "ArrowDown") next = (current + 1) % available.length;
-      else if (event.key === "ArrowUp") next = (current - 1 + available.length) % available.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = available.length - 1;
-      if (next == null) return;
-      event.preventDefault();
-      event.stopPropagation();
-      available[next]?.focus();
-    };
-    document.addEventListener("pointerdown", onPointerDown, true);
-    menu.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      menu.removeEventListener("keydown", onKeyDown);
-    };
-  }, [anchor, onClose, position]);
-
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div
-      ref={menuRef}
-      id={menuId}
-      className="mc-conversation-menu"
-      role="menu"
-      aria-label="会话操作"
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        position: "fixed",
-        left: position?.left ?? 0,
-        top: position?.top ?? 0,
-        zIndex: "var(--z-toast)",
-        width: position?.width ?? 236,
-        maxWidth: "calc(100vw - 16px)",
-        maxHeight: position?.maxHeight ?? "calc(100vh - 16px)",
-        overflowY: "auto",
-        visibility: position ? "visible" : "hidden",
-        padding: 5,
-        background: "var(--surface-raised)",
-        border: "1px solid var(--border-soft)",
-        borderRadius: "var(--radius-sm, 6px)",
-        boxShadow: "var(--shadow-strong, var(--shadow-md))",
-      }}
-    >
-      <MenuItem icon={<Pencil size={14} />} label="重命名" onClick={onRename} />
-      <MenuItem icon={<CopyPlus size={14} />} label="克隆会话" onClick={onClone} />
-      {canMerge && <MenuItem icon={<GitMerge size={14} />} label="合并到父会话" onClick={onMerge} />}
-      <MenuItem icon={<Download size={14} />} label="导出会话树" onClick={onExport} />
-      {canReveal && <MenuItem icon={<FolderOpen size={14} />} label="在资源管理器中显示" onClick={onReveal} />}
-      {canCopy && <MenuItem icon={<Copy size={14} />} label="复制工作区路径" onClick={onCopy} />}
-      <MenuItem
-        icon={<GitBranch size={14} />}
-        label={isIsolated ? "移到本地工作区" : "移到隔离工作区"}
-        onClick={onHandoff}
-      />
-      {isIsolated && (
-        <MenuItem icon={<XCircle size={14} />} label="清理工作区" onClick={onCleanup} />
-      )}
-      <MenuDivider />
-      <MenuItem
-        icon={archived ? <RotateCcw size={14} /> : <Archive size={14} />}
-        label={archived ? "取消归档" : "归档"}
-        onClick={onArchive}
-      />
-    </div>,
-    document.body,
-  );
+    document.getElementById(menuId)!.querySelector<HTMLButtonElement>('button[role="menuitem"]')!.focus();
+  }, [menuId]);
+  const bounds = anchor!.getBoundingClientRect();
+  return <ContextMenu id={menuId} ariaLabel={tr("会话操作")} className="mc-conversation-menu" itemFontSize="var(--text-xs)"
+    returnFocusTo={anchor!}
+    position={{ x: bounds.right - 236, y: bounds.bottom + 6 }} onClose={onClose} items={[
+      ...(!archived ? [
+        { label: tr("重命名"), icon: threadMenuIcon("rename"), onClick: onRename },
+        { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), onClick: onPin },
+        { label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState },
+        ...(projectOptions.some(project => project.id !== currentProject) || currentProject ? [{ label: tr("项目"), icon: threadMenuIcon("project"), submenu: [
+          ...projectOptions.filter(project => project.id !== currentProject).map(project => ({ label: project.name, icon: threadMenuIcon("project"), onClick: () => onProjectChange(project.id) })),
+          ...(currentProject ? [{ label: tr("移出项目"), icon: threadMenuIcon("project"), onClick: () => onProjectChange("") }] : []),
+        ] }] : []),
+        { label: "", separator: true },
+      ] : []),
+      { label: tr("复制"), icon: threadMenuIcon("copy"), submenu: [
+        { label: tr("复制深度链接"), icon: threadMenuIcon("copy"), onClick: onCopyLink },
+        { label: tr("复制为 Markdown"), icon: threadMenuIcon("copy"), onClick: onCopyMarkdown },
+        { label: tr("复制工作目录"), icon: threadMenuIcon("copy"), disabled: !canCopy, onClick: onCopy },
+      ] },
+      ...(windowItems.length || canHandoff ? [{ label: "", separator: true }] : []),
+      ...windowItems,
+      ...(canHandoff ? [{ label: isIsolated ? tr("移到本地工作区") : tr("移到隔离工作区"), icon: threadMenuIcon(isIsolated ? "local" : "worktree"), onClick: onHandoff }] : []),
+      { label: "", separator: true },
+      { label: archived ? tr("取消归档") : tr("归档"), icon: archived ? <RotateCcw size={14} /> : threadMenuIcon("archive"), onClick: onArchive },
+    ]} />;
 };
 
 export type ConfirmDialogState = {
@@ -314,6 +186,7 @@ export const ConfirmDialog = ({
   onCancel: () => void;
   onConfirm: () => void;
 }) => {
+  const { t: tr } = useI18n();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useFocusTrap(true);
   useEscapeKey(onCancel, true, dialogRef);
@@ -358,8 +231,7 @@ export const ConfirmDialog = ({
       </div>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
         <button ref={cancelRef} type="button" onClick={onCancel} style={dialogCancelStyle}>
-          取消
-        </button>
+          {tr("取消")}</button>
         <button
           type="button"
           onClick={onConfirm}

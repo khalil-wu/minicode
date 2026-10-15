@@ -40,6 +40,12 @@
 }
 
 .mc-diff-toolbar { padding-block: 2px; }
+.mc-diff-scope-selector {
+  padding: 2px 9px 2px 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-base);
+}
 .mc-diff-scope-trigger,
 .mc-diff-icon-action { background: transparent; }
 .mc-diff-scope-trigger:hover,

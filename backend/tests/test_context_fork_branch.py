@@ -22,10 +22,26 @@ async def _loaded_context(_conversation_id: str) -> None:
 
 
 def _ready_session(**values):
-    return SimpleNamespace(
+    values.setdefault("send_conversation_list", _loaded_context_list)
+    session = SimpleNamespace(
         conversation_runtime=SimpleNamespace(wait_for_hydration=_loaded_context),
         **values,
     )
+    from backend.ws.session_lifecycle import SessionLifecycle
+
+    session.session_lifecycle = SessionLifecycle(session)
+    session.runtime_snapshot = lambda: {"active_conversation_id": session.active_conversation_id}
+
+    async def send_payload(payload, **_kwargs):
+        await session.send_event(AgentEvent(type=payload["type"], data={key: value for key, value in payload.items() if key != "type"}))
+        return True
+
+    session.send_payload = send_payload
+    return session
+
+
+async def _loaded_context_list() -> None:
+    return None
 
 
 def _resource_stores(tmp_path: Path) -> dict[str, object]:
@@ -318,7 +334,7 @@ def test_context_fork_owner_tracks_whether_the_new_branch_was_activated(tmp_path
             ws_manager=None,
             send_event=send_event,
             switch_workspace_for_conversation=switch_workspace,
-            load_active_conversation_snapshot=lambda *_args: None,
+            load_active_conversation_snapshot=lambda *_args, **_kwargs: None,
             sync_permission_mode_with_active_conversation=lambda **_kwargs: None,
             send_conversation_list=send_conversation_list,
             **_resource_stores(tmp_path / suffix),
@@ -327,8 +343,11 @@ def test_context_fork_owner_tracks_whether_the_new_branch_was_activated(tmp_path
             session,
             {"message_id": "m2", "create_branch": True, "activate": activate},
         )
-        assert events and events[-1].type == "context_forked"
-        return events[-1].data, session
+        forked = next(event for event in events if event.type == "context_forked")
+        assert events[-1].type == "command.result"
+        assert events[-1].data["level"] == "success"
+        assert events[-1].data["data"]["conversation_id"] == parent.id
+        return forked.data, session
 
     inactive_data, inactive_session = asyncio.run(run_one(activate=False, suffix="inactive"))
     active_data, active_session = asyncio.run(run_one(activate=True, suffix="active"))
@@ -379,7 +398,9 @@ def test_context_fork_legacy_index_maps_to_compacted_model_history(tmp_path: Pat
             session,
             {"message_index": 3, "create_branch": False},
         )
-        return events[-1]
+        assert events[-1].type == "command.result"
+        assert events[-1].data["level"] == "success"
+        return next(event for event in events if event.type == "context_forked")
 
     event = asyncio.run(scenario())
     assert event.type == "context_forked"
@@ -424,16 +445,19 @@ def test_context_fork_rejects_invalid_unstable_indices_and_empty_transcript(tmp_
 
     for raw_index in (True, 0.5, "not-an-index", 99):
         events = asyncio.run(run_one(raw_index))
-        assert events[-1].type == "error"
-        assert events[-1].data["conversation_id"]
+        assert [event.type for event in events] == ["error", "command.result"]
+        assert events[-1].data["level"] == "error"
+        assert events[0].data["conversation_id"]
         # The renderer's inbound contract requires `recoverable`; without it the
         # rejection was dropped by the validator and the user saw nothing.
-        assert events[-1].data["recoverable"] is True
+        assert events[0].data["recoverable"] is True
+        assert events[-1].data["data"]["recoverable"] is True
 
     empty_events = asyncio.run(run_one(-1, empty=True))
-    assert empty_events[-1].type == "error"
+    assert [event.type for event in empty_events] == ["error", "command.result"]
+    assert empty_events[-1].data["level"] == "error"
     assert "visible message" in empty_events[-1].data["message"]
-    assert empty_events[-1].data["recoverable"] is True
+    assert empty_events[0].data["recoverable"] is True
 
 
 def test_context_side_query_keeps_owner_captured_before_async_wait() -> None:

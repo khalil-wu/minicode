@@ -334,11 +334,12 @@ def test_tool_search_reuses_index_and_rebuilds_on_registry_change(tmp_path, monk
     monkeypatch.setattr(registry, "build_schema_views", views)
     async def scenario():
         first = await tool.execute({"query": "browser"})
-        assert "searchable" in json.loads(first.content)["matches"]
+        assert "searchable" in {item["name"] for namespace in first.tool_search_output for item in namespace["tools"]}
         await tool.execute({"query": "inspect"})
         assert views.call_count == 1
         other = Searchable(); other.name = "another"
         registry.register(other)
-        assert "another" in json.loads((await tool.execute({"query": "browser"})).content)["matches"]
+        found = await tool.execute({"query": "browser"})
+        assert "another" in {item["name"] for namespace in found.tool_search_output for item in namespace["tools"]}
         assert views.call_count == 2
     asyncio.run(scenario())

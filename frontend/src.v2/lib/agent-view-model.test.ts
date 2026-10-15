@@ -95,6 +95,28 @@ describe("agent view model", () => {
     });
   });
 
+  it("uses the durable completion timestamp after status queries and session restores", () => {
+    const now = 1_800_000_000_000;
+    const [view] = projectAgentViews([{ id: "completed", role: "reviewer", status: "done", displayName: "Review layout",
+      completedAt: now - 2 * 60 * 60 * 1000, lastProgressAt: now - 100, lastEventAt: now }], now);
+    expect(view.relativeTimeLabel).toBe("2 小时");
+  });
+
+  it("counts accepted preflight separately from actual execution", () => {
+    const agent = { id: "starting", role: "explore", status: "running" as const, startedAt: 0 };
+    const [starting] = projectAgentViews([agent]);
+    expect(starting).toMatchObject({ status: "waiting", statusLabel: "正在启动" });
+    expect(agentStatusSummary([starting])).toBe("1 正在启动");
+    expect(projectAgentViews([{ ...agent, startedAt: 100 }])[0]).toMatchObject({ status: "running", statusLabel: "运行中" });
+  });
+
+  it("orders completed history by actual completion while status refreshes leave it in place", () => {
+    expect(projectAgentViews([
+      { id: "older", role: "reviewer", status: "done", completedAt: 100, lastEventAt: 500 },
+      { id: "newer", role: "reviewer", status: "done", completedAt: 200, lastEventAt: 300 },
+    ]).map((view) => view.id)).toEqual(["newer", "older"]);
+  });
+
   it("keeps identities stable across status changes and only resolves known relationships", () => {
     const agents = [
       { id: "parent", agentPath: "/root/review", role: "reviewer", status: "running" as const, objective: "审阅界面" },

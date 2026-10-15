@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import time
 from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
@@ -8,6 +10,7 @@ from backend.agent.tool_projection import projection_for_tool
 from backend.agent.tool_runtime import tool_is_idempotent, tool_side_effect_kind
 from backend.agent.tool_stream_tracker import StreamingToolStatus, StreamingToolTracker
 from backend.agent.final_tool_request import canonical_tool_request_digest
+from backend.agent.command_actions import command_actions_for_tool
 from backend.llm.base import ToolCallEvent, ToolCallStartEvent
 from backend.tools.base import ToolResult
 from backend.tools.registry import ToolRegistry
@@ -23,6 +26,8 @@ def status_for_result(result: ToolResult, requested_status: str | None = None) -
         "cancelled",
     }:
         return requested_status
+    if requested_status == "interrupted" or result.status == "interrupted":
+        return "cancelled"
     if result.status in {
         "success",
         "failed",
@@ -49,7 +54,7 @@ def tool_call_pending_event(
     """Project a provider tool block before its streamed arguments are complete."""
 
     projection = projection_for_tool(start.name, tool_registry)
-    return AgentEvent.tool_call(
+    event = AgentEvent.tool_call(
         id=start.id,
         name=start.name,
         args={},
@@ -64,6 +69,8 @@ def tool_call_pending_event(
         iteration_id=iteration_id,
         phase="tool",
     )
+    event.data["streaming_announcement"] = True
+    return event
 
 
 def abandoned_tool_announcement_events(
@@ -184,6 +191,8 @@ def tool_call_start_event(
     iteration_id: str,
     tool_registry: ToolRegistry | None = None,
     turn_id: str = "",
+    workspace_root: Any = None,
+    status: str = "running",
 ) -> AgentEvent:
     projection = projection_for_tool(tc.name, tool_registry)
     side_effect_kind = (
@@ -209,10 +218,11 @@ def tool_call_start_event(
         getattr(tc, "_final_request_digest", "")
         or canonical_tool_request_digest(tc.name, tc.arguments or {})
     ).strip()
-    return AgentEvent.tool_call(
+    event = AgentEvent.tool_call(
         id=tc.id,
         name=tc.name,
         args=tc.arguments,
+        status=status,
         started_at=int(started_epoch * 1000),
         display_hint=projection.display_hint,
         result_kind=projection.result_kind,
@@ -227,4 +237,27 @@ def tool_call_start_event(
         idempotent=idempotent,
         idempotency_key=idempotency_key,
         request_digest=request_digest,
+        command_actions=command_actions_for_tool(tc.name, tc.arguments, workspace_root),
     )
+    event.data["streaming_announcement"] = False
+    request = getattr(tc, "_final_tool_request", None)
+    if request is not None and request.exec_policy is not None:
+        presentation = getattr(tc, "_command_presentation", None)
+        if presentation is None:
+            presentation = {
+                "command": request.arguments["command"],
+                "cwd": str(request.exec_policy.command.cwd),
+                "started_at_ms": int(time.time() * 1000),
+            }
+            setattr(tc, "_command_presentation", presentation)
+        event.data["command_presentation"] = deepcopy(presentation)
+        execution_started_at = getattr(tc, "_command_execution_started_at", None)
+        if execution_started_at is not None:
+            event.data["execution_started_at"] = execution_started_at
+    for field in ("native_type", "native_namespace", "native_name"):
+        value = getattr(tc, field)
+        if value:
+            event.data[field] = value
+    if projection.private_model_only:
+        event.data["private_model_only"] = True
+    return event

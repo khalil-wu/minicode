@@ -3,20 +3,25 @@
 const crypto = require("node:crypto");
 const http = require("node:http");
 const { TextDecoder } = require("node:util");
+const { bridgeBindTarget } = require("./backend-host-contract");
 
 let manager = null;
+let getWindowRecordByInstanceId = () => null;
 let token = "";
 let appendDesktopLog = () => {};
 let server = null;
 let starting = null;
 let endpoint = "";
 let accepting = false;
+let configuredEndpoint = "";
 const inFlight = new Set();
 const operations = new Map();
 
 function init(deps = {}) {
   manager = deps.manager || null;
+  if (typeof deps.getWindowRecordByInstanceId === "function") getWindowRecordByInstanceId = deps.getWindowRecordByInstanceId;
   token = typeof deps.token === "string" ? deps.token : "";
+  configuredEndpoint = typeof deps.endpoint === "string" ? deps.endpoint.trim() : "";
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
 }
 
@@ -24,6 +29,20 @@ function tokenMatches(value) {
   const supplied = Buffer.from(String(value || ""));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && expected.length > 0 && crypto.timingSafeEqual(supplied, expected);
+}
+
+function assertWindowBinding(payload) {
+  const record = getWindowRecordByInstanceId(payload.window_instance_id);
+  const supplied = Buffer.from(typeof payload.window_binding_token === "string" ? payload.window_binding_token : "");
+  const expected = Buffer.from(record?.windowBindingToken || "");
+  if (!record || record.window.isDestroyed() || !expected.length || supplied.length !== expected.length
+    || !crypto.timingSafeEqual(supplied, expected)
+    || (payload.window_owner_id !== undefined && payload.window_owner_id !== record.windowOwnerId)) {
+    const error = new Error("Desktop window binding is invalid or no longer active.");
+    error.code = "ERR_WINDOW_BINDING";
+    throw error;
+  }
+  return record;
 }
 
 function readJsonBody(request, maxBytes = 1_000_000) {
@@ -69,8 +88,8 @@ function operationReceipt(operation) {
   };
 }
 
-function createOperation(id, owner) {
-  const operation = { id, owner, controller: new AbortController(), started: false,
+function createOperation(id, owner, windowInstanceId, windowBindingToken) {
+  const operation = { id, owner, windowInstanceId, windowBindingToken, controller: new AbortController(), started: false,
     submitted: false, settled: false, status: "queued", reason: "", promise: null };
   operations.set(id, operation);
   return operation;
@@ -87,8 +106,17 @@ function cancelOperation(operation, reason) {
 
 function ownedOperation(payload) {
   const operation = operations.get(payload.operation_id);
-  if (operation && operation.owner !== payload.conversation_id) {
-    throw new Error("Browser operation belongs to another conversation.");
+  if (operation && (operation.owner !== payload.conversation_id || operation.windowInstanceId !== payload.window_instance_id)) {
+    throw new Error("Browser operation belongs to another conversation or window.");
+  }
+  if (operation) {
+    const supplied = Buffer.from(typeof payload.window_binding_token === "string" ? payload.window_binding_token : "");
+    const expected = Buffer.from(operation.windowBindingToken);
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+      const error = new Error("Desktop window binding does not own this browser operation.");
+      error.code = "ERR_WINDOW_BINDING";
+      throw error;
+    }
   }
   return operation;
 }
@@ -118,7 +146,7 @@ async function executeOwnedCommand(payload, response) {
   // Only the token-authenticated backend bridge may supply this execution
   // option. Renderer/manual navigation payloads never become authority.
   const navigationAuthorization = backendNavigationAuthorization(payload);
-  const operation = createOperation(id, payload.conversation_id);
+  const operation = createOperation(id, payload.conversation_id, payload.window_instance_id, payload.window_binding_token);
   operation.promise = Promise.resolve().then(async () => {
     operation.controller.signal.throwIfAborted();
     operation.started = true;
@@ -177,12 +205,21 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && request.url === "/v1/health") {
     return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser" });
   }
-  if (request.method !== "POST" || !["/v1/command", "/v1/operation"].includes(request.url)) {
+  if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding"].includes(request.url)) {
     return sendJson(response, 404, { ok: false, error: "Not found" });
   }
   try {
-    if (!manager?.executeControlCommand) throw new Error("Embedded browser manager is unavailable.");
     const payload = await readJsonBody(request);
+    const binding = request.url === "/v1/operation" ? null : assertWindowBinding(payload);
+    if (request.url === "/v1/window-binding") {
+      if (payload.window_owner_id !== binding.windowOwnerId) throw new Error("Desktop window owner does not match its binding.");
+      return sendJson(response, 200, { ok: true, window_instance_id: binding.windowInstanceId, window_owner_id: binding.windowOwnerId });
+    }
+    if (!manager?.executeControlCommand) throw new Error("Embedded browser manager is unavailable.");
+    if (typeof payload.window_instance_id !== "string" || !payload.window_instance_id
+      || typeof payload.conversation_id !== "string" || !payload.conversation_id) {
+      throw new Error("Browser command requires a conversation and window instance owner.");
+    }
     if (payload.operation_id != null && (typeof payload.operation_id !== "string" || !payload.operation_id
       || typeof payload.conversation_id !== "string" || !payload.conversation_id)) {
       throw new Error("Browser operation requires a string id and conversation owner.");
@@ -190,8 +227,9 @@ async function handleRequest(request, response) {
     if (request.url === "/v1/operation") {
       if (!payload.operation_id || !payload.conversation_id) throw new Error("Browser operation requires its id and conversation owner.");
       let operation = ownedOperation(payload);
+      if (!operation) assertWindowBinding(payload);
       if (payload.action === "cancel") {
-        operation ||= createOperation(payload.operation_id, payload.conversation_id);
+        operation ||= createOperation(payload.operation_id, payload.conversation_id, payload.window_instance_id, payload.window_binding_token);
         cancelOperation(operation, payload.reason === "timeout" ? "timeout" : "cancelled");
       } else if (!["status", "wait"].includes(payload.action)) {
         throw new Error("Unsupported browser operation control.");
@@ -210,7 +248,7 @@ async function handleRequest(request, response) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendDesktopLog(`[desktop] embedded browser bridge command failed: ${message}`);
-    return sendJson(response, 400, { ok: false, error: message });
+    return sendJson(response, error.code === "ERR_WINDOW_BINDING" ? 403 : 400, { ok: false, error: message });
   }
 }
 
@@ -221,6 +259,7 @@ async function start() {
     return endpoint;
   }
   starting = (async () => {
+    const target = configuredEndpoint ? bridgeBindTarget(configuredEndpoint) : { host: "127.0.0.1", port: 0 };
     accepting = true;
     const active = http.createServer((request, response) => {
       const operation = handleRequest(request, response);
@@ -231,13 +270,13 @@ async function start() {
     try {
       await new Promise((resolve, reject) => {
         active.once("error", reject);
-        active.listen(0, "127.0.0.1", () => {
+        active.listen(target.port, target.host, () => {
           active.off("error", reject);
           resolve();
         });
       });
       if (!accepting) throw new Error("Embedded browser bridge is stopping");
-      endpoint = `http://127.0.0.1:${active.address().port}`;
+      endpoint = configuredEndpoint ? target.endpoint : `http://127.0.0.1:${active.address().port}`;
       appendDesktopLog(`[desktop] embedded browser bridge listening on ${endpoint}`);
       return endpoint;
     } catch (error) {
@@ -273,4 +312,10 @@ async function stop() {
   endpoint = "";
 }
 
-module.exports = { init, start, stop };
+function releaseWindow(windowInstanceId) {
+  for (const operation of operations.values()) {
+    if (operation.windowInstanceId === windowInstanceId && !operation.settled) cancelOperation(operation, "window_closed");
+  }
+}
+
+module.exports = { init, start, stop, releaseWindow };

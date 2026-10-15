@@ -26,6 +26,16 @@ afterEach(() => {
 });
 
 describe("Markdown file reference projection", () => {
+  it("keeps unknown child-workspace references readable without borrowing the active parent workspace", () => {
+    const view = render(<MarkdownRenderer content="查看 [源文件](src/app.ts) 和 [记录](report.pdf)。" workspaceRoot="" conversationId="parent-owner" />);
+    for (const label of ["源文件", "记录"]) {
+      const chip = view.getByRole("button", { name: label });
+      expect(chip.hasAttribute("disabled")).toBe(true);
+      fireEvent.click(chip);
+    }
+    expect(openFile).not.toHaveBeenCalled();
+    expect(previewFile).not.toHaveBeenCalled();
+  });
   const locations = [
     { suffix: ":13", line: 13, column: undefined },
     { suffix: ":13:4", line: 13, column: 4 },

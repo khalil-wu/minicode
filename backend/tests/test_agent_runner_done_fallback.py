@@ -31,6 +31,7 @@ from backend.ws.agent_runner import (
     _ui_agent_state_for_event,
 )
 from backend.ws.run_manager import SessionRunManager
+from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.conversation_runtime import ConversationRuntime
 from backend.ws.session_lifecycle import SessionLifecycle
@@ -256,7 +257,7 @@ async def _admit_query_submission(submission) -> None:
     )
 
 
-class _Session(SessionAgentRunnerMixin):
+class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
     def __init__(self, tmp_path: Path, events: list[dict], runner_events: list[AgentEvent] | None = None):
         self.session_id = "session_runner_done"
         # Match the desktop composition root: host stores and their queue lease
@@ -965,7 +966,15 @@ def test_ui_agent_snapshot_reconciles_stale_running_child_from_durable_runtime()
         "toolCallCount": 2,
         "terminationReason": "success",
         "terminationInitiator": "runtime",
+        # This old result has no retained execution-start timestamp. Its
+        # duration and completion cannot invent one during restoration.
+        "startedAt": 0,
     }]
+    refreshed, changed_again = _reconcile_ui_agent_state_with_runtime(
+        state, runtime=_Runtime(), conversation_id="conv-weather",
+    )
+    assert changed_again is False
+    assert refreshed["subagents"][0]["startedAt"] == 0
 
 
 def test_persisted_ui_agent_snapshot_is_repaired_before_restore(tmp_path, monkeypatch) -> None:
@@ -1199,6 +1208,9 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
         mutation_order.append("replay")
 
     original_save = session.conversation_repo.save_context_snapshot
+    retained_children = [{"id": "historical-child", "role": "explore", "status": "done", "agentPath": "/root/historical-child", "mailboxEpoch": 2,
+                          "resultContent": "Retained child answer", "displayName": "Historical child"}]
+    original_save("conv_runnerdone", {"ui_agent_state": {"plan": None, "todos": [], "subagents": retained_children, "agentProgress": []}})
 
     def tracked_save(conversation_id, snapshot):
         mutation_order.append("save")
@@ -1239,6 +1251,8 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
     )
 
     assert mutation_order[:2] == ["replay", "save"]
+    saved = session.conversation_repo.get_conversation("conv_runnerdone")
+    assert saved.context_snapshot["ui_agent_state"]["subagents"] == retained_children
 
 
 def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path, monkeypatch):
@@ -1448,6 +1462,15 @@ def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path
         )
         assert "conv_runnerdone" not in getattr(session, "_ui_agent_state_pending", {})
 
+        # The same parent delivery fence cannot erase a child which finishes
+        # after its parent turn; its own incarnation and conversation own it.
+        session._persist_ui_agent_state_event(
+            "conv_runnerdone",
+            "subagent.done",
+            {"message_id": "assistant-terminal", "subagent_id": "late-child", "agent_path": "/root/late-child", "mailbox_epoch": 2,
+             "status": "completed", "result": {"content": "Child completed after parent", "status": "completed"}},
+        )
+
         session._persist_ui_agent_state_event(
             "conv_runnerdone",
             "task.update",
@@ -1464,6 +1487,69 @@ def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
     assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "new-todo"
+    assert saved.context_snapshot["ui_agent_state"]["subagents"][0]["id"] == "late-child"
+    assert saved.context_snapshot["ui_agent_state"]["subagents"][0]["mailboxEpoch"] == 2
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_completed_parent_callback_keeps_child_history_through_next_turn_and_retry(tmp_path, monkeypatch, retry):
+    events: list[dict] = []
+    session = _Session(tmp_path, events)
+    callbacks = []
+
+    async def runner(**kwargs):
+        await _admit_runner_turn(kwargs)
+        callbacks.append(kwargs["emit_event"])
+        yield AgentEvent.agent_message_completed("Parent completed", source="model_final")
+        yield AgentEvent.done()
+
+    session.query_engine = QueryEngine(runner=runner)
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+
+    async def scenario():
+        await session._run_agent_locked("first turn", conversation_id="conv_runnerdone",
+            metadata={"assistant_message_id": "parent-first", "user_message_id": "user-first"})
+        first_terminal = session.conversation_repo.get_conversation("conv_runnerdone")
+        original_blocks = first_terminal.transcript[-1]["blocks"]
+        stale_retry_checkpoint = {
+            "transcript": first_terminal.transcript, "context_snapshot": first_terminal.context_snapshot,
+            "summary": first_terminal.summary, "memory_pollution_sources": first_terminal.memory_pollution_sources,
+        }
+        child_event = {"subagent_id": "late-child", "agent_path": "/root/late-child", "mailbox_epoch": 1,
+                       "parent_message_id": "parent-first", "status": "completed",
+                       "result": {"content": "Child finished after parent", "status": "completed"}}
+        await callbacks[0]("subagent.done", child_event)
+        await session._flush_ui_agent_state_now("conv_runnerdone")
+        saved = session.conversation_repo.get_conversation("conv_runnerdone")
+        assert saved.transcript[-1]["blocks"] == original_blocks
+        assert saved.context_snapshot["ui_agent_state"]["subagents"][0]["resultContent"] == "Child finished after parent"
+        second_metadata = {"assistant_message_id": "parent-second", "user_message_id": "user-second"}
+        if retry:
+            second_metadata["_retry_projection"] = stale_retry_checkpoint
+        await session._run_agent_locked("next turn", conversation_id="conv_runnerdone", metadata=second_metadata)
+        saved = session.conversation_repo.get_conversation("conv_runnerdone")
+        assert saved.context_snapshot["ui_agent_state"]["subagents"][0]["mailboxEpoch"] == 1
+        second_blocks = saved.transcript[-1]["blocks"]
+
+        # The original parent's callback remains the child's delivery channel;
+        # it cannot append the follow-up's process to either terminal parent.
+        await callbacks[0]("subagent.progress", {**child_event, "mailbox_epoch": 2, "status": "running", "result": None,
+                                                "current_activity": "Actual child followup"})
+        await callbacks[0]("subagent.done", {**child_event, "mailbox_epoch": 2,
+                                            "result": {"content": "Followup completed", "status": "completed"}})
+        await callbacks[0]("subagent.done", child_event)
+        await session._flush_ui_agent_state_now("conv_runnerdone")
+        restored = ConversationRepository(session.conversation_repo._base_dir).get_conversation("conv_runnerdone")
+        assert restored.transcript[-1]["blocks"] == second_blocks
+        assert restored.context_snapshot["ui_agent_state"]["subagents"][0]["mailboxEpoch"] == 2
+        assert restored.context_snapshot["ui_agent_state"]["subagents"][0]["resultContent"] == "Followup completed"
+        assert any(event.get("type") == "subagent.done" and event.get("mailbox_epoch") == 2 for event in events)
+        assert not any(event.get("type") == "agent.progress" and event.get("subagent_id") == "late-child" for event in events)
+
+    _run_session_scenario(scenario())
 
 
 
@@ -1945,7 +2031,8 @@ def test_runner_persists_presented_file_and_suppresses_deleted_helper(tmp_path, 
     assert deliverable["outputFiles"][0]["path"] == output_path
 
 
-def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reported_duration", [None, 11_640])
+def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch, reported_duration):
     events: list[dict] = []
     session = _Session(
         tmp_path,
@@ -1953,6 +2040,7 @@ def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch):
         runner_events=[AgentEvent.done(
             input_tokens=12,
             output_tokens=7,
+            duration_ms=reported_duration,
             provider_raw={"finish_reason": "stop", "request_id": "req-123"},
         )],
     )
@@ -1988,6 +2076,12 @@ def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch):
     assert done[0]["provider_raw"] == {"finish_reason": "stop", "request_id": "req-123"}
     assert done[0]["usage"]["input_tokens"] == 12
     assert done[0]["usage"]["output_tokens"] == 7
+    if reported_duration is not None:
+        assert done[0]["duration_ms"] == reported_duration
+    restored = ConversationRepository(session.conversation_repo._base_dir)
+    public_page = restored.get_transcript_page("conv_runnerdone")
+    assert public_page["transcript"][-1]["duration_ms"] == done[0]["duration_ms"]
+    assert public_page["transcript"][-1]["duration_ms"] >= 0
     done_index = next(index for index, event in enumerate(events) if event.get("type") == "done")
     idle_index = next(
         index

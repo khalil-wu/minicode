@@ -1,4 +1,4 @@
-import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip, RefreshCw, Terminal } from 'lucide-react'
+import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../../components/EmptyState'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
@@ -25,10 +25,9 @@ import {
   ActivityButtonRow,
   ActivityIcon,
   ActivitySection,
-  InfoCard,
-  InfoRow,
   PanelHeader,
 } from '../SidebarShared'
+import { ConversationFilesTree } from './ConversationFilesTree'
 
 type ArtifactItem = {
   id: string
@@ -50,41 +49,47 @@ type ArtifactItem = {
 export const ArtifactsTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
   const isConnected = useAppStore((s) => s.isConnected)
-  const workspaceRoot = useAppStore((s) => s.workingDirectory)
+  const conversation = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId))
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId)
+  const fileTreeVersion = useAppStore((s) => s.fileTreeVersion)
+  const executionCwd = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || ''
+  const browserRoot = conversation?.projectlessBrowserRoot || executionCwd
   const messages = useAppStore((s) => s.messages)
   const previewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact)
-  const [query, setQuery] = useState('')
-  const [kind, setKind] = useState('all')
-  const [recentOnly, setRecentOnly] = useState(false)
-  const [inventory, setInventory] = useState<{ conversationId: string; workspaceRoot: string; query: string; kind: string; page: ConversationResourcePage } | null>(null)
+  const [inventory, setInventory] = useState<{ conversationId: string; executionCwd: string; page: ConversationResourcePage } | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [refreshVersion, setRefreshVersion] = useState(0)
   const requestOwner = useRef('')
-  requestOwner.current = `${conversationId}\u0000${workspaceRoot}\u0000${query}\u0000${kind}\u0000${refreshVersion}`
-  const currentInventory = inventory?.conversationId === conversationId && inventory.workspaceRoot === workspaceRoot && inventory.query === query && inventory.kind === kind ? inventory : null
+  requestOwner.current = `${conversationId}\u0000${executionCwd}\u0000${pendingConversationSwitchId}\u0000${refreshVersion}`
+  const currentInventory = inventory?.conversationId === conversationId && inventory.executionCwd === executionCwd ? inventory : null
   useEffect(() => {
     setLoadError('')
-    if (!conversationId || !isConnected) { setLoading(false); return }
+    if (!conversationId || !executionCwd || !isConnected || pendingConversationSwitchId) { setLoading(false); return }
     const controller = new AbortController()
     const requestKey = requestOwner.current
     setLoading(true)
-    const timer = window.setTimeout(() => {
-      void fetchConversationResources(conversationId, { query, kind, workspaceRoot, signal: controller.signal }).then((page) => {
-        if (requestOwner.current === requestKey) setInventory({ conversationId, workspaceRoot, query, kind, page })
+    void fetchConversationResources(conversationId, { workspaceRoot: executionCwd, signal: controller.signal }).then((page) => {
+        if (!controller.signal.aborted && requestOwner.current === requestKey) {
+          setInventory({ conversationId, executionCwd, page })
+          setLoadError((page.read_errors ?? []).map((error) => error.message).join('\n'))
+        }
       }).catch((error: unknown) => {
-        if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : String(error))
+        if (!controller.signal.aborted && requestOwner.current === requestKey) setLoadError(error instanceof Error ? error.message : String(error))
       }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    }, 180)
-    return () => { window.clearTimeout(timer); controller.abort() }
-  }, [conversationId, workspaceRoot, isConnected, query, kind, refreshVersion])
+    return () => controller.abort()
+  }, [conversationId, executionCwd, isConnected, pendingConversationSwitchId, refreshVersion])
   const loadMore = async () => {
     const owner = currentInventory!
     const requestKey = requestOwner.current
     setLoading(true); setLoadError('')
     try {
-      const page = await fetchConversationResources(owner.conversationId, { query: owner.query, kind: owner.kind, workspaceRoot: owner.workspaceRoot, after: owner.page.after })
-      setInventory((current) => current === owner ? { ...owner, page: { ...page, items: [...owner.page.items, ...page.items] } } : current)
+      const page = await fetchConversationResources(owner.conversationId, { workspaceRoot: owner.executionCwd, after: owner.page.after })
+      if (requestOwner.current === requestKey) {
+        const readErrors = [...(owner.page.read_errors ?? []), ...(page.read_errors ?? [])]
+        setInventory((current) => current === owner ? { ...owner, page: { ...page, items: [...owner.page.items, ...page.items], read_errors: readErrors } } : current)
+        setLoadError([...new Set(readErrors.map((error) => error.message))].join('\n'))
+      }
     } catch (error) { if (requestOwner.current === requestKey) setLoadError(error instanceof Error ? error.message : String(error)) }
     finally { if (requestOwner.current === requestKey) setLoading(false) }
   }
@@ -97,45 +102,26 @@ export const ArtifactsTab = () => {
     return (
       <div style={panelStyle}>
         <PanelHeader title="文件" />
-        <EmptyState compact icon={<FolderOpen size={20} />} title="暂无活动对话" hint="开始对话后，文件、附件与执行结果会显示在这里。" />
+        <EmptyState compact icon={<FolderOpen size={20} />} title="暂无活动对话" hint="开始对话后，文件与附件会显示在这里。" />
       </div>
     )
   }
 
-  const filtered = items.filter((item) => `${item.label} ${item.path || ''} ${item.turnId || ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-    && (kind === 'all' || (kind === 'image' ? item.mediaType?.startsWith('image/') : kind === 'attachment' ? item.kind === 'attachment' : kind === 'execution' ? item.executionResult : item.kind !== 'attachment' && !item.executionResult && !item.mediaType?.startsWith('image/'))))
-  const visible = recentOnly ? filtered.slice(0, 12) : filtered
-  const generated = visible.filter((item) => item.kind !== 'attachment' && !item.executionResult)
-  const executionResults = visible.filter((item) => item.executionResult)
-  const attachments = visible.filter((item) => item.kind === 'attachment')
+  const generated = items.filter((item) => item.kind !== 'attachment')
+  const attachments = items.filter((item) => item.kind === 'attachment')
 
   return (
     <div style={panelStyle}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <PanelHeader title="文件" meta={`${Math.max(items.length, currentInventory?.page.total ?? 0)} 项`} />
-        <button type="button" className="btn-ghost mc-icon-button" aria-label="刷新历史资源" disabled={!isConnected || loading} onClick={() => setRefreshVersion((value) => value + 1)}><RefreshCw size={14} /></button>
-      </div>
-      <input aria-label="搜索文件、附件与执行结果" placeholder="搜索文件名或轮次…" value={query} onChange={(event) => setQuery(event.target.value)} style={filterInputStyle} />
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <select aria-label="制品类型" value={kind} onChange={(event) => setKind(event.target.value)} style={filterInputStyle}>
-          <option value="all">全部类型</option><option value="file">文件</option><option value="image">图像</option><option value="attachment">附件</option><option value="execution">执行结果</option>
-        </select>
-        <label style={metaStyle}><input type="checkbox" checked={recentOnly} onChange={(event) => setRecentOnly(event.target.checked)} />仅最近 12 项</label>
-        <span style={metaStyle}>{filtered.length} 项匹配</span>
-      </div>
-      <InfoCard>
-        <InfoRow label="生成文件" value={String(generated.length)} />
-        <InfoRow label="附件" value={String(attachments.length)} />
-        {executionResults.length > 0 && <InfoRow label="执行结果" value={String(executionResults.length)} />}
-      </InfoCard>
+      <PanelHeader title="文件" />
+      {executionCwd && browserRoot && !pendingConversationSwitchId && <ConversationFilesTree key={`${conversationId}:${executionCwd}:${browserRoot}`}
+        owner={{ conversationId, executionCwd }} browserRoot={browserRoot} connected={isConnected} version={fileTreeVersion} />}
       <ArtifactSection title="生成文件" items={generated} />
-      <ArtifactSection title="执行结果" items={executionResults} />
       <ArtifactSection title="附件" items={attachments} />
       {loading && <p role="status" style={metaStyle}>正在读取历史资源…</p>}
       {loadError && <p role="alert" style={{ ...metaStyle, whiteSpace: 'normal' }}>{loadError}<button type="button" className="btn-ghost" onClick={() => setRefreshVersion((value) => value + 1)}>重新读取</button></p>}
       {currentInventory?.page.has_more && <button type="button" className="btn-ghost" disabled={loading} onClick={() => void loadMore()}>读取更多历史资源</button>}
       {!isConnected && <p style={metaStyle}>连接后端后可读取完整历史资源。</p>}
-      {filtered.length === 0 && !loading && !loadError && <EmptyState compact icon={<FileText size={18} />} title={query || kind !== 'all' ? '没有匹配的文件' : '暂无文件、附件或执行结果'} hint={query || kind !== 'all' ? '尝试其他文件名或类型。' : '生成文件、上传附件或产生执行输出后会显示在这里。'} />}
+      {!executionCwd && items.length === 0 && !loading && !loadError && <EmptyState compact icon={<FileText size={18} />} title="暂无文件或附件" hint="生成文件或上传附件后会显示在这里。" />}
     </div>
   )
 }
@@ -171,7 +157,7 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
         name: item.label,
         mediaType: item.mediaType,
         kind: item.kind,
-        workspaceRoot: item.workspaceRoot || conversation?.worktreePath || conversation?.workspaceRoot
+        workspaceRoot: item.workspaceRoot || conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot
           || (item.conversationId === store.conversationId ? store.workingDirectory : undefined),
         conversationId: item.conversationId,
       })
@@ -186,21 +172,18 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
     <ActivitySection title={title} previewCount={8}>
       {items.map((item) => {
         const Icon = artifactIcon(item)
-        const executionTime = item.executionResult && item.occurredAt
-          ? new Date(item.occurredAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
-          : ''
         return (
           <div key={item.id}>
-          <ActivityButtonRow onClick={() => openItem(item)} title={item.path || (executionTime ? `${item.label} · ${executionTime}` : item.detail || item.label)}>
+          <ActivityButtonRow onClick={() => openItem(item)} title={item.path || item.detail || item.label}>
             <ActivityIcon><Icon size={14} /></ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={labelStyle}>{item.label}</span>
-              <span style={metaStyle}>{[item.executionResult ? executionTime || '执行输出' : item.path || item.mediaType || item.kind, item.detail].filter(Boolean).join(' - ')}</span>
+              <span style={metaStyle}>{[item.path, item.detail].filter(Boolean).join(' · ')}</span>
             </span>
             <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
           </ActivityButtonRow>
           {item.messageId && item.conversationId && <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, padding: '0 4px 5px 28px' }}>
-            <span style={metaStyle} title={item.turnId || item.messageId}>{item.turnId ? `轮次 ${item.turnId.slice(-8)}` : `消息 ${item.messageId.slice(-8)}`}{item.occurredAt ? ` · ${new Date(item.occurredAt).toLocaleString()}` : ''}</span>
+            <span style={metaStyle}>{item.occurredAt ? new Date(item.occurredAt).toLocaleString() : ''}</span>
             <button type="button" className="activity-source-locate" onClick={() => revealConversationMessage(item.conversationId!, item.messageId!)}>回到对话</button>
           </div>}
           </div>
@@ -230,7 +213,7 @@ export function mergeResourceInventory(liveItems: ArtifactItem[], resources: Con
     const stored = items.get(key)
     items.set(key, stored ? { ...mergeArtifactItems(stored, item), label: isPlaceholderLabel(item.label) ? stored.label : item.label } : item)
   }
-  return [...items.values()].sort((left, right) => (right.occurredAt ?? 0) - (left.occurredAt ?? 0))
+  return [...items.values()].filter((item) => !item.executionResult).sort((left, right) => (right.occurredAt ?? 0) - (left.occurredAt ?? 0))
 }
 
 export function collectArtifacts(
@@ -303,6 +286,7 @@ export function collectArtifacts(
   if (previewArtifact?.artifactId
     && previewArtifact.source !== 'attachment'
     && previewArtifact.source !== 'local'
+    && previewArtifact.source !== 'browser'
     && (previewArtifact.source !== 'workspace' || artifactIndexes.has(previewArtifact.artifactId))) {
     const artifactId = previewArtifact.artifactId.trim()
     const kind = canonicalArtifactKind(previewArtifact.kind, previewArtifact.mediaType)
@@ -331,7 +315,9 @@ export function collectArtifacts(
     }
   }
 
-  return items.reverse()
+  // Merge explicit deliverable metadata before excluding orchestration text;
+  // uploads and workspace outputFiles keep their separate identity domains.
+  return items.filter((item) => !item.executionResult).reverse()
 }
 
 function artifactFromToolRecord(
@@ -421,7 +407,6 @@ function generatedFileFromReply(
 }
 
 function artifactIcon(item: ArtifactItem) {
-  if (item.executionResult) return Terminal
   const kind = (item.kind || "").toLowerCase()
   const media = (item.mediaType || "").toLowerCase()
   if (kind === "image" || media.startsWith("image/")) return Image
@@ -445,8 +430,6 @@ const panelStyle: React.CSSProperties = {
   display: 'grid',
   gap: 8,
 }
-
-const filterInputStyle: React.CSSProperties = { minWidth: 0, padding: '7px 9px', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', background: 'var(--surface-base)', color: 'var(--text-primary)', font: 'inherit', fontSize: 'var(--text-xs)' }
 
 const labelStyle: React.CSSProperties = {
   display: 'block',

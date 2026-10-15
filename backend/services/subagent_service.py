@@ -8,7 +8,7 @@ from backend.agent.public_projection import (
     project_public_subagent_run,
     public_text,
 )
-from backend.conversations.public_projection import project_public_tool_call, project_public_transcript_message
+from backend.conversations.public_projection import project_public_tool_call, project_public_transcript_message, merge_delegation_facts
 
 
 def _attach_conversation(event: AgentEvent, conversation_id: str) -> AgentEvent:
@@ -94,6 +94,76 @@ def build_subagent_status_event(
     return _attach_conversation(event, conversation_id)
 
 
+def project_subagent_transcript_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Publish only transcript facts, using the same public tool/text boundary."""
+    projected: list[dict[str, Any]] = []
+    for event in events:
+        event_type = event["event_type"]
+        payload = event["payload"]
+        timestamp = event["ts_ms"]
+        public_payload: dict[str, Any]
+        if event_type == "user_prompt":
+            public_payload = {"content": public_text(payload.get("content") or payload.get("prompt"), max_chars=262_144),
+                              "run_id": str(payload.get("run_id") or ""), "turn_id": str(payload.get("turn_id") or payload.get("run_id") or "")}
+        elif event_type == "tool_use":
+            call = payload["tool_call"]
+            public_payload = {"tool_call": project_public_tool_call({**call,
+                "args": call.get("arguments", call.get("args", {})),
+                "status": call.get("status") or "running", "started_at": timestamp})}
+        elif event_type == "tool_result":
+            status = str(payload.get("status") or "failed")
+            if status == "completed":
+                status = "success"
+            output = public_text(payload.get("content") or payload.get("output"), max_chars=60_000)
+            record = project_public_tool_call({**payload, "id": payload["tool_call_id"],
+                "name": payload["tool_name"], "status": status,
+                "summary": output, "output_preview": output,
+                "finished_at": payload.get("finished_at", timestamp)})
+            record.pop("args")
+            public_payload = {"tool_call_id": payload["tool_call_id"], "record": record}
+        elif event_type == "progress" and payload.get("kind") == "assistant_message":
+            public_payload = {key: payload[key] for key in ("kind", "item_id", "source", "status", "content_offset") if key in payload}
+            for key in ("content", "content_delta"):
+                if key in payload:
+                    public_payload[key] = public_text(payload[key], max_chars=262_144)
+        elif event_type == "assistant":
+            public_payload = {"content": public_text(payload.get("content") or payload.get("text"), max_chars=262_144),
+                              "source": str(payload.get("answer_source") or payload.get("source") or "retained"),
+                              "status": "completed",
+                              **({"item_id": payload["item_id"]} if payload.get("item_id") else {}),
+                              **({"message_only": True} if payload.get("message_only") else {})}
+        elif event_type == "system" and payload.get("lifecycle") == "turn_started":
+            public_payload = {"lifecycle": "turn_started", "turn_id": str(payload.get("turn_id") or payload.get("run_id") or "")}
+        elif event_type == "system" and payload.get("lifecycle") == "context_compaction_item":
+            item = payload["item"]
+            public_payload = {"lifecycle": "context_compaction_item", "item": dict(item),
+                              "event_type": payload["event_type"], "transcript_only": True}
+        elif event_type == "system" and payload.get("transcript_only"):
+            public_payload = {key: payload[key] for key in ("kind", "item_id", "source", "status", "visibility") if key in payload}
+            public_payload.update(transcript_only=True, content=public_text(payload.get("content"), max_chars=262_144))
+        elif event_type == "system" and payload.get("lifecycle") == "provider_progress":
+            if payload.get("provider_state") != "failed" and not payload.get("error_message"):
+                continue
+            public_payload = {key: payload[key] for key in ("lifecycle", "operation_id", "provider_span_id", "provider_state", "retry_attempt", "max_retries", "retry_after_ms") if key in payload}
+            for key in ("message", "summary", "detail", "error_message"):
+                if key in payload:
+                    public_payload[key] = public_text(payload[key], max_chars=12_000)
+        elif event_type == "system" and payload.get("lifecycle") == "error":
+            public_payload = {"lifecycle": "error", "message": public_text(payload.get("message"), max_chars=12_000)}
+        elif event_type == "system" and payload.get("lifecycle") == "turn_diff_updated":
+            message = project_public_transcript_message({"id": event["event_id"], "role": "assistant", "content": "", "metadata": {"turn_diff": payload}})
+            public_payload = {"lifecycle": "turn_diff_updated", **message["metadata"]["turn_diff"]}
+        elif event_type == "system" and payload.get("lifecycle") == "subagent_delegation_updated":
+            public_payload = {"lifecycle": "subagent_delegation_updated", "parent_message_id": payload["parent_message_id"],
+                "parent_tool_call_id": payload["parent_tool_call_id"],
+                "delegation": project_public_tool_call({"delegations": [payload["delegation"]]})["delegations"][0]}
+        else:
+            continue
+        projected.append({"event_id": event["event_id"], "seq": event["seq"], "ts_ms": timestamp,
+                          "event_type": event_type, "payload": public_payload})
+    return projected
+
+
 def build_subagent_transcript_messages(
     transcript: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -128,6 +198,10 @@ def build_subagent_transcript_messages(
     run_started_at = 0
     current_turn_id = ""
     final_text: str = ""
+    final_source: str = "retained"
+    final_item_id = ""
+    final_status = "completed"
+    final_message_text = ""
     terminal_event: dict[str, Any] | None = None
     last_error: dict[str, Any] | None = None
 
@@ -135,7 +209,7 @@ def build_subagent_transcript_messages(
         nonlocal current_assistant
         if current_assistant is None:
             current_assistant = {
-                "id": f"subagent-turn-{event_id}",
+                "id": f"subagent-turn-{current_turn_id or event_id}",
                 "role": "assistant",
                 "content": "",
                 "timestamp": run_started_at or timestamp,
@@ -147,13 +221,19 @@ def build_subagent_transcript_messages(
 
     def _flush_run() -> None:
         nonlocal current_user, current_assistant, tool_records
-        nonlocal run_started_at, current_turn_id, final_text, terminal_event, last_error
+        nonlocal run_started_at, current_turn_id, final_text, final_source, terminal_event, last_error
+        nonlocal final_item_id, final_status
+        nonlocal final_message_text
         if current_user is None and current_assistant is None and terminal_event is None:
             current_assistant = None
             tool_records = {}
             run_started_at = 0
             current_turn_id = ""
             final_text = ""
+            final_source = "retained"
+            final_item_id = ""
+            final_status = "completed"
+            final_message_text = ""
             terminal_event = None
             last_error = None
             return
@@ -164,6 +244,10 @@ def build_subagent_transcript_messages(
             run_started_at = 0
             current_turn_id = ""
             final_text = ""
+            final_source = "retained"
+            final_item_id = ""
+            final_status = "completed"
+            final_message_text = ""
             terminal_event = None
             last_error = None
             return
@@ -176,23 +260,25 @@ def build_subagent_transcript_messages(
             blocks = []
             assistant["blocks"] = blocks
         if final_text:
-            # One authoritative final text block belongs at the end of the
-            # assistant turn.  Repeated assistant journal observations update
-            # this block instead of duplicating the answer on every refresh.
-            blocks[:] = [
-                block for block in blocks
-                if block.get("type") != "text"
-                or block.get("source") not in {"model_final", "reply", "recovery", "partial"}
-            ]
-            blocks.append({
+            # The durable terminal observation updates the actual streamed
+            # item. A snapshot must not replace its identity or erase earlier
+            # visible items that the incremental consumer already received.
+            item_id = final_item_id or f"{assistant['id']}-final"
+            final_block = {
                 "type": "text",
-                "item_id": f"{assistant['id']}-final",
+                "item_id": item_id,
                 "content": final_text,
-                "source": "model_final",
-                "status": "completed" if terminal_event else "in_progress",
-                "is_streaming": terminal_event is None,
-            })
-            assistant["content"] = final_text
+                "source": final_source,
+                "status": "completed" if terminal_event else final_status,
+                "is_streaming": terminal_event is None and final_status not in {"completed", "partial", "cancelled"},
+            }
+            for block_index, block in enumerate(blocks):
+                if block.get("type") == "text" and block.get("item_id") == item_id:
+                    blocks[block_index] = final_block
+                    break
+            else:
+                blocks.append(final_block)
+            assistant["content"] = final_message_text or final_text
         if terminal_event is not None:
             terminal_payload = terminal_event.get("payload")
             if not isinstance(terminal_payload, dict):
@@ -241,7 +327,7 @@ def build_subagent_transcript_messages(
                 if isinstance(recoverable, bool):
                     assistant["failure_recoverable"] = recoverable
             assistant["is_streaming"] = False
-            if not final_text:
+            if not final_text and not final_message_text:
                 summary = public_text(terminal_payload.get("summary"), max_chars=262_144).strip()
                 if summary:
                     assistant["content"] = summary
@@ -254,7 +340,7 @@ def build_subagent_transcript_messages(
                         "type": "text",
                         "item_id": f"{assistant['id']}-final",
                         "content": summary,
-                        "source": "model_final",
+                        "source": "partial" if terminal_status in {"partial", "interrupted"} else "retained",
                         "status": "completed",
                         "is_streaming": False,
                     })
@@ -279,6 +365,10 @@ def build_subagent_transcript_messages(
         run_started_at = 0
         current_turn_id = ""
         final_text = ""
+        final_source = "retained"
+        final_item_id = ""
+        final_status = "completed"
+        final_message_text = ""
         terminal_event = None
         last_error = None
 
@@ -307,6 +397,16 @@ def build_subagent_transcript_messages(
             assistant["metadata"] = projected["metadata"]
             continue
 
+        if event_type == "system" and payload.get("lifecycle") == "subagent_delegation_updated":
+            assistant = current_assistant if current_assistant is not None and current_assistant["id"] == payload["parent_message_id"] else next(
+                (message for message in messages if message["id"] == payload["parent_message_id"]), None)
+            if assistant is not None:
+                for block in assistant["blocks"]:
+                    if block["type"] == "tool_call" and block["record"]["id"] == payload["parent_tool_call_id"]:
+                        record = block["record"]
+                        record["delegations"] = merge_delegation_facts(record.get("delegations", []), [payload["delegation"]])
+            continue
+
         if event_type == "user_prompt":
             if current_user is not None or terminal_event is not None:
                 _flush_run()
@@ -326,10 +426,17 @@ def build_subagent_transcript_messages(
             continue
 
         if event_type == "assistant":
-            _ensure_assistant(timestamp, event_id)
+            assistant = _ensure_assistant(timestamp, event_id)
             content = public_text(payload.get("content") or payload.get("text"), max_chars=262_144).strip()
             if content:
+                if payload.get("message_only"):
+                    final_message_text = content
+                    assistant["content"] = content
+                    continue
                 final_text = content
+                final_source = str(payload.get("answer_source") or payload.get("source") or "retained")
+                final_item_id = str(payload.get("item_id") or final_item_id)
+                final_status = "completed"
             continue
 
         if event_type == "system" and payload.get("lifecycle") == "provider_progress":
@@ -466,6 +573,8 @@ def build_subagent_transcript_messages(
                     "summary": output,
                     "output_preview": output,
                 })
+                if record.get("delegations") or projected.get("delegations"):
+                    projected["delegations"] = merge_delegation_facts(record.get("delegations", []), projected.get("delegations", []))
                 record.clear()
                 record.update(projected)
             superseded_ids = {
@@ -501,6 +610,11 @@ def build_subagent_transcript_messages(
             else:
                 content = str(payload.get("content") or "")
             source = str(payload.get("source") or "pending").strip() or "pending"
+            if source in {"model_final", "partial", "retained"}:
+                final_text = content
+                final_source = source
+                final_item_id = item_id
+                final_status = str(payload.get("status") or "running").strip().lower()
             status = str(payload.get("status") or "running").strip().lower()
             block = {
                 "type": "text",
@@ -520,6 +634,12 @@ def build_subagent_transcript_messages(
                 blocks.append(block)
             assistant["content"] = content
             assistant["is_streaming"] = True
+            continue
+
+        if event_type == "system" and payload.get("lifecycle") == "context_compaction_item":
+            from backend.agent.turn_state import project_context_compaction_item
+            assistant = _ensure_assistant(timestamp, event_id)
+            project_context_compaction_item(assistant["blocks"], payload["item"])
             continue
 
         if event_type == "system" and bool(payload.get("transcript_only")):

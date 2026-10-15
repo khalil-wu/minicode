@@ -11,6 +11,7 @@ import {
 } from "../openWebInBrowser";
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import mermaid from "mermaid";
+import { openWebInBrowser } from "../openWebInBrowser";
 
 const { sendMock, openPathMock, revealPathMock, socketState } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -40,6 +41,13 @@ vi.mock("../../desktop/runtime", () => ({
   // These specs exercise the desktop shell path (default-app open / reveal),
   // which is only offered when a desktop runtime is present.
   isDesktop: () => true,
+}));
+
+// These tests exercise link parsing and owner binding. Native preference and
+// asynchronous open contracts are exercised in the preference chain suite.
+vi.mock("../../lib/open-preferred-target", () => ({
+  openPreferredFile: (_path: string, _root?: string, _line?: number, openInApp?: () => void) => openInApp?.(),
+  openPreferredWebLink: (url: string) => openWebInBrowser(url),
 }));
 
 vi.mock("mermaid", () => ({
@@ -824,16 +832,12 @@ describe("MarkdownRenderer", () => {
     unsubscribe();
   });
 
-  it("shows a local website icon before the favicon loads and after an image error", () => {
+  it("shows a local website icon without guessing a resource from the article URL", () => {
     const { container } = render(<MarkdownRenderer content={"[OpenAI article](https://unknown.example/articles/github)"} />);
     const link = screen.getByRole("link", { name: "OpenAI article" });
     expect(link.querySelector('.md-web-link-icon[data-brand="generic"] svg')).toBeTruthy();
-    const remote = link.querySelector<HTMLImageElement>('.brand-icon-remote')!;
-    expect(remote.src).toBe("https://unknown.example/favicon.ico");
-    expect(remote.hidden).toBe(true);
-    fireEvent.error(remote);
-    expect(link.querySelector('.md-web-link-icon svg')).toBeTruthy();
-    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.brand-icon-remote')?.getAttribute('src'))
+      .toBe('https://www.google.com/s2/favicons?domain=unknown.example&sz=32');
   });
 
   it("keeps mail and heading links as text links without website or file icons", () => {

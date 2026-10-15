@@ -135,7 +135,7 @@ def _retain_completed_answer(*, context_builder, stream_text, candidate_text,
             events.append(started)
         completed = stream_text.complete_active_agent_message(
             candidate_text,
-            source="model_final",
+            source="retained",
             status="completed",
         )
         if completed is not None:
@@ -145,6 +145,7 @@ def _retain_completed_answer(*, context_builder, stream_text, candidate_text,
             candidate_text,
             phase=provider_phase or "final_answer",
             provider_items=provider_items_for_final_answer(provider_items),
+            answer_source="retained",
         )
     return events
 

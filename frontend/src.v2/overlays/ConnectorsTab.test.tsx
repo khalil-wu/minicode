@@ -114,6 +114,8 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     render(<ConnectorsTab />);
 
     expect(screen.getByText("OAuth 已登录")).toBeTruthy();
+    expect(screen.queryByText("4 个工具")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看 MCP 内容 linear" }));
     expect(screen.getByText("4 个工具")).toBeTruthy();
   });
 

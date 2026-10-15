@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { useAppStore } from "./index";
 import { sendClientCommand, sendClientCommandAwaitResult, sendConversationDeleteCommand } from "../protocol/ws-outbox";
@@ -410,7 +411,7 @@ describe("conversation deletion store behavior", () => {
     useAppStore.getState().requestConversationSwitch("conv-next");
 
     const state = useAppStore.getState();
-    expect(sendClientCommand).toHaveBeenCalledWith({ type: "conversation.switch", conversation_id: "conv-next" });
+    expect(sendClientCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "conv-next" }));
     expect(state.conversationId).toBe("conv-active");
     expect(state.pendingConversationSwitchId).toBe("conv-next");
     expect(state.appMode).toBe("cowork");

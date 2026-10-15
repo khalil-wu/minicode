@@ -257,6 +257,15 @@ def _plugin_name_from_package(package_path: Path) -> str:
             for info, rel in _validated_plugin_package_infos(archive)
             if Path(rel).parts[-2:] == (PLUGIN_MANIFEST_DIRECTORY, "plugin.json")
         ]
+        from backend.plugins.source_agent_manifest import is_agent_plugin_schema, resolve_agent_manifest
+
+        for info, rel in _validated_plugin_package_infos(archive):
+            if Path(rel).name != "plugin.json":
+                continue
+            raw = json.loads(archive.read(info).decode("utf-8"))
+            if isinstance(raw, Mapping) and is_agent_plugin_schema(raw):
+                resolve_agent_manifest(raw, Path(rel).parent)
+                candidates.append((info, rel))
         if not candidates:
             raise PluginSettingsError(
                 "Plugin package must contain .minicode-plugin/plugin.json",

@@ -12,8 +12,12 @@ from backend.agent.turn_state import (
     _append_bounded_output,
     append_agent_message_delta,
     append_thinking_block,
+    append_process_delta,
+    materialize_content_block,
     complete_agent_message_block,
     start_agent_message_block,
+    project_context_compaction_item,
+    record_user_input_block,
 )
 from backend.ws.event_log import is_raw_provider_reasoning_event
 
@@ -174,6 +178,10 @@ def _tool_record(
         ("display_summary", "displaySummary"),
         ("result_kind", "resultKind"),
         ("activity_kind", "activityKind"),
+        ("command_actions", "commandActions"),
+        ("streaming_announcement", "streamingAnnouncement"),
+        ("command_presentation", "commandPresentation"),
+        ("execution_started_at", "executionStartedAt"),
         ("visibility", "visibility"),
         ("provider_error_type", "providerErrorType"),
         ("error_info", "errorInfo"),
@@ -210,7 +218,7 @@ def _stream_content_blocks(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def get_stream_content_blocks(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the ordered, renderer-safe snapshot for reconnect."""
-    blocks = copy.deepcopy(_stream_content_blocks(state))
+    blocks = copy.deepcopy([materialize_content_block(block) for block in _stream_content_blocks(state)])
     return [
         block
         for block in blocks
@@ -346,7 +354,10 @@ def _upsert_activity_block(
                 blocks[index] = merged
                 return
 
-            merged = {**existing, **block}
+            # A full process snapshot owns its content. Materialize and retire
+            # the prior delta buffer before applying that authoritative body.
+            previous = materialize_content_block(existing) if block.get("type") == "process" else existing
+            merged = {**previous, **block}
             if block.get("type") == "progress":
                 detail = merge_provider_activity_detail(
                     existing.get("detail"),
@@ -447,11 +458,13 @@ def apply_stream_event(
     state["event_seq"] = int(state.get("event_seq") or 0) + 1
     state["last_event_type"] = str(event_type or "")
     state["last_event_at"] = int(time.time() * 1000)
+    if event_type == "agent.run.started" and payload.get("role") == "main" and payload.get("started_at") is not None:
+        state["started_at"] = payload["started_at"]
     if payload.get("turn_id"):
         state["turn_id"] = str(payload["turn_id"])
     if payload.get("phase") is not None:
         state["phase"] = str(payload.get("phase") or "")
-    elif event_type in {"approval_request", "ask_user"}:
+    elif event_type in {"approval_request", "ask_user", "request_user_input"}:
         state["phase"] = "approval"
     elif event_type in {
         "tool_call",
@@ -474,6 +487,10 @@ def apply_stream_event(
                 },
             )
             state["phase"] = "model"
+        elif item.get("type") == "context_compaction":
+            project_context_compaction_item(_stream_content_blocks(state), item)
+        elif item.get("type") == "user_message":
+            record_user_input_block(_stream_content_blocks(state), item["id"])
     elif event_type == "agent_message.delta":
         append_agent_message_delta(
             _stream_content_blocks(state),
@@ -505,6 +522,10 @@ def apply_stream_event(
                 if source in {"model_final", "reply", "partial", "recovery"}
                 else "model"
             )
+        elif item.get("type") == "context_compaction":
+            project_context_compaction_item(_stream_content_blocks(state), item)
+        elif item.get("type") == "user_message":
+            record_user_input_block(_stream_content_blocks(state), item["id"])
     elif event_type in {"thinking_delta", "thinking"}:
         thinking = str(payload.get("content") or "")
         if thinking:
@@ -526,21 +547,19 @@ def apply_stream_event(
             )
     elif event_type == "tool_call":
         _upsert_tool_state(state, payload, transition="prepared")
-    elif event_type in {"approval_request", "ask_user"}:
-        _upsert_tool_state(
-            state,
-            payload,
-            status="pending",
-            transition="waiting_approval",
-        )
+    elif event_type in {"approval_request", "ask_user", "request_user_input"}:
+        if event_type != "request_user_input" or _tool_id(payload) in state["tool_calls"]:
+            _upsert_tool_state(
+                state,
+                payload,
+                status="pending",
+                transition="waiting_approval",
+            )
     elif event_type == "agent.item.delta":
         item_id = str(payload.get("item_id") or "").strip()
         delta = str(payload.get("delta") or "")
         if item_id and delta:
-            for block in _stream_content_blocks(state):
-                if block.get("type") == "process" and block.get("id") == item_id:
-                    block["content"] = f"{block.get('content') or ''}{delta}"
-                    break
+            append_process_delta(_stream_content_blocks(state), item_id, delta)
     elif event_type in {"tool_output_delta", "command_output_chunk"}:
         _upsert_tool_state(
             state,
@@ -576,12 +595,15 @@ def apply_stream_event(
             _replace_tool_block(state, record)
     elif event_type == "runtime.span":
         runtime_status, runtime_transition = _runtime_span_lifecycle(payload)
-        _upsert_tool_state(
+        record = _upsert_tool_state(
             state,
             payload,
             status=runtime_status,
             transition=runtime_transition,
         )
+        if record is not None and payload.get("event") == "tool.started" and record.get("commandPresentation") is not None:
+            record["executionStartedAt"] = payload["started_at"]
+            _replace_tool_block(state, record)
     elif event_type == "agent.progress" and payload.get("tool_call_id"):
         progress_status, progress_transition = _progress_lifecycle(payload)
         _upsert_tool_state(
@@ -590,7 +612,26 @@ def apply_stream_event(
             status=progress_status,
             transition=progress_transition,
         )
-    if event_type == "agent.item":
+    if event_type == "guardian_assessment":
+        blocks = _stream_content_blocks(state)
+        review = {key: value for key, value in payload.items() if key in {
+            "id", "target_item_id", "turn_id", "started_at_ms", "completed_at_ms", "status", "action",
+            "risk_level", "user_authorization", "rationale", "decision_source", "review_reason"}}
+        index = next((i for i, block in enumerate(blocks)
+            if block.get("type") == "guardian_assessment" and block["review"]["id"] == review["id"]), None)
+        block = {"type": "guardian_assessment", "review": review}
+        if index is None:
+            blocks.append(block)
+        elif not (blocks[index]["review"]["status"] != "in_progress" and review["status"] == "in_progress"):
+            blocks[index] = block
+    elif event_type == "guardian_warning":
+        block = {"type": "guardian_warning", "message": payload["message"], "turnId": payload["turn_id"]}
+        if "interruption" in payload:
+            block["interruption"] = payload["interruption"]
+        blocks = _stream_content_blocks(state)
+        if block not in blocks:
+            blocks.append(block)
+    elif event_type == "agent.item":
         item_id = str(payload.get("item_id") or payload.get("id") or "").strip()
         if (
             str(payload.get("status") or "").strip().lower() == "retracted"

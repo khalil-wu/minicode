@@ -177,7 +177,7 @@ def test_pre_compact_blocked_is_reported_without_vetoing_compaction() -> None:
     assert state.stopped_reason != "budget_exceeded"
 
 
-def test_pre_and_post_compact_hook_context_is_preserved() -> None:
+def test_compact_hook_messages_are_visible_without_becoming_model_instructions() -> None:
     class _HookAwareCtx(_BudgetCtx):
         def __init__(self):
             super().__init__(token_usage=900, after_compact_usage=500)
@@ -219,9 +219,9 @@ def test_pre_and_post_compact_hook_context_is_preserved() -> None:
     events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
 
     assert events and events[0].type == "context_compacted"
-    assert compact_focus == ["continue\n\nretain the API contract"]
-    assert ctx.user_context == ["post-compact context"]
-    assert ctx.system_notes == ["post-compact system note"]
+    assert compact_focus == ["continue"]
+    assert ctx.user_context == [] and ctx.system_notes == []
+    assert events[1].type == "system_notice" and events[1].data["content"] == "post-compact system note"
 
 
 class _SnapshotCtx(_BudgetCtx):

@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Clock3, Search, Trash2 } from "lucide-react";
 import { fuzzyFilter } from "../lib/fuzzy-match";
@@ -12,6 +13,7 @@ interface Props {
 }
 
 export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelect, onClose, onClear }: Props) => {
+  const { t: tr } = useI18n();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -71,18 +73,18 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
             ref={inputRef}
             value={query}
             onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }}
-            placeholder="搜索输入历史"
-            aria-label="搜索输入历史"
+            placeholder={tr("搜索输入历史")}
+            aria-label={tr("搜索输入历史")}
           />
           {items.length > 0 && (
-            <button type="button" onClick={onClear} title="清空输入历史" aria-label="清空输入历史">
+            <button type="button" onClick={onClear} title={tr("清空输入历史")} aria-label={tr("清空输入历史")}>
               <Trash2 size={14} />
             </button>
           )}
         </div>
-        <div ref={listRef} role="listbox" aria-label="输入历史" className="prompt-history-list">
+        <div ref={listRef} role="listbox" aria-label={tr("输入历史")} className="prompt-history-list">
           {filtered.length === 0 ? (
-            <div className="prompt-history-empty">{items.length === 0 ? "此工作区还没有输入记录" : "没有匹配的输入记录"}</div>
+            <div className="prompt-history-empty">{items.length === 0 ? tr("此工作区还没有输入记录") : tr("没有匹配的输入记录")}</div>
           ) : filtered.map((item, index) => (
             <button
               type="button"
@@ -98,7 +100,7 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
             </button>
           ))}
         </div>
-        <div className="prompt-history-hint">Ctrl+R · 方向键选择 · Enter 重新使用</div>
+        <div className="prompt-history-hint">{tr("Ctrl+R · 方向键选择 · Enter 重新使用")}</div>
       </div>
     </div>
   );

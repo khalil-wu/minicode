@@ -1,0 +1,256 @@
+{
+  "source": "https://github.com/openai/codex",
+  "commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "license": "Apache-2.0",
+  "starlark": "0.14.2",
+  "rust_toolchain": "1.95.0",
+  "files": [
+    {
+      "upstream": "codex-rs/execpolicy/BUILD.bazel",
+      "vendored": "vendor/execpolicy/BUILD.bazel",
+      "sha256": "e27501d03d24478a69ab198bfcc1d1b56acc74bc756502f0ac05f613fa51e104"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/Cargo.toml",
+      "vendored": "vendor/execpolicy/Cargo.toml",
+      "sha256": "fa5fc7a74b71f6d147576d8858da06ff3fd264d9cf594568719a9aee1b28c79a"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/README.md",
+      "vendored": "vendor/execpolicy/README.md",
+      "sha256": "a923e74e338a38facf1e0fa65cd5d3aee6b058e7891b06ac482af841bcbec6e0"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/examples/example.codexpolicy",
+      "vendored": "vendor/execpolicy/examples/example.codexpolicy",
+      "sha256": "5331cf79a351fba057b67bafa8fc6465ef2e42265a7ce2140730cc703e0e6e2e"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/amend.rs",
+      "vendored": "vendor/execpolicy/src/amend.rs",
+      "sha256": "3d2ad0d8b95a03094571695894bcdb34b561a17b678a7927cbbbc3116c34378a"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/decision.rs",
+      "vendored": "vendor/execpolicy/src/decision.rs",
+      "sha256": "b0b82fff854a73c4ab95b330d51cfa65e77f4a13ab4d5eaa9e01e08e70ed59c2"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/error.rs",
+      "vendored": "vendor/execpolicy/src/error.rs",
+      "sha256": "44bd8d8a9c66d592797a5bf61a762bbdd962781e0056ce6948be4b5e13ba32ea"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/execpolicycheck.rs",
+      "vendored": "vendor/execpolicy/src/execpolicycheck.rs",
+      "sha256": "21275b920b9ac6ef0559a7ceb744fcc46a6cfce0f0ae1cff99fe3054214c66a7"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/executable_name.rs",
+      "vendored": "vendor/execpolicy/src/executable_name.rs",
+      "sha256": "93d3a19d552d13dcbbaa73a329b2100c29aa9dad6317f8d1ca2275a098025326"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/lib.rs",
+      "vendored": "vendor/execpolicy/src/lib.rs",
+      "sha256": "19f8f32a51e03209fd329edcf5f775f9fe97bf124d421192a64f0fcee1788bd9"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/main.rs",
+      "vendored": "vendor/execpolicy/src/main.rs",
+      "sha256": "c782e2dd8cac18ca2af03746a3502c8437d8a6a0f4f13fa8405317fbe292843e"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/parser.rs",
+      "vendored": "vendor/execpolicy/src/parser.rs",
+      "sha256": "65b14d66705593ea90e50dce12cb2c29ea5264a334b06ffbbf378e882453bb91"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/policy.rs",
+      "vendored": "vendor/execpolicy/src/policy.rs",
+      "sha256": "193ea680acdfeb0583e7836dec0600491d459215e27d430f54631b929427339e"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/rule.rs",
+      "vendored": "vendor/execpolicy/src/rule.rs",
+      "sha256": "9c10d246a857a22b37ba94ea720642c7c7dd39c3fd431eb5f1af6ef7014fcada"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/sandbox_migration.rs",
+      "vendored": "vendor/execpolicy/src/sandbox_migration.rs",
+      "sha256": "3964c725d27c848966f99d92d20df2653b1e6da03ff8879e6b7fc00f2e83c2f9"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/src/sandbox_migration_tests.rs",
+      "vendored": "vendor/execpolicy/src/sandbox_migration_tests.rs",
+      "sha256": "84b3a918155ba0666fce6338500897eb98cccd35d5ccded5883510e6bb06935a"
+    },
+    {
+      "upstream": "codex-rs/execpolicy/tests/basic.rs",
+      "vendored": "vendor/execpolicy/tests/basic.rs",
+      "sha256": "61adb1eab4d26232b1a623978a0ba283e78a2eea4fec065fadaf3f98c8132c26"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/BUILD.bazel",
+      "vendored": "vendor/absolute-path/BUILD.bazel",
+      "sha256": "36bcf78e7c7e1ad975aa8474f451710b7430418258a6afe04204178bae16b1a1"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/Cargo.toml",
+      "vendored": "vendor/absolute-path/Cargo.toml",
+      "sha256": "bcc0de539a16df6c46f8e75f1458dcc4e3d06e94850844fad101dbb6414b0f50"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/src/absolutize.rs",
+      "vendored": "vendor/absolute-path/src/absolutize.rs",
+      "sha256": "f10e52b6909abcd619d4bd9995144dedb4278965cedd6242a43e2385ec3be826"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/src/lib.rs",
+      "vendored": "vendor/absolute-path/src/lib.rs",
+      "sha256": "b0a5c11456cdb6978c739898ec3174a65413c94676d4bfa19324f42a52e20991"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/src/system_aliases.rs",
+      "vendored": "vendor/absolute-path/src/system_aliases.rs",
+      "sha256": "1e0c96b236baf047c4225bdccb572a77a4d70426c13de5e276468d7676bbc4db"
+    },
+    {
+      "upstream": "codex-rs/utils/absolute-path/src/system_aliases_tests.rs",
+      "vendored": "vendor/absolute-path/src/system_aliases_tests.rs",
+      "sha256": "2d385488882a1e23da3adbb640e8e49c505fbb926e41eb8a8683141d43de2cae"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/bash.rs",
+      "vendored": "vendor/source-shell/src/bash.rs",
+      "sha256": "f6761e7b2faf0e6de7148336cc3277525cfd7aab0fee10e40e279c30c99c5322"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/powershell.rs",
+      "vendored": "vendor/source-shell/src/powershell.rs",
+      "sha256": "20df5ac69dd1730c93761dcebd9cc1568002c5eb381a29612e2ccafbf1dbe0be"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/shell_detect.rs",
+      "vendored": "vendor/source-shell/src/shell_detect.rs",
+      "sha256": "b46ffe661d5c7fc292b5bb1767b8c3e16b71bb6d67b1ac4769438346ee435ce8"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/is_dangerous_command.rs",
+      "vendored": "vendor/source-shell/src/command_safety/is_dangerous_command.rs",
+      "sha256": "51b3920ca68914b3bc800ff5428828120480f68588689c2994ec69c9406c70fd"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/mod.rs",
+      "vendored": "vendor/source-shell/src/command_safety/mod.rs",
+      "sha256": "49a634cb8cde7eda262500b1dde86dfbf7a738543baa65ca9fec667ff9b8d661"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/powershell_parser.ps1",
+      "vendored": "vendor/source-shell/src/command_safety/powershell_parser.ps1",
+      "sha256": "6eaeceef188aad562f65c749d09d886a6219dda2ed271da2d7508cfc0f14f1b9"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/powershell_parser.rs",
+      "vendored": "vendor/source-shell/src/command_safety/powershell_parser.rs",
+      "sha256": "a5e8db98d347b209ea655922812bfd22df1346449952456616c6e62dc1fff536"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/powershell_tree_sitter.rs",
+      "vendored": "vendor/source-shell/src/command_safety/powershell_tree_sitter.rs",
+      "sha256": "ae428ad62c75bd72e694df508a6640879e0531a68fa9fccc7e9436e7af67526e"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/powershell_tree_sitter_tests.rs",
+      "vendored": "vendor/source-shell/src/command_safety/powershell_tree_sitter_tests.rs",
+      "sha256": "1b35b7275c219466f7d2f2077435da2e46b7e9eccb577a6d593cf32af2085219"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/windows_dangerous_commands.rs",
+      "vendored": "vendor/source-shell/src/command_safety/windows_dangerous_commands.rs",
+      "sha256": "56a06ee2d97a0be4b490475abbafea6f32e948ae532cbf6cee79877ba919d995"
+    },
+    {
+      "upstream": "codex-rs/shell-command/src/command_safety/fixtures/powershell_lowering.json",
+      "vendored": "vendor/source-shell/src/command_safety/fixtures/powershell_lowering.json",
+      "sha256": "fe61be56e83a446428b17c657292f03b6617011ea57f0d3c2f73f185db9045a2"
+    },
+    {
+      "upstream": "codex-rs/config/src/requirements_exec_policy.rs",
+      "vendored": "vendor/source-config/requirements_exec_policy.rs",
+      "sha256": "104054793994ef54b29a4d7c95c01ece48d7e348f02726ec342c4fe82a0261ef"
+    }
+  ],
+  "adapted_sources": [
+    {
+      "upstream": "codex-rs/core/src/exec_policy.rs",
+      "upstream_sha256": "49fc000c2b7779ecdc79d81b482f231f74a32ef69763cc686a1adcd4461a3616",
+      "output": "src/source_amendment.rs",
+      "algorithms": [
+        "BANNED_PREFIX_SUGGESTIONS",
+        "is_policy_match",
+        "try_derive_execpolicy_amendment_for_prompt_rules",
+        "try_derive_execpolicy_amendment_for_allow_rules",
+        "derive_requested_execpolicy_amendment_from_prefix_rule",
+        "prefix_rule_would_approve_all_commands"
+      ],
+      "changes": "protocol value type only; proposal functions visibility"
+    },
+    {
+      "upstream": "codex-rs/core/src/exec_policy.rs",
+      "upstream_sha256": "49fc000c2b7779ecdc79d81b482f231f74a32ef69763cc686a1adcd4461a3616",
+      "output": "src/source_requirement.rs",
+      "algorithms": [
+        "create_exec_approval_requirement_for_parsed_commands",
+        "is_policy_match",
+        "prompt_is_rejected_by_policy",
+        "dangerous_command_match_for_origin",
+        "dangerous_command_match_for_heuristics",
+        "render_decision_for_unmatched_command_for_platform",
+        "profile_has_managed_filesystem_restrictions",
+        "commands_for_exec_policy_for_platform",
+        "derive_prompt_reason",
+        "render_shlex_command",
+        "derive_forbidden_reason",
+        "derive_rejected_prompt_reason",
+        "dangerous_command_rejection_reason"
+      ],
+      "changes": "standalone synchronous Policy input and serialized requirement result; Source approval/sandbox enum value types; pre-resolved filesystem kind/full_disk_write/managed DTO substitutes full permission type"
+    },
+    {
+      "upstream": "codex-rs/core/src/exec_policy/executable_identity.rs",
+      "upstream_sha256": "57edba9a27c007e0e0dc9ad5e40c7b857487c17245ea1e1ab3f32863653fc5e8",
+      "output": "src/source_requirement.rs",
+      "algorithms": [
+        "create_exec_approval_requirement_for_shell",
+        "shell_approval_command"
+      ],
+      "changes": "standalone synchronous command input; configured shell Path and shell mode value types; no algorithm changes"
+    },
+    {
+      "upstream": "codex-rs/protocol/src/models.rs",
+      "upstream_sha256": "f0b13fc42a7b2a1497eebb9b4c67c92da587b852f3175279860290379c1fc3d6",
+      "output": "src/source_prefix_format.rs",
+      "algorithms": [
+        "MAX_RENDERED_PREFIXES",
+        "MAX_ALLOW_PREFIX_TEXT_BYTES",
+        "TRUNCATED_MARKER",
+        "format_allow_prefixes",
+        "prefix_combined_str_len",
+        "render_command_prefix"
+      ],
+      "changes": "unchanged extracted formatting section"
+    },
+    {
+      "upstream": "codex-rs/protocol/src/shell_environment.rs",
+      "upstream_sha256": "d2ae2223ff5a102188d9561394da1915cf820aa6b133e02a00d38423dae4d4dc",
+      "output": "vendor/source-shell/src/source_test_environment.rs",
+      "algorithms": [
+        "NON_INHERITABLE_ENV_VARS",
+        "is_non_inheritable_env_var",
+        "scrub_non_inheritable_env_vars"
+      ],
+      "changes": "unchanged extracted constants and functions, compiled only for Source PowerShell subprocess test oracle; crate self alias resolves original Source test path"
+    }
+  ]
+}

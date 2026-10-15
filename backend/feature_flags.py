@@ -9,6 +9,19 @@ from typing import Any, Mapping
 
 
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
+    "default_mode_request_user_input": False,
+    "token_budget": False,
+    "request_permissions_tool": False,
+    "exec_permission_approvals": False,
+    "guardian_reuse_parent_compaction": True,
+    "guardian_approval": True,
+    "guardianv2": False,
+    "guardianv2_decisions_comparison": False,
+    "step_model_switching": False,
+    "guardian_root_handoff_context": False,
+    "guardian_enhanced_node_repl_transcripts": False,
+    "guardian_node_repl_transcript_images": False,
+    "guardian_conversation_history_tools": False,
     # Existing behaviour defaults remain unchanged.
     "reactive_compact": True,
     "plugin_lifecycle_api": True,
@@ -87,7 +100,8 @@ def load_feature_flags(
         name = normalize_feature_name(str(raw_name))
         if not name:
             continue
-        flags[name] = coerce_feature_bool(raw_value, flags.get(name, False))
+        value = raw_value.get("enabled") if isinstance(raw_value, Mapping) else raw_value
+        flags[name] = coerce_feature_bool(value, flags.get(name, False))
 
     for env_name, raw_value in os.environ.items():
         if not env_name.startswith(_ENV_PREFIX):

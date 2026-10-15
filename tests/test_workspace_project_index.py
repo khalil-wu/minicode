@@ -77,7 +77,7 @@ def test_dependency_pass_reads_real_declarations_and_metadata_without_dependency
     _write(tmp_path, "frontend/node_modules/nested/implementation.ts", "export const implementation = 1")
     _write(tmp_path, ".gitignore", "node_modules/\n")
 
-    index = WorkspaceService(lambda: tmp_path).project_index()
+    index = WorkspaceService(lambda: tmp_path).project_index(include_dependencies=True)
     assert index.complete is True
     assert {file.path: file.kind for file in index.files} == expected
 

@@ -256,7 +256,7 @@ function buildSummary(input: ActivitySidebarStateInput): ActivitySummaryItem[] {
     items.push({
       id: "context",
       label: `${formatNumber(input.contextUsage.used)} / ${formatNumber(input.contextUsage.limit)} tokens`,
-      detail: input.contextUsage.compactSummary || `${percent}% context used`,
+      detail: input.contextUsage.compactSummary || `上下文已使用 ${percent}%`,
       kind: "context",
       status: percent >= 90 ? "failed" : percent >= 75 ? "running" : "info",
     });

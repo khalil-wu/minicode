@@ -12,3 +12,17 @@ This revision supplies literal templates; the old `instructions_variables` perso
 Selection follows `codex-rs/prompts/src/model_instructions.rs::render_model_instructions`; unknown-model fallback and explicit personality disabling follow `codex-rs/models-manager/src/model_info.rs`.
 
 Copyright OpenAI. Licensed under the Apache License, Version 2.0; see LICENSE.txt.
+
+`collaboration-plan.md` and `collaboration-default.md` preserve the source files
+`codex-rs/collaboration-mode-templates/templates/plan.md` and `default.md` byte for byte.
+Their developer-role injection follows
+`codex-rs/core/src/context/world_state/collaboration_mode.rs`.
+Rendering maps only the official `request_user_input` name to MiniCode's existing
+`ask_user`, and states its actual single `question` / string `options` schema.
+The permission-owned legacy plan-file workflow remains independent.
+
+`desktop-review-guidelines.md` preserves the decoded `M` prompt from installed
+Codex desktop `26.1007.2314.0`, `webview/assets/code-review-aae677399d79.js`
+(asset SHA-256 `bee20a5cfea1d5fa4f628cfeb6fcad9b74d50ae47604d4130a591a832ea80119`).
+It belongs to the ordinary Markdown review turn path, independently of the
+Rust `ReviewTask` JSON rubric. See the source audit under `docs/validation/`.

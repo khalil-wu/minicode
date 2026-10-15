@@ -59,7 +59,7 @@ function turnDiffFor(path: string, patch: string): TurnDiffState {
 }
 
 describe("useAgentEditReview", () => {
-  beforeEach(() => { vi.useFakeTimers(); useAppStore.setState({ agentEditReviewKept: {} }); });
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); useAppStore.setState({ agentEditReviewKept: {} }); });
   afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   const content = "alpha\nBRAVO\ncharlie\n";

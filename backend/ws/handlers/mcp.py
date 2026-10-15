@@ -369,6 +369,7 @@ class _ProviderOAuthCallbacks:
             kind="provider_oauth",
         )
         pending_payloads[request_id] = control_payload
+        notification_claim = wait_state.approval_notification_claim(request_id)
         abort_waiters: list[asyncio.Task[None]] = [
             asyncio.create_task(
                 self._abort_event.wait(),
@@ -410,6 +411,7 @@ class _ProviderOAuthCallbacks:
                     [request_id],
                     reason="provider_auth_rejected",
                     conversation_id=self.conversation_id,
+                    notification_claims={request_id: notification_claim},
                 )
                 raise PermissionError("OAuth prompt was cancelled by the user")
             if isinstance(response, dict):
@@ -431,6 +433,7 @@ class _ProviderOAuthCallbacks:
                 [request_id],
                 reason="provider_auth_resolved",
                 conversation_id=self.conversation_id,
+                notification_claims={request_id: notification_claim},
             )
             return answer_text
         except asyncio.TimeoutError:
@@ -438,6 +441,7 @@ class _ProviderOAuthCallbacks:
                 [request_id],
                 reason="provider_auth_timeout",
                 conversation_id=self.conversation_id,
+                notification_claims={request_id: notification_claim},
             )
             raise
         except asyncio.CancelledError:
@@ -445,6 +449,7 @@ class _ProviderOAuthCallbacks:
                 [request_id],
                 reason="provider_auth_cancelled",
                 conversation_id=self.conversation_id,
+                notification_claims={request_id: notification_claim},
             )
             raise
         except PermissionError:
@@ -456,6 +461,7 @@ class _ProviderOAuthCallbacks:
                 [request_id],
                 reason="provider_auth_failed",
                 conversation_id=self.conversation_id,
+                notification_claims={request_id: notification_claim},
             )
             raise
         finally:

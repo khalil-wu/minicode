@@ -26,6 +26,9 @@ import { useContextMenu } from "../../components/useContextMenu";
 import { copyText } from "../../lib/clipboard";
 import { isPreviewableMediaPath } from "../../lib/media-types";
 import { editorPathsEqual } from "../../stores/shared-helpers";
+import { openPreferredFile, openPreferredWebLink } from "../../lib/open-preferred-target";
+import { useI18n } from "../../i18n";
+import { withoutCodeCommentDirectives } from "../../lib/code-comment";
 import {
   isWindowsLikeWorkspacePath,
   normalizeWorkspacePath,
@@ -544,6 +547,7 @@ const normalizeLatexDelimiters = (value: string): string => {
 };
 
 const CopyButton = ({ text }: { text: string }) => {
+  const { t } = useI18n();
   const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
   const copied = copiedSource?.text === text;
   useEffect(() => {
@@ -552,8 +556,8 @@ const CopyButton = ({ text }: { text: string }) => {
     return () => window.clearTimeout(timer);
   }, [copiedSource]);
   const handleCopy = useCallback(async () => {
-    if (await copyText(text, "代码")) setCopiedSource({ text });
-  }, [text]);
+    if (await copyText(text, t("代码"))) setCopiedSource({ text });
+  }, [text, t]);
 
   return (
     <button
@@ -565,12 +569,13 @@ const CopyButton = ({ text }: { text: string }) => {
       }}
       className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
     >
-      {copied ? "已复制" : "复制"}
+      {t(copied ? "已复制" : "复制")}
     </button>
   );
 };
 
 const InsertButton = ({ text }: { text: string }) => {
+  const { t } = useI18n();
   const appMode = useAppStore((s) => s.appMode);
   const activeTabPath = useAppStore((s) => s.activeTabPath);
   const editableTab = useAppStore((s) => s.editorTabs.some((tab) => editorPathsEqual(tab.path, s.activeTabPath, s.workingDirectory)
@@ -589,12 +594,12 @@ const InsertButton = ({ text }: { text: string }) => {
     const event = new CustomEvent("editor:insert-text", { detail: { text, handled: false } });
     window.dispatchEvent(event);
     if (!event.detail.handled) {
-      pushToast("编辑器尚未就绪，请稍后重试。", "warning", 1800);
+      pushToast(t("编辑器尚未就绪，请稍后重试。"), "warning", 1800);
       return;
     }
     setInsertedSource({ text, path: activeTabPath });
-    pushToast(`已插入 ${activeTabPath}`, "success", 1200);
-  }, [activeTabPath, canInsert, text]);
+    pushToast(t("已插入 {path}", { path: activeTabPath || "" }), "success", 1200);
+  }, [activeTabPath, canInsert, text, t]);
 
   if (!canInsert) return null;
   return (
@@ -606,9 +611,9 @@ const InsertButton = ({ text }: { text: string }) => {
         right: 58,
       }}
       className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
-      title={`插入到 ${activeTabPath}`}
+      title={t("插入到 {path}", { path: activeTabPath || "" })}
     >
-      {inserted ? "已插入" : "插入"}
+      {t(inserted ? "已插入" : "插入")}
     </button>
   );
 };
@@ -642,6 +647,8 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
     <pre
       style={codeBlockStyle(hasLanguage)}
       className="overflow-x-auto"
+      data-markdown-copy="code-block"
+      data-markdown-copy-text={text}
     >
       <code>
         {lines.map((line, index) => (
@@ -656,6 +663,7 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
 };
 
 const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: ResolvedTheme }) => {
+  const { t } = useI18n();
   const reactId = useId();
   const renderId = useMemo(
     () => `md-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
@@ -695,23 +703,23 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
         const safeSvg = sanitizeMermaidSvg(rendered.svg);
         if (!cancelled) {
           if (safeSvg) setSvg(safeSvg);
-          else setError("无法安全呈现 Mermaid 图表。");
+          else setError(t("无法安全呈现 Mermaid 图表。"));
         }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "无法呈现 Mermaid 图表。");
+        if (!cancelled) setError(err instanceof Error ? err.message : t("无法呈现 Mermaid 图表。"));
       });
 
     return () => {
       cancelled = true;
     };
-  }, [chart, renderId, resolvedTheme]);
+  }, [chart, renderId, resolvedTheme, t]);
 
   if (error) {
     return (
       <div className="space-y-2">
         <div className="text-[var(--text-xs)] text-[var(--state-warning)] px-3 py-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
-          Mermaid 呈现失败，已显示源代码。
+          {t("Mermaid 呈现失败，已显示源代码。")}
         </div>
         <PlainCodeBlock hasLanguage text={chart} />
       </div>
@@ -727,7 +735,7 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
       className="md-mermaid"
       data-testid="md-mermaid"
       role="region"
-      aria-label="Mermaid 图表，可上下和左右滚动"
+      aria-label={t("Mermaid 图表，可上下和左右滚动")}
       tabIndex={0}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
@@ -1069,6 +1077,7 @@ function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageR
 }
 
 const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: EditorTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+  const { t } = useI18n();
   const activeWorkspace = useAppStore((s) => s.workingDirectory);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
   const opensInPreview = workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
@@ -1077,26 +1086,31 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
   const { fileName, meta } = splitFileLabelMeta(name);
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
-  const openFile = () => {
-    if (opensInPreview) {
-      openWorkspaceFilePreview({ path: target.path, name: fileName, workspaceRoot, conversationId });
+  const openInEditor = () => {
+    if (workingDirectory && !workspacePathsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
+      openWorkspaceFilePreview({ path: target.path, name: fileName, workspaceRoot: workingDirectory, conversationId });
     } else {
       useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column });
     }
   };
+  const openFile = () => {
+    if (isDesktop()) void openPreferredFile(target.path, workingDirectory, target.line, openInEditor);
+    else openInEditor();
+  };
   const { onContextMenu, menu } = useContextMenu(() => [
     {
-      label: opensInPreview ? "预览文件" : "在编辑器中打开",
-      onClick: openFile,
+      label: t(opensInPreview ? "预览文件" : "在编辑器中打开"),
+      onClick: openInEditor,
+      disabled: workspaceRoot === "",
     },
     // OS shell actions have no meaning in browser mode; offering them there
     // produced a menu entry that did nothing at all.
-    ...(isDesktop() ? [
-      { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
-      { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    ...(isDesktop() && workspaceRoot !== "" ? [
+      { label: t("使用默认应用打开"), onClick: () => { void openPath(titlePath); } },
+      { label: t("在资源管理器中显示"), onClick: () => { void revealPath(titlePath); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void copyText(titlePath, "路径"); } },
+    { label: t("复制路径"), onClick: () => { void copyText(titlePath, t("路径")); } },
   ]);
 
   return (
@@ -1104,11 +1118,14 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
       <button
         type="button"
         onClick={openFile}
-        title={`${opensInPreview ? "预览" : "在编辑器中打开"} ${titlePath}`}
+        disabled={workspaceRoot === ""}
+        title={`${t(opensInPreview ? "预览" : "在编辑器中打开")} ${titlePath}`}
         aria-label={label}
         className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
         data-presentation={presentation}
         data-ext={extension || "file"}
+        data-file-reference=""
+        data-markdown-copy-text={label}
       >
         {fileIcon(target.path, { size: 14, className: "md-file-link-icon" })}
         <span className="md-file-chip-label">
@@ -1123,6 +1140,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
 };
 
 const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: FileTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+  const { t } = useI18n();
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
@@ -1131,31 +1149,33 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
   const { onContextMenu, menu } = useContextMenu(() => [
     {
-      label: "在编辑器中打开（仅文本文件）",
+      label: t("在编辑器中打开（仅文本文件）"),
       disabled: true,
     },
     // OS shell actions have no meaning in browser mode; offering them there
     // produced a menu entry that did nothing at all.
-    ...(isDesktop() ? [
-      { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
-      { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    ...(isDesktop() && workspaceRoot !== "" ? [
+      { label: t("使用默认应用打开"), onClick: () => { void openPath(titlePath); } },
+      { label: t("在资源管理器中显示"), onClick: () => { void revealPath(titlePath); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void copyText(titlePath, "路径"); } },
+    { label: t("复制路径"), onClick: () => { void copyText(titlePath, t("路径")); } },
   ]);
 
   return (
     <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
       <button
         type="button"
+        disabled={workspaceRoot === ""}
         onClick={() => {
-          if (previewInsideWorkspace) {
-            openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory, conversationId });
-          } else {
-            void openPath(titlePath);
-          }
+          const openInApp = () => {
+            if (previewInsideWorkspace) openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory, conversationId });
+            else void openPath(titlePath);
+          };
+          if (isDesktop()) void openPreferredFile(titlePath, workingDirectory, undefined, openInApp);
+          else openInApp();
         }}
-        title={previewInsideWorkspace ? `预览 ${titlePath}` : `打开 ${titlePath}`}
+        title={t("打开 {path}", { path: titlePath })}
         aria-label={label}
         className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
         data-presentation={presentation}
@@ -1173,6 +1193,7 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
 };
 
 const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: FolderTarget; children: React.ReactNode } & MessageResourceScope) => {
+  const { t } = useI18n();
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { name } = displayPathParts(label.replace(/[\\/]+$/, ""));
@@ -1182,7 +1203,7 @@ const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: Fold
     <button
       type="button"
       onClick={() => useAppStore.getState().requestFileTreeReveal(workspaceRoot === undefined ? target.path : titlePath, "folder")}
-      title={`在文件树中显示 ${titlePath}`}
+      title={t("在文件树中显示 {path}", { path: titlePath })}
       aria-label={label}
       className={`${fileChipClassName} md-folder-chip`}
       data-kind="folder"
@@ -1196,6 +1217,7 @@ const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: Fold
 };
 
 const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
+  const { t } = useI18n();
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
   const alt = typeof props.alt === "string" ? props.alt : "image";
@@ -1228,30 +1250,30 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
         role="img"
         aria-label={alt}
         className="my-2 inline-flex max-w-full items-center rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
-        title={artifactId ? undefined : "本地图片位于当前工作区之外"}
+        title={artifactId ? undefined : t("本地图片位于当前工作区之外")}
       >
-        {artifactId ? (conversationId ? "连接恢复后可预览图片。" : "图片未关联到会话，暂时无法预览。") : "本地图片不可用"}
+        {t(artifactId ? (conversationId ? "连接恢复后可预览图片。" : "图片未关联到会话，暂时无法预览。") : "本地图片不可用")}
       </span>
     );
   }
 
   if (remoteSrc && (remoteImagePolicy === "block" || !remoteImageAllowed)) {
-    const hostname = remoteHostname || "远程主机";
+    const hostname = remoteHostname || t("远程主机");
     return (
       <span
         className="my-2 inline-flex max-w-full flex-col items-start gap-2 rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
         data-remote-image-placeholder={remoteSrc}
       >
-        <span>{alt} · 图片来自 {hostname}</span>
+        <span>{t("{alt} · 图片来自 {host}", { alt, host: hostname })}</span>
         {remoteImagePolicy === "block" ? (
-          <span>设置中已禁止加载远程图片。</span>
+          <span>{t("设置中已禁止加载远程图片。")}</span>
         ) : (
           <span className="inline-flex flex-wrap gap-2">
             <button type="button" className="btn-secondary" onClick={() => setLoadedRemoteUrl(remoteSrc)}>
-              加载图片
+              {t("加载图片")}
             </button>
             <button type="button" className="btn-ghost" onClick={() => allowRemoteImageDomain(hostname)}>
-              本任务允许 {hostname}
+              {t("本任务允许 {host}", { host: hostname })}
             </button>
           </span>
         )}
@@ -1295,7 +1317,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   // open in a lightbox. Distinguish the affordance so users don't expect a zoom
   // lightbox when clicking a remote image.
   const opensInPreviewPanel = isPreviewableHttpUrl(src);
-  const previewTitle = "在预览面板中打开";
+  const previewTitle = t("在预览面板中打开");
 
   const image = (
     <img
@@ -1311,7 +1333,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   return previewable ? (
     <button
       type="button"
-      aria-label={`在预览中打开 ${alt}`}
+      aria-label={t("在预览中打开 {name}", { name: alt })}
       className="block max-w-full border-0 bg-transparent p-0 text-left"
       onClick={(event) => {
         if (!event.defaultPrevented) openPreview();
@@ -1344,6 +1366,7 @@ const mdComponents = (
   };
   return ({
   pre: ({ children }) => <div className="my-4">{children}</div>,
+  input: ({ node: _node, checked, ...props }) => <input {...props} checked={checked} role="checkbox" aria-checked={Boolean(checked)} />,
   code({ className, children, node }: MarkdownCodeProps) {
     const resourceScope = useContext(MarkdownResourceContext);
     const text = String(children).replace(/\n$/, "");
@@ -1353,7 +1376,7 @@ const mdComponents = (
     const isBlock = nodePos && nodePos.end.line > nodePos.start.line;
     if (language === "mermaid") {
       return (
-        <div className="code-block-wrapper relative">
+        <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
           <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
             <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
               mermaid
@@ -1366,7 +1389,7 @@ const mdComponents = (
     }
     if (match || isBlock) {
       return (
-        <div className="code-block-wrapper relative">
+        <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
           {match && (
             <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
               <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
@@ -1472,7 +1495,10 @@ const mdComponents = (
         onClick={(event) => {
           props.onClick?.(event);
           if (event.defaultPrevented) return;
-          if (openWebTarget(href)) event.preventDefault();
+          if (isDesktop() && isPreviewableHttpUrl(href)) {
+            event.preventDefault();
+            void openPreferredWebLink(href);
+          } else if (openWebTarget(href)) event.preventDefault();
         }}
       >
         {opensInApp && (
@@ -1749,6 +1775,7 @@ const CommittedMarkdown = memo(({ parts, count, ...props }: {
 }) => <>{parts.slice(0, count).map((part) => <MarkdownPiece key={part.start} part={part} {...props} />)}</>);
 
 function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths }: Props) {
+  content = withoutCodeCommentDirectives(content);
   const resolved = useResolvedTheme();
   const rawId = useId();
   const scopeId = useMemo(() => `md-${rawId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawId]);

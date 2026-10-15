@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketState
 from backend.agent.message import UserCommand
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.event_outbox import EventOutbox
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 class Socket:
@@ -62,10 +63,12 @@ async def test_explicit_result_owner_wins_over_originating_command(tmp_path):
 async def test_dispatcher_captures_command_owner_before_capacity_wait(tmp_path):
     events, socket = outbox(tmp_path)
     host = SimpleNamespace(active_conversation_id="conversation-a", root="/workspace-a", event_outbox=events)
-    host.session_lifecycle = SimpleNamespace(workspace_root_for_conversation=lambda: host.root)
+    host.session_lifecycle = SessionLifecycle(host)
+    host.session_lifecycle.workspace_root_for_conversation = lambda: host.root
     dispatcher = SessionCommandDispatcher.__new__(SessionCommandDispatcher)
     dispatcher._session = host
     dispatcher._user_message_admissions = {}
+    dispatcher._regeneration_transitions = {}
     dispatcher._command_semaphore = asyncio.Semaphore(0)
     dispatcher._client_command_id = lambda _: "cmd-waiting"
 
@@ -98,9 +101,12 @@ async def test_dispatcher_owner_does_not_borrow_active_workspace(tmp_path, data,
     host = SimpleNamespace(active_conversation_id="conversation-b", event_outbox=events,
         conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: conversation if cid == "conversation-a" else None),
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda conv=None: conv.workspace_root if conv is not None else "/workspace-b"))
+    host.session_lifecycle = SessionLifecycle(host)
+    host.session_lifecycle.workspace_root_for_conversation = lambda conv=None: conv.workspace_root if conv is not None else "/workspace-b"
     dispatcher = SessionCommandDispatcher.__new__(SessionCommandDispatcher)
     dispatcher._session = host
     dispatcher._user_message_admissions = {}
+    dispatcher._regeneration_transitions = {}
     dispatcher._command_semaphore = asyncio.Semaphore(1)
     dispatcher._client_command_id = lambda _: "cmd-owner"
 
@@ -125,6 +131,8 @@ async def test_rejected_restore_projection_reports_correlated_command_failure(tm
     host = SimpleNamespace(active_conversation_id="conversation-a", event_outbox=events,
         ws_manager=None, connection_generation=1,
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: "/workspace-a"))
+    host.session_lifecycle = SessionLifecycle(host)
+    host.session_lifecycle.workspace_root_for_conversation = lambda: "/workspace-a"
     lifecycle_lock = asyncio.Lock()
     host.conversation_lifecycle_lock = lambda: lifecycle_lock
 
@@ -141,6 +149,7 @@ async def test_rejected_restore_projection_reports_correlated_command_failure(tm
     dispatcher = SessionCommandDispatcher.__new__(SessionCommandDispatcher)
     dispatcher._session = host
     dispatcher._user_message_admissions = {}
+    dispatcher._regeneration_transitions = {}
     dispatcher._command_semaphore = asyncio.Semaphore(1)
     dispatcher._handle_command_inner = handle_inner
 

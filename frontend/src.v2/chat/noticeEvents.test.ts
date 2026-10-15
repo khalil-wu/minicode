@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleNoticeEvent } from "./noticeEvents";
 import { useAppStore } from "../stores";
@@ -225,7 +226,23 @@ describe("handleNoticeEvent", () => {
       compactionState: "compacted",
       compactionSummary: "Kept project goals and current task.",
     });
+    expect(useAppStore.getState().messages).toEqual([expect.objectContaining({
+      id: "system-compact-status", content: "", systemNoticeTitle: "上下文已压缩", systemNoticeProcessing: false,
+    })]);
+  });
+
+  it("finishes the actual background compaction notice without changing the foreground draft or token usage", () => {
+    useAppStore.setState({ draft: "前台新草稿", conversationMessages: { "conv-other": [] }, contextUsage: { used: 80, limit: 1000 },
+      conversations: [{ id: "conv-active", title: "Active" }, { id: "conv-other", title: "Other" }] });
+    handleNoticeEvent({ type: "conversation.compaction.updated", conversation_id: "conv-other", state: "compacting", summary: "正在压缩上下文。" } as ServerEvent);
+    expect(useAppStore.getState().conversationMessages["conv-other"][0].systemNoticeProcessing).toBe(true);
+    handleNoticeEvent({ type: "conversation.compaction.updated", conversation_id: "conv-other", state: "failed", summary: "HTTP 400" } as ServerEvent);
+    expect(useAppStore.getState().conversationMessages["conv-other"]).toEqual([expect.objectContaining({
+      systemNoticeTitle: "压缩失败", content: "HTTP 400", systemNoticeProcessing: false, failureMessage: "HTTP 400",
+    })]);
     expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().draft).toBe("前台新草稿");
+    expect(useAppStore.getState().contextUsage).toEqual({ used: 80, limit: 1000 });
   });
 
   it("ignores compaction metadata from inactive conversations", () => {
@@ -353,12 +370,7 @@ describe("handleNoticeEvent", () => {
       conversation_id: "conv-active",
       workspace_root: "C:\\Desktop\\RAG",
     });
-    expect(pushToast).toHaveBeenCalledOnce();
-    expect(pushToast).toHaveBeenCalledWith(
-      "Opened workspace: RAG · python · 42 files",
-      "success",
-      3500,
-    );
+    expect(pushToast).not.toHaveBeenCalled();
     expect(state.inspectorEntries).toEqual([
       expect.objectContaining({
         targetKind: "workspace",
@@ -457,7 +469,7 @@ describe("handleNoticeEvent", () => {
   });
 
   it("converts RFC3339 file-change timestamps and requests a git refresh", () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     const originalRequestGitChanges = useAppStore.getState().requestGitChanges;
     const requestGitChanges = vi.fn();
     useAppStore.setState({

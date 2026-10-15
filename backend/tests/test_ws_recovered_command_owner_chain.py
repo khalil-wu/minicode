@@ -11,10 +11,11 @@ from backend.agent.message import UserCommand
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.command_scope import resolve_command_scope
 from backend.ws.durable_user_queue import DurableUserMessageQueue
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 def _session(tmp_path, queue):
-    conversation = SimpleNamespace(workspace_root=str(tmp_path), worktree_path="")
+    conversation = SimpleNamespace(workspace_root=str(tmp_path), worktree_path="", execution_cwd=str(tmp_path))
     lock = asyncio.Lock()
     sent = []
 
@@ -46,12 +47,14 @@ def _session(tmp_path, queue):
         send_payload=send_payload, send_event=send_event,
         emit_command_result=send_payload,
     )
+    session.session_lifecycle = SessionLifecycle(session)
+    session.session_lifecycle.workspace_root = tmp_path
     return session, sent
 
 
 async def _drain(dispatcher):
-    if dispatcher.command_tasks:
-        await asyncio.gather(*tuple(dispatcher.command_tasks))
+    while dispatcher.command_tasks or dispatcher.execution_command_tasks:
+        await asyncio.gather(*(dispatcher.command_tasks | dispatcher.execution_command_tasks))
 
 
 @pytest.mark.asyncio
@@ -160,7 +163,10 @@ async def test_owner_relative_action_persists_selected_owner_before_ack(tmp_path
             raise WebSocketDisconnect()
 
     session.ws = SimpleNamespace(receive_text=receive_text)
-    dispatcher._schedule_durable_client_command = lambda *_args: None
+    def retain_without_dispatch(command_id, generation, *, command_type):
+        assert command_id == 'cmd_relative' and generation == 1 and command_type == 'preview.refresh'
+
+    dispatcher._schedule_durable_client_command = retain_without_dispatch
     try:
         with pytest.raises(WebSocketDisconnect):
             await dispatcher.run(1)

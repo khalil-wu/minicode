@@ -5,6 +5,8 @@ from types import MappingProxyType
 from typing import Any
 
 from backend.agent.context import ContextBuilder
+from backend.agent.lifecycle_observer import LifecycleObserverOwner
+from backend.agent.run_context import RunContext
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
@@ -47,6 +49,51 @@ def test_extension_payload_clone_fallback_breaks_cycles_without_aliasing() -> No
 
     assert cloned is not source
     assert cloned == ["uncopyable", None]
+
+
+def test_extension_host_error_reaches_the_canonical_projection_boundary() -> None:
+    async def scenario():
+        class FailedRunner(_Runner):
+            failed_emission = False
+            async def emit(self, event):
+                if (
+                    event["type"] == "message_start"
+                    and event["message"]["role"] == "assistant"
+                    and not self.failed_emission
+                ):
+                    self.failed_emission = True
+                    raise OSError("Extension host transport failed")
+                return await super().emit(event)
+        runner = FailedRunner()
+        owner = LifecycleObserverOwner(
+            observer=ExtensionLifecycleObserver(runner, "Read the project"),
+            run_context=RunContext(),
+        )
+        assert await owner.start() is None
+        failure = await owner.observe(AgentEvent.agent_message_started(item_id="assistant-1"))
+        assert failure is not None
+        assert failure.type == "error"
+        assert failure.data["error_code"] == "lifecycle_observer.observe_failed"
+        assert "Extension host transport failed" in failure.data["message"]
+        assert await owner.finish(status="completed", reason="") is None
+        assert runner.events[-1]["type"] == "agent_settled"
+    asyncio.run(scenario())
+
+
+def test_before_agent_start_host_error_reaches_the_canonical_projection_boundary() -> None:
+    async def scenario():
+        class FailedRunner(_Runner):
+            async def emit_before_agent_start(self, *args):
+                raise OSError("Extension aggregation failed")
+        owner = LifecycleObserverOwner(
+            observer=ExtensionLifecycleObserver(FailedRunner(), "Read the project"),
+            run_context=RunContext(),
+        )
+        failure = await owner.start()
+        assert failure is not None
+        assert failure.data["error_code"] == "lifecycle_observer.start_failed"
+        assert "Extension aggregation failed" in failure.data["message"]
+    asyncio.run(scenario())
 
 
 def test_observer_preserves_message_and_tool_lifecycle_order() -> None:

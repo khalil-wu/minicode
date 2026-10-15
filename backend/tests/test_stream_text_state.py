@@ -18,6 +18,11 @@ from backend.agent.loop_process_events import model_process_text_event
 from backend.llm.base import StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
 
 
+def _project_delta(state, delta, **metadata):
+    item = state.append_agent_text(delta, source=metadata.get("source", ""), item_id=metadata.get("item_id", ""))
+    return state.project_agent_message_delta(delta, text_item=item, **metadata)
+
+
 @pytest.mark.parametrize("live", [False, True])
 @pytest.mark.parametrize("item_id", ["same-item", ""])
 def test_final_phase_reclassification_preserves_the_same_item_prefix_in_history(live, item_id):
@@ -116,7 +121,7 @@ def test_final_answer_history_keeps_complete_anthropic_tool_protocol_state() -> 
 def test_agent_message_items_close_before_a_new_unique_item_starts() -> None:
     state = StreamTextState(iteration_id="iteration:4")
 
-    first_events = state.project_agent_message_delta("rejected")
+    first_events = _project_delta(state, "rejected")
     first_id = first_events[0].data["item"]["id"]
 
     assert first_events[0].type == "item.started"
@@ -134,7 +139,7 @@ def test_agent_message_items_close_before_a_new_unique_item_starts() -> None:
         "status": "cancelled",
     }
 
-    second_events = state.project_agent_message_delta("accepted")
+    second_events = _project_delta(state, "accepted")
     second_id = second_events[0].data["item"]["id"]
     assert second_id != first_id
     assert second_events[1].data["item_id"] == second_id
@@ -189,7 +194,7 @@ def test_answer_committer_carries_finish_reason_into_done_provider_metadata() ->
 def test_streamed_agent_message_projects_source_from_the_first_frame() -> None:
     state = StreamTextState(iteration_id="iteration:5")
 
-    events = state.project_agent_message_delta("checking", source="pending")
+    events = _project_delta(state, "checking", source="pending")
 
     assert state.active_agent_message_source == "pending"
     assert events[0].data["item"]["source"] == "pending"
@@ -197,7 +202,7 @@ def test_streamed_agent_message_projects_source_from_the_first_frame() -> None:
     # every token would only inflate the stream.
     assert "source" not in events[1].data
 
-    unchanged = state.project_agent_message_delta(" more", source="pending")
+    unchanged = _project_delta(state, " more", source="pending")
     assert "source" not in unchanged[0].data
 
     completed = state.complete_active_agent_message(
@@ -216,19 +221,19 @@ def test_streamed_agent_message_republishes_source_on_reclassification() -> None
     # renderer relies on it to move live text out of the work log.
     state = StreamTextState(iteration_id="iteration:6")
 
-    state.project_agent_message_delta("thinking about it", source="pending")
-    upgraded = state.project_agent_message_delta(" the answer", source="model_final")
+    _project_delta(state, "thinking about it", source="pending")
+    upgraded = _project_delta(state, " the answer", source="model_final")
 
     assert [event.type for event in upgraded] == ["agent_message.delta"]
     assert upgraded[0].data["source"] == "model_final"
-    assert "source" not in state.project_agent_message_delta(
+    assert "source" not in _project_delta(state,
         " continues", source="model_final"
     )[0].data
 
 
 def test_process_text_projection_emits_each_changed_accumulated_prefix() -> None:
     state = StreamTextState(iteration_id="iteration:process")
-    state.pending_process_text = "first"
+    state.append_process_text("first")
 
     first = state.maybe_stream_process_text(
         source="commentary", event_factory=model_process_text_event
@@ -236,7 +241,7 @@ def test_process_text_projection_emits_each_changed_accumulated_prefix() -> None
     duplicate = state.maybe_stream_process_text(
         source="commentary", event_factory=model_process_text_event
     )
-    state.pending_process_text = "first second"
+    state.append_process_text(" second")
     second = state.maybe_stream_process_text(
         source="commentary", event_factory=model_process_text_event
     )
@@ -251,7 +256,7 @@ def test_process_text_projection_emits_each_changed_accumulated_prefix() -> None
     assert second.data == {"item_id": first.data["id"], "delta": " second"}
 
     # A buffer that is not an extension (reclassified text) re-announces.
-    state.pending_process_text = "rewritten"
+    state.replace_pending_process_text("rewritten")
     third = state.maybe_stream_process_text(
         source="commentary", event_factory=model_process_text_event
     )
@@ -311,12 +316,12 @@ def test_stream_attempt_preserves_duplicate_provider_ids_by_batch_occurrence() -
 def test_stream_text_uses_provider_item_identity_for_distinct_message_items() -> None:
     state = StreamTextState(iteration_id="iteration")
 
-    first = state.project_agent_message_delta(
+    first = _project_delta(state,
         "commentary",
         source="commentary",
         item_id="provider-message-1",
     )
-    second = state.project_agent_message_delta(
+    second = _project_delta(state,
         "answer",
         source="model_final",
         item_id="provider-message-2",
@@ -331,17 +336,17 @@ def test_stream_text_uses_provider_item_identity_for_distinct_message_items() ->
 
 def test_answer_commit_completes_only_the_active_provider_item_text() -> None:
     state = StreamTextState(iteration_id="iteration")
-    state.project_agent_message_delta(
+    _project_delta(state,
         "first",
         source="model_final",
         item_id="provider-message-1",
     )
-    second = state.project_agent_message_delta(
+    second = _project_delta(state,
         "second",
         source="model_final",
         item_id="provider-message-2",
     )
-    state.final_candidate_text = "firstsecond"
+    state.replace_final_text("firstsecond")
     state.final_candidate_item_id = "provider-message-2"
 
     projection = build_answer_commit_projection(
@@ -359,7 +364,7 @@ def test_answer_commit_completes_only_the_active_provider_item_text() -> None:
 
 def test_answer_commit_redacts_provider_refusal_explanation_from_public_item() -> None:
     state = StreamTextState(iteration_id="iteration")
-    state.final_candidate_text = "safe answer"
+    state.replace_final_text("safe answer")
 
     projection = build_answer_commit_projection(
         stream_text=state,

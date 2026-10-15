@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from copy import deepcopy
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
@@ -17,7 +19,8 @@ from backend.tools.output_limits import (
     TASK_OUTPUT_MAX_CHARS,
 )
 from backend.tools.untrusted import wrap_untrusted_content
-from backend.tools.command_support import command_wait_ms, MAX_COMMAND_YIELD_MS
+from backend.tools.command_support import command_wait_ms, stdin_wait_ms
+from backend.terminal.stdin_authority import StdinAuthorityError, TerminalInputApproval
 
 
 class MonitorTool(BaseTool):
@@ -40,6 +43,13 @@ class MonitorTool(BaseTool):
     read_only = True
     max_result_chars = MAX_TOOL_RESULT_CHARS
 
+    def check_permission(self, args=None, context=None):
+        # Source reviews an existing terminal's retained authority at the actual
+        # write, under its process lock. Static deny/ask still wins in checker.
+        if (args or {}).get("action", "status") == "write_stdin":
+            return PermissionLevel.AUTO
+        return None
+
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
         return str((args or {}).get("action") or "status").strip().lower() == "status"
 
@@ -61,8 +71,6 @@ class MonitorTool(BaseTool):
             chars = payload.get("chars")
             if not isinstance(chars, str):
                 return "chars must be a string when action is write_stdin"
-            if not chars and not bool(payload.get("close_stdin", False)):
-                return "chars must not be empty unless close_stdin is true"
         return ""
 
     def get_schema(self) -> ToolSchema:
@@ -82,8 +90,8 @@ class MonitorTool(BaseTool):
                         "description": "Background command id returned by run_command. Required for write_stdin and cancel; omit for a status listing.",
                     },
                     "yield_time_ms": {
-                        "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
-                        "description": "Wait up to this many milliseconds for completion or new output after cursor. Default 0. Waiting does not stop the command.",
+                        "type": "integer", "minimum": 0,
+                        "description": "Wait for completion or new output after cursor. Status defaults to 0; write_stdin defaults to 250, and empty stdin polls wait at least 5000. Waiting does not stop the command.",
                     },
                     "cursor": {
                         "type": "integer", "minimum": 0,
@@ -120,6 +128,13 @@ class MonitorTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
+        result = await self._execute(args, context)
+        result.runtime_metadata.setdefault("terminal_hook", {"ready": False})
+        return result
+
+    async def _execute(
+        self, args: dict[str, Any], context: ToolExecutionContext | None,
+    ) -> ToolResult:
         manager = getattr(context, "background_manager", None) if context else None
         if manager is None:
             return self._error_result("No background command manager is available in this session.")
@@ -130,7 +145,8 @@ class MonitorTool(BaseTool):
         action = str(args.get("action") or "status").strip().lower()
         command_id = str(args.get("command_id") or "").strip()
         try:
-            wait_ms = command_wait_ms(args.get("yield_time_ms"), default=0)
+            wait_ms = (stdin_wait_ms(args.get("yield_time_ms"), chars=args.get("chars", ""), context=context)
+                       if action == "write_stdin" else command_wait_ms(args.get("yield_time_ms"), default=0))
         except ValueError as exc:
             return self._error_result(str(exc))
         cursor = args.get("cursor")
@@ -139,23 +155,17 @@ class MonitorTool(BaseTool):
         if (wait_ms or cursor is not None) and not command_id:
             return self._error_result("command_id is required when waiting for command output")
         if action == "write_stdin":
-            written = await self._write_stdin(
+            return await self._write_stdin(
                 manager,
                 command_id,
                 str(args.get("chars") or ""),
                 conversation_id=conversation_id,
                 close_stdin=bool(args.get("close_stdin", False)),
+                context=context,
+                approval_args=deepcopy(args),
+                wait_ms=wait_ms,
+                cursor=cursor,
             )
-            if written.is_error or not (wait_ms or cursor is not None):
-                return written
-            try:
-                await manager.wait(command_id, conversation_id=conversation_id, wait_ms=wait_ms, cursor=cursor, cancel_event=getattr(context, "cancel_event", None))
-            except KeyError:
-                return self._error_result(f"Background command '{command_id}' was not found.")
-            snapshot = self._command_snapshot(manager, command_id, args, conversation_id=conversation_id)
-            snapshot.content = written.content + "\n" + snapshot.content
-            snapshot.content_preview = (written.content_preview or written.content) + "\n" + (snapshot.content_preview or snapshot.content)
-            return snapshot
         if action == "cancel":
             if not command_id:
                 return self._error_result("command_id is required when action is cancel.")
@@ -205,6 +215,10 @@ class MonitorTool(BaseTool):
         *,
         conversation_id: str,
         close_stdin: bool,
+        context: ToolExecutionContext,
+        approval_args: dict[str, Any],
+        wait_ms: int,
+        cursor: int | None,
     ) -> ToolResult:
         if not command_id:
             return self._error_result("command_id is required when action is write_stdin.")
@@ -214,16 +228,77 @@ class MonitorTool(BaseTool):
                 chars,
                 conversation_id=conversation_id,
                 close_stdin=close_stdin,
+                context=context,
+                authorize_input=lambda action: self._approve_terminal_input(action, context, approval_args),
+                wait_ms=wait_ms,
+                cursor=cursor,
             )
         except KeyError:
             return self._error_result(f"Background command '{command_id}' was not found.")
         except RuntimeError as exc:
             return self._error_result(str(exc))
-        suffix = " and closed stdin" if close_stdin else ""
-        return ToolResult(
-            content=f"Wrote {written} UTF-8 bytes to background command {command_id}{suffix}.",
-            content_preview=f"Wrote {written} UTF-8 bytes to the background command{suffix}.",
-        )
+        result = self._command_snapshot(manager, command_id, approval_args, conversation_id=conversation_id)
+        result.runtime_metadata.update(stdin_bytes_written=written, stdin_closed=close_stdin)
+        return result
+
+    async def _approve_terminal_input(self, action: TerminalInputApproval, context: ToolExecutionContext, args: dict[str, Any]) -> None:
+        from backend.agent.tool_batch_execution import _await_approval_within_turn_deadline
+        from backend.agent.tool_execution import await_preflight
+        from backend.llm.base import ToolCallEvent
+        from backend.permissions.approval_policy import rejected_approval_reason
+
+        strict = context.permission.strict_auto_review or context.permission_grants.strict_auto_review_enabled(context.turn_id)
+        if action.sandbox_permissions != "use_default" and not (strict and context.permission.approval_policy == "never"):
+            reason = rejected_approval_reason(context.permission, "sandbox_approval")
+            if reason is not None:
+                raise StdinAuthorityError(reason)
+
+        hook_manager = context.run_context.hook_manager if context.run_context is not None else None
+        if hook_manager is not None:
+            hook = await await_preflight(hook_manager.run_permission_request(
+                "write_stdin", action.permission_hook_input(), reason=action.reason,
+                permission_level="confirm", tool_call_id=context.tool_call_id,
+                session_id=context.session_id, permission_mode=context.permission.mode),
+                deadline=context.deadline_monotonic, cancel_event=context.cancel_event,
+                run_context=context.run_context, llm=context.llm)
+            if hook.updated_input is not None:
+                raise StdinAuthorityError("the permission hook proposed different terminal input; submit it as a new tool request")
+            if hook.blocked or hook.permission_decision == "deny":
+                raise StdinAuthorityError(hook.message or hook.feedback or "terminal input was rejected by the permission hook")
+            if hook.permission_decision == "allow":
+                return
+        service = context.run_context.guardian_review_service if context.run_context is not None else None
+        if service is not None:
+            from backend.agent.guardian.action import GuardianAction
+
+            receipt = await service.decide(GuardianAction.from_terminal_input(action, context), context,
+                strict_auto_review=context.permission.strict_auto_review or context.permission_grants.strict_auto_review_enabled(context.turn_id),
+                approval_reason=action.reason)
+            if receipt is not None and not receipt.require_user:
+                if receipt.status == "aborted":
+                    raise asyncio.CancelledError
+                if receipt.status != "approved":
+                    raise StdinAuthorityError(receipt.rationale or "terminal input was not approved")
+                return
+        if context.permission.approval_policy == "never":
+            raise StdinAuthorityError("approval policy is never; terminal input requires permissions that cannot be requested")
+        if context.approval_handler is None or context.emit_event is None:
+            raise StdinAuthorityError("terminal input requires approval but no approval channel is available")
+        if context.cancel_event is not None and context.cancel_event.is_set():
+            raise asyncio.CancelledError
+        await context.emit_event("approval_request", {
+            "subtype": "write_stdin", "tool_call_id": context.tool_call_id, "tool_name": self.name,
+            "args": deepcopy(args), "request_digest": context.authorization_digest,
+            "policy_identity": context.authorization_policy_identity,
+            "stdin_action": action.to_payload(),
+        })
+        call = ToolCallEvent(id=context.tool_call_id, name=self.name, arguments=deepcopy(args))
+        response = await _await_approval_within_turn_deadline(context.approval_handler, call, context,
+            expected_digest=context.authorization_digest)
+        if response.get("action") != "approve" or response.get("updated_input") is not None or response.get("updatedInput") is not None:
+            raise StdinAuthorityError(response.get("guidance") or "terminal input was not approved")
+        if response.get("scope") not in {None, "call"} or response.get("remember"):
+            raise StdinAuthorityError("terminal input approvals apply only to this interaction")
 
     async def _cancel_command(
         self,
@@ -348,14 +423,15 @@ class MonitorTool(BaseTool):
             }
             header += "Process cleanup is still pending; use action='cancel' on this command id to retry cleanup.\n"
         body = wrap_untrusted_content(output, "monitor") if output else "<no output captured yet>"
+        is_execution_error = command.status == "failed" and not command.command_completed
         status = (
             "pending"
             if bool(getattr(command, "cleanup_pending", False))
             else "failed"
-            if command.status == "failed"
+            if is_execution_error
             else "success"
         )
-        return ToolResult(
+        result = ToolResult(
             content=f"{header}\n{body}",
             content_preview=(
                 f"Process: {command.status}\ncommand: {command.command}\ncwd: {command.cwd}\nexit_code: {command.exit_code}\n"
@@ -363,12 +439,16 @@ class MonitorTool(BaseTool):
                 + ("[Output is incomplete; more output is retained.]\n" if more or truncated else "")
                 + (output or "<no output captured yet>")
             ),
-            is_error=command.status == "failed",
+            is_error=is_execution_error,
             status=status,
             result_kind="terminal",
             display_summary=f"Background command {command.command_id}: {command.status}",
             runtime_metadata={"command_id": command.command_id, "next_cursor": next_cursor, "more_output": more,
                               "end_cursor": end_cursor,
+                              "stdout_preview": output, "stderr_preview": "",
                               "process_status": command.status, "exit_code": command.exit_code},
             cleanup_receipt=cleanup_receipt,
         )
+        result.runtime_metadata["terminal_hook"] = manager.terminal_hook_payload(command_id,
+            conversation_id=conversation_id, output=output)
+        return result

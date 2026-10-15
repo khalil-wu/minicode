@@ -54,6 +54,8 @@ async def test_fork_keeps_host_runtime_and_isolates_code_values(sdk_owner):
 
     @tool
     async def branch_value(label: str, context):
+        assert context.window_binding_token == "fork-private-window-proof"
+        assert context.run_context.window_binding_token == "fork-private-window-proof"
         context.run_context.code_store.put("branch", label)
         if label == "PARENT":
             parent_entered.set()
@@ -65,7 +67,8 @@ async def test_fork_keeps_host_runtime_and_isolates_code_values(sdk_owner):
 
     parent = create_session(session_id="parent", workspace_root=workspace, config=config,
         llm=ToolModel("branch_value", {"label": "PARENT"}), artifact_store=artifacts,
-        tool_registry=create_tool_registry(branch_value), run_context=RunContext(agent_runtime=runtime))
+        tool_registry=create_tool_registry(branch_value),
+        run_context=RunContext(agent_runtime=runtime, window_binding_token="fork-private-window-proof"))
     child = parent.fork(session_id="child")
 
     async def collect(stream):
@@ -79,6 +82,7 @@ async def test_fork_keeps_host_runtime_and_isolates_code_values(sdk_owner):
         await asyncio.wait_for(parent_task, 10)
         assert observed == {"PARENT": "PARENT", "CHILD": "CHILD"}
         assert child._query_kwargs["run_context"].agent_runtime is runtime
+        assert child._query_kwargs["run_context"].window_binding_token == "fork-private-window-proof"
     finally:
         child_entered.set()
         await asyncio.gather(parent_task, return_exceptions=True)

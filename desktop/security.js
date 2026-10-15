@@ -171,6 +171,10 @@ function rememberTrustedWorkspaceRoot(targetPath) {
   } catch {
     return "";
   }
+  // The backend can mint a standalone task directory between native picker
+  // uses. Read its committed ledger before adding another native selection.
+  // Saving only this process's cache would discard those real task roots.
+  approvedWorkspaceRoots = new Set([...readApprovedWorkspaceRoots(), ...approvedWorkspaceRoots]);
   if (!Array.from(approvedWorkspaceRoots).some((root) => isSamePath(root, resolved))) {
     persistApprovedWorkspaceRoots([...approvedWorkspaceRoots, resolved]);
     approvedWorkspaceRoots.add(resolved);
@@ -283,7 +287,7 @@ const IPC_CAPABILITIES = new Set([
   "minicode:menu:popup",
   "minicode:fs:listTree", "minicode:fs:readFile",
   "minicode:fs:deletePath",
-  "minicode:fs:searchFiles", "minicode:notify",
+  "minicode:fs:searchFiles", "minicode:notify", "minicode:notifications:hide",
   "minicode:openExternal", "minicode:openPath", "minicode:pickDirectory",
   "minicode:pty:ackExit", "minicode:pty:clear", "minicode:pty:kill", "minicode:pty:killConversation", "minicode:pty:list", "minicode:pty:restart",
   "minicode:pty:resize", "minicode:pty:snapshot", "minicode:pty:spawn",
@@ -291,8 +295,15 @@ const IPC_CAPABILITIES = new Set([
   "minicode:startup:openLogs", "minicode:startup:quit", "minicode:startup:retry",
   "minicode:update:activity", "minicode:update:check", "minicode:update:download", "minicode:update:install",
   "minicode:update:preflight", "minicode:update:status:get",
-  "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize",
+  "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize", "minicode:window:state",
+  "minicode:window:unload:capture", "minicode:window:unload:resume",
+  "minicode:window:openConversation",
+  "minicode:window:initialNavigation:consume",
   "minicode:runtime:get",
+  "minicode:preferences:get", "minicode:preferences:set", "minicode:openPreferredPath", "minicode:saveFile",
+  "minicode:preferences:chooseTaskDirectory",
+  "minicode:browser:history", "minicode:browser:removeHistory",
+  "minicode:embeddedBrowser:clearBrowsingData", "minicode:embeddedBrowser:capture",
   "minicode:workspace:pickDirectory", "minicode:workspace:trust",
 ]);
 

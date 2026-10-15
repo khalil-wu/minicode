@@ -46,6 +46,7 @@ class AnswerCommitter:
                 final_text,
                 phase=provider_phase or "final_answer",
                 provider_items=replay_items,
+                answer_source="model_final",
             )
         if final_text:
             state.reply = (

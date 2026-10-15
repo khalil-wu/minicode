@@ -218,6 +218,10 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
     if structured is not None:
         return structured
 
+    # Subscription/workspace exhaustion is terminal even with transport 429.
+    if re.search(r"\b(?:workspace_(?:owner|member)_)?usage_limit_reached\b", text):
+        return LLMErrorClassification(True, False, "billing", "billing")
+
     if (
         "provider_error_type=protocol" in text
         or "provider_error_code=convert_request_failed" in text
@@ -616,7 +620,7 @@ def _structured_provider_error_signal(
             return LLMErrorClassification(True, False, "provider_protocol", "protocol")
         if any(token in signal for token in ("invalid_api_key", "authentication_error", "unauthorized")):
             return LLMErrorClassification(True, False, "auth", "auth")
-        if any(token in signal for token in ("insufficient_quota", "quota_exceeded", "billing_error")):
+        if any(token in signal for token in ("insufficient_quota", "quota_exceeded", "billing_error", "usage_limit_reached")):
             return LLMErrorClassification(True, False, "billing", "billing")
         if any(token in signal for token in ("rate_limit", "rate_limited", "too_many_requests")):
             return LLMErrorClassification(False, True, "api", "rate_limit")
@@ -724,7 +728,8 @@ def _error_text_fragments(message: str | BaseException | None) -> list[str]:
         if not isinstance(item, BaseException):
             continue
         _append_text(fragments, type(item).__name__)
-        for attr in ("status_code", "code", "type", "message", "body"):
+        for attr in ("status_code", "code", "type", "message", "body",
+                     "provider_error_code", "provider_error_schema_type", "provider_error_type"):
             _append_text(fragments, _stringify(getattr(item, attr, None)))
         response = getattr(item, "response", None)
         if response is None:

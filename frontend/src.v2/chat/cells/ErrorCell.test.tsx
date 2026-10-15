@@ -60,12 +60,13 @@ describe("ErrorCell", () => {
     expect(screen.getByText("Allow access and retry")).toBeTruthy();
   });
 
-  it("only shows the fatal badge for non-recoverable errors", () => {
+  it("keeps the actual error without exposing the internal recoverability flag", () => {
     const recoverable = render(<ErrorCell cell={base({ recoverable: true })} />);
     expect(screen.queryByText("不可恢复")).toBeNull();
     recoverable.unmount();
 
     render(<ErrorCell cell={base({ recoverable: false })} />);
-    expect(screen.getByText("不可恢复")).toBeTruthy();
+    expect(screen.queryByText("不可恢复")).toBeNull();
+    expect(screen.getByText("Something failed")).toBeTruthy();
   });
 });

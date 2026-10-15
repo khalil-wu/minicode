@@ -1,0 +1,526 @@
+{
+  "reference_revision": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "wire": [
+    {
+      "type": "tool_call",
+      "id": "actions-0",
+      "name": "run_command",
+      "args": {
+        "command": "Get-Content -LiteralPath source.txt -Raw"
+      },
+      "status": "running",
+      "started_at": 1791810584320,
+      "display_hint": "Run",
+      "result_kind": "command",
+      "activity_kind": "commandExecution",
+      "command_actions": [
+        {
+          "type": "read",
+          "command": "Get-Content -LiteralPath source.txt -Raw",
+          "name": "source.txt",
+          "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+        }
+      ],
+      "visibility": "timeline",
+      "group_id": "iter:1",
+      "step_id": "actions-0",
+      "turn_id": "turn:1",
+      "iteration_id": "iter:1",
+      "phase": "tool",
+      "side_effect_kind": "workspace",
+      "idempotent": false,
+      "request_digest": "7584327c271f8d5c4626f6e19280bea96f35e58fe49dd01892fcba1b41cd974a"
+    },
+    {
+      "type": "tool_result",
+      "id": "actions-0",
+      "summary": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+      "is_error": false,
+      "status": "success",
+      "display_summary": "Run",
+      "result_kind": "command",
+      "activity_kind": "commandExecution",
+      "command_actions": [
+        {
+          "type": "read",
+          "command": "Get-Content -LiteralPath source.txt -Raw",
+          "name": "source.txt",
+          "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+        }
+      ],
+      "visibility": "timeline",
+      "group_id": "iter:1",
+      "step_id": "actions-0",
+      "recoverable": true,
+      "turn_id": "turn:1",
+      "iteration_id": "iter:1",
+      "phase": "tool",
+      "side_effect_kind": "workspace",
+      "idempotent": false,
+      "completed_at_ms": 1791810585112
+    },
+    {
+      "type": "tool_call",
+      "id": "actions-1",
+      "name": "run_command",
+      "args": {
+        "command": "Write-Output 'actual exit evidence'; exit 7"
+      },
+      "status": "running",
+      "started_at": 1791810585126,
+      "display_hint": "Run",
+      "result_kind": "command",
+      "activity_kind": "commandExecution",
+      "command_actions": [
+        {
+          "type": "unknown",
+          "command": "Write-Output 'actual exit evidence'; exit 7"
+        }
+      ],
+      "visibility": "timeline",
+      "group_id": "iter:1",
+      "step_id": "actions-1",
+      "turn_id": "turn:1",
+      "iteration_id": "iter:1",
+      "phase": "tool",
+      "side_effect_kind": "workspace",
+      "idempotent": false,
+      "request_digest": "a4970632972a4f54e56e930d3057ec44ee58aabc9e2cb577dcb623f9b2e2b8b3"
+    },
+    {
+      "type": "tool_result",
+      "id": "actions-1",
+      "summary": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+      "is_error": true,
+      "status": "failed",
+      "display_summary": "Run",
+      "result_kind": "command",
+      "activity_kind": "commandExecution",
+      "command_actions": [
+        {
+          "type": "unknown",
+          "command": "Write-Output 'actual exit evidence'; exit 7"
+        }
+      ],
+      "visibility": "timeline",
+      "group_id": "iter:1",
+      "step_id": "actions-1",
+      "error_info": {
+        "error_kind": "execution_error",
+        "user_summary": "",
+        "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+        "recoverable": true,
+        "projection": "error",
+        "model_observation": "The run_command call failed. Try another approach if possible."
+      },
+      "error_kind": "execution_error",
+      "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+      "recoverable": true,
+      "projection": "error",
+      "turn_id": "turn:1",
+      "iteration_id": "iter:1",
+      "phase": "tool",
+      "side_effect_kind": "workspace",
+      "idempotent": false,
+      "completed_at_ms": 1791810585780
+    }
+  ],
+  "main_blocks": [
+    {
+      "type": "tool_call",
+      "record": {
+        "id": "actions-0",
+        "name": "run_command",
+        "args": {
+          "command": "Get-Content -LiteralPath source.txt -Raw"
+        },
+        "status": "success",
+        "started_at": 1791810584320,
+        "display_hint": "Run",
+        "result_kind": "command",
+        "activity_kind": "commandExecution",
+        "command_actions": [
+          {
+            "type": "read",
+            "command": "Get-Content -LiteralPath source.txt -Raw",
+            "name": "source.txt",
+            "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+          }
+        ],
+        "visibility": "timeline",
+        "group_id": "iter:1",
+        "step_id": "actions-0",
+        "turn_id": "turn:1",
+        "iteration_id": "iter:1",
+        "phase": "tool",
+        "side_effect_kind": "workspace",
+        "idempotent": false,
+        "request_digest": "7584327c271f8d5c4626f6e19280bea96f35e58fe49dd01892fcba1b41cd974a",
+        "transition": "completed",
+        "startedAt": 1791810584320,
+        "turnId": "turn:1",
+        "iterationId": "iter:1",
+        "stepId": "actions-0",
+        "groupId": "iter:1",
+        "resultKind": "command",
+        "activityKind": "commandExecution",
+        "commandActions": [
+          {
+            "type": "read",
+            "command": "Get-Content -LiteralPath source.txt -Raw",
+            "name": "source.txt",
+            "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+          }
+        ],
+        "displayHint": "Run",
+        "summary": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+        "is_error": false,
+        "display_summary": "Run",
+        "recoverable": true,
+        "completed_at_ms": 1791810585112,
+        "displaySummary": "Run",
+        "finishedAt": 1791810585123
+      }
+    },
+    {
+      "type": "tool_call",
+      "record": {
+        "id": "actions-1",
+        "name": "run_command",
+        "args": {
+          "command": "Write-Output 'actual exit evidence'; exit 7"
+        },
+        "status": "failed",
+        "started_at": 1791810585126,
+        "display_hint": "Run",
+        "result_kind": "command",
+        "activity_kind": "commandExecution",
+        "command_actions": [
+          {
+            "type": "unknown",
+            "command": "Write-Output 'actual exit evidence'; exit 7"
+          }
+        ],
+        "visibility": "timeline",
+        "group_id": "iter:1",
+        "step_id": "actions-1",
+        "turn_id": "turn:1",
+        "iteration_id": "iter:1",
+        "phase": "tool",
+        "side_effect_kind": "workspace",
+        "idempotent": false,
+        "request_digest": "a4970632972a4f54e56e930d3057ec44ee58aabc9e2cb577dcb623f9b2e2b8b3",
+        "transition": "failed",
+        "startedAt": 1791810585126,
+        "turnId": "turn:1",
+        "iterationId": "iter:1",
+        "stepId": "actions-1",
+        "groupId": "iter:1",
+        "resultKind": "command",
+        "activityKind": "commandExecution",
+        "commandActions": [
+          {
+            "type": "unknown",
+            "command": "Write-Output 'actual exit evidence'; exit 7"
+          }
+        ],
+        "displayHint": "Run",
+        "summary": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+        "is_error": true,
+        "display_summary": "Run",
+        "error_info": {
+          "error_kind": "execution_error",
+          "user_summary": "",
+          "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+          "recoverable": true,
+          "projection": "error",
+          "model_observation": "The run_command call failed. Try another approach if possible."
+        },
+        "error_kind": "execution_error",
+        "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+        "recoverable": true,
+        "projection": "error",
+        "completed_at_ms": 1791810585780,
+        "displaySummary": "Run",
+        "errorInfo": {
+          "error_kind": "execution_error",
+          "user_summary": "",
+          "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+          "recoverable": true,
+          "projection": "error",
+          "model_observation": "The run_command call failed. Try another approach if possible."
+        },
+        "errorKind": "execution_error",
+        "developerDetail": "Exit code: 7 (failed)\n\nactual exit evidence",
+        "finishedAt": 1791810585789
+      }
+    }
+  ],
+  "child_messages": [
+    {
+      "id": "66b2e63b386e41269335c64e776cf0e2",
+      "role": "user",
+      "content": "read and run",
+      "timestamp": 1791810584318
+    },
+    {
+      "id": "subagent-turn-6aeeb6b459fc4e67b989c630f6b56bc5",
+      "role": "assistant",
+      "content": "Both actual commands were inspected.",
+      "timestamp": 1791810584318,
+      "blocks": [
+        {
+          "type": "tool_call",
+          "record": {
+            "id": "actions-0",
+            "name": "run_command",
+            "status": "success",
+            "summary": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+            "displaySummary": "Run",
+            "resultKind": "command",
+            "activityKind": "commandExecution",
+            "visibility": "timeline",
+            "displayHint": "Run",
+            "groupId": "iter:1",
+            "stepId": "actions-0",
+            "turnId": "turn:1",
+            "iterationId": "iter:1",
+            "phase": "tool",
+            "outputPreview": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+            "commandActions": [
+              {
+                "type": "read",
+                "command": "Get-Content -LiteralPath source.txt -Raw",
+                "name": "source.txt",
+                "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+              }
+            ],
+            "args": {
+              "command": "Get-Content -LiteralPath source.txt -Raw"
+            },
+            "durationMs": 6,
+            "startedAt": 1791810585116,
+            "finishedAt": 1791810585122,
+            "recoverable": true
+          }
+        },
+        {
+          "type": "tool_call",
+          "record": {
+            "id": "actions-1",
+            "name": "run_command",
+            "status": "failed",
+            "summary": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+            "displaySummary": "Run",
+            "resultKind": "command",
+            "activityKind": "commandExecution",
+            "visibility": "timeline",
+            "errorKind": "execution_error",
+            "developerDetail": "Exit code: 7 (failed)\n\nactual exit evidence",
+            "projection": "error",
+            "displayHint": "Run",
+            "groupId": "iter:1",
+            "stepId": "actions-1",
+            "turnId": "turn:1",
+            "iterationId": "iter:1",
+            "phase": "tool",
+            "outputPreview": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+            "commandActions": [
+              {
+                "type": "unknown",
+                "command": "Write-Output 'actual exit evidence'; exit 7"
+              }
+            ],
+            "args": {
+              "command": "Write-Output 'actual exit evidence'; exit 7"
+            },
+            "durationMs": 4,
+            "startedAt": 1791810585783,
+            "finishedAt": 1791810585787,
+            "recoverable": true,
+            "errorInfo": {
+              "error_kind": "execution_error",
+              "user_summary": "",
+              "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+              "recoverable": true,
+              "projection": "error",
+              "model_observation": "The run_command call failed. Try another approach if possible."
+            }
+          }
+        },
+        {
+          "type": "text",
+          "item_id": "subagent-turn-6aeeb6b459fc4e67b989c630f6b56bc5-final",
+          "content": "Both actual commands were inspected.",
+          "source": "retained",
+          "status": "completed",
+          "is_streaming": false
+        }
+      ],
+      "turn_id": "subagent-turn-6aeeb6b459fc4e67b989c630f6b56bc5",
+      "is_streaming": false,
+      "completed_at": 1791810585791,
+      "duration_ms": 1473,
+      "terminal_status": "completed",
+      "termination_reason": "completed"
+    }
+  ],
+  "child_incremental": [
+    {
+      "event_id": "66b2e63b386e41269335c64e776cf0e2",
+      "seq": 1,
+      "ts_ms": 1791810584318,
+      "event_type": "user_prompt",
+      "payload": {
+        "content": "read and run",
+        "run_id": "",
+        "turn_id": ""
+      }
+    },
+    {
+      "event_id": "6aeeb6b459fc4e67b989c630f6b56bc5",
+      "seq": 2,
+      "ts_ms": 1791810585116,
+      "event_type": "tool_use",
+      "payload": {
+        "tool_call": {
+          "id": "actions-0",
+          "name": "run_command",
+          "status": "running",
+          "resultKind": "command",
+          "activityKind": "commandExecution",
+          "visibility": "timeline",
+          "displayHint": "Run",
+          "groupId": "iter:1",
+          "stepId": "actions-0",
+          "turnId": "turn:1",
+          "iterationId": "iter:1",
+          "phase": "tool",
+          "commandActions": [
+            {
+              "type": "read",
+              "command": "Get-Content -LiteralPath source.txt -Raw",
+              "name": "source.txt",
+              "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+            }
+          ],
+          "args": {
+            "command": "Get-Content -LiteralPath source.txt -Raw"
+          },
+          "startedAt": 1791810585116
+        }
+      }
+    },
+    {
+      "event_id": "a3e02190c14b4804a5d4c73a7d456e10",
+      "seq": 3,
+      "ts_ms": 1791810585122,
+      "event_type": "tool_result",
+      "payload": {
+        "tool_call_id": "actions-0",
+        "record": {
+          "id": "actions-0",
+          "name": "run_command",
+          "status": "success",
+          "summary": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+          "displaySummary": "Run",
+          "resultKind": "command",
+          "activityKind": "commandExecution",
+          "visibility": "timeline",
+          "groupId": "iter:1",
+          "stepId": "actions-0",
+          "turnId": "turn:1",
+          "iterationId": "iter:1",
+          "phase": "tool",
+          "outputPreview": "Exit code: 0\n\nreal file evidence\r\nsecond line\r\n\r\n",
+          "commandActions": [
+            {
+              "type": "read",
+              "command": "Get-Content -LiteralPath source.txt -Raw",
+              "name": "source.txt",
+              "path": "C:/Users/ago/AppData/Local/Temp/pytest-of-吴嘉炜/pytest-533/test_real_command_execution_ca0/workspace/source.txt"
+            }
+          ],
+          "finishedAt": 1791810585122,
+          "recoverable": true
+        }
+      }
+    },
+    {
+      "event_id": "a5dd5d030e604d349dfb6a81cc320653",
+      "seq": 4,
+      "ts_ms": 1791810585783,
+      "event_type": "tool_use",
+      "payload": {
+        "tool_call": {
+          "id": "actions-1",
+          "name": "run_command",
+          "status": "running",
+          "resultKind": "command",
+          "activityKind": "commandExecution",
+          "visibility": "timeline",
+          "displayHint": "Run",
+          "groupId": "iter:1",
+          "stepId": "actions-1",
+          "turnId": "turn:1",
+          "iterationId": "iter:1",
+          "phase": "tool",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "Write-Output 'actual exit evidence'; exit 7"
+            }
+          ],
+          "args": {
+            "command": "Write-Output 'actual exit evidence'; exit 7"
+          },
+          "startedAt": 1791810585783
+        }
+      }
+    },
+    {
+      "event_id": "4aa6aae3419c41e8985411b92c8ba65c",
+      "seq": 5,
+      "ts_ms": 1791810585787,
+      "event_type": "tool_result",
+      "payload": {
+        "tool_call_id": "actions-1",
+        "record": {
+          "id": "actions-1",
+          "name": "run_command",
+          "status": "failed",
+          "summary": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+          "displaySummary": "Run",
+          "resultKind": "command",
+          "activityKind": "commandExecution",
+          "visibility": "timeline",
+          "errorKind": "execution_error",
+          "developerDetail": "Exit code: 7 (failed)\n\nactual exit evidence",
+          "projection": "error",
+          "groupId": "iter:1",
+          "stepId": "actions-1",
+          "turnId": "turn:1",
+          "iterationId": "iter:1",
+          "phase": "tool",
+          "outputPreview": "Exit code: 7 (failed)\n\nactual exit evidence\r\n",
+          "commandActions": [
+            {
+              "type": "unknown",
+              "command": "Write-Output 'actual exit evidence'; exit 7"
+            }
+          ],
+          "finishedAt": 1791810585787,
+          "recoverable": true,
+          "errorInfo": {
+            "error_kind": "execution_error",
+            "user_summary": "",
+            "developer_detail": "Exit code: 7 (failed)\n\nactual exit evidence",
+            "recoverable": true,
+            "projection": "error",
+            "model_observation": "The run_command call failed. Try another approach if possible."
+          }
+        }
+      }
+    }
+  ]
+}

@@ -69,6 +69,20 @@ describe("GitPanel workspace workflows", () => {
 
   afterEach(() => cleanup());
 
+  it("does not mount repository actions or request an empty workspace", () => {
+    useAppStore.setState({ workingDirectory: "" });
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    try {
+      render(<GitPanel />);
+      expect(screen.getByText("尚未打开项目")).toBeTruthy();
+      expect(screen.queryByRole("region", { name: "Git 交付" })).toBeNull();
+      expect(mocks.status).not.toHaveBeenCalled();
+      expect(mocks.worktree).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("retains a hidden overview without fetching and refreshes only after activation", async () => {
     const { rerender } = render(<GitPanel active={false} />);
     expect(mocks.status).not.toHaveBeenCalled();

@@ -15,11 +15,13 @@ import subprocess
 import sys
 import threading
 import time
+from time import monotonic
+import weakref
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Callable, Iterable, Literal
 from uuid import uuid4
 
 from backend.async_cleanup import (
@@ -95,6 +97,33 @@ logger = logging.getLogger(__name__)
 # observation stream. A lost metric never changes run authority and is reported
 # through ``metric_persistence`` when it is observable.
 _METRIC_APPEND_LOCK = threading.RLock()
+_SUBAGENT_ACTIVITY_GUARD = threading.Lock()
+_SUBAGENT_ACTIVITY_SUBSCRIBERS: set[weakref.WeakMethod] = set()
+
+
+def subscribe_subagent_activity_changed(callback: Callable[[AgentRuntime], None]) -> Callable[[], None]:
+    """Subscribe a host owner without retaining a disconnected session."""
+    reference = weakref.WeakMethod(callback)
+    with _SUBAGENT_ACTIVITY_GUARD:
+        _SUBAGENT_ACTIVITY_SUBSCRIBERS.add(reference)
+
+    def unsubscribe() -> None:
+        with _SUBAGENT_ACTIVITY_GUARD:
+            _SUBAGENT_ACTIVITY_SUBSCRIBERS.discard(reference)
+
+    return unsubscribe
+
+
+def _notify_subagent_activity_changed(runtime: AgentRuntime) -> None:
+    with _SUBAGENT_ACTIVITY_GUARD:
+        references = tuple(_SUBAGENT_ACTIVITY_SUBSCRIBERS)
+    for reference in references:
+        callback = reference()
+        if callback is not None:
+            callback(runtime)
+        else:
+            with _SUBAGENT_ACTIVITY_GUARD:
+                _SUBAGENT_ACTIVITY_SUBSCRIBERS.discard(reference)
 
 
 def _purge_conversation_files(
@@ -365,7 +394,7 @@ class AgentRuntime:
                 self._registry.seal(record.run_id, kind="run")
         for record in self._subagents.values():
             self._registry.register(record, kind="subagent")
-            if record.status != "running":
+            if record.status not in {"pending", "running"}:
                 self._registry.seal(record.subagent_id, kind="subagent")
         self._subagent_results = {
             record.subagent_id: record
@@ -383,7 +412,8 @@ class AgentRuntime:
                     record.subagent_id,
                     status="interrupted",
                     content=summary,
-                    error="runtime_interrupted",
+                    error=record.cleanup_reason or "runtime_interrupted",
+                    terminal_reason=record.cleanup_reason or "runtime_interrupted",
                     tool_call_count=record.tool_count,
                     agent_path=record.agent_path,
                     mailbox_epoch=record.mailbox_epoch,
@@ -627,6 +657,7 @@ class AgentRuntime:
             runtime_owner_token=self._runtime_owner_token,
             agent_path=agent_path,
             mailbox_epoch=max(0, int(mailbox_epoch or 0)),
+            _started_monotonic=monotonic(),
         )
         registration = self._registry.prepare_registration(record, kind="run")
         persisted = self._swarm_store.upsert_agent_run(
@@ -788,8 +819,10 @@ class AgentRuntime:
         *,
         subagent_id: str,
         parent_run_id: str = "",
+        parent_tool_call_id: str = "",
         agent_type: str,
         prompt_summary: str = "",
+        input_prompt: str = "",
         background: bool = False,
         task_id: str = "",
         session_id: str = "",
@@ -810,6 +843,7 @@ class AgentRuntime:
         permission_mode: str = "confirm",
         plan_mode_required: bool = False,
         agent_path_segment: str = "",
+        pending: bool = False,
     ) -> SubagentRunRecord:
         if not self._refresh_runtime_lease():
             raise RuntimeError("Agent runtime lease was lost; refusing to start a subagent.")
@@ -822,9 +856,14 @@ class AgentRuntime:
             raise RuntimeError(f"Subagent {subagent_id} is already running.")
         if existing is not None and existing.cleanup_pending:
             raise RuntimeError(f"Subagent {subagent_id} still has pending cleanup from its previous execution.")
-        if subagent_id in self._subagent_slot_reservations:
+        promoting_pending = existing is not None and existing.status == "pending" and not pending
+        if promoting_pending and not self._owns_record(existing):
+            raise RuntimeError(f"Subagent {subagent_id} is queued by another runtime.")
+        if pending and existing is not None and existing.status == "pending":
+            raise RuntimeError(f"Subagent {subagent_id} is already queued.")
+        if not pending and subagent_id in self._subagent_slot_reservations:
             self._subagent_slot_reservations.discard(subagent_id)
-        elif existing is None or existing.status != "running":
+        elif not pending:
             if not teammate_name:
                 # Bounded workers share the global capacity; named teammates
                 # have a separate lifecycle and no bounded-worker ceiling.
@@ -880,8 +919,10 @@ class AgentRuntime:
         record = SubagentRunRecord(
             subagent_id=subagent_id,
             parent_run_id=parent_run_id,
+            parent_tool_call_id=parent_tool_call_id or (existing.parent_tool_call_id if promoting_pending else ""),
             agent_type=agent_type,
             prompt_summary=prompt_summary,
+            input_prompt=input_prompt or (existing.input_prompt if promoting_pending else ""),
             background=background,
             task_id=task_id,
             session_id=str(session_id or "").strip(),
@@ -895,8 +936,11 @@ class AgentRuntime:
             detach_from_parent=detach,
             read_only=read_only,
             write_scope=write_scope or [],
-            resume_config=dict(resume_config or {}),
+            resume_config={**(existing.resume_config if promoting_pending else {}), **(resume_config or {})},
             current_activity=current_activity,
+            status="pending" if pending else "running",
+            accepted_at=existing.accepted_at if promoting_pending else epoch_ms(),
+            started_at=0 if pending else epoch_ms(),
             runtime_instance_id=self._runtime_instance_id,
             runtime_process_id=self._runtime_process_id,
             runtime_process_start_identity=self._runtime_process_start_identity,
@@ -905,7 +949,7 @@ class AgentRuntime:
             # original immutable path while allowing parent_run_id ownership to
             # move to the new active coordinator.
             agent_path=candidate_agent_path,
-            mailbox_epoch=MailboxEpoch(previous_epoch).next().value,
+            mailbox_epoch=previous_epoch if promoting_pending else MailboxEpoch(previous_epoch).next().value,
             teammate_name=str(teammate_name or "").strip(),
             team_name=str(team_name or "").strip(),
             permission_mode=str(permission_mode or "confirm").strip(),
@@ -922,7 +966,7 @@ class AgentRuntime:
         )
         if persisted is None:
             raise RuntimeError(f"Subagent {subagent_id} is owned by another runtime.")
-        if existing is not None:
+        if existing is not None and not promoting_pending:
             # Clear the prior incarnation only after the new ownership claim
             # succeeds. A failed cross-process claim must preserve its result.
             self._subagent_results.pop(subagent_id, None)
@@ -940,9 +984,12 @@ class AgentRuntime:
         )
         if subagent_id not in self._subagent_completion_events:
             self._subagent_completion_events[subagent_id] = asyncio.Event()
-        self.write_metric("subagent_started", record.to_dict())
+        task_metadata = self._subagent_task_metadata.get(subagent_id)
+        if task_metadata is not None:
+            task_metadata["status"] = record.status
+        self.write_metric("subagent_accepted" if pending else "subagent_started", record.to_dict())
         self._record_agent_activity(
-            "started",
+            "queued" if pending else "started",
             agent_ids=(subagent_id,),
             conversation_id=self._conversation_id_for_agent(subagent_id),
             status=record.status,
@@ -1111,6 +1158,25 @@ class AgentRuntime:
         )
         return candidate
 
+    def complete_pending_subagent(
+        self, subagent_id: str, *, status: AgentRunStatus, content: str, reason: str,
+    ) -> tuple[SubagentRunRecord, SubagentResultRecord] | None:
+        record = self._subagents.get(subagent_id)
+        if record is None or record.status != "pending":
+            return None
+        result = self.store_subagent_result(subagent_id, status=status, content=content,
+            error=content if status == "failed" else "", terminal_reason=reason,
+            agent_path=record.agent_path, mailbox_epoch=record.mailbox_epoch)
+        if result is None:
+            return None
+        terminal = self.complete_subagent(subagent_id, status, summary=content,
+            agent_path=record.agent_path, mailbox_epoch=record.mailbox_epoch)
+        if terminal is None:
+            return None
+        self.execution_journal(subagent_id).append_terminal(status=status, summary=content, reason=reason,
+            extra={"agent_path": record.agent_path, "mailbox_epoch": record.mailbox_epoch, "child_started": False})
+        return terminal, result
+
     def register_subagent_task(
         self,
         subagent_id: str,
@@ -1118,6 +1184,7 @@ class AgentRuntime:
         *,
         cancel_event: asyncio.Event | None = None,
         parent_run_id: str = "",
+        parent_tool_call_id: str = "",
         owner_task_id: str = "",
         session_id: str = "",
         model: str = "",
@@ -1125,10 +1192,20 @@ class AgentRuntime:
         reasoning_effort: str = "",
         agent_type: str = "",
         prompt_summary: str = "",
+        input_prompt: str = "",
         background: bool = False,
         pending: bool = False,
         canonical_task_name: str = "",
         agent_path_segment: str = "",
+        cancel_with_parent: bool | None = None,
+        detach_from_parent: bool | None = None,
+        read_only: bool = False,
+        write_scope: list[str] | None = None,
+        resume_config: dict[str, Any] | None = None,
+        teammate_name: str = "",
+        team_name: str = "",
+        permission_mode: str = "confirm",
+        plan_mode_required: bool = False,
     ) -> None:
         candidate_agent_path = self.validate_subagent_task_registration(
             subagent_id,
@@ -1139,6 +1216,19 @@ class AgentRuntime:
         clean_subagent_id = str(subagent_id or "").strip()
         clean_parent_run_id = str(parent_run_id or "").strip()
         clean_task_name = str(canonical_task_name or "").strip()
+        if pending:
+            self.start_subagent(
+                subagent_id=subagent_id, parent_run_id=clean_parent_run_id,
+                parent_tool_call_id=parent_tool_call_id,
+                agent_type=agent_type, prompt_summary=prompt_summary, input_prompt=input_prompt,
+                background=background, task_id=clean_task_name, session_id=session_id,
+                model=model, provider=provider, reasoning_effort=reasoning_effort, objective=prompt_summary,
+                cancel_with_parent=cancel_with_parent, detach_from_parent=detach_from_parent,
+                read_only=read_only, write_scope=write_scope, resume_config=resume_config,
+                teammate_name=teammate_name, team_name=team_name, permission_mode=permission_mode,
+                plan_mode_required=plan_mode_required, agent_path_segment=agent_path_segment or clean_task_name,
+                pending=True,
+            )
         self._subagent_tasks[subagent_id] = task
         self._subagent_task_metadata[subagent_id] = {
             "subagent_id": subagent_id,
@@ -1230,17 +1320,6 @@ class AgentRuntime:
             )
         return candidate_agent_path
 
-    def mark_subagent_task_running(self, subagent_id: str) -> None:
-        metadata = self._subagent_task_metadata.get(str(subagent_id or "").strip())
-        if isinstance(metadata, dict):
-            metadata["status"] = "running"
-            self._record_agent_activity(
-                "running",
-                agent_ids=(subagent_id,),
-                conversation_id=self._conversation_id_for_agent(subagent_id),
-                status="running",
-            )
-
     def release_subagent_task(
         self,
         subagent_id: str,
@@ -1261,6 +1340,7 @@ class AgentRuntime:
         self._subagent_owner_task_ids.pop(subagent_id, None)
         self._subagent_session_ids.pop(subagent_id, None)
         self.release_subagent_slot(subagent_id)
+        _notify_subagent_activity_changed(self)
         if subagent_id not in self._subagents:
             self._subagent_name_registry = {
                 name: registered_id
@@ -1276,6 +1356,9 @@ class AgentRuntime:
     def has_live_subagent_task(self, subagent_id: str) -> bool:
         task = self._subagent_tasks.get(subagent_id)
         return task is not None and not task.done()
+
+    def owns_subagent_task(self, subagent_id: str, task: asyncio.Task[Any]) -> bool:
+        return self._subagent_tasks.get(subagent_id) is task
 
     def transfer_subagent_task_owner(
         self,
@@ -1370,6 +1453,8 @@ class AgentRuntime:
                 loop.call_soon_threadsafe(event.set)
             except RuntimeError:
                 continue
+        if kind in {"queued", "started", "completed", "task_registered"}:
+            _notify_subagent_activity_changed(self)
         return sequence
 
     def agent_activity_cursor(self) -> int:
@@ -1918,6 +2003,7 @@ class AgentRuntime:
             "subagent_cleanup_requested",
             {"subagent_id": subagent_id, "reason": reason},
         )
+        _notify_subagent_activity_changed(self)
         self.execution_journal(subagent_id).append_cleanup(
             {
                 "resource_kind": "subagent",
@@ -1947,6 +2033,7 @@ class AgentRuntime:
             return None
         self._subagents[subagent_id] = candidate
         self.write_metric("subagent_cleanup_completed", {"subagent_id": subagent_id})
+        _notify_subagent_activity_changed(self)
         self.execution_journal(subagent_id).append_cleanup(
             {
                 "resource_kind": "subagent",
@@ -2128,6 +2215,15 @@ class AgentRuntime:
                 completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
         return completed
 
+    def subagent_tasks_for_conversation(self, conversation_id: str) -> set[asyncio.Task[Any]]:
+        """Borrow actual workers/continuations through their authoritative owner edges."""
+        return {
+            task for agent_id, task in self._subagent_tasks.items()
+            if not task.done()
+            and (owner := self.get_agent_owner_run(agent_id)) is not None
+            and owner.conversation_id == conversation_id
+        }
+
     async def stop_subagent_tasks_for_conversation(
         self,
         conversation_id: str,
@@ -2278,13 +2374,13 @@ class AgentRuntime:
         # turn in the same conversation may consume that terminal notification
         # while the mailbox epoch still matches. Reusing the subagent id bumps
         # the epoch, so stale-incarnation results remain rejected.
-        record = self._subagents.get(str(subagent_id or "").strip())
-        if record is None or record.status == "running":
+        record = self._subagents.get(str(subagent_id or "").strip()) or self.load_persisted_subagent(subagent_id)
+        if record is None or record.status in {"pending", "running"}:
             return False
         if int(mailbox_epoch or 0) != int(record.mailbox_epoch or 0):
             return False
-        target_parent = self._runs.get(str(parent_run_id or "").strip())
-        original_parent = self._runs.get(str(record.parent_run_id or "").strip())
+        target_parent = self.get_agent_owner_run(parent_run_id)
+        original_parent = self.get_agent_owner_run(record.parent_run_id)
         if target_parent is None or original_parent is None:
             return False
         if original_parent.status == "running":
@@ -2649,6 +2745,17 @@ class AgentRuntime:
             },
         )
 
+    def _subagent_worker_projection(
+        self, subagent_id: str, record: SubagentRunRecord | None,
+    ) -> dict[str, str]:
+        task = self._subagent_tasks.get(subagent_id)
+        if task is None:
+            return {}
+        task_metadata = self._subagent_task_metadata.get(subagent_id, {})
+        task_status = str(task_metadata.get("status") or "running")
+        status = record.status if record is not None else task_status
+        return {"background_task": "done" if task.done() else "queued" if status == "pending" else "running"}
+
     def get_subagent_snapshot(
         self,
         subagent_id: str,
@@ -2681,13 +2788,7 @@ class AgentRuntime:
         )
         if task is not None:
             task_status = str(task_metadata.get("status") or "running")
-            payload["background_task"] = (
-                "done"
-                if task.done()
-                else "running"
-                if record is not None or task_status == "running"
-                else "queued"
-            )
+            payload.update(self._subagent_worker_projection(subagent_id, record))
             payload.setdefault("status", task_status)
         cancel_event = self._subagent_cancel_events.get(subagent_id)
         if cancel_event is not None and cancel_event.is_set():
@@ -2895,6 +2996,7 @@ class AgentRuntime:
         summary: str = "",
         sender_mailbox_epoch: int | None = None,
         recipient_mailbox_epoch: int | None = None,
+        delivery_mode: Literal["queue_only", "trigger_turn"] = "trigger_turn",
     ) -> SwarmMessageRecord:
         sender_record = self.get_subagent(sender_id)
         sender_run = self.get_run(sender_id) if sender_record is None else None
@@ -2943,7 +3045,7 @@ class AgentRuntime:
             resolved_sender_epoch = max(0, int(sender_mailbox_epoch or 0))
         expected_recipient_epoch = (
             max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0)) + 1
-            if recipient_record is not None and str(recipient_record.status or "") != "running"
+            if recipient_record is not None and str(recipient_record.status or "") not in {"pending", "running"}
             else max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0))
         )
         resolved_recipient_epoch = (
@@ -2982,6 +3084,7 @@ class AgentRuntime:
                 "sender_mailbox_epoch": resolved_sender_epoch,
                 "recipient_mailbox_epoch": resolved_recipient_epoch,
                 "recipient_mailbox_epochs": broadcast_epochs,
+                "delivery_mode": delivery_mode,
             })
         )
         self._swarm_messages[record.message_id] = record
@@ -2999,7 +3102,7 @@ class AgentRuntime:
                 conversation_id=str(getattr(parent_run, "conversation_id", "") or conversation_id),
                 session_id=str(getattr(parent_run, "session_id", "") or ""),
                 subagent_id=sender_id,
-                payload={"message_id": record.message_id},
+                payload={"message_id": record.message_id, "delivery_mode": delivery_mode},
                 kind="mailbox_wake",
                 idempotency_key=f"mailbox_wake:{record.message_id}",
                 base_dir=self._outbox_root,
@@ -3174,6 +3277,7 @@ class AgentRuntime:
         since_seq: int = 0,
         limit: int = 100,
         lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
+        trigger_turn_only: bool = False,
     ) -> list[MailboxMessageClaim]:
         if not self._refresh_runtime_lease():
             raise RuntimeError("runtime lease was lost before mailbox claim")
@@ -3185,6 +3289,7 @@ class AgentRuntime:
             since_seq=since_seq,
             limit=limit,
             lease_ms=lease_ms,
+            trigger_turn_only=trigger_turn_only,
         )
         claims: list[MailboxMessageClaim] = []
         for item in raw_claims:
@@ -3671,6 +3776,22 @@ class AgentRuntime:
                 return
         self._append_metrics([metric])
 
+    def active_subagent_snapshot(self) -> list[dict[str, Any]]:
+        """Expose durable global work and live terminal cleanup as upgrade blockers."""
+        active = {item["id"]: item for item in self._swarm_store.active_subagent_snapshot()}
+        for subagent_id, task in self._subagent_tasks.items():
+            if task.done() or subagent_id in active:
+                continue
+            record = self._subagents.get(subagent_id)
+            status = record.status if record is not None else self._subagent_task_metadata[subagent_id]["status"]
+            active[subagent_id] = {
+                "id": subagent_id,
+                "status": status,
+                "cleanup_pending": (record.cleanup_pending if record is not None else False)
+                or status not in {"pending", "running"},
+            }
+        return [active[subagent_id] for subagent_id in sorted(active)]
+
     def list_runs(self, *, conversation_id: str = "", include_subagents: bool = False) -> dict[str, Any]:
         """Return a lightweight runtime snapshot for UI/debug panels."""
         runs = [
@@ -3717,7 +3838,7 @@ class AgentRuntime:
             subagents = [
                 {
                     **record.public_dict(),
-                    **({"background_task": "running"} if record.subagent_id in self._subagent_tasks else {}),
+                    **self._subagent_worker_projection(record.subagent_id, record),
                     **({"result_available": True} if record.subagent_id in self._subagent_results else {}),
                     **(
                         {"cancel_requested": True}
@@ -3734,7 +3855,7 @@ class AgentRuntime:
             subagents.extend(
                 {
                     **project_public_subagent_run(metadata),
-                    "background_task": "done" if task.done() else "queued",
+                    **self._subagent_worker_projection(subagent_id, None),
                     "result_available": False,
                 }
                 for subagent_id, task in self._subagent_tasks.items()

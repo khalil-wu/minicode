@@ -11,9 +11,11 @@ import type {
   ResolvedTheme,
 } from "./types";
 import { clamp } from "../lib/clamp";
+import { rightPanelDefaultWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
 import { clampTextScale } from "../lib/text-scale";
 import { safeJsonParse } from "../lib/safe-parse";
 import { cachedEditorDrafts, cachedEditorWorkspaceIndex, loadEditorDrafts, persistEditorDrafts, type EditorWorkspaceIndex } from "./editor-drafts";
+import { canClaimLegacyEditorDrafts, draftWindowOwnerId, windowDraftWorkspaceKey } from "./draft-window-owner";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import {
   isTerminalToolCallStatus,
@@ -43,6 +45,7 @@ export const LS = {
     leftWidth: "minicode.layout.left-width",
     leftExpandedWidth: "minicode.layout.left-expanded-width",
     rightWidth: "minicode.layout.right-width",
+    rightWidthRatio: "minicode.layout.right-width-ratio:v3",
     rightOpen: "minicode.layout.right-open",
     dockHeight: "minicode.layout.dock-height",
     dockCollapsed: "minicode.layout.dock-collapsed",
@@ -54,7 +57,10 @@ export const LS = {
   agentMode: "minicode.composer.agentMode",
   remoteImagePolicy: "minicode.markdown.remoteImagePolicy",
   conversation: {
-    activeId: "minicode.conversation.active-id",
+    get activeId() {
+      const owner = window.__MINICODE_RUNTIME__?.windowOwnerId;
+      return !owner || owner === "primary" ? "minicode.conversation.active-id" : `minicode.conversation.active-id:${owner}`;
+    },
   },
   editorTabs: "minicode.editor.tabs",
   editorDrafts: "minicode.editor.drafts",
@@ -64,11 +70,10 @@ export const LS = {
 };
 
 export const DEFAULT_WORKSPACE_KEY = "__default__";
-export const LEFT_SIDEBAR_DEFAULT_WIDTH = 275;
+export const LEFT_SIDEBAR_DEFAULT_WIDTH = 340;
 export const LEFT_SIDEBAR_MIN_WIDTH = 240;
 export const LEFT_SIDEBAR_MAX_WIDTH = 520;
-export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
-export const RIGHT_SIDEBAR_MAX = 1040;
+export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 600;
 export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
 
 export const isCompactWorkbenchViewport = () => (
@@ -228,11 +233,16 @@ export const loadInitialLayout = () => {
       ? 0
       : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, left)
     : LEFT_SIDEBAR_DEFAULT_WIDTH;
+  const mainContentWidth = window.innerWidth - leftSidebarWidth;
+  const rightSidebarWidth = Number.isFinite(right) ? right : rightPanelDefaultWidth(mainContentWidth, window.innerHeight);
+  const storedRightRatio = readLS(LS.layout.rightWidthRatio);
   return {
     leftSidebarWidth,
     leftSidebarExpandedWidth: leftSidebarWidth || clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH,
       Number(readLS(LS.layout.leftExpandedWidth)) || LEFT_SIDEBAR_DEFAULT_WIDTH),
-    rightSidebarWidth: clamp(320, RIGHT_SIDEBAR_MAX, Number.isFinite(right) ? right : RIGHT_SIDEBAR_DEFAULT_WIDTH),
+    rightSidebarWidth,
+    rightSidebarWidthRatio: storedRightRatio === null
+      ? rightPanelWidthRatio(rightSidebarWidth, mainContentWidth) : Number(storedRightRatio),
     rightPanelOpen: rightOpen,
     dockHeight: clamp(180, 520, Number.isFinite(dock) ? dock : 240),
     dockCollapsed: collapsed,
@@ -242,22 +252,6 @@ export const loadInitialLayout = () => {
 };
 
 // ── Right sidebar helpers ──────────────────────────────────────────
-
-export const preferredRightSidebarWidth = (
-  tab: UISlice["rightStackTab"],
-  currentWidth: number,
-): number => {
-  const viewportWidth = typeof window === "undefined" ? 1440 : window.innerWidth;
-  if (viewportWidth < 1180) return currentWidth;
-  const preferred =
-    tab === "preview" ? 440 :
-      tab === "browser" ? 680 :
-        tab === "subagents" ? RIGHT_SIDEBAR_DEFAULT_WIDTH :
-            tab === "artifacts" ? RIGHT_SIDEBAR_DEFAULT_WIDTH :
-            0;
-  if (!preferred || currentWidth >= preferred) return currentWidth;
-  return clamp(320, RIGHT_SIDEBAR_MAX, preferred);
-};
 
 export const automaticRightPanelState = (
   state: AppStore,
@@ -271,15 +265,10 @@ export const automaticRightPanelState = (
   ) {
     return {};
   }
-  const rightSidebarWidth = preferredRightSidebarWidth(tab, state.rightSidebarWidth);
-  if (rightSidebarWidth !== state.rightSidebarWidth) {
-    writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
-  }
   writeLS(LS.layout.rightOpen, "1");
   return {
     rightStackTab: tab,
     rightPanelOpen: true,
-    rightSidebarWidth,
     dockCollapsed: state.dockCollapsed,
   };
 };
@@ -292,24 +281,32 @@ export const editorWorkspaceKey = (workspace: string | null | undefined): string
 };
 
 const editorTabsStorageKey = (workspace: string | null | undefined): string =>
-  `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
+  `${LS.editorTabs}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
 
-const editorDraftsStorageKey = (workspace?: string | null): string => `${LS.editorDrafts}:${editorWorkspaceKey(workspace)}`;
-const editorLocationStorageKey = (workspace?: string | null): string => `${LS.editorLocation}:${editorWorkspaceKey(workspace)}`;
+const editorDraftsStorageKey = (workspace?: string | null): string => `${LS.editorDrafts}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
+const editorLocationStorageKey = (workspace?: string | null): string => `${LS.editorLocation}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
 const editorViewStorageKey = (workspace: string, path: string): string =>
+  `${LS.editorView}:${JSON.stringify([draftWindowOwnerId(), editorWorkspaceKey(workspace), editorPathComparisonKey(path, workspace)])}`;
+const legacyEditorViewStorageKey = (workspace: string, path: string): string =>
   `${LS.editorView}:${JSON.stringify([editorWorkspaceKey(workspace), editorPathComparisonKey(path, workspace)])}`;
+const editorViewRecoveryKey = (workspace: string, path: string): string => {
+  const owned = editorViewStorageKey(workspace, path);
+  const owner = draftWindowOwnerId();
+  const inherited = owner === "primary" || cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace))?.legacyClaimOwnerId === owner;
+  return readLS(owned) !== null || !inherited ? owned : legacyEditorViewStorageKey(workspace, path);
+};
 
 export interface EditorViewSnapshot { kind: "code" | "markdown"; state: unknown; }
 
 export const loadEditorViewState = (workspace: string, path: string): EditorViewSnapshot | null =>
-  safeJsonParse<EditorViewSnapshot | null>(readLS(editorViewStorageKey(workspace, path)) ?? "null", null);
+  safeJsonParse<EditorViewSnapshot | null>(readLS(editorViewRecoveryKey(workspace, path)) ?? "null", null);
 
 export const persistEditorViewState = (workspace: string, path: string, viewState: EditorViewSnapshot): void => {
   writeLS(editorViewStorageKey(workspace, path), JSON.stringify(viewState));
 };
 
 export const renameEditorViewState = (workspace: string, path: string, newPath: string): void => {
-  const oldKey = editorViewStorageKey(workspace, path);
+  const oldKey = editorViewRecoveryKey(workspace, path);
   const view = readLS(oldKey);
   if (view !== null) {
     writeLS(editorViewStorageKey(workspace, newPath), view);
@@ -367,6 +364,8 @@ const blankEditorTab = (path: string): EditorTab => ({
 });
 
 type CachedEditorWorkspace = {
+  ownerId: string;
+  workspace: string;
   tabs: EditorTab[];
   activeTabPath: string | null;
   activeEditorPath: string | null;
@@ -375,17 +374,20 @@ type CachedEditorWorkspace = {
 // The live cache preserves buffers during workspace switches. Dirty text and
 // disk baselines are also persisted, separately from the open-file path index.
 const editorWorkspaceBuffers = new Map<string, CachedEditorWorkspace>();
+const editorWorkspaceBufferKey = (workspace: string | null | undefined) => windowDraftWorkspaceKey(editorWorkspaceKey(workspace));
 
 /** Dirty buffers include workspaces that are currently hidden from the editor. */
 export const dirtyEditorFiles = (
   state: Pick<AppStore, "workingDirectory" | "editorTabs">,
   workspaceRoot?: string,
 ): string[] => {
-  const activeKey = editorWorkspaceKey(state.workingDirectory);
+  const ownerId = draftWindowOwnerId();
+  const activeKey = editorWorkspaceBufferKey(state.workingDirectory);
   const selectedKey = workspaceRoot === undefined ? undefined : editorWorkspaceKey(workspaceRoot);
-  const workspaces = new Map(editorWorkspaceBuffers);
-  workspaces.set(activeKey, { tabs: state.editorTabs, activeTabPath: null, activeEditorPath: null });
-  return [...workspaces].flatMap(([root, workspace]) => {
+  const workspaces = new Map([...editorWorkspaceBuffers].filter(([, cache]) => cache.ownerId === ownerId));
+  workspaces.set(activeKey, { ownerId, workspace: editorWorkspaceKey(state.workingDirectory), tabs: state.editorTabs, activeTabPath: null, activeEditorPath: null });
+  return [...workspaces.values()].flatMap((workspace) => {
+    const root = workspace.workspace;
     if (selectedKey !== undefined && root !== selectedKey) return [];
     return workspace.tabs.filter((tab) => !tab.readOnly && tab.content !== tab.original).map((tab) => {
       const path = normalizeWorkspacePath(tab.path);
@@ -403,7 +405,8 @@ export const cacheEditorStateForWorkspace = (
   activeTabPath: string | null,
   activeEditorPath: string | null,
 ) => {
-  editorWorkspaceBuffers.set(editorWorkspaceKey(workspace), {
+  editorWorkspaceBuffers.set(editorWorkspaceBufferKey(workspace), {
+    ownerId: draftWindowOwnerId(), workspace: editorWorkspaceKey(workspace),
     tabs: tabs.map((tab) => ({ ...tab })),
     activeTabPath,
     activeEditorPath,
@@ -414,13 +417,16 @@ export const clearEditorWorkspaceBufferCacheForTests = () => {
   editorWorkspaceBuffers.clear();
 };
 
-const legacyEditorWorkspaceIndex = (workspace?: string | null): EditorWorkspaceIndex | undefined => {
-    const storageKey = editorTabsStorageKey(workspace);
+const legacyEditorWorkspaceIndex = (workspace?: string | null, includeBrowserLegacy = false): EditorWorkspaceIndex | undefined => {
+    let storageKey = editorTabsStorageKey(workspace);
+    const ownedRaw = readLS(storageKey);
+    const inherited = draftWindowOwnerId() === "primary" || includeBrowserLegacy && canClaimLegacyEditorDrafts();
+    if (ownedRaw === null && inherited) storageKey = `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
     const legacyStorageKey = legacyEditorTabsStorageKey(workspace);
     const canonicalRaw = readLS(storageKey);
     const scopedRaw = canonicalRaw
-      ?? (legacyStorageKey !== storageKey ? readLS(legacyStorageKey) : null);
-    const raw = scopedRaw ?? (editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
+      ?? (inherited && legacyStorageKey !== storageKey ? readLS(legacyStorageKey) : null);
+    const raw = scopedRaw ?? (inherited && editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
     if (!raw) return undefined;
     const parsed = safeJsonParse<unknown>(raw, []);
     if (!Array.isArray(parsed)) return undefined;
@@ -436,8 +442,9 @@ const legacyEditorWorkspaceIndex = (workspace?: string | null): EditorWorkspaceI
         return true;
       });
     const tabMeta = safeJsonParse<EditorWorkspaceIndex["metadata"]>(readLS(storageKey + ":meta") ?? "{}", {});
-    const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(editorLocationStorageKey(workspace)) ?? "{}", {});
-    return { workspace: editorWorkspaceKey(workspace), paths: normalizedPaths,
+    const locationKey = ownedRaw !== null || !inherited ? editorLocationStorageKey(workspace) : `${LS.editorLocation}:${editorWorkspaceKey(workspace)}`;
+    const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(locationKey) ?? "{}", {});
+    return { workspace: editorWorkspaceKey(workspace), ...(ownedRaw !== null ? { windowOwnerId: draftWindowOwnerId() } : {}), paths: normalizedPaths,
       metadata: Object.fromEntries(normalizedPaths.map(path => [path, tabMeta[editorPathComparisonKey(path, workspace ?? "")] ?? {}])),
       activeTabPath: location.activeTabPath ?? null, activeEditorPath: location.activeEditorPath ?? null };
 };
@@ -465,7 +472,7 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null, 
     seen.add(key);
     return [path];
   });
-  const legacyIndex = legacyEditorWorkspaceIndex(workspace);
+  const legacyIndex = legacyEditorWorkspaceIndex(workspace, true);
   const previous = cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyIndex;
   const index: EditorWorkspaceIndex = { workspace: editorWorkspaceKey(workspace), paths,
     metadata: Object.fromEntries(tabs.map(tab => [normalizeEditorPath(tab.path, workspace ?? ""), {
@@ -473,11 +480,17 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null, 
     }])), activeTabPath: location ? location.activeTabPath : previous?.activeTabPath ?? null,
     activeEditorPath: location ? location.activeEditorPath : previous?.activeEditorPath ?? null };
   persistEditorDrafts(editorWorkspaceKey(workspace), tabs.map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") })),
-    legacyEditorDrafts(workspace), editorDraftsStorageKey(workspace), index, legacyIndex);
+    legacyEditorDrafts(workspace, true), editorDraftsRecoveryKey(workspace, true), index, legacyIndex);
 };
 
-const legacyEditorDrafts = (workspace?: string | null): EditorTab[] =>
-  safeJsonParse<EditorTab[]>(readLS(editorDraftsStorageKey(workspace)) ?? "[]", [])
+const editorDraftsRecoveryKey = (workspace?: string | null, includeBrowserLegacy = false) => {
+  const owned = editorDraftsStorageKey(workspace);
+  const inherited = draftWindowOwnerId() === "primary" || includeBrowserLegacy && canClaimLegacyEditorDrafts();
+  return readLS(owned) !== null || !inherited ? owned : `${LS.editorDrafts}:${editorWorkspaceKey(workspace)}`;
+};
+
+const legacyEditorDrafts = (workspace?: string | null, includeBrowserLegacy = false): EditorTab[] =>
+  safeJsonParse<EditorTab[]>(readLS(editorDraftsRecoveryKey(workspace, includeBrowserLegacy)) ?? "[]", [])
     .map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") }));
 
 export function mergeRestoredEditorTabs(tabs: EditorTab[], restored: EditorTab[], workspace: string) {
@@ -499,11 +512,11 @@ export const editorWorkspaceRecoveryLocation = (workspace: string | null | undef
   cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyEditorWorkspaceIndex(workspace);
 
 export async function restoreWorkspaceEditorDrafts(workspace: string, initialLocation?: Pick<AppStore, "activeTabPath" | "activeEditorPath">) {
-  const initialCache = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  const initialCache = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
   const initial = initialLocation ?? { activeTabPath: initialCache?.activeTabPath ?? null, activeEditorPath: initialCache?.activeEditorPath ?? null };
-  await loadEditorDrafts(editorWorkspaceKey(workspace), legacyEditorDrafts(workspace), editorDraftsStorageKey(workspace), legacyEditorWorkspaceIndex(workspace));
+  await loadEditorDrafts(editorWorkspaceKey(workspace), legacyEditorDrafts(workspace, true), editorDraftsRecoveryKey(workspace, true), legacyEditorWorkspaceIndex(workspace, true));
   const restored = loadPersistedEditorTabs(workspace);
-  const cached = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
   if (cached) {
     const location = editorWorkspaceRecoveryLocation(workspace);
     cached.tabs = reconcileRestoredEditorTabs(cached.tabs, restored, workspace);
@@ -514,7 +527,7 @@ export async function restoreWorkspaceEditorDrafts(workspace: string, initialLoc
 }
 
 export const editorStateForWorkspace = (workspace: string | null | undefined) => {
-  const cached = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
   if (cached) {
     const editorTabs = cached.tabs.map((tab) => ({ ...tab }));
     return {
@@ -561,7 +574,7 @@ const hasVisibleContentBlocks = (message: ChatMessage): boolean =>
     if (block.type === "progress") {
       return Boolean((block.label || block.summary || block.message || "").trim());
     }
-    return block.type === "tool_call";
+    return block.type === "tool_call" || block.type === "guardian_assessment" || block.type === "guardian_warning";
   });
 
 export const isStructurallyEmptyAssistantMessage = (message: ChatMessage) =>
@@ -676,7 +689,7 @@ export const computeToolCallCount = (messages: ChatMessage[]): number =>
 export const progressConversationKey = (conversationId?: string): string => conversationId?.trim() || "__unowned__";
 
 export const conversationWorkspacePath = (conversation?: AppStore["conversations"][number] | null): string =>
-  conversation?.worktreePath || conversation?.workspaceRoot || "";
+  conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || "";
 
 // ── Thinking metadata helpers ──────────────────────────────────────
 
@@ -734,9 +747,10 @@ export const initialCodeTextScale = (): number => {
 
 export const initialReducedMotion = (): boolean => readLS(LS.reducedMotion) === "1";
 
-export const initialSendShortcut = (): UISlice["sendShortcut"] => (
-  readLS(LS.sendShortcut) === "mod-enter" ? "mod-enter" : "enter"
-);
+export const initialSendShortcut = (): UISlice["sendShortcut"] => {
+  const shortcut = readLS(LS.sendShortcut);
+  return shortcut === "mod-enter" || shortcut === "cmdIfMultiline" ? shortcut : "enter";
+};
 
 export const initialFollowUpBehavior = (): UISlice["followUpBehavior"] => (
   readLS(LS.followUpBehavior) === "steer" ? "steer" : "queue"
@@ -772,6 +786,7 @@ const pendingToolCallToRecord = (
   durationMs: tc.durationMs ?? tc.duration_ms,
   displayHint: tc.displayHint ?? tc.display_hint,
   inputSummary: tc.inputSummary ?? tc.input_summary,
+  commandActions: tc.commandActions ?? tc.command_actions,
   turnId: tc.turnId ?? tc.turn_id,
   iterationId: tc.iterationId ?? tc.iteration_id,
   phase: tc.phase,
@@ -780,6 +795,9 @@ const pendingToolCallToRecord = (
   outputPreview: tc.outputPreview,
   stdoutPreview: tc.stdoutPreview,
   stderrPreview: tc.stderrPreview,
+  exitCode: tc.exitCode,
+  recipientId: tc.recipientId,
+  recipientIds: tc.recipientIds,
 });
 
 export const mergeResumeToolCalls = (

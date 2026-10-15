@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, PanelKind, PanelSlot, UISlice, WorkspaceSlice } from "./types";
 import { clamp } from "../lib/clamp";
+import { rightPanelMaximumWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
 import { isDesktop, openPath } from "../desktop/runtime";
 import {
   LS,
@@ -8,7 +9,6 @@ import {
   LEFT_SIDEBAR_MAX_WIDTH,
   LEFT_SIDEBAR_MIN_WIDTH,
   RIGHT_SIDEBAR_DEFAULT_WIDTH,
-  RIGHT_SIDEBAR_MAX,
   writeLS,
   normalizePanelSlots,
   defaultPanelSlots,
@@ -50,6 +50,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     rightPanelExpanded: false,
     gitReviewRequest: null,
     sideChatOpen: false,
+    activeSideChatId: null,
     sideChatPendingContext: null,
     terminalSessions: [],
     terminalSnapshots: {},
@@ -59,16 +60,24 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     editorOpenRequests: [],
     activeEditorOpenRequestId: null,
     activeEditorPath: null,
-    setLeftSidebarWidth: (w) => {
+    setLeftSidebarWidth: (w, options) => {
       const v = w <= 0 ? 0 : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, w);
-      writeLS(LS.layout.leftWidth, String(v));
-      if (v > 0) writeLS(LS.layout.leftExpandedWidth, String(v));
-      set({ leftSidebarWidth: v, leftSidebarExpandedWidth: v || get().leftSidebarExpandedWidth });
+      const persist = options?.persist !== false;
+      if (persist) {
+        writeLS(LS.layout.leftWidth, String(v));
+        if (v > 0) writeLS(LS.layout.leftExpandedWidth, String(v));
+      }
+      set({ leftSidebarWidth: v, ...(persist && v > 0 ? { leftSidebarExpandedWidth: v } : {}) });
     },
-    setRightSidebarWidth: (w) => {
-      const v = clamp(320, RIGHT_SIDEBAR_MAX, w);
-      writeLS(LS.layout.rightWidth, String(v));
-      set({ rightSidebarWidth: v });
+    setRightSidebarWidth: (w, options) => {
+      const mainContentWidth = options?.mainContentWidth ?? window.innerWidth - get().leftSidebarWidth;
+      const v = clamp(320, rightPanelMaximumWidth(mainContentWidth), w);
+      const ratio = rightPanelWidthRatio(v, mainContentWidth);
+      if (options?.persist !== false) {
+        writeLS(LS.layout.rightWidth, String(v));
+        writeLS(LS.layout.rightWidthRatio, String(ratio));
+      }
+      set({ rightSidebarWidth: v, rightSidebarWidthRatio: ratio });
     },
     toggleRightPanel: () =>
       set((s) => {
@@ -255,6 +264,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         panelSlots: next,
         leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH,
         rightSidebarWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+        rightSidebarWidthRatio: null,
         rightPanelOpen: false,
         rightPanelExpanded: false,
         dockHeight: 240,
@@ -262,7 +272,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         activeBottomTab: "terminal",
       });
       writeLS(LS.layout.leftWidth, String(LEFT_SIDEBAR_DEFAULT_WIDTH));
-      writeLS(LS.layout.rightWidth, String(RIGHT_SIDEBAR_DEFAULT_WIDTH));
+      localStorage.removeItem(LS.layout.rightWidth);
+      localStorage.removeItem(LS.layout.rightWidthRatio);
       writeLS(LS.layout.rightOpen, "0");
       writeLS(LS.layout.dockHeight, "240");
       writeLS(LS.layout.dockCollapsed, "1");

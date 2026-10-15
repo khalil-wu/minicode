@@ -9,7 +9,8 @@
  * Keep in lockstep with backend/ws/events.py.
  */
 
-import type { AgentCapabilitiesPayload } from "./capabilities";
+import type { AgentCapabilitiesPayload, ApprovalPolicy } from "./capabilities";
+import type { CompletionNotification } from "./notification-types";
 import type { ComposerQuote, InspectorTargetKind, MessageContextRef, ProviderRawMetadata } from "../stores/types";
 
 export const AGENT_PROGRESS_STAGES = [
@@ -93,6 +94,8 @@ export type StreamingServerEventType =
   | "agent.run.completed"
   | "agent.item"
   | "agent.item.delta"
+  | "guardian_assessment"
+  | "guardian_warning"
   | "agent.progress"
   | "runtime.span"
   | "task.update"
@@ -134,6 +137,7 @@ export type StreamingClientCommandType =
   | "subagent.transcript"
   | "subagent.plan_review"
   | "send_message"
+  | "followup_task"
   | "inspector.focus";
 
 // ──────────────────────────────────────────────────────────────────
@@ -148,11 +152,27 @@ export interface AgentMessageItem {
   status?: "in_progress" | "completed" | "partial" | "cancelled" | "failed" | string;
 }
 
+export interface ContextCompactionItem {
+  id: string;
+  type: "context_compaction";
+  source: "auto" | "manual";
+  status: "in_progress" | "completed" | "interrupted";
+  started_at: number;
+  finished_at?: number;
+}
+
+export interface UserMessageItem {
+  id: string;
+  type: "user_message";
+  /** The committed public user row; its artifact references remain real. */
+  message: Record<string, unknown> & { id: string; role: "user"; content: string };
+}
+
 export interface ItemStartedEvent {
   type: "item.started";
   conversation_id: string;
-  item: AgentMessageItem;
-  message_id: string;
+  item: AgentMessageItem | ContextCompactionItem | UserMessageItem;
+  message_id?: string;
 }
 
 export interface AgentMessageDeltaEvent {
@@ -175,11 +195,11 @@ export interface AgentItemDeltaEvent {
 export interface ItemCompletedEvent {
   type: "item.completed";
   conversation_id: string;
-  item: AgentMessageItem;
+  item: AgentMessageItem | ContextCompactionItem | UserMessageItem;
   finish_reason?: string;
   provider_raw?: ProviderRawMetadata;
   attachments?: ReplyAttachment[];
-  message_id: string;
+  message_id?: string;
 }
 
 export interface ImageChunkLiveEvent {
@@ -234,12 +254,22 @@ export interface ToolCallSourcePayload {
   runtime_call_id?: string;
 }
 
+export type CommandAction =
+  | { type: "read"; command: string; name: string; path: string }
+  | { type: "search"; command: string; query?: string | null; path?: string | null }
+  | { type: "listFiles"; command: string; path?: string | null }
+  | { type: "unknown"; command: string };
+
 export interface ToolCallEvent {
   type: "tool_call";
   id: string;
   name: string;
   args: Record<string, unknown>;
   call_source?: ToolCallSourcePayload;
+  command_actions?: CommandAction[];
+  streaming_announcement?: boolean;
+  command_presentation?: { command: string; cwd: string; started_at_ms: number };
+  execution_started_at?: number;
   status?: "running" | string;
   started_at?: number;
   display_hint?: string;
@@ -271,10 +301,20 @@ export interface ToolErrorInfo {
 }
 
 export interface ToolResultEvent {
+  streaming_announcement?: boolean;
+  command_presentation?: ToolCallEvent["command_presentation"];
+  execution_started_at?: number;
+  delegations?: import("../lib/tool-call-reducer").ToolDelegation[];
   type: "tool_result";
   id: string;
   summary: string;
+  stdout_preview?: string;
+  stderr_preview?: string;
+  exit_code?: number;
+  recipient_id?: string;
+  recipient_ids?: string[];
   call_source?: ToolCallSourcePayload;
+  command_actions?: CommandAction[];
   artifact_id?: string;
   /** Metadata for a tool-owned artifact; the binary body stays off the WS. */
   artifact_kind?: "file" | "diff" | "image" | "json" | "code" | "text" | string;
@@ -462,6 +502,7 @@ export interface AgentRunRecordPayload {
   budget?: Record<string, unknown>;
   started_at?: number;
   completed_at?: number | null;
+  duration_ms?: number;
   task_id?: string;
   session_id?: string;
   summary?: string;
@@ -544,6 +585,7 @@ export interface DoneEvent {
   reason?: string;
   duration_ms?: number;
   failure_recoverable?: boolean;
+  completion_notification?: CompletionNotification | null;
   lifecycle_cleanup_receipts?: Record<string, LifecycleCleanupReceipt>;
   lifecycle_cleanup_pending_count?: number;
   usage: {
@@ -583,6 +625,8 @@ export interface StreamResumeEvent {
   conversation_id: string;
   message_id: string | null;
   turn_id?: string;
+  /** Original main run's Unix-millisecond start, never the viewer's restore time. */
+  started_at?: number;
   /** Ordered authoritative projection for an in-flight assistant turn. */
   content_blocks?: Array<Record<string, unknown>>;
   phase?: string;
@@ -596,6 +640,8 @@ export interface StreamResumeEvent {
     id: string;
     name: string;
     args: Record<string, unknown>;
+    command_actions?: CommandAction[];
+    commandActions?: CommandAction[];
     status?: "pending" | "running" | string;
     started_at?: number;
     startedAt?: number;
@@ -611,6 +657,8 @@ export interface StreamResumeEvent {
     id: string;
     name: string;
     args?: Record<string, unknown>;
+    command_actions?: CommandAction[];
+    commandActions?: CommandAction[];
     status?: string;
     transition?: string;
     started_at?: number;
@@ -626,6 +674,9 @@ export interface StreamResumeEvent {
     outputPreview?: string;
     stdoutPreview?: string;
     stderrPreview?: string;
+    exitCode?: number;
+    recipientId?: string;
+    recipientIds?: string[];
   }>;
 }
 
@@ -665,6 +716,9 @@ export interface SubagentTranscriptSnapshot {
 }
 
 export interface SubagentStartEvent {
+  parent_tool_call_id?: string;
+  parent_message_id?: string;
+  delegation?: import("../lib/tool-call-reducer").ToolDelegation;
   model?: string;
   provider?: string;
   reasoning_effort?: string;
@@ -721,10 +775,20 @@ export interface SubagentProgressEvent {
   activity_summary?: string;
   user_visible?: boolean;
   transcript_snapshot?: SubagentTranscriptSnapshot;
-  transcript_delta?: { seq: number; message_id: string; item_id: string; delta: string; offset: number };
+  transcript_delta?: SubagentTranscriptEventsDelta | { seq: number; message_id: string; item_id: string; delta: string; offset: number; kind?: undefined };
+}
+
+export interface SubagentTranscriptEventsDelta {
+  kind: "events";
+  base_seq: number;
+  seq: number;
+  events: Array<{ event_id: string; seq: number; ts_ms: number; event_type: string; payload: Record<string, unknown> }>;
 }
 
 export interface SubagentDoneEvent {
+  parent_tool_call_id?: string;
+  parent_message_id?: string;
+  delegation?: import("../lib/tool-call-reducer").ToolDelegation;
   model?: string;
   provider?: string;
   reasoning_effort?: string;
@@ -883,6 +947,8 @@ export interface RuntimeForkSnapshot {
 }
 
 export interface RuntimeSessionSnapshot {
+  agent_mode?: "build" | "plan" | "review" | "explore";
+  agent_mode_revision?: number;
   session_id?: string;
   parent_session_id?: string | null;
   active_conversation_id?: string | null;
@@ -896,6 +962,9 @@ export interface RuntimeSessionSnapshot {
   permission_mode?: string;
   permission_profile?: "confirm" | "plan" | "auto" | "bypass" | string;
   permission_source?: string;
+  approval_policy?: ApprovalPolicy;
+  sandbox_mode?: string;
+  managed_requirements_source?: string | null;
   workspace_scope?: "computer" | "project" | "worktree" | string;
   sandbox_status?: {
     os?: "enforced" | "app_layer" | "disabled" | string;
@@ -934,6 +1003,7 @@ export interface RuntimeSessionSnapshot {
   forks?: RuntimeForkSnapshot[];
   running_tasks?: unknown[];
   task_summary?: Record<string, unknown>;
+  active_subagents?: Array<{ id: string; status: string; cleanup_pending?: boolean }>;
   capabilities?: AgentCapabilitiesPayload;
 }
 
@@ -1025,6 +1095,14 @@ export interface SendMessageCommand {
   conversation_id?: string;
   task_id?: string;
   team_name?: string;
+}
+
+export interface FollowupTaskCommand {
+  type: "followup_task";
+  target: string;
+  message: string;
+  conversation_id: string;
+  workspace_root: string;
 }
 
 export interface InspectorFocusCommand extends ConversationOwnedCommand {

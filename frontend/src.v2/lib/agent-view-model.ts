@@ -26,6 +26,7 @@ export interface AgentView {
   status: AgentDisplayStatus;
   statusLabel: string;
   relativeTimeLabel: string;
+  startedAt?: number;
   identityKey: string;
   teammateName?: string;
   teamName?: string;
@@ -45,7 +46,7 @@ export interface AgentView {
 }
 
 const titleFor = (agent: SubagentState): string => {
-  return String(agent.objective || agent.summary || agent.teammateName || "").trim() || "子任务";
+  return String(agent.displayName || agent.teammateName || agent.objective || agent.summary || "").trim() || "子任务";
 };
 
 const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
@@ -53,6 +54,7 @@ const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
   if (isLiveAgent(agent) && agent.awaitingPlanApproval) return "attention";
   if (isLiveAgent(agent) && agent.needsInput) return "attention";
   if (isLiveAgent(agent) && agent.isIdle) return "waiting";
+  if (agent.status === "running" && agent.startedAt === 0) return "waiting";
   switch (effectiveSubagentStatus(agent)) {
     case "error":
       return "attention";
@@ -91,7 +93,7 @@ const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): strin
     if (agent.blockedBy?.length || String(agent.waitingOn || "").trim()) return "等待中";
     return "已阻塞";
   }
-  if (effective === "running") return "运行中";
+  if (effective === "running") return agent.startedAt === 0 ? "正在启动" : "运行中";
   if (effective === "pending") return "等待中";
   if (effective === "done") return "已完成";
   if (effective === "partial") {
@@ -161,7 +163,7 @@ const isLiveAgent = (agent: SubagentState): boolean => ["pending", "running", "b
 
 const agentLink = (agent: SubagentState): AgentLink => ({
   id: agent.id,
-  title: agent.teammateName || titleFor(agent),
+  title: titleFor(agent),
   identityKey: agent.agentPath || agent.id,
 });
 
@@ -173,7 +175,7 @@ export const agentStatusSummary = (views: AgentView[]): string => {
 };
 
 const relativeTimeLabelFor = (agent: SubagentState, now: number): string => {
-  const timestamp = agent.lastEventAt ?? agent.lastProgressAt;
+  const timestamp = agent.completedAt || agent.lastProgressAt || agent.lastEventAt;
   if (!timestamp || !Number.isFinite(timestamp)) return "";
   const elapsedMs = Math.max(0, now - timestamp);
   if (elapsedMs < 60_000) return "刚刚";
@@ -209,9 +211,10 @@ export function projectAgentViews(
   });
   return [...agents]
     .filter((agent) => agent.role !== "message" && agent.role !== "workflow")
-    // Keep the creation order stable within each status group so progress
-    // events update a row in place instead of making the list jump around.
-    .sort((left, right) => rank[displayStatus(left)] - rank[displayStatus(right)])
+    // Live work stays in place; completed history shows the newest actual
+    // completion first, without letting refresh timestamps reorder it.
+    .sort((left, right) => rank[displayStatus(left)] - rank[displayStatus(right)]
+      || (displayStatus(left) === "completed" ? (right.completedAt ?? 0) - (left.completedAt ?? 0) : 0))
     .map((source) => {
       const effectiveStatus = effectiveSubagentStatus(source);
       const executionMode = source.background ? "background" as const : "blocking" as const;
@@ -239,6 +242,7 @@ export function projectAgentViews(
         status,
         statusLabel: statusLabelFor(source, status),
         relativeTimeLabel: relativeTimeLabelFor(source, now),
+        startedAt: source.startedAt,
         identityKey: source.agentPath || source.id,
         teammateName: source.teammateName,
         teamName: source.teamName,

@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { Bug, CircleAlert, Gauge, GitBranch, TerminalSquare, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
@@ -26,6 +27,7 @@ const LazyTerminalPanel = lazy(() =>
 const LazyProblemsWorkspace = lazy(() => import("../panels/ProblemsWorkspace").then((module) => ({ default: module.ProblemsWorkspace })));
 
 export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
+  const { t: tr } = useI18n();
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
@@ -103,15 +105,15 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
     <section
       className="mc-bottom-drawer"
       data-open={isOpen ? "true" : "false"}
-      aria-label="底部工具"
+      aria-label={tr("底部工具")}
       aria-hidden={!isOpen}
       style={{
         "--mc-bottom-drawer-height": `${dockHeight}px`,
       } as React.CSSProperties}
     >
-      {isOpen && <div className="mc-bottom-drawer-resize" role="separator" aria-orientation="horizontal" aria-label="调整底部工具高度" aria-valuemin={180} aria-valuemax={520} aria-valuenow={Math.round(dockHeight)} tabIndex={0} onPointerDown={startResize} onKeyDown={handleResizeKeyDown} />}
+      {isOpen && <div className="mc-bottom-drawer-resize" role="separator" aria-orientation="horizontal" aria-label={tr("调整底部工具高度")} aria-valuemin={180} aria-valuemax={520} aria-valuenow={Math.round(dockHeight)} tabIndex={0} onPointerDown={startResize} onKeyDown={handleResizeKeyDown} />}
       {isOpen && <div className="mc-bottom-drawer-header">
-        <div role="tablist" aria-label="底部工具面板" style={{ display: "contents" }}>
+        <div role="tablist" aria-label={tr("底部工具面板")} style={{ display: "contents" }}>
         {TABS.map((t, index) => {
           const Icon = t.icon;
           let badge: string | null = null;
@@ -126,7 +128,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
               id={`bottom-dock-tab-${t.id}`}
               aria-selected={visibleTab === t.id}
               aria-controls={`bottom-dock-panel-${t.id}`}
-              aria-label={t.id === "problems" ? badge !== null ? `问题 ${badge} 个错误` : "问题" : undefined}
+              aria-label={t.id === "problems" ? badge !== null ? tr("问题 {v0} 个错误", { v0: badge }) : tr("问题") : undefined}
               tabIndex={visibleTab === t.id ? 0 : -1}
               onClick={() => openBottomTab(t.id)}
               onKeyDown={(event) => {
@@ -145,7 +147,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
               data-active={visibleTab === t.id ? "true" : "false"}
             >
               <Icon size={14} />
-              {t.label}
+              {t.label === "Git" ? t.label : tr(t.label)}
               {badge && (
                 <span className="mc-bottom-drawer-badge" data-danger={(t.id === "problems" ? (problemsCount.count ?? 0) > 0 : totalBudgetPercent > 0.9) ? "true" : "false"}>{badge}</span>
               )}
@@ -154,7 +156,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
         })}
         </div>
         <div className="mc-bottom-drawer-spacer" />
-        <button type="button" className="mc-icon-button" aria-label="关闭底部工具" title="关闭底部工具" onClick={closeBottomDock}>
+        <button type="button" className="mc-icon-button" aria-label={tr("关闭底部工具")} title={tr("关闭底部工具")} onClick={closeBottomDock}>
           <X size={15} />
         </button>
       </div>}
@@ -167,7 +169,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
           {(terminalVisited || terminalVisible) && <div className="h-full" hidden={!terminalVisible} aria-hidden={!terminalVisible}>
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="terminal" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="终端" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName={tr("终端")} />}>
                   <LazyTerminalPanel visible={terminalVisible} />
                 </SafeBoundary>
               </Suspense>
@@ -176,7 +178,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
           {isOpen && visibleTab === "budget" && (
             <div className="p-3">
               <div className="mb-2" style={{ color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums" }}>
-                {hasBudget ? `上下文占用：${(totalBudgetPercent * 100).toFixed(1)}%` : "暂无上下文数据"}
+                {hasBudget ? tr("上下文占用：{v0}%", { v0: (totalBudgetPercent * 100).toFixed(1) }) : tr("暂无上下文数据")}
               </div>
               <PromptCacheStats />
               <BudgetBars />
@@ -197,6 +199,7 @@ const formatTokenCount = (value: number): string => {
 };
 
 const PromptCacheStats = () => {
+  const { t: tr } = useI18n();
   const lastUsage = useAppStore((s) => s.lastUsage);
   const usageTotals = useAppStore((s) => s.usageTotals);
   if (!lastUsage && usageTotals.turns <= 0) return null;
@@ -218,18 +221,18 @@ const PromptCacheStats = () => {
   const hitRate = promptCacheHitRate(last);
   const totalHitRate = promptCacheHitRate(usageTotals);
   const cacheText = hasPromptUsage || hasCache
-    ? `普通输入 ${formatTokenCount(ordinaryInput)} · 缓存读取 ${formatTokenCount(cacheRead)} · 缓存写入 ${formatTokenCount(cacheWrite)} · 提示词总量 ${formatTokenCount(promptTotal)}`
-      + ` · 命中 ${hitRate == null ? "n/a" : `${Math.round(hitRate)}%`}`
-      + (usageTotals.turns > 1 ? ` · 会话提示词 ${formatTokenCount(totalPrompt)} / 命中 ${totalHitRate == null ? "n/a" : `${Math.round(totalHitRate)}%`} / ${usageTotals.turns} 轮` : "")
+    ? tr("普通输入 {v0} · 缓存读取 {v1} · 缓存写入 {v2} · 提示词总量 {v3}", { v0: formatTokenCount(ordinaryInput), v1: formatTokenCount(cacheRead), v2: formatTokenCount(cacheWrite), v3: formatTokenCount(promptTotal) })
+      + tr(" · 命中 {v0}", { v0: hitRate == null ? "n/a" : `${Math.round(hitRate)}%` })
+      + (usageTotals.turns > 1 ? tr(" · 会话提示词 {v0} / 命中 {v1} / {v2} 轮", { v0: formatTokenCount(totalPrompt), v1: totalHitRate == null ? "n/a" : `${Math.round(totalHitRate)}%`, v2: usageTotals.turns }) : "")
     : "";
   const reasoningText = hasReasoning
-    ? `推理 ${formatTokenCount(lastReasoning)}`
-      + (usageTotals.turns > 1 ? ` / 会话 ${formatTokenCount(totalReasoning)}` : "")
+    ? tr("推理 {v0}", { v0: formatTokenCount(lastReasoning) })
+      + (usageTotals.turns > 1 ? tr(" / 会话 {v0}", { v0: formatTokenCount(totalReasoning) }) : "")
     : "";
   const details = [cacheText, reasoningText].filter(Boolean).join(" · ");
   return (
     <div style={cacheStatsStyle}>
-      <div style={{ color: "var(--text-secondary)", fontWeight: "var(--fw-semibold)" }}>模型用量</div>
+      <div style={{ color: "var(--text-secondary)", fontWeight: "var(--fw-semibold)" }}>{tr("模型用量")}</div>
       <div style={{ color: "var(--text-muted)", textAlign: "right" }}>
         {details}
       </div>
@@ -293,16 +296,17 @@ const cacheStatsStyle: React.CSSProperties = {
 };
 
 const DebugLog = () => {
+  const { t: tr } = useI18n();
   const messages = useAppStore((s) => s.messages);
   const toolCallCount = useAppStore((s) => s.toolCallCount);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const isConnected = useAppStore((s) => s.isConnected);
   return (
     <div style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>
-      <div>连接：{String(isConnected)}</div>
-      <div>流式输出：{String(isStreaming)}</div>
-      <div>消息：{messages.length}</div>
-      <div>工具调用：{toolCallCount}</div>
+      <div>{tr("连接：")}{String(isConnected)}</div>
+      <div>{tr("流式输出：")}{String(isStreaming)}</div>
+      <div>{tr("消息：")}{messages.length}</div>
+      <div>{tr("工具调用：")}{toolCallCount}</div>
     </div>
   );
 };

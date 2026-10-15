@@ -72,7 +72,8 @@ def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, mon
             raise AssertionError("sync must not load a private record")
 
         def runtime_snapshot(self):
-            return {"session_id": self.session_id, "active_conversation_id": self.active_conversation_id}
+            return {"session_id": self.session_id, "active_conversation_id": self.active_conversation_id,
+                    "capabilities": {"provider_capabilities": {"provider_id": "custom", "base_url": "", "wire_api": "chat"}}}
 
         async def send_payload(self, payload, **kwargs):
             sent.append(payload)

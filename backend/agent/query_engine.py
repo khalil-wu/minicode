@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from backend.mcp.approval import MCPApprovalStore
+
 import asyncio
 import logging
 import time
 from contextlib import AsyncExitStack, aclosing
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -21,7 +23,7 @@ from backend.agent.query_journal import (
     terminal_commit_failed,
     terminal_journal_failure_event,
 )
-from backend.agent.run_events import should_emit_event
+from backend.agent.run_events import mark_model_only_tool_event, should_emit_event
 from backend.agent.code_execution_store import CodeExecutionStore
 from backend.agent.runtime import (
     AgentRuntime,
@@ -47,6 +49,8 @@ from backend.agent.lifecycle_observer import (
 from backend.llm.base import LLMAdapter, LLMTurnContext
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
+from backend.permissions.grants import PermissionGrantStore
+from backend.agent.guardian.host import GuardianHostState
 from backend.tools.registry import ToolRegistry
 from backend.terminal.manager import BackgroundCommandManager
 
@@ -72,6 +76,10 @@ class AgentSession:
     lifecycle_cleanup_tasks: set[asyncio.Task] = field(default_factory=set)
     active_tool_names: tuple[str, ...] | None = None
     code_store: CodeExecutionStore = field(default_factory=CodeExecutionStore)
+    permission_grants: PermissionGrantStore = field(default_factory=PermissionGrantStore)
+    guardian_host: GuardianHostState | None = None
+    mcp_tool_approvals: MCPApprovalStore = field(default_factory=MCPApprovalStore)
+    owns_guardian_host: bool = True
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
     _command_shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -83,6 +91,8 @@ class AgentSession:
 
     async def aclose(self) -> None:
         """Release commands created by this session; injected host services are borrowed."""
+        if self.guardian_host is not None and self.owns_guardian_host:
+            await self.guardian_host.aclose()
         if self._command_shutdown_task is not None:
             if self._command_shutdown_task.done():
                 self._command_shutdown_task.result()
@@ -330,6 +340,18 @@ class QueryEngine:
             turn_kernel=turn_ctx.turn_kernel,
             conversation_id=conversation_id,
         )
+        host_emit_event = turn_ctx.emit_event
+        async def emit_runtime_event(event_type, data):
+            # Direct tool callbacks do not travel through the yielded query
+            # stream. Commit their real native start before the host sees it,
+            # including SDK sessions without a host callback. CodeMode and
+            # extension callbacks retain their acknowledged nested route.
+            if (event_type == "runtime.span" and data.get("event") == "tool.started"
+                    and (data.get("call_source") or {}).get("kind") not in {"code_mode", "extension"}):
+                await journal.record_event_async(AgentEvent(event_type, data))
+            if host_emit_event is not None:
+                await host_emit_event(event_type, data)
+        turn_ctx = replace(turn_ctx, emit_event=emit_runtime_event)
         terminal = QueryTerminalTransaction(turn_ctx=turn_ctx, journal=journal)
         lifecycle = LifecycleObserverOwner(run_context=turn_ctx.run_context, llm=session.llm)
         runner_scope = AsyncExitStack()
@@ -449,6 +471,9 @@ class QueryEngine:
                     else:
                         event_stream = runner
                     async for event in event_stream:
+                        mark_model_only_tool_event(event, turn_ctx.run_context.active_tool_registry)
+                        if event.type == "item.started" and event.data["item"].get("type") == "agent_message":
+                            turn_ctx.context_builder.guardian_evidence.reserve_assistant_order(event.data["item"]["id"])
                         if not use_nested_stream:
                             await journal.record_event_async(event)
                         terminal.observe_runner_event(event)
@@ -558,6 +583,10 @@ class QueryEngine:
             status="failed",
             reason="terminal_commit_failed" if commit_failed else "startup_failed",
         )
+        if completion is not None and completion.type == "agent.run.completed":
+            duration_ms = completion.data.get("duration_ms")
+            if duration_ms is not None:
+                terminal.data["duration_ms"] = duration_ms
         events: list[AgentEvent] = []
         if not commit_failed:
             events.append(
@@ -692,6 +721,8 @@ class QueryEngine:
         if session is None:  # guarded by QuerySubmission.__post_init__
             raise TypeError("QuerySubmission session was not initialized")
         sc = submission.runtime
+        if sc.permission_grants is None:
+            sc.permission_grants = session.permission_grants
 
         # Unpack session_context — the loop kernel no longer needs to do this.
         skill_manager = sc.skill_manager
@@ -787,6 +818,15 @@ class QueryEngine:
         ctx.bind_tool_context(None)
         ctx.bind_llm_turn_context(run_context.llm_turn_context)
         session.context_builder = ctx
+        run_context.context_builder = ctx
+        if session.guardian_host is None:
+            session.guardian_host = GuardianHostState(str(metadata.get("conversation_id") or session_id), root_source=run_context.guardian_evidence_source)
+        session.guardian_host.bind(ctx)
+        run_context.mcp_tool_approvals = session.mcp_tool_approvals
+        run_context.guardian_review_service = session.guardian_host.service
+        run_context.guardian_async_service = session.guardian_host.async_service
+        run_context.node_repl_review_evidence = session.guardian_host.node_repl_review_evidence
+        run_context.guardian_root_evidence_source = session.guardian_host.root_snapshot
 
         # Resolve max iterations and create/reuse state.
         max_iterations_limit = resolve_turn_max_iterations(settings)

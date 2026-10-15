@@ -20,6 +20,7 @@ from fnmatch import fnmatch
 from typing import Any
 
 from backend.permissions.powershell_ast import command_readings
+from backend.permissions.patterns import tool_policy_pattern_matches
 
 _LEGACY_TOOL_NAMES = frozenset({"bash", "edit", "read", "write", "shell"})
 _PROTOCOL_COMMAND_NAMES = frozenset({"terminal.exec", "terminal_exec"})
@@ -35,7 +36,7 @@ _SUBCOMMAND_SEPARATORS = frozenset({";", "|", "&", "`", "\n", "<", ">", "(", ")"
 _BACKSLASH_ESCAPES = sys.platform != "win32"
 _FILE_TOOL_GLOBS: tuple[str, ...] = ("read_file", "write_file", "edit_file", "save_*")
 
-_RULE_RE = re.compile(r"^([A-Za-z_][\w*?.:@/\-\[\]!]*)\s*(?:\((.*)\))?$", re.DOTALL)
+_RULE_RE = re.compile(r"^([A-Za-z_][\w*?.:%@/\-\[\]!]*)\s*(?:\((.*)\))?$", re.DOTALL)
 
 _UNSAFE_COMMAND_WRAPPERS = frozenset(
     {
@@ -122,14 +123,7 @@ def _is_file_tool(tool_name: str) -> bool:
 
 
 def _tool_rule_matches(tool_name: str, pattern: str) -> bool:
-    normalized_pattern = str(pattern or "").strip()
-    if fnmatch(tool_name, normalized_pattern):
-        return True
-    return bool(
-        normalized_pattern.startswith("mcp__")
-        and "*" not in normalized_pattern
-        and tool_name.startswith(f"{normalized_pattern}__")
-    )
+    return tool_policy_pattern_matches(tool_name, pattern)
 
 
 def _extract_content(tool_name: str, args: dict[str, Any] | None) -> str:
@@ -146,9 +140,10 @@ def _extract_content(tool_name: str, args: dict[str, Any] | None) -> str:
 
 def command_prefix_uses_unsafe_wrapper(prefix: str) -> bool:
     """Reject wrapper prefixes even when the binary is path-qualified."""
-    first = str(prefix or "").strip().split(maxsplit=1)[0].strip("'\"")
-    if not first:
+    parts = prefix.strip().split(maxsplit=1)
+    if not parts:
         return False
+    first = parts[0].strip("'\"")
     binary = re.split(r"[/\\]", first)[-1].lower()
     return binary in _UNSAFE_COMMAND_WRAPPERS
 

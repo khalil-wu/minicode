@@ -29,6 +29,7 @@ from pathspec.gitignore import GitIgnoreSpec
 
 from backend.config import PermissionSettings
 from backend.permissions.context import PermissionContext, PermissionDecision
+from backend.permissions.approval_policy import ApprovalFlow, ApprovalPolicy, policy_for_mode, rejected_approval_reason
 from backend.permissions.network import assess_network_url
 from backend.permissions.rules import PermissionRuleMatcher
 from backend.security.sensitive_files import (
@@ -62,13 +63,9 @@ def _tool_pattern_matches(tool_name: str, pattern: str, policy_aliases: tuple[st
     server: it covers `mcp__server__*` without making similarly named servers
     match by raw prefix.
     """
-    normalized_pattern = str(pattern or "").strip()
-    return any(
-        fnmatch.fnmatch(name, normalized_pattern)
-        or (normalized_pattern.startswith("mcp__") and "*" not in normalized_pattern
-            and name.startswith(normalized_pattern + "__"))
-        for name in (tool_name, *policy_aliases)
-    )
+    from backend.permissions.patterns import tool_policy_pattern_matches
+
+    return any(tool_policy_pattern_matches(name, pattern) for name in (tool_name, *policy_aliases))
 
 
 def _callable_accepts_tool_parameter(owner: Any, method_name: str, callable_obj: Any) -> bool:
@@ -942,6 +939,16 @@ def _secret_repo_floor_specs() -> tuple[GitIgnoreSpec, GitIgnoreSpec | None]:
     return GitIgnoreSpec.from_lines(patterns), folded
 
 
+def _granted_path_allows_operation(context: PermissionContext, path: str, operation: str) -> bool:
+    from backend.permissions.grants import permission_profile_allows_path
+
+    return permission_profile_allows_path(
+        context.additional_permissions, path,
+        cwd=Path(context.workspace_root), workspace_root=context.workspace_root,
+        write=operation == "write",
+    )
+
+
 def _matches_secret_repo_floor(workspace_relative_path: str) -> bool:
     """True when a path is inside the bypass-immune secret/repo floor.
 
@@ -1036,12 +1043,13 @@ class PermissionChecker:
         tool: "BaseTool | None" = None,
     ) -> tuple[bool, str]:
         """Check static capability boundaries without inventing invocation args."""
-        policy_aliases = tool.policy_aliases if tool is not None else ()
-        matched = self._first_match(tool_name, self._settings.always_deny, policy_aliases)
+        policy_name = tool.policy_identity if tool is not None else tool_name
+        policy_aliases = (*tool.policy_aliases, *getattr(tool, "policy_deny_aliases", ())) if tool is not None else ()
+        matched = self._first_match(policy_name, self._settings.always_deny, policy_aliases)
         if matched:
             return False, f"Tool '{tool_name}' is disabled by the static permission policy ({matched})."
         if context is not None:
-            matched = self._first_match(tool_name, context.tool_deny_rules, policy_aliases)
+            matched = self._first_match(policy_name, context.tool_deny_rules, policy_aliases)
             if matched:
                 return False, f"Tool '{tool_name}' is disabled for this session ({matched})."
         if tool is not None:
@@ -1057,19 +1065,21 @@ class PermissionChecker:
         tool_name: str,
         args: dict[str, Any] | None,
         policy_aliases: tuple[str, ...] = (),
-    ) -> PermissionLevel | None:
+        deny_aliases: tuple[str, ...] = (),
+    ) -> tuple[PermissionLevel, str] | None:
         """Evaluate parsed Tool(content) rules with deny > ask > allow precedence."""
         from backend.permissions.content_rules import rule_matches_call
 
+        restriction_aliases = (*policy_aliases, *deny_aliases)
         for rule in self._content_deny:
-            if rule_matches_call(rule, tool_name, args, effect="deny", policy_aliases=policy_aliases):
-                return PermissionLevel.ALWAYS_DENY
+            if rule_matches_call(rule, tool_name, args, effect="deny", policy_aliases=restriction_aliases):
+                return PermissionLevel.ALWAYS_DENY, rule.tool_glob
         for rule in self._content_ask:
-            if rule_matches_call(rule, tool_name, args, effect="ask", policy_aliases=policy_aliases):
-                return PermissionLevel.CONFIRM
+            if rule_matches_call(rule, tool_name, args, effect="ask", policy_aliases=restriction_aliases):
+                return PermissionLevel.CONFIRM, rule.tool_glob
         for rule in self._content_allow:
             if rule_matches_call(rule, tool_name, args, effect="allow", policy_aliases=policy_aliases):
-                return PermissionLevel.AUTO
+                return PermissionLevel.AUTO, rule.tool_glob
         return None
 
     def build_context(
@@ -1083,19 +1093,20 @@ class PermissionChecker:
         workspace_scope: str = "project",
         source: str = "runtime",
         pre_plan_mode: str | None = None,
-        approval_policy: str = "",
+        approval_policy: Any = "",
+        granular_approval: dict[str, bool] | None = None,
         sandbox_mode: str = "",
         requirements_source: str = "",
     ) -> PermissionContext:
         normalized_mode = normalize_permission_mode_token(mode)
-        # The mode already implies an approval policy (bypass never
-        # prompt; plan and the rest ask on request). Derive it from the one
-        # canonical mapping so the authorizing chokepoint and visible surface agree.
-        from backend.config_requirements import permission_mode_requirements
-
-        resolved_approval_policy = str(approval_policy or "").strip() or (
-            permission_mode_requirements(normalized_mode)[0]
-        )
+        # Explicit turn authority retains the complete Source policy. Builtin
+        # Full access overrides config with Never; other modes retain config.
+        if approval_policy == "granular":
+            resolved = ApprovalPolicy.parse({"granular": granular_approval})
+        elif approval_policy not in (None, ""):
+            resolved = ApprovalPolicy.parse(approval_policy)
+        else:
+            resolved = policy_for_mode(normalized_mode, self._settings.approval_policy)
         return PermissionContext(
             mode=normalized_mode,  # type: ignore[arg-type]
             session_overrides=dict(session_overrides or {}),
@@ -1119,7 +1130,8 @@ class PermissionChecker:
                 and normalize_permission_mode_token(pre_plan_mode) != "plan"
                 else None
             ),
-            approval_policy=resolved_approval_policy,
+            approval_policy=resolved.kind,
+            granular_approval=resolved.granular.to_dict() if resolved.granular is not None else None,
             sandbox_mode=sandbox_mode,
             requirements_source=requirements_source,
         )
@@ -1155,8 +1167,53 @@ class PermissionChecker:
         context: PermissionContext | None = None,
         tool: "BaseTool | None" = None,
     ) -> tuple[PermissionLevel, str, str]:
+        if tool_name == "run_command" and context is not None and context.captured_exec_policy is not None:
+            allowed, reason = self.capability_available(tool_name, context=context, tool=tool)
+            if not allowed:
+                return PermissionLevel.ALWAYS_DENY, "capability_boundary", reason
+            native = context.captured_exec_policy
+            if native.kind == "forbidden":
+                return PermissionLevel.ALWAYS_DENY, "exec_policy", native.reason or "blocked by policy"
+            if context.strict_auto_review:
+                return PermissionLevel.CONFIRM, "tool", "strict_auto_review"
+            return (PermissionLevel.AUTO if native.kind == "skip" else PermissionLevel.CONFIRM,
+                "exec_policy", native.reason or native.kind)
+        result = self._evaluate_policy_level(tool_name, args, context=context, tool=tool)
+        if result[0] in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW} and context is not None and context.approval_policy in {"never", "granular"} and result[1:] != ("tool", "strict_auto_review"):
+            flow = self._approval_flow(tool, result[1], result[2])
+            reason = rejected_approval_reason(context, flow)
+            if reason is not None:
+                source = "managed_requirements" if context.requirements_source else "approval_policy"
+                return PermissionLevel.ALWAYS_DENY, source, reason
+        return result
+
+    def _approval_flow(self, tool: Any, source: str, rule: str) -> ApprovalFlow:
+        # The admitted MCP producer creates ApprovalAction::McpToolCall. It
+        # is independent of the granular sandbox/rule/elicitation switches.
+        if tool is not None:
+            spec = tool.get_spec()
+            if spec is not None and spec.capability == "mcp":
+                return "mcp_tool_call"
+        if source == "content_rule" or source == "session_override":
+            return "rules"
+        if source == "static_policy":
+            for field in ("require_confirm", "require_diff_review"):
+                if rule in getattr(self._settings, field) and field not in self._settings.builtin_approval_routing:
+                    return "rules"
+        return "sandbox_approval"
+
+    def _evaluate_policy_level(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        context: PermissionContext | None = None,
+        tool: "BaseTool | None" = None,
+    ) -> tuple[PermissionLevel, str, str]:
         capability_floor = (PermissionLevel.AUTO, "", "")
+        policy_name = tool.policy_identity if tool is not None else tool_name
         policy_aliases = tool.policy_aliases if tool is not None else ()
+        deny_aliases = (*policy_aliases, *getattr(tool, "policy_deny_aliases", ())) if tool is not None else ()
 
         def raise_floor(
             level: PermissionLevel,
@@ -1177,17 +1234,17 @@ class PermissionChecker:
             return level, source, rule
 
         # 1. 检查是否在 always_deny
-        matched = self._first_match(tool_name, self._settings.always_deny, policy_aliases)
+        matched = self._first_match(policy_name, self._settings.always_deny, deny_aliases)
         if matched:
             return PermissionLevel.ALWAYS_DENY, "static_policy", matched
 
         policy_override: tuple[PermissionLevel, str, str] | None = None
         if context is not None:
-            matched = self._first_match(tool_name, context.tool_deny_rules, policy_aliases)
+            matched = self._first_match(policy_name, context.tool_deny_rules, deny_aliases)
             if matched:
                 return PermissionLevel.ALWAYS_DENY, "context_deny", matched
 
-            override = self._resolve_override_match(tool_name, context.session_overrides, policy_aliases)
+            override = self._resolve_override_match(policy_name, context.session_overrides, policy_aliases, deny_aliases=deny_aliases)
             if override is not None:
                 pattern, level = override
                 if level == PermissionLevel.ALWAYS_DENY:
@@ -1197,7 +1254,8 @@ class PermissionChecker:
         # Content-level rules (Tool(content) syntax). A deny rule wins in every
         # mode (safety); an allow rule forces AUTO except in plan mode (plan is
         # strict read-only regardless of allow rules).
-        content_decision = self._content_rule_decision(tool_name, args, policy_aliases)
+        content_match = self._content_rule_decision(policy_name, args, policy_aliases, deny_aliases)
+        content_decision = content_match[0] if content_match is not None else None
         if content_decision == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
         if policy_override is None and content_decision in {
@@ -1226,20 +1284,61 @@ class PermissionChecker:
         # before confirm/auto/accept-edits choose their default behavior.
         static_auto: tuple[PermissionLevel, str, str] | None = None
         static_floor: list[tuple[PermissionLevel, str, str]] = []
-        matched = self._first_match(tool_name, self._settings.require_diff_review, policy_aliases)
-        if matched:
-            static_floor.append((PermissionLevel.DIFF_REVIEW, "static_policy", matched))
-        matched = self._first_match(tool_name, self._settings.require_confirm, policy_aliases)
-        if matched:
-            static_floor.append((PermissionLevel.CONFIRM, "static_policy", matched))
-        matched = self._first_match(tool_name, self._settings.auto_allow, policy_aliases)
+        explicit_static_floor: list[tuple[PermissionLevel, str, str]] = []
+        granted_tool_auto = (
+            context is not None
+            and tool_name in {"run_command", "apply_patch"}
+            and context.additional_permissions is not None
+            and not context.additional_permissions.is_empty
+            and tool_decision_is_explicit and tool_level == PermissionLevel.AUTO
+        )
+        for field_name, patterns, level in (
+            ("require_diff_review", self._settings.require_diff_review, PermissionLevel.DIFF_REVIEW),
+            ("require_confirm", self._settings.require_confirm, PermissionLevel.CONFIRM),
+        ):
+            if granted_tool_auto and field_name in self._settings.builtin_approval_routing:
+                continue
+            static_floor.extend(
+                (level, "static_policy", pattern) for pattern in patterns
+                if _tool_pattern_matches(policy_name, pattern, deny_aliases)
+            )
+            if field_name not in self._settings.builtin_approval_routing:
+                explicit_static_floor.extend(
+                    (level, "static_policy", pattern) for pattern in patterns
+                    if _tool_pattern_matches(policy_name, pattern, deny_aliases)
+                )
+        if granted_tool_auto:
+            # A path/network grant preapproves authority, never a user's
+            # explicit tool rule. Builtin routing was removed above; these
+            # remaining restrictions must reach the invocation-specific AUTO.
+            for floor in static_floor:
+                raise_floor(*floor)
+        auto_matches = [pattern for pattern in self._settings.auto_allow if _tool_pattern_matches(policy_name, pattern, policy_aliases)]
+        exact_names = {policy_name, *policy_aliases}
+        matched = next((pattern for pattern in auto_matches if pattern in exact_names), auto_matches[0] if auto_matches else "")
         if matched:
             static_auto = (PermissionLevel.AUTO, "static_policy", matched)
+
+        ordinary_exec = (
+            context is not None and tool is not None and tool_name == "run_command"
+            and (args or {}).get("with_escalated_permissions") is not True
+            and tool.get_side_effect_kind(args) != "destructive"
+        )
+        strict_review = context is not None and context.strict_auto_review and tool is not None and (
+            ordinary_exec or tool_name == "apply_patch"
+        )
+        granted_tool_strict = (
+            strict_review and context.additional_permissions is not None and not context.additional_permissions.is_empty
+            and tool_decision_is_explicit and tool_level == PermissionLevel.CONFIRM
+        )
+        never_regular_exec = ordinary_exec and context.approval_policy == "never" and not strict_review
 
         # cc's COMMAND_SUBSTITUTION_PATTERNS make commands carrying injection
         # signals 'ask' instead of silently auto-classified read-only.
         injection_reason = ""
-        if args is not None and (
+        if args is not None and not strict_review and not (context is not None and (
+            context.mode == "bypass" or context.approval_policy == "never"
+        )) and (
             fnmatch.fnmatch(tool_name, "run_command") or tool_name.startswith("terminal_")
         ):
             shell_command = str(args.get("command") or args.get("cmd") or "")
@@ -1260,6 +1359,8 @@ class PermissionChecker:
 
             workspace = Path(context.workspace_root or self._workspace_root or Path.cwd()).resolve()
             policy = sandbox_policy_for_permission_context(workspace, context)
+            if context.additional_permissions is not None:
+                policy = policy.with_additional_permissions(context.additional_permissions)
             resolved = policy.resolve(cwd=workspace)
             if resolved.enforcement is SandboxEnforcement.MANAGED and not resolved.allow_network:
                 capability = SandboxRunner(policy).capability(cwd=workspace)
@@ -1301,6 +1402,25 @@ class PermissionChecker:
                     raise_floor(*floor)
             return apply_floor(PermissionLevel.AUTO, "mode", plan_rule)
 
+        from backend.mcp.registry import MCPToolProxy
+
+        if isinstance(tool, MCPToolProxy):
+            # Source owns MCP approval through its captured server policy and
+            # three-state annotations. Local filesystem/external capability
+            # defaults must not add another MCP approval producer.
+            for floor in explicit_static_floor:
+                raise_floor(*floor)
+            if policy_override is not None and policy_override[0] in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
+                raise_floor(*policy_override)
+            if context is not None and context.strict_auto_review:
+                return apply_floor(PermissionLevel.CONFIRM, "tool", "strict_auto_review")
+            if tool._approval_mode == "auto":
+                if policy_override is not None and policy_override[0] == PermissionLevel.AUTO:
+                    return apply_floor(*policy_override)
+                if static_auto is not None:
+                    return apply_floor(*static_auto)
+            return apply_floor(tool_level, "tool", f"{tool_name}.check_permission")
+
         # Bypass is MiniCode's explicit unattended/full-access mode.  It
         # removes approval routing for ordinary workspace and external work;
         # otherwise DIFF_REVIEW/CONFIRM would be converted into a denial by
@@ -1308,6 +1428,13 @@ class PermissionChecker:
         # making the user's selected mode unusable.  Hard policy denies and
         # tool-owned refusals have already returned above.  Path containment
         # and sensitive-file checks remain authoritative in evaluate().
+        if context is not None and (context.mode == "bypass" or strict_review or never_regular_exec):
+            for floor in explicit_static_floor:
+                raise_floor(*floor)
+            if policy_override is not None and policy_override[0] in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
+                raise_floor(*policy_override)
+        if strict_review:
+            raise_floor(PermissionLevel.CONFIRM, "tool", "strict_auto_review")
         if context is not None and context.mode == "bypass":
             if tool_level == PermissionLevel.ALWAYS_DENY:
                 return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.check_permission"
@@ -1316,46 +1443,12 @@ class PermissionChecker:
                     side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
                 except Exception:
                     return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.side_effect_metadata"
-                # Bypass skips ordinary tool-default prompts, as in Claude
-                # Code's bypassPermissions branch.  Concrete destructive
-                # classification remains a human-confirmation boundary. MCP
-                # extensions keep the same boundary for open-world/external
-                # calls: bypass removes the generic MCP prompt, but it does
-                # not turn an untrusted remote capability into a local AUTO
-                # operation. A plain read-only MCP-shaped test tool with no
-                # external metadata remains eligible for bypass AUTO.
+                # Non-MCP destructive tool declarations retain their local
+                # capability boundary. The captured Source MCP producer
+                # has already resolved above.
                 if bool(getattr(tool, "destructive", False)) or side_effect_kind == "destructive":
                     return PermissionLevel.CONFIRM, "capability_boundary", "bypass:destructive"
-                if (
-                    tool_name.startswith("mcp__")
-                    and (
-                        bool(getattr(tool, "open_world", False))
-                        or side_effect_kind == "external"
-                    )
-                ):
-                    return PermissionLevel.CONFIRM, "capability_boundary", "bypass:mcp_external"
-            return PermissionLevel.AUTO, "mode", "bypass:auto"
-
-        # A user-authored/session-scoped MCP allow is the only way an extension
-        # may skip confirmation. Its own readOnlyHint is never sufficient.
-        if (
-            tool_name.startswith("mcp__")
-            and policy_override is not None
-            and policy_override[0] == PermissionLevel.AUTO
-            and not bool(getattr(tool, "destructive", False))
-            and not bool(getattr(tool, "open_world", False))
-        ):
-            return policy_override
-
-        # MCP declarations are untrusted extensions in ordinary modes. Their
-        # claimed read-only metadata may shape the UI but cannot waive an
-        # explicit confirmation. Claude's bypassPermissions branch happens
-        # after the tool's own deny/safety hooks and therefore does not invent
-        # a second generic MCP confirmation here.
-        if tool_name.startswith("mcp__") and not (
-            context is not None and context.mode == "bypass"
-        ):
-            raise_floor(PermissionLevel.CONFIRM, "capability_boundary", "mcp_extension")
+            return apply_floor(PermissionLevel.AUTO, "mode", "bypass:auto")
 
         # CC asks whenever a filesystem-shaped tool call has no getPath seam.
         # A forgotten declaration must not silently inherit AUTO in MiniCode.
@@ -1403,6 +1496,8 @@ class PermissionChecker:
             # An injection-risk signal also keeps the floor: that asymmetry is
             # the point.
             explicit_capability_allow = not injection_reason and (
+                never_regular_exec or strict_review
+                or
                 (tool_decision_is_explicit and tool_level == PermissionLevel.AUTO)
                 or (
                     policy_override is not None
@@ -1415,6 +1510,7 @@ class PermissionChecker:
                 args,
                 context,
                 explicit_allow=explicit_capability_allow,
+                permissions_preapproved=granted_tool_auto or granted_tool_strict,
             )
             if metadata_floor is not None:
                 raise_floor(
@@ -1422,6 +1518,17 @@ class PermissionChecker:
                     "tool_capability",
                     f"{tool_name}.runtime_metadata",
                 )
+
+        # Source reviews ordinary actions under an existing strict turn grant
+        # through Guardian. Configured rule prompts and stronger capability
+        # floors retain their original producer, so Never/granular still gate
+        # those actual requests. Builtin routing cannot overwrite the sentinel.
+        if strict_review:
+            return capability_floor
+        if never_regular_exec:
+            # default_exec_approval_requirement(Never) skips ordinary prompts;
+            # the command continues to execute within its actual sandbox.
+            return apply_floor(PermissionLevel.AUTO, "mode", "never:auto")
 
         if policy_override is not None:
             return apply_floor(*policy_override)
@@ -1590,16 +1697,6 @@ class PermissionChecker:
             if level == PermissionLevel.AUTO
             else "ask"
         )
-        if (
-            decision == "ask"
-            and context is not None
-            and context.approval_policy == "never"
-            and context.mode != "bypass"
-        ):
-            level = PermissionLevel.ALWAYS_DENY
-            decision = "deny"
-            rule_source = "managed_requirements"
-            matched_rule = context.requirements_source or "allowed_approval_policies=never"
         approval_policy = {
             PermissionLevel.AUTO: "auto",
             PermissionLevel.CONFIRM: "confirm",
@@ -1620,7 +1717,7 @@ class PermissionChecker:
             risk=self._decision_risk(level, tool),
             scope=scope,
             expiry="session" if rule_source == "session_override" else "call" if rule_source == "tool" else "policy",
-            request_digest=canonical_tool_request_digest(tool_name, args or {}),
+            request_digest=canonical_tool_request_digest(tool.policy_identity if tool is not None else tool_name, args or {}),
         )
 
     def validate_command(self, command: str) -> tuple[bool, str]:
@@ -1660,11 +1757,11 @@ class PermissionChecker:
                 return False
         return normalized_path in {"", "."} and resolved_path.exists()
 
-    def is_path_allowed(self, file_path: str, *, context: PermissionContext | None = None) -> bool:
+    def is_path_allowed(self, file_path: str, *, context: PermissionContext | None = None, include_granted_permissions: bool = False) -> bool:
         """检查路径是否在允许范围内，denylist 优先于 allowlist。"""
-        return self.prepare_path_check(context=context)(file_path)
+        return self.prepare_path_check(context=context, include_granted_permissions=include_granted_permissions)(file_path)
 
-    def prepare_path_check(self, *, context: PermissionContext | None = None) -> Callable[[str], bool]:
+    def prepare_path_check(self, *, context: PermissionContext | None = None, include_granted_permissions: bool = False) -> Callable[[str], bool]:
         """Prepare one operation's policy; each candidate is resolved afresh.
 
         Search operations check thousands of files against the same roots and
@@ -1730,6 +1827,14 @@ class PermissionChecker:
                 else resolved_root / path_obj
             ).resolve()
             declared_readable = False
+            declared_grant = False
+            if include_granted_permissions and context is not None and resolved_root is not None:
+                from backend.permissions.grants import permission_profile_allows_path
+
+                declared_grant = permission_profile_allows_path(
+                    context.additional_permissions, resolved_path,
+                    cwd=resolved_root, workspace_root=resolved_root,
+                )
             for readable_root in readable_roots:
                 try:
                     resolved_path.relative_to(readable_root)
@@ -1737,7 +1842,7 @@ class PermissionChecker:
                     break
                 except ValueError:
                     continue
-            if resolved_root is None and not declared_readable:
+            if resolved_root is None and not declared_readable and not declared_grant:
                 return False
             if resolved_root is not None:
                 try:
@@ -1756,7 +1861,7 @@ class PermissionChecker:
                 return False
             if folded_spec is not None and folded_spec.match_file(candidate.lower()):
                 return False
-            if bypass or declared_readable or not allow_patterns:
+            if bypass or declared_readable or declared_grant or not allow_patterns:
                 return True
             for normalized in allow_patterns:
                 if normalized in {"", "."}:
@@ -1797,6 +1902,10 @@ class PermissionChecker:
         context: PermissionContext | None = None,
         tool: "BaseTool | None" = None,
     ) -> str:
+        if tool_name == "run_command" and context is not None and context.captured_exec_policy is not None:
+            # Actual shell paths are enforced by the captured Source sandbox,
+            # rather than guessing a command's writes from its cwd argument.
+            return ""
         # Filesystem tools own the declaration of path-bearing arguments. The
         # checker applies one policy without maintaining a parallel tool-name
         # taxonomy.
@@ -1838,7 +1947,7 @@ class PermissionChecker:
                     plan_path_allowed = is_current_plan_file(str(file_path), context)
                 if (
                     not tool_result_read
-                    and not self.is_path_allowed(str(file_path), context=context)
+                    and not self.is_path_allowed(str(file_path), context=context, include_granted_permissions=tool_name in {"run_command", "apply_patch"})
                     and not root_path_allowed
                     and not plan_path_allowed
                 ):
@@ -1862,9 +1971,13 @@ class PermissionChecker:
                         operation,
                         context=context,
                         allow_workspace_escape=(
-                            tool_name == "run_command"
-                            and args.get("with_escalated_permissions") is True
-                            and (context is None or context.allow_unsandboxed_commands)
+                            (tool_name == "run_command"
+                             and args.get("with_escalated_permissions") is True
+                             and (context is None or context.allow_unsandboxed_commands))
+                            or (tool_name in {"run_command", "apply_patch"}
+                                and context is not None
+                                and context.workspace_root is not None
+                                and _granted_path_allows_operation(context, str(file_path), operation))
                         ),
                     )
                     if not allowed:
@@ -1883,6 +1996,8 @@ class PermissionChecker:
             "workspace_scope": context.workspace_scope if context is not None else "project",
             "source": context.source if context is not None else "settings",
         }
+        if context is not None and context.requirements_source:
+            scope["requirements_source"] = context.requirements_source
         raw_args = args or {}
         path = raw_args.get("file_path") or raw_args.get("directory") or raw_args.get("path")
         url = raw_args.get("url") or raw_args.get("uri") or raw_args.get("href")
@@ -1977,6 +2092,7 @@ class PermissionChecker:
         context: PermissionContext | None,
         *,
         explicit_allow: bool = False,
+        permissions_preapproved: bool = False,
     ) -> PermissionLevel | None:
         """Translate tool metadata into an approval floor that rules cannot lower.
 
@@ -2006,8 +2122,15 @@ class PermissionChecker:
         if declared == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY
 
+        from backend.mcp.registry import MCPToolProxy
+
+        if isinstance(tool, MCPToolProxy):
+            # MCP risk metadata is handled by Source's approval-mode decision,
+            # including Writes/Approve and real-profile Never preapproval.
+            return None
+
         mode = getattr(context, "mode", "confirm") if context is not None else "confirm"
-        if declared == PermissionLevel.DIFF_REVIEW and mode != "auto":
+        if declared == PermissionLevel.DIFF_REVIEW and mode != "auto" and not permissions_preapproved:
             return PermissionLevel.DIFF_REVIEW
 
         try:
@@ -2059,14 +2182,23 @@ class PermissionChecker:
         tool_name: str,
         overrides: dict[str, PermissionLevel],
         policy_aliases: tuple[str, ...] = (),
+        *,
+        deny_aliases: tuple[str, ...] = (),
     ) -> tuple[str, PermissionLevel] | None:
         matches = [
             (pattern, level) for pattern, level in overrides.items()
-            if _tool_pattern_matches(tool_name, pattern, policy_aliases)
+            if _tool_pattern_matches(
+                tool_name, pattern,
+                (*policy_aliases, *deny_aliases) if level != PermissionLevel.AUTO else policy_aliases,
+            )
         ]
         # A later approval for the new wire name cannot erase a deny attached
         # to the same raw tool/server identity before it was renamed.
-        return next((match for match in matches if match[1] == PermissionLevel.ALWAYS_DENY), matches[0] if matches else None)
+        exact_names = {tool_name, *policy_aliases}
+        return next(
+            (match for match in matches if match[1] == PermissionLevel.ALWAYS_DENY),
+            next((match for match in matches if match[0] in exact_names), matches[0] if matches else None),
+        )
 
     @staticmethod
     def _first_match(tool_name: str, patterns: list[str], policy_aliases: tuple[str, ...] = ()) -> str:

@@ -126,7 +126,8 @@ describe("task evidence and runtime diagnostics have separate projections", () =
     const original = JSON.stringify(tool);
     const ui = render(<ActivityCell cell={cell(tool)} conversationId="conv_owner" workspaceRoot="C:/workspace" />);
     expectTaskEvidenceOnly(ui.container);
-    expect(ui.container.textContent).toContain("src/main.ts");
+    expect(ui.container.querySelector(".activity-cell-read-target")?.textContent).toBe("main.ts");
+    expect(ui.container.querySelector(".activity-cell-read-target")?.getAttribute("title")).toBe("src/main.ts");
     fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
     expectTaskEvidenceOnly(ui.container);
     expect(ui.container.textContent).toContain("export const answer = 42;");

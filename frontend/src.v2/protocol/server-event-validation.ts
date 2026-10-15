@@ -1,3 +1,4 @@
+import { isGuardianAssessment } from "./guardian-types";
 import { SERVER_EVENT_TYPES, type ServerEvent, type ServerEventType } from "./events";
 import {
   AGENT_PROGRESS_PHASES,
@@ -6,6 +7,7 @@ import {
   AGENT_PROGRESS_STATUSES,
 } from "./streaming-types";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { isToolDelegations } from "../lib/tool-call-reducer";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -15,13 +17,16 @@ type FieldKind = "array" | "boolean" | "number" | "record" | "string" | "nullabl
 const REQUIRED_ROUTING_FIELDS: Partial<
   Record<ServerEventType, Readonly<Record<string, FieldKind>>>
 > = {
-  "item.started": { conversation_id: "string", message_id: "string", item: "record" },
+  "workspace.project_index.invalidated": { conversation_id: "string", workspace_root: "string", index_instance_id: "string", revision: "number" },
+  "item.started": { conversation_id: "string", item: "record" },
   "agent_message.delta": { item_id: "string", delta: "string" },
   "agent.item.delta": { item_id: "string", delta: "string" },
-  "item.completed": { conversation_id: "string", message_id: "string", item: "record" },
+  "item.completed": { conversation_id: "string", item: "record" },
   "thinking_delta": { conversation_id: "string", message_id: "string", content: "string" },
   "thinking": { conversation_id: "string", message_id: "string", content: "string" },
   "agent.item": { conversation_id: "string", message_id: "string", id: "string", kind: "string" },
+  "guardian_assessment": { conversation_id: "string", message_id: "string", turn_id: "string", id: "string", action: "record", status: "string", started_at_ms: "number" },
+  "guardian_warning": { conversation_id: "string", message_id: "string", turn_id: "string", message: "string" },
   "agent.progress": {
     conversation_id: "string",
     message_id: "string",
@@ -246,6 +251,8 @@ const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
   "thinking",
   "agent.item",
   "agent.item.delta",
+  "guardian_assessment",
+  "guardian_warning",
   "agent.progress",
   "runtime.span",
   "agent.run.started",
@@ -287,6 +294,7 @@ const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
   "permission.rules.updated",
   "guidelines.updated",
   "file.changed",
+  "workspace.project_index.invalidated",
   "git.pr_status",
   "diff.git_working_tree",
   "diff.git_staged",
@@ -338,6 +346,7 @@ const WORKSPACE_OWNED_EVENT_TYPES = new Set<ServerEventType>([
   "checkpoint.run.resume",
   "guidelines.updated",
   "file.changed",
+  "workspace.project_index.invalidated",
   "git.pr_status",
   "diff.git_working_tree",
   "diff.git_staged",
@@ -733,6 +742,23 @@ const isAgentMessageItem = (
     && isBoundedString(value.source, 256);
 };
 
+const isContextCompactionItem = (value: unknown, lifecycle: "started" | "completed"): boolean => isRecord(value)
+  && isBoundedString(value.id, 1_024)
+  && value.type === "context_compaction"
+  && (lifecycle === "started" ? value.status === "in_progress" : value.status === "completed" || value.status === "interrupted")
+  && (value.source === "auto" || value.source === "manual")
+  && (!("started_at" in value) || isNonNegativeSafeInteger(value.started_at))
+  && (!("finished_at" in value) || isNonNegativeSafeInteger(value.finished_at));
+
+const isUserMessageItem = (value: unknown): boolean => isRecord(value)
+  && value.type === "user_message"
+  && isBoundedString(value.id, 1_024)
+  && isRecord(value.message)
+  && value.message.id === value.id
+  && value.message.role === "user"
+  && isBoundedString(value.message.content, MAX_MESSAGE_TEXT_CHARS, { allowEmpty: true })
+  && hasBoundedJsonShape(value.message);
+
 const isReplyAttachment = (value: unknown): boolean => isRecord(value)
   && isBoundedString(value.path, 32_768)
   && !String(value.path).includes("\0")
@@ -840,7 +866,7 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
     return isBoundedString(request.workspace_root, 32_768, { allowEmpty: true })
       && (!("operation" in request) || request.operation === "archive" || request.operation === "delete");
   }
-  if (request.subtype === "can_use_tool") {
+  if (["can_use_tool", "request_permissions", "write_stdin"].includes(String(request.subtype))) {
     return isNonEmptyString(request.tool_name)
       && isRecord(request.input)
       // Tool arguments and diffs are attacker-influenced and unbounded at the
@@ -848,7 +874,15 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
       // every other projected payload does.
       && hasBoundedJsonShape(request.input)
       && request.tool_use_id === requestId
+      && (request.subtype !== "request_permissions" || (isRecord(request.permissions) && hasBoundedJsonShape(request.permissions)))
+      && (request.subtype !== "write_stdin" || (isRecord(request.stdin_action) && hasBoundedJsonShape(request.stdin_action)))
       && (!("network_unisolated" in request) || typeof request.network_unisolated === "boolean")
+      && (!("mcp_approval" in request) || (isRecord(request.mcp_approval)
+        && isNonEmptyString(request.mcp_approval.server)
+        && isNonEmptyString(request.mcp_approval.tool_name)
+        && ["auto", "prompt", "writes", "approve"].includes(String(request.mcp_approval.approval_mode))
+        && typeof request.mcp_approval.allow_session_remember === "boolean"
+        && (!("allow_persistent_approval" in request.mcp_approval) || typeof request.mcp_approval.allow_persistent_approval === "boolean")))
       && (!("diff" in request) || (
         isBoundedString(request.diff, MAX_TERMINAL_OUTPUT_CHARS, { allowEmpty: true })
         || (isRecord(request.diff) && hasBoundedJsonShape(request.diff))
@@ -861,10 +895,23 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
     return request.tool_use_id === requestId
       && isNonEmptyString(request.prompt)
       && isNonEmptyString(request.question)
+      && (!("mode" in request) || request.mode === "form" || request.mode === "url")
+      && (request.mode !== "url" || (isNonEmptyString(request.url) && isNonEmptyString(request.elicitation_id)))
       && (!("schema" in request) || (isRecord(request.schema) && hasBoundedJsonShape(request.schema)))
       && ["options", "choices", "allowed_values"].every((field) => (
         !(field in request) || (Array.isArray(request[field]) && hasBoundedJsonShape(request[field]))
       ));
+  }
+  if (request.subtype === "request_user_input") {
+    return request.tool_use_id === requestId && typeof request.isBlocking === "boolean"
+      && Array.isArray(request.questions) && request.questions.length > 0
+      && request.questions.every(question => isRecord(question) && isNonEmptyString(question.id)
+        && typeof question.header === "string" && isNonEmptyString(question.question)
+        && (!("isOther" in question) || typeof question.isOther === "boolean")
+        && (!("isSecret" in question) || typeof question.isSecret === "boolean")
+        && (!("options" in question) || (Array.isArray(question.options) && question.options.every(option => isRecord(option)
+          && isNonEmptyString(option.label) && typeof option.description === "string"))))
+      && hasBoundedJsonShape(request.questions);
   }
   if (request.subtype === "provider_auth_prompt") {
     const promptType = request.prompt_type;
@@ -911,7 +958,10 @@ const isCheckpointRecord = (
     && Array.isArray(value.paths)
     && value.paths.length > 0
     && value.paths.length <= 4_096
-    && value.paths.every(isWorkspaceRelativePath)
+    && value.paths.every(path => isWorkspaceRelativePath(path) || (
+      isBoundedString(path, 32_768) && !path.includes("\0")
+      && (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/") || /^\\\\[^\\]+\\[^\\]+/.test(path))
+    ))
     && isRecord(value.metadata)
     && hasBoundedJsonShape(value.metadata);
   if (!valid) return false;
@@ -987,7 +1037,8 @@ const isBoundedRecordArray = (
 const isGoalPayload = (value: unknown): value is Record<string, unknown> => {
   if (!isRecord(value) || !hasBoundedJsonShape(value)) return false;
   if (!isOptionalBoundedText(value, "id", 1_024)) return false;
-  if (!isOptionalBoundedText(value, "text", MAX_GOAL_TEXT_CHARS)) return false;
+  if (!isOptionalBoundedText(value, "text", MAX_GOAL_TEXT_CHARS * 2)
+    || typeof value.text === "string" && Array.from(value.text).length > MAX_GOAL_TEXT_CHARS) return false;
   if (!isOptionalBoundedText(value, "status", 64)) return false;
   if (!isOptionalBoundedText(value, "created_at", 256)) return false;
   if (!isOptionalBoundedText(value, "updated_at", 256)) return false;
@@ -1019,6 +1070,9 @@ const isConversationSummaryPayload = (
     ["workspace_root", 32_768],
     ["git_branch", 4_096],
     ["worktree_path", 32_768],
+    ["execution_cwd", 32_768],
+    ["projectless_output_dir", 32_768],
+    ["projectless_browser_root", 32_768],
     ["summary", 65_536],
     ["parent_conversation_id", 1_024],
     ["fork_id", 1_024],
@@ -1123,6 +1177,12 @@ const isRuntimeSessionSnapshot = (value: unknown): value is Record<string, unkno
     maxArrayItems: 8_192,
     maxObjectItems: 4_096,
   })) return false;
+  if ("active_subagents" in value && value.active_subagents !== undefined) {
+    if (!Array.isArray(value.active_subagents) || value.active_subagents.length > 8_192
+      || !value.active_subagents.every(agent => isRecord(agent) && isBoundedString(agent.id, 1_024)
+        && isBoundedString(agent.status, 128)
+        && (!("cleanup_pending" in agent) || typeof agent.cleanup_pending === "boolean"))) return false;
+  }
   for (const field of [
     "session_id",
     "parent_session_id",
@@ -1166,8 +1226,20 @@ const isRuntimeSessionSnapshot = (value: unknown): value is Record<string, unkno
   return !activeId || !active || activeId === active;
 };
 
+const hasCommandActionPayload = (value: Record<string, unknown>): boolean => {
+  const actions = value.commandActions ?? value.command_actions;
+  if (actions === undefined) return true;
+  return Array.isArray(actions) && actions.every((action) => {
+    if (!isRecord(action) || !isBoundedString(action.command, MAX_COMMAND_OUTPUT_CHARS, { allowEmpty: true })) return false;
+    if (action.type === "read") return isBoundedString(action.name, 32_768, { allowEmpty: true }) && isBoundedString(action.path, 32_768);
+    if (action.type === "search") return isOptionalBoundedText(action, "query", 32_768) && isOptionalBoundedText(action, "path", 32_768);
+    if (action.type === "listFiles") return isOptionalBoundedText(action, "path", 32_768);
+    return action.type === "unknown";
+  });
+};
+
 const isStreamResumeToolRecord = (value: unknown, pending: boolean): value is Record<string, unknown> => {
-  if (!isRecord(value) || !hasBoundedJsonShape(value)) return false;
+  if (!isRecord(value) || !hasBoundedJsonShape(value) || !hasCommandActionPayload(value)) return false;
   if (!isBoundedString(value.id, 1_024) || !isBoundedString(value.name, 1_024)) return false;
   if (pending && (!isRecord(value.args) || !hasBoundedJsonShape(value.args))) return false;
   if (!pending && "args" in value && value.args !== undefined && value.args !== null
@@ -1197,6 +1269,9 @@ const isStreamResumeBlock = (value: unknown): value is Record<string, unknown> =
     maxObjectItems: 2_048,
   })) return false;
   if (!isBoundedString(value.type, 128)) return false;
+  if (value.type === "guardian_assessment") return isGuardianAssessment(value.review);
+  if (value.type === "guardian_warning") return typeof value.message === "string" && typeof value.turnId === "string" && (value.interruption === undefined || typeof value.interruption === "boolean");
+  if (value.type === "user_input") return isBoundedString(value.userMessageId, 1_024);
   if ("content" in value && !isBoundedString(value.content, MAX_MESSAGE_TEXT_CHARS, { allowEmpty: true })) {
     return false;
   }
@@ -1208,6 +1283,8 @@ const hasValidSemanticPayload = (
   type: ServerEventType,
 ): boolean => {
   let valid = true;
+  if (type === "guardian_assessment") valid = isGuardianAssessment(value);
+  if (type === "guardian_warning") valid = typeof value.message === "string" && (value.interruption === undefined || typeof value.interruption === "boolean");
   if (type === "agent.item.delta") {
     valid = isBoundedString(value.conversation_id, 1_024)
       && isBoundedString(value.item_id, 1_024)
@@ -1226,13 +1303,15 @@ const hasValidSemanticPayload = (
   }
   if (type === "item.started") {
     valid = isBoundedString(value.conversation_id, 1_024)
-      && isBoundedString(value.message_id, 1_024)
-      && isAgentMessageItem(value.item, "started");
+      && ((isAgentMessageItem(value.item, "started") && isBoundedString(value.message_id, 1_024))
+        || (isUserMessageItem(value.item) && isBoundedString(value.message_id, 1_024) && isBoundedString(value.turn_id, 1_024))
+        || (isContextCompactionItem(value.item, "started") && (!("message_id" in value) || isBoundedString(value.message_id, 1_024))));
   }
   if (type === "item.completed") {
     valid = isBoundedString(value.conversation_id, 1_024)
-      && isBoundedString(value.message_id, 1_024)
-      && isAgentMessageItem(value.item, "completed")
+      && ((isAgentMessageItem(value.item, "completed") && isBoundedString(value.message_id, 1_024))
+        || (isUserMessageItem(value.item) && isBoundedString(value.message_id, 1_024) && isBoundedString(value.turn_id, 1_024))
+        || (isContextCompactionItem(value.item, "completed") && (!("message_id" in value) || isBoundedString(value.message_id, 1_024))))
       && (!("finish_reason" in value) || isBoundedString(value.finish_reason, 16_384))
       && (!("provider_raw" in value) || (
         isRecord(value.provider_raw)
@@ -1268,9 +1347,46 @@ const hasValidSemanticPayload = (
       && (!("item_id" in value) || isBoundedString(value.item_id, 1_024))
       && (!("content_index" in value) || isNonNegativeSafeInteger(value.content_index));
   }
+  if (["subagent.start", "subagent.done"].includes(type) && "delegation" in value) {
+    valid = valid && isToolDelegations([value.delegation])
+      && (!("parent_tool_call_id" in value) || isBoundedString(value.parent_tool_call_id, 1_024, { allowEmpty: true }))
+      && (!("parent_message_id" in value) || isBoundedString(value.parent_message_id, 1_024) && isBoundedString(value.parent_tool_call_id, 1_024));
+  }
+  if (type === "tool_result" && "delegations" in value) valid = valid && isToolDelegations(value.delegations);
   if (type === "subagent.progress" && "transcript_delta" in value) {
     const delta = value.transcript_delta;
-    valid = valid && isRecord(delta)
+    if (isRecord(delta) && delta.kind === "events") {
+      let previousSeq = Number(delta.base_seq);
+      valid = valid && isNonNegativeSafeInteger(delta.seq) && isNonNegativeSafeInteger(delta.base_seq)
+        && delta.seq > delta.base_seq && Array.isArray(delta.events) && delta.events.length <= 4_096
+        && delta.events.every(event => {
+          if (!isRecord(event) || !isNonNegativeSafeInteger(event.seq) || event.seq <= previousSeq || event.seq > Number(delta.seq)
+            || !isBoundedString(event.event_id, 1_024) || !isNonNegativeSafeInteger(event.ts_ms)
+            || !isRecord(event.payload) || !hasBoundedJsonShape(event.payload, {
+              maxNodes: 16_384, maxDepth: 18, maxStringCharacters: 4_194_304,
+              maxArrayItems: 8_192, maxObjectItems: 4_096,
+            })) return false;
+          previousSeq = event.seq;
+          const payload = event.payload;
+          if (event.event_type === "user_prompt" || event.event_type === "assistant") return typeof payload.content === "string";
+          if (event.event_type === "tool_use") return isRecord(payload.tool_call)
+            && isBoundedString(payload.tool_call.id, 1_024) && isBoundedString(payload.tool_call.name, 1_024) && isRecord(payload.tool_call.args)
+            && hasCommandActionPayload(payload.tool_call)
+            && (!("delegations" in payload.tool_call) || isToolDelegations(payload.tool_call.delegations));
+          if (event.event_type === "tool_result") return isRecord(payload.record)
+            && payload.record.id === payload.tool_call_id && isBoundedString(payload.record.name, 1_024)
+            && ["pending", "running", "success", "failed", "blocked", "partial", "timeout", "cancelled"].includes(String(payload.record.status))
+            && hasCommandActionPayload(payload.record)
+            && (!("delegations" in payload.record) || isToolDelegations(payload.record.delegations));
+          if (event.event_type === "progress") return payload.kind === "assistant_message" && isBoundedString(payload.item_id, 1_024)
+            && (typeof payload.content === "string" || typeof payload.content_delta === "string" && isNonNegativeSafeInteger(payload.content_offset));
+          if (event.event_type !== "system") return false;
+          if (payload.lifecycle === "turn_started") return typeof payload.turn_id === "string";
+          if (payload.lifecycle === "subagent_delegation_updated") return isBoundedString(payload.parent_message_id, 1_024)
+            && isBoundedString(payload.parent_tool_call_id, 1_024) && isToolDelegations([payload.delegation]);
+          return payload.transcript_only === true || ["provider_progress", "turn_diff_updated", "error"].includes(String(payload.lifecycle));
+        });
+    } else valid = valid && isRecord(delta)
       && isNonNegativeSafeInteger(delta.seq)
       && isNonNegativeSafeInteger(delta.offset)
       && isBoundedString(delta.message_id, 1_024)
@@ -1280,6 +1396,7 @@ const hasValidSemanticPayload = (
   }
   if (type === "tool_call") {
     valid = valid
+      && hasCommandActionPayload(value)
       && (!("visibility" in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)));
   }
   if (type === "tool_result") {
@@ -1289,9 +1406,14 @@ const hasValidSemanticPayload = (
       ["artifact_media_type", 128],
     ] as const;
     valid = valid
+      && hasCommandActionPayload(value)
       // summary is required by the routing contract. Empty summaries are
       // retained for compatibility with a few legacy blocked-tool events.
       && isBoundedString(value.summary, MAX_EVENT_SUMMARY_CHARS, { allowEmpty: true })
+      && ["stdout_preview", "stderr_preview"].every(field => !(field in value) || isBoundedString(value[field], MAX_EVENT_CONTENT_CHARS, { allowEmpty: true }))
+      && (!("exit_code" in value) || Number.isSafeInteger(value.exit_code))
+      && (!("recipient_id" in value) || isBoundedString(value.recipient_id, 1_024))
+      && (!("recipient_ids" in value) || (Array.isArray(value.recipient_ids) && value.recipient_ids.every(id => isBoundedString(id, 1_024))))
       && retryableArtifactFields.every(([field, maximum]) => (
         !(field in value) || isBoundedString(value[field], maximum)
       ))
@@ -1547,6 +1669,7 @@ const hasValidSemanticPayload = (
       && (!('phase' in value) || isBoundedString(value.phase, 128, { allowEmpty: true }))
       && (!('stream_status' in value) || isBoundedString(value.stream_status, 128, { allowEmpty: true }))
       && (!('last_event_type' in value) || isBoundedString(value.last_event_type, 256, { allowEmpty: true }))
+      && (!('started_at' in value) || typeof value.started_at === "number" && Number.isFinite(value.started_at) && value.started_at >= 0)
       && (!('event_seq' in value) || isNonNegativeSafeInteger(value.event_seq));
   }
   if (type === "goal.updated") {
@@ -1560,6 +1683,7 @@ const hasValidSemanticPayload = (
     const conversations = value.conversations;
     const activeId = value.active_conversation_id;
     const activeConversation = value.active_conversation;
+    const sidebarOrder = value.sidebar_order;
     const conversationIds = Array.isArray(conversations)
       ? conversations.map((item) => isRecord(item) ? String(item.id ?? "").trim() : "")
       : [];
@@ -1584,6 +1708,13 @@ const hasValidSemanticPayload = (
       && (!activeId || conversationIds.includes(String(activeId)))
       && (!activeConversation || !activeId || String(activeConversation.id) === String(activeId))
       && (!('session' in value) || value.session === null || value.session === undefined || isRuntimeSessionSnapshot(value.session))
+      && (sidebarOrder === undefined || isRecord(sidebarOrder)
+        && isNonNegativeSafeInteger(sidebarOrder.revision)
+        && (sidebarOrder.sort_mode === "manual" || sidebarOrder.sort_mode === "updated_at")
+        && Array.isArray(sidebarOrder.project_order) && sidebarOrder.project_order.every((item: unknown) => typeof item === "string")
+        && Array.isArray(sidebarOrder.recent_thread_ids) && sidebarOrder.recent_thread_ids.every((item: unknown) => typeof item === "string")
+        && isRecord(sidebarOrder.project_thread_orders) && Object.values(sidebarOrder.project_thread_orders)
+          .every(items => Array.isArray(items) && items.every((item: unknown) => typeof item === "string")))
       && isOptionalIsoTimestamp(value, "snapshot_at");
   }
   if (type === "conversation.switched") {
@@ -1596,7 +1727,7 @@ const hasValidSemanticPayload = (
       || isBoundedString(switchedId, 1_024)
     )
       && (conversation === null || conversation === undefined || isConversationRecordPayload(conversation))
-      && (Boolean(switchedId) || Boolean(conversationId))
+      && ((switchedId === null && conversation === null) || Boolean(switchedId) || Boolean(conversationId))
       && (!switchedId || !conversationId || String(switchedId) === conversationId)
       && (!('is_hydrating' in value) || typeof value.is_hydrating === "boolean")
       && (!('session' in value) || value.session === null || value.session === undefined || isRuntimeSessionSnapshot(value.session))
@@ -1728,7 +1859,7 @@ const hasValidSemanticPayload = (
   }
   if (type === "context_compacted") {
     valid = isBoundedString(value.conversation_id, 1_024)
-      && isBoundedString(value.summary, MAX_JSON_STRING_CHARS)
+      && isBoundedString(value.summary, MAX_JSON_STRING_CHARS, { allowEmpty: isBoundedString(value.compaction_item_id, 1_024) })
       && (!("before_tokens" in value) || isNonNegativeSafeInteger(value.before_tokens))
       && (!("after_tokens" in value) || isNonNegativeSafeInteger(value.after_tokens))
       && (!("retained_categories" in value) || (
@@ -1940,7 +2071,8 @@ const hasValidSemanticPayload = (
     valid = isNonEmptyString(value.provider) && isNonEmptyString(value.message);
   }
   if (type === "conversation.compaction.updated") {
-    valid = value.state === "compacted" && isNonEmptyString(value.summary);
+    valid = ["compacting", "compacted", "failed"].includes(String(value.state))
+      && (isNonEmptyString(value.summary) || (value.summary === "" && isBoundedString(value.compaction_item_id, 1_024) && value.state !== "failed"));
   }
   if (type === "conversation.summary.updated") {
     valid = typeof value.summary === "string"

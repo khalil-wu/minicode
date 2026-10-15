@@ -274,7 +274,7 @@ def _prepare_hook_condition_matcher(
     env_extras: dict[str, str] | None,
     tool_registry: Any | None = None,
     has_conditions: bool = True,
-) -> tuple[Callable[[Any], bool], tuple[str, ...]]:
+) -> tuple[Callable[[Any], bool], tuple[str, ...], Callable[[Any], bool]]:
     """Read one tool identity for this batch's condition and matcher aliases."""
 
     condition_event = event in {
@@ -284,15 +284,31 @@ def _prepare_hook_condition_matcher(
         HookEvent.PERMISSION_REQUEST,
     }
     if not condition_event and event != HookEvent.PERMISSION_DENIED:
-        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), ()
+        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), (), (lambda entry: True)
     fields = env_extras or {}
     tool_name = fields.get("TOOL_NAME", match_target)
     tool = tool_registry.get_tool(tool_name) if tool_registry is not None else None
-    policy_aliases = tool.policy_aliases if tool is not None else ()
+    grant_aliases = tool.policy_aliases if tool is not None else ()
+    policy_aliases = tuple(dict.fromkeys((*grant_aliases, *tool.policy_deny_aliases))) if tool is not None else ()
+    tool_identity = tool.policy_identity if tool is not None else tool_name
+    from backend.hooks.dispatcher import matcher_matches
+
+    def grant_matches(entry: Any) -> bool:
+        matcher = entry.raw_matcher if hasattr(entry, "raw_matcher") else entry.matcher.pattern
+        if matcher and not any(matcher_matches(matcher, candidate, tool_match=True)
+                               for candidate in (tool_identity, *grant_aliases)):
+            return False
+        condition = str(getattr(entry, "condition", "") or "").strip()
+        if not condition:
+            return True
+        from backend.permissions.content_rules import parse_content_rule, rule_matches_call
+        rule = parse_content_rule(condition)
+        return bool(rule is not None and rule_matches_call(rule, tool_identity,
+            _json_object(fields.get("TOOL_ARGS_JSON", "")), policy_aliases=grant_aliases))
     if not condition_event:
-        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), policy_aliases
+        return (lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())), policy_aliases, grant_matches
     if not has_conditions:
-        return (lambda entry: True), policy_aliases
+        return (lambda entry: True), policy_aliases, grant_matches
     arguments = _json_object(fields.get("TOOL_ARGS_JSON", ""))
     from backend.permissions.content_rules import parse_content_rule, rule_matches_call
     from backend.tools.base import validate_tool_input
@@ -306,9 +322,9 @@ def _prepare_hook_condition_matcher(
         if not input_is_valid:
             return False
         rule = parse_content_rule(condition)
-        return bool(rule is not None and rule_matches_call(rule, tool_name, arguments, policy_aliases=policy_aliases))
+        return bool(rule is not None and rule_matches_call(rule, tool_name, arguments, effect="deny", policy_aliases=policy_aliases))
 
-    return condition_matches, policy_aliases
+    return condition_matches, policy_aliases, grant_matches
 
 
 def _hook_input(
@@ -407,11 +423,12 @@ def _hook_input(
     elif event == HookEvent.SESSION_END:
         payload["reason"] = raw.get("SESSION_END_REASON", "")
     elif event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}:
-        payload["trigger"] = raw.get("COMPACT_TRIGGER", "manual")
-        if event == HookEvent.PRE_COMPACT:
-            payload["custom_instructions"] = raw.get("COMPACT_CUSTOM_INSTRUCTIONS") or None
-        else:
-            payload["compact_summary"] = raw.get("COMPACT_SUMMARY", "")
+        payload.pop("event")
+        payload["hook_event_name"] = "PreCompact" if event is HookEvent.PRE_COMPACT else "PostCompact"
+        payload.pop("permission_mode", None)
+        payload["transcript_path"] = raw.get("TRANSCRIPT_PATH") or None
+        payload.update(turn_id=raw.get("TURN_ID", ""), model=raw.get("MODEL", ""),
+                       trigger=raw.get("COMPACT_TRIGGER", "manual"))
     elif event == HookEvent.CONFIG_CHANGE:
         payload.update({"source": raw.get("CONFIG_CHANGE_SOURCE", ""), "file_path": raw.get("CONFIG_FILE_PATH", "")})
     elif event == HookEvent.CWD_CHANGED:
@@ -812,7 +829,7 @@ class HookManager:
         entries = self.hooks.get(event, ())
         if not entries:
             return ()
-        condition_matches, policy_aliases = _prepare_hook_condition_matcher(
+        condition_matches, policy_aliases, _grant_matches = _prepare_hook_condition_matcher(
             event=event,
             match_target=match_target,
             env_extras=env_extras,
@@ -865,7 +882,7 @@ class HookManager:
         self,
         tool_name: str,
         args: dict[str, Any],
-        result_content: str,
+        result_content: Any,
         *,
         tool_call_id: str = "",
         session_id: str = "",
@@ -875,7 +892,10 @@ class HookManager:
         extras["TOOL_CALL_ID"] = tool_call_id
         extras["SESSION_ID"] = session_id
         extras["PERMISSION_MODE"] = permission_mode
-        extras["TOOL_RESULT"] = result_content[:_RESULT_TRUNCATE]
+        extras["TOOL_RESULT"] = (
+            result_content[:_RESULT_TRUNCATE] if isinstance(result_content, str)
+            else json.dumps(result_content, ensure_ascii=False, separators=(",", ":"))
+        )
         return await self._run_event(
             HookEvent.POST_TOOL_USE, match_target=tool_name, env_extras=extras,
         )
@@ -1334,7 +1354,7 @@ class HookManager:
         from backend.hooks.dispatcher import execute_handlers, select_handlers
         from backend.hooks.reducer import reduce_hook_executions
 
-        condition_matches, policy_aliases = _prepare_hook_condition_matcher(
+        condition_matches, policy_aliases, grant_matches = _prepare_hook_condition_matcher(
             event=event,
             match_target=match_target,
             env_extras=env_extras,
@@ -1368,6 +1388,7 @@ class HookManager:
             executions = await execute_handlers(
                 synchronous,
                 lambda entry: self._execute_entry(entry, event, env_extras),
+                permission_grant_allowed=grant_matches,
             )
         except asyncio.CancelledError:
             for entry in synchronous:
@@ -1470,6 +1491,12 @@ class HookManager:
             hook_fields.setdefault("TRANSCRIPT_PATH", str(metadata.get("transcript_path") or ""))
             hook_fields.setdefault("AGENT_ID", str(metadata.get("agent_id") or ""))
             hook_fields.setdefault("AGENT_TYPE", str(metadata.get("agent_type") or ""))
+            if event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}:
+                hook_fields.setdefault("TURN_ID", tool_context.turn_id)
+                model_snapshot = tool_context.model_execution
+                if model_snapshot is None and tool_context.run_context is not None:
+                    model_snapshot = tool_context.run_context.active_model_execution or tool_context.run_context.model_execution
+                hook_fields.setdefault("MODEL", model_snapshot.model if model_snapshot is not None else str(metadata.get("model") or ""))
         hook_input = _hook_input(event, hook_fields, self.workspace_root)
         # Keeping command-hook JSON ASCII avoids PowerShell/Git
         # Bash code-page reinterpretation on Windows.

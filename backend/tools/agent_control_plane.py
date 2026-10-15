@@ -24,8 +24,9 @@ AgentTreeScope = Literal[
     "tree",
     "conversation",
     "message",
+    "lifecycle",
 ]
-AgentOperationName = Literal["spawn", "observe", "wait", "interrupt", "message"]
+AgentOperationName = Literal["spawn", "observe", "wait", "interrupt", "message", "followup"]
 CHILD_AGENT_OPTIONS_METADATA_KEY = "_child_agent_options"
 
 
@@ -40,9 +41,10 @@ class AgentOperationBinding:
 
 _CANONICAL_AGENT_BINDINGS: dict[str, AgentOperationBinding] = {
     "task": AgentOperationBinding("task", "spawn", "children"),
-    "task_status": AgentOperationBinding("task_status", "observe", "children"),
-    "task_stop": AgentOperationBinding("task_stop", "interrupt", "children"),
+    "task_status": AgentOperationBinding("task_status", "observe", "lifecycle"),
+    "task_stop": AgentOperationBinding("task_stop", "interrupt", "lifecycle"),
     "send_message": AgentOperationBinding("send_message", "message", "message"),
+    "followup_task": AgentOperationBinding("followup_task", "followup", "message"),
 }
 
 
@@ -138,9 +140,8 @@ class AgentControlPlane:
     """Canonical ownership and lifecycle projection for one tool caller.
 
     The caller identity comes from the live ``ToolExecutionContext`` rather
-    than model-supplied arguments.  A root run owns its current descendant
-    tree; for mailbox delivery it may also reach detached/background workers
-    from older runs in the same conversation.  A child may reach its own
+    than model-supplied arguments. A root coordinates the conversation-owned
+    tree across turns, including detached/background workers. A child may reach its own
     descendants and, when its explicit execution profile permits messaging,
     its siblings/parent mailbox.
     """
@@ -478,6 +479,16 @@ class AgentControlPlane:
         ]
 
     def agents_for_scope(self, scope: AgentTreeScope) -> list[dict[str, Any]]:
+        if scope == "lifecycle":
+            if not self.has_actor_identity:
+                return []
+            if self.actor_is_subagent:
+                return self.descendants()
+            merged = {
+                _agent_id(item): item
+                for item in (*self.conversation_agents(), *self.descendants())
+            }
+            return list(merged.values())
         if scope == "children":
             return self.children()
         if scope == "descendants":
@@ -748,7 +759,7 @@ class AgentControlPlane:
             return False
         if operation == "spawn":
             return str(profile.delegation or "none") != "none"
-        if operation in {"observe", "wait", "interrupt"}:
+        if operation in {"observe", "wait", "interrupt", "followup"}:
             return bool(profile.agent_lifecycle)
         return False
 

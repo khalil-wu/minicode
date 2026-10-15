@@ -27,6 +27,7 @@ class RecordingSocket:
         self.query_params = {"session_id": session_id}
         self.headers = {}
         self.application_state = WebSocketState.CONNECTING
+        self.client_state = WebSocketState.CONNECTING
         self.accept_calls = 0
         self.sent = []
         self.closed = []
@@ -34,6 +35,7 @@ class RecordingSocket:
     async def accept(self, **kwargs):
         self.accept_calls += 1
         self.application_state = WebSocketState.CONNECTED
+        self.client_state = WebSocketState.CONNECTED
 
     async def send_json(self, payload):
         self.sent.append(payload)
@@ -41,6 +43,7 @@ class RecordingSocket:
     async def close(self, **kwargs):
         self.closed.append(kwargs)
         self.application_state = WebSocketState.DISCONNECTED
+        self.client_state = WebSocketState.DISCONNECTED
 
 
 class RecordingLLM:
@@ -97,12 +100,11 @@ def _assert_released(connection):
 
 
 async def _release_session(session):
-    await session.run_manager.shutdown_notification_wakes()
-    session.run_manager.close_durable_queue()
-    await session.event_outbox.drain_persistence()
-    await session.llm.aclose()
-    session.artifact_store.shutdown()
-    session.artifact_store.clear()
+    manager = session.ws_manager
+    assert await manager.shutdown_session(session.session_id, reason="test_cleanup") is True
+    assert manager.iter_sessions() == ()
+    assert not manager._disconnect_tasks
+    assert not manager._connecting_websockets
 
 
 @pytest.mark.asyncio
@@ -249,16 +251,45 @@ async def test_cancelling_cold_read_releases_unadopted_resources(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_corrupt_cold_replay_releases_resources_without_erasing_log(tmp_path):
+@pytest.mark.parametrize("retained_prefix", [False, True])
+async def test_corrupt_optional_cold_replay_adopts_session_and_releases_without_erasing_log(tmp_path, retained_prefix):
     path = _replay_path()
-    path.write_bytes(b"\xff\n")
+    valid = {"type": "agent_message.delta", "conversation_id": "conv_kept",
+             "item_id": "kept", "delta": "保留原内容", "seq": 42}
+    raw = ((json.dumps(valid, ensure_ascii=False) + "\n").encode("utf-8") if retained_prefix else b"") + b"\xff\n"
+    path.write_bytes(raw)
     manager = WebSocketManager()
     connection = _connection(tmp_path)
-    with pytest.raises(UnicodeDecodeError):
-        await manager.connect(**connection)
+    session, generation = await manager.connect(**connection)
+    try:
+        assert generation == 1
+        assert manager.iter_sessions() == (session,)
+        assert session.event_outbox.replay_log_degraded is True
+        assert session.event_outbox._store.read_status.dropped_lines == 1
+        assert session.event_outbox._store.read_status.to_payload() == {"replay_log_dropped_lines": 1}
+        assert session.event_outbox.current_replay_seq == (42 if retained_prefix else 0)
+        assert list(session.event_outbox._events) == ([valid] if retained_prefix else [])
+        assert path.read_bytes() == raw
+        assert connection["llm"].close_calls == 0
+        assert connection["artifact_store"].shutdown_calls == 0
+    finally:
+        await _release_session(session)
     _assert_released(connection)
     assert manager.iter_sessions() == ()
-    assert path.read_bytes() == b"\xff\n"
+    assert path.read_bytes() == raw
+    rebuilt_connection = _connection(tmp_path / "rebuilt")
+    rebuilt, rebuilt_generation = await manager.connect(**rebuilt_connection)
+    try:
+        assert rebuilt is not session
+        assert rebuilt_generation == 1
+        assert manager.iter_sessions() == (rebuilt,)
+        assert rebuilt.event_outbox.replay_log_degraded is True
+        assert rebuilt.event_outbox.current_replay_seq == (42 if retained_prefix else 0)
+        assert path.read_bytes() == raw
+    finally:
+        await _release_session(rebuilt)
+    _assert_released(rebuilt_connection)
+    assert path.read_bytes() == raw
 
 
 @pytest.mark.asyncio
@@ -302,8 +333,8 @@ async def test_rejected_connect_releases_resources(tmp_path, failure):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("failure", "drop_at"), [
-    ("artifact", None), ("registry", None), ("permissions", None), ("replay", None),
-    ("replay", "send"), ("replay", "close"),
+    ("artifact", None), ("registry", None), ("permissions", None),
+    ("registry", "send"), ("registry", "close"),
 ])
 async def test_endpoint_reports_initialization_failure_and_releases_resources(
     tmp_path, monkeypatch, failure, drop_at,
@@ -365,7 +396,10 @@ async def test_endpoint_reports_initialization_failure_and_releases_resources(
     monkeypatch.setattr(main, "ArtifactStore", create_artifacts)
     monkeypatch.setattr(main._state, "bootstrap", bootstrap)
     monkeypatch.setattr(main._state, "ws_manager", manager)
-    await main.websocket_endpoint(endpoint_socket)
+    try:
+        await main.websocket_endpoint(endpoint_socket)
+    finally:
+        await manager.shutdown(reason="test_endpoint_cleanup")
     assert manager.iter_sessions() == ()
     assert socket.accept_calls == 1
     if drop_at == "send":

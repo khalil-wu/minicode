@@ -7,7 +7,18 @@ const mocks = vi.hoisted(() => {
 });
 vi.mock("../protocol/ws-outbox", async (load) => ({ ...await load<typeof import("../protocol/ws-outbox")>(),
   sendClientCommand: mocks.command,
-  sendClientCommandAwaitResult: vi.fn(async (command) => ({ type: "command.result", level: "success", data: { conversation_id: command.conversation_id } })),
+  sendClientCommandAwaitResult: vi.fn(async (command, expectedCommand) => {
+    mocks.command(command);
+    return {
+      type: "command.result", command: expectedCommand, client_command_id: command.client_command_id,
+      level: "success", message: "", data: {
+        conversation_id: command.conversation_id,
+        ...(command.type === "user_message" ? {
+          admitted: true, user_message_id: command.user_message_id, assistant_message_id: command.assistant_message_id,
+        } : {}),
+      },
+    };
+  }),
   sendConversationDeleteCommand: vi.fn(async () => true),
 }));
 vi.mock("../chat/sendChatMessage", async (load) => {

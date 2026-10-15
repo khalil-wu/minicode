@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleDiffEvent } from "./diffEvents";
 import { useAppStore } from "../stores";
@@ -11,6 +12,8 @@ describe("handleDiffEvent", () => {
     vi.mocked(pushToast).mockClear();
     useAppStore.setState({
       conversationId: "conv-current",
+      pendingConversationSwitchId: null,
+      pendingConversationCreateId: null,
       workingDirectory: "C:\\workspace",
       messages: [{
         id: "assistant-1",
@@ -24,7 +27,8 @@ describe("handleDiffEvent", () => {
       }],
       conversationMessages: {},
       turnDiffs: {},
-      gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
+      gitChanges: { workingTree: [], staged: [], untracked: [], loading: false,
+        workingTreeRequestId: "current-working", stagedRequestId: "current-staged" },
     });
   });
 
@@ -102,6 +106,7 @@ describe("handleDiffEvent", () => {
   it("stores ordinary worktree diffs as global workspace state", () => {
     handleDiffEvent({
       type: "diff.git_working_tree",
+      request_id: "current-working",
       is_git_repo: true,
       conversation_id: "conv-current",
       workspace_root: "C:\\workspace",
@@ -124,10 +129,12 @@ describe("handleDiffEvent", () => {
         staged: [{ path: "old-staged.txt", additions: 1, deletions: 0 }],
         untracked: ["old-untracked.txt"],
         loading: true,
+        workingTreeRequestId: "current-working", stagedRequestId: "current-staged",
       },
     });
     handleDiffEvent({
       type,
+      request_id: type === "diff.git_working_tree" ? "current-working" : "current-staged",
       conversation_id: "conv-current",
       workspace_root: "C:\\workspace",
       is_git_repo: false,
@@ -165,11 +172,13 @@ describe("handleDiffEvent", () => {
         staged: [],
         untracked: [],
         loading: false,
+        workingTreeRequestId: "current-working",
       },
     });
 
     handleDiffEvent({
       type: "diff.git_working_tree",
+      request_id: "current-working",
       conversation_id: "conv-current",
       workspace_root: "/tmp/project",
       files: [{ path: "wrong-workspace.ts", patch: "diff", additions: 1, deletions: 0 }],

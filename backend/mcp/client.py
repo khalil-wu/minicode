@@ -33,7 +33,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.shared.exceptions import McpError
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from pydantic import AnyUrl
+from pydantic import AnyUrl, RootModel
 from pydantic import ValidationError
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Subprotocol
@@ -66,6 +66,7 @@ _MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 _HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
 
 _request_owner: ContextVar[dict[str, Any] | None] = ContextVar("mcp_request_owner", default=None)
+_NativeCallToolResult = RootModel[dict[str, Any]]
 _callback_owner: ContextVar[tuple[bool, dict[str, Any] | None] | None] = ContextVar("mcp_callback_owner", default=None)
 
 
@@ -200,6 +201,8 @@ class MCPToolDef:
     input_schema: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, Any] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
+    title: str | None = None
+    output_schema: dict[str, Any] | None = None
 
 
 @dataclass
@@ -238,6 +241,19 @@ class MCPCallResult:
     is_error: bool = False
     structured_content: dict[str, Any] | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    wire_result: dict[str, Any] | None = field(default=None, repr=False)
+
+    def public_result(self) -> dict[str, Any]:
+        from copy import deepcopy
+
+        result = (deepcopy(self.wire_result) if self.wire_result is not None
+            else {"content": deepcopy(self.content), "isError": self.is_error})
+        if self.wire_result is None and self.structured_content is not None:
+            result["structuredContent"] = deepcopy(self.structured_content)
+        # Source ToolOutput::code_mode_result removes only client-private
+        # result metadata. Content-block metadata remains part of its contract.
+        result.pop("_meta", None)
+        return result
 
     @property
     def text(self) -> str:
@@ -245,6 +261,7 @@ class MCPCallResult:
             str(item.get("text") or "")
             for item in self.content
             if isinstance(item, dict) and item.get("type") == "text"
+            and (item.get("_meta") or {}).get("codex/encryptedContent") is not True
         )
 
     @property
@@ -803,11 +820,17 @@ class MCPClient:
         if method == "tools/list":
             result = await session.list_tools(cursor=params.get("cursor"))
         elif method == "tools/call":
-            result = await session.call_tool(
-                str(params.get("name") or ""),
-                dict(params.get("arguments") or {}),
-                read_timeout_seconds=timedelta(seconds=self._tool_timeout),
-                meta=dict(params.get("_meta") or {}) or None,
+            # Source CallToolResult owns arbitrary content Values and preserves
+            # unknown block kinds. Use the SDK framing/lifecycle with that
+            # native result shape instead of narrowing it to the SDK's union.
+            meta = params.get("_meta")
+            result = await session.send_request(
+                types.ClientRequest(types.CallToolRequest(params=types.CallToolRequestParams(
+                    name=params["name"], arguments=params.get("arguments"),
+                    _meta=types.RequestParams.Meta(**meta) if meta else None,
+                ))),
+                _NativeCallToolResult,
+                request_read_timeout_seconds=timedelta(seconds=self._tool_timeout),
             )
         elif method == "resources/list":
             result = await session.list_resources(cursor=params.get("cursor"))
@@ -905,6 +928,8 @@ class MCPClient:
             tools.append(
                 MCPToolDef(
                     name=name,
+                    title=sanitize_untrusted_unicode(item["title"]) if item.get("title") is not None else None,
+                    output_schema=copy.deepcopy(item.get("outputSchema")),
                     description=sanitize_untrusted_unicode(item.get("description") or ""),
                     input_schema=input_schema,
                     annotations=(
@@ -934,7 +959,9 @@ class MCPClient:
     ) -> MCPCallResult:
         if not self._connected:
             return self._tool_error(f"MCP server '{self.server_name}' is not connected")
-        params: dict[str, Any] = {"name": tool_name, "arguments": arguments or {}}
+        params: dict[str, Any] = {"name": tool_name}
+        if arguments is not None:
+            params["arguments"] = arguments
         if request_meta:
             params["_meta"] = dict(request_meta)
         owner_key = next(self._tool_owner_seq)
@@ -997,6 +1024,7 @@ class MCPClient:
             is_error=bool(result.get("isError", False)),
             structured_content=result.get("structuredContent"),
             meta=dict(result.get("_meta") or {}),
+            wire_result=result,
         )
 
     def _tool_exception(self, exc: BaseException) -> MCPCallResult:
@@ -1199,9 +1227,18 @@ class MCPClient:
                 result = {"action": "accept", "content": result.get("response") or {}}
             elif action not in {"accept", "decline", "cancel"}:
                 result = {"action": "cancel"}
-            return types.ElicitResult.model_validate(result)
+            # ElicitResult's SDK model permits extension fields. Standard form
+            # replies only carry action/content/_meta, never internal error data.
+            return types.ElicitResult.model_validate({
+                "action": result["action"],
+                "content": result.get("content") if result["action"] == "accept" and payload.get("mode", "form") == "form" else None,
+                "_meta": result.get("_meta"),
+            })
         except PermissionError as exc:
             return types.ErrorData(code=-32003, message=str(exc) or "request rejected")
+        except ValidationError:
+            logger.warning("[MCP:%s] invalid elicitation schema or response", self.server_name, exc_info=True)
+            return types.ErrorData(code=types.INVALID_REQUEST, message="Invalid MCP form schema or response")
         except Exception:
             logger.debug("[MCP:%s] elicitation callback failed", self.server_name, exc_info=True)
             return types.ErrorData(code=types.INTERNAL_ERROR, message="client request failed")
@@ -1340,6 +1377,8 @@ class MCPClient:
         request_tasks = set(self._active_request_tasks)
         if request_tasks:
             await asyncio.gather(*request_tasks, return_exceptions=True)
+        if self._close_event is not None:
+            self._close_event.set()
         if self._lifecycle_task is not None:
             await asyncio.gather(self._lifecycle_task, return_exceptions=True)
         return await self.close()

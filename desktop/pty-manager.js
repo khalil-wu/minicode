@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const desktopPreferences = require("./preferences");
 
 // ---------------------------------------------------------------------------
 // State
@@ -32,7 +33,7 @@ const PTY_LIVE_SESSION_MAX = Math.max(
 let pty = null;
 let sanitizedPtyEnv = () => ({});
 let appendDesktopLog = () => {};
-let getMainWindow = () => null;
+let getWindowByInstanceId = () => null;
 let assertTrustedPath = null;
 let killExitTimeoutMs = PTY_KILL_EXIT_TIMEOUT_MS;
 let forceKillExitTimeoutMs = PTY_FORCE_KILL_EXIT_TIMEOUT_MS;
@@ -45,7 +46,7 @@ function init(deps) {
   if (deps.pty !== undefined) pty = deps.pty;
   if (typeof deps.sanitizedPtyEnv === "function") sanitizedPtyEnv = deps.sanitizedPtyEnv;
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
-  if (typeof deps.getMainWindow === "function") getMainWindow = deps.getMainWindow;
+  if (typeof deps.getWindowByInstanceId === "function") getWindowByInstanceId = deps.getWindowByInstanceId;
   if (typeof deps.assertTrustedPath === "function") assertTrustedPath = deps.assertTrustedPath;
   killExitTimeoutMs = Number.isFinite(deps.killExitTimeoutMs)
     ? Math.max(1, Math.floor(deps.killExitTimeoutMs))
@@ -59,8 +60,8 @@ function init(deps) {
 // Session management
 // ---------------------------------------------------------------------------
 
-function getSendTarget() {
-  const win = getMainWindow();
+function getSendTarget(session) {
+  const win = session.window;
   if (win && !win.isDestroyed()) {
     return win.webContents;
   }
@@ -79,9 +80,9 @@ function requireConversationId(conversationId) {
   return normalized;
 }
 
-function isOwnedBy(session, conversationId) {
+function isOwnedBy(session, conversationId, windowInstanceId) {
   const owner = normalizeConversationId(conversationId);
-  return Boolean(owner && session && session.conversationId === owner);
+  return Boolean(owner && session && session.conversationId === owner && session.windowInstanceId === windowInstanceId);
 }
 
 function appendSessionOutput(sessionId, session, data, emit = true) {
@@ -94,7 +95,7 @@ function appendSessionOutput(sessionId, session, data, emit = true) {
     session.scrollback = session.scrollback.slice(session.scrollback.length - PTY_SCROLLBACK_MAX_CHARS);
   }
   if (!emit) return;
-  const wc = getSendTarget();
+  const wc = getSendTarget(session);
   if (wc) {
     wc.send("minicode:pty:data", {
       sessionId,
@@ -144,29 +145,21 @@ function normalizeTerminalSize(cols, rows) {
   };
 }
 
-function windowsPowerShellArgs() {
-  const initCommand = [
-    "$__minicodeUtf8 = [System.Text.UTF8Encoding]::new($false)",
-    "[Console]::InputEncoding = $__minicodeUtf8",
-    "[Console]::OutputEncoding = $__minicodeUtf8",
-    "chcp 65001 | Out-Null",
-    "Clear-Host",
-  ].join("; ");
-  return ["-NoLogo", "-NoProfile", "-NoExit", "-Command", initCommand];
-}
-
-function spawnSession(cwd, conversationId) {
+function spawnSession(cwd, conversationId, windowInstanceId) {
   if (ptyCleanupDone) {
     throw new Error("Terminal manager is shutting down.");
   }
   pruneExitedSessions();
   const ownerConversationId = requireConversationId(conversationId);
+  const window = getWindowByInstanceId(windowInstanceId);
+  if (!window || window.isDestroyed()) throw new Error("Terminal window owner is unavailable.");
   const liveSessionCount = Array.from(ptySessions.values()).filter((session) => session.isAlive !== false).length;
   if (liveSessionCount >= PTY_LIVE_SESSION_MAX) {
     throw new Error(`Terminal session limit reached (${PTY_LIVE_SESSION_MAX}). Close a terminal before opening another.`);
   }
-  const shellStr = process.platform === "win32" ? "powershell.exe" : (process.env.SHELL || "bash");
-  const shellArgs = process.platform === "win32" ? windowsPowerShellArgs() : [];
+  const target = desktopPreferences.resolveTerminalShell();
+  const shellStr = target.executable;
+  const shellArgs = target.args;
   const resolvedCwd = resolveTerminalCwd(cwd);
 
   // Single authoritative execution path: a real PTY.  There is deliberately
@@ -202,6 +195,8 @@ function spawnSession(cwd, conversationId) {
   const session = {
     process: ptyProcess,
     conversationId: ownerConversationId,
+    windowInstanceId,
+    window,
     cwd: resolvedCwd,
     shell: shellStr,
     scrollback: "",
@@ -214,6 +209,7 @@ function spawnSession(cwd, conversationId) {
     resolveExit,
     exitSettled: false,
     killPromise: null,
+    nativeKillRequested: false,
   };
   ptySessions.set(sessionId, session);
 
@@ -234,8 +230,15 @@ function spawnSession(cwd, conversationId) {
     session.exitSignal = hasRealExitCode ? null : (signal || "unknown");
     session.exitedAt = Date.now();
     session.exitSettled = true;
+    // A Windows shell exit closes its output socket, but node-pty releases
+    // the PseudoConsole/worker only through kill(). Settle the real result
+    // first so disposal's repeated callback cannot replace that result.
+    if (process.platform === "win32" && !session.nativeKillRequested) {
+      session.nativeKillRequested = true;
+      session.process.kill();
+    }
     session.resolveExit();
-    const wc = getSendTarget();
+    const wc = getSendTarget(session);
     if (wc) {
       wc.send("minicode:pty:exit", {
         sessionId,
@@ -257,7 +260,7 @@ function spawnSession(cwd, conversationId) {
   };
 }
 
-function writeToSession(sessionId, data, conversationId) {
+function writeToSession(sessionId, data, conversationId, windowInstanceId) {
   if (typeof sessionId !== "string" || typeof data !== "string") {
     return false;
   }
@@ -266,7 +269,7 @@ function writeToSession(sessionId, data, conversationId) {
     return false;
   }
   const session = ptySessions.get(sessionId);
-  if (session?.isAlive && isOwnedBy(session, conversationId)) {
+  if (session?.isAlive && isOwnedBy(session, conversationId, windowInstanceId)) {
     for (let offset = 0; offset < data.length; offset += PTY_WRITE_CHUNK_CHARS) {
       session.process.write(data.slice(offset, offset + PTY_WRITE_CHUNK_CHARS));
     }
@@ -275,9 +278,9 @@ function writeToSession(sessionId, data, conversationId) {
   return false;
 }
 
-function resizeSession(sessionId, cols, rows, conversationId) {
+function resizeSession(sessionId, cols, rows, conversationId, windowInstanceId) {
   const session = ptySessions.get(sessionId);
-  if (session?.isAlive && isOwnedBy(session, conversationId)) {
+  if (session?.isAlive && isOwnedBy(session, conversationId, windowInstanceId)) {
     try {
       const size = normalizeTerminalSize(cols, rows);
       session.process.resize(size.cols, size.rows);
@@ -330,10 +333,14 @@ async function terminateSession(sessionId, session) {
   if (session.exitSettled || session.isAlive === false) return true;
   if (!session.killPromise) {
     session.killPromise = (async () => {
-      await killProcessTreeAndWait(session.process.pid, () => session.process.kill());
+      await killProcessTreeAndWait(session.process.pid, () => {
+        session.nativeKillRequested = true;
+        session.process.kill();
+      });
       if (await waitForSessionExit(session, killExitTimeoutMs)) return true;
 
       appendDesktopLog(`[desktop] pty ${sessionId} did not exit after termination; forcing kill`);
+      session.nativeKillRequested = true;
       session.process.kill();
       if (!await waitForSessionExit(session, forceKillExitTimeoutMs)) {
         appendDesktopLog(`[desktop] pty ${sessionId} did not report exit after forced kill`);
@@ -349,9 +356,9 @@ async function terminateSession(sessionId, session) {
   }
 }
 
-async function killSession(sessionId, conversationId) {
+async function killSession(sessionId, conversationId, windowInstanceId) {
   const session = ptySessions.get(sessionId);
-  if (isOwnedBy(session, conversationId)) {
+  if (isOwnedBy(session, conversationId, windowInstanceId)) {
     if (!await terminateSession(sessionId, session)) return false;
     if (ptySessions.get(sessionId) === session) ptySessions.delete(sessionId);
     return true;
@@ -359,14 +366,14 @@ async function killSession(sessionId, conversationId) {
   return false;
 }
 
-async function restartSession(sessionId, conversationId) {
+async function restartSession(sessionId, conversationId, windowInstanceId) {
   const session = ptySessions.get(sessionId);
-  if (!isOwnedBy(session, conversationId)) return null;
+  if (!isOwnedBy(session, conversationId, windowInstanceId)) return null;
   const cwd = session.cwd;
   appendDesktopLog(`[desktop] restarting pty ${sessionId} for ${conversationId}`);
-  if (!await killSession(sessionId, conversationId)) return null;
+  if (!await killSession(sessionId, conversationId, windowInstanceId)) return null;
   try {
-    const replacement = spawnSession(cwd, conversationId);
+    const replacement = spawnSession(cwd, conversationId, windowInstanceId);
     appendDesktopLog(`[desktop] restarted pty ${sessionId} as ${replacement.session_id}`);
     return replacement;
   } catch (error) {
@@ -375,22 +382,22 @@ async function restartSession(sessionId, conversationId) {
   }
 }
 
-async function killConversation(conversationId, preserveHistory = false) {
+async function killConversation(conversationId, preserveHistory = false, windowInstanceId) {
   const owner = requireConversationId(conversationId);
   const ownedSessionIds = Array.from(ptySessions.entries())
-    .filter(([, session]) => session.conversationId === owner)
+    .filter(([, session]) => isOwnedBy(session, owner, windowInstanceId))
     .map(([sessionId]) => sessionId);
   const results = await Promise.all(
     ownedSessionIds.map((sessionId) => preserveHistory
       ? terminateSession(sessionId, ptySessions.get(sessionId))
-      : killSession(sessionId, owner)),
+      : killSession(sessionId, owner, windowInstanceId)),
   );
   return results.filter(Boolean).length;
 }
 
-function acknowledgeExitedSession(sessionId, conversationId) {
+function acknowledgeExitedSession(sessionId, conversationId, windowInstanceId) {
   const session = ptySessions.get(sessionId);
-  if (!isOwnedBy(session, conversationId) || session.isAlive !== false) return false;
+  if (!isOwnedBy(session, conversationId, windowInstanceId) || session.isAlive !== false) return false;
   ptySessions.delete(sessionId);
   return true;
 }
@@ -420,19 +427,19 @@ function _snapshotEntry(sessionId, session, maxChars) {
   };
 }
 
-function snapshotSession(sessionId, maxChars, conversationId) {
+function snapshotSession(sessionId, maxChars, conversationId, windowInstanceId) {
   pruneExitedSessions();
   const session = ptySessions.get(sessionId);
-  if (!isOwnedBy(session, conversationId)) {
+  if (!isOwnedBy(session, conversationId, windowInstanceId)) {
     return null;
   }
   return _snapshotEntry(sessionId, session, maxChars);
 }
 
-function clearSession(sessionId, conversationId) {
+function clearSession(sessionId, conversationId, windowInstanceId) {
   pruneExitedSessions();
   const session = ptySessions.get(sessionId);
-  if (!isOwnedBy(session, conversationId)) {
+  if (!isOwnedBy(session, conversationId, windowInstanceId)) {
     return { cleared: false, outputCursor: 0 };
   }
   // Preserve the monotonic output cursor so the renderer can reject a data
@@ -444,13 +451,13 @@ function clearSession(sessionId, conversationId) {
   };
 }
 
-function listSessions(conversationId, maxChars) {
+function listSessions(conversationId, maxChars, windowInstanceId) {
   pruneExitedSessions();
   const owner = normalizeConversationId(conversationId);
   if (!owner) return [];
   const list = [];
   for (const [sessionId, session] of ptySessions.entries()) {
-    if (session.conversationId !== owner) continue;
+    if (!isOwnedBy(session, owner, windowInstanceId)) continue;
     list.push(_snapshotEntry(sessionId, session, maxChars || PTY_LIST_PREVIEW_CHARS));
   }
   return list;
@@ -464,6 +471,7 @@ function listActiveSessions() {
     list.push({
       session_id: sessionId,
       conversation_id: session.conversationId,
+      window_instance_id: session.windowInstanceId,
     });
   }
   return list.sort((left, right) => left.session_id.localeCompare(right.session_id));
@@ -471,11 +479,18 @@ function listActiveSessions() {
 
 async function killAllSessions() {
   if (ptyCleanupDone) return;
-  ptyCleanupDone = true;
   const terminations = Array.from(ptySessions.entries()).map(([sessionId, session]) =>
-    killSession(sessionId, session.conversationId),
+    killSession(sessionId, session.conversationId, session.windowInstanceId),
   );
-  await Promise.allSettled(terminations);
+  const results = await Promise.all(terminations);
+  if (results.some((terminated) => !terminated)) throw new Error("Terminal cleanup did not finish for all owned sessions.");
+  ptyCleanupDone = true;
+}
+
+async function releaseWindow(windowInstanceId) {
+  const owned = Array.from(ptySessions.entries()).filter(([, session]) => session.windowInstanceId === windowInstanceId);
+  const results = await Promise.all(owned.map(([sessionId, session]) => killSession(sessionId, session.conversationId, windowInstanceId)));
+  if (results.some((terminated) => !terminated)) throw new Error(`Terminal cleanup did not finish for window ${windowInstanceId}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +512,7 @@ module.exports = {
   acknowledgeExitedSession,
   pruneExitedSessions,
   killAllSessions,
+  releaseWindow,
   resolveTerminalCwd,
   normalizeTerminalSize,
-  windowsPowerShellArgs,
 };

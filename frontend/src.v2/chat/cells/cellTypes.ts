@@ -52,6 +52,27 @@ export interface StatusNoticeCellState {
   title: string;
   message?: string;
   createdAt: number;
+  processing?: boolean;
+}
+
+export interface GuardianReviewCellState {
+  kind: "guardian_review";
+  id: string;
+  review: import("../../protocol/guardian-types").GuardianAssessment;
+  status: "running" | "done";
+  createdAt: number;
+  segment?: number;
+  segmentClosed?: boolean;
+}
+export interface GuardianWarningCellState { kind: "guardian_warning"; id: string; message: string; createdAt: number; }
+
+export interface ContextCompactionCellState {
+  kind: "context_compaction";
+  id: string;
+  status: "running" | "completed" | "interrupted";
+  source?: string;
+  createdAt: number;
+  completedAt?: number;
 }
 
 export interface ActivityCellState {
@@ -62,7 +83,11 @@ export interface ActivityCellState {
   subtitle?: string;
   status: "pending" | "pending_approval" | "running" | "done" | "partial" | "failed" | "interrupted";
   collapsed: boolean;
+  automaticApprovalReviews?: import("../../protocol/guardian-types").GuardianAssessment[];
+  guardianDeclined?: boolean;
+  guardianPatchFiles?: string[];
   toolCallRecords?: ToolCallRecord[];
+  outputText?: string;
   artifacts?: ArtifactPreview[];
   progress?: {
     current?: number;
@@ -74,6 +99,7 @@ export interface ActivityCellState {
     retryAfterMs?: number;
     providerState?: ProgressContentBlock["providerState"];
     errorMessage?: string;
+    detail?: string;
   };
   skill?: SkillProcessMetadata;
   startedAt: number;
@@ -94,10 +120,18 @@ export interface SkillProcessMetadata {
 export interface ExecCellState {
   kind: "exec";
   id: string;
+  automaticApprovalReviews?: import("../../protocol/guardian-types").GuardianAssessment[];
+  guardianDeclined?: boolean;
   command: string;
+  commandActions?: ToolCallRecord["commandActions"];
+  commandPresentation?: ToolCallRecord["commandPresentation"];
+  executionStartedAt?: number;
+  commandExecutionItemId?: string;
+  originalCommand?: string;
   callSource?: ToolCallRecord["callSource"];
   artifacts?: ArtifactPreview[];
   cwd?: string;
+  outputArtifact?: ArtifactPreview;
   background?: boolean;
   status: "pending" | "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
   exitCode?: number;
@@ -211,6 +245,7 @@ export interface CollaborationCellEntry {
   agentId: string;
   agentLabel: string;
   agentIdentity?: string;
+  agentStartedAt?: number;
   agentStatus?: SubagentState["status"];
   content?: string;
 }
@@ -237,6 +272,9 @@ export interface CollaborationCellState {
 export type HistoryCellState =
   | UserMessageCellState
   | StatusNoticeCellState
+  | GuardianReviewCellState
+  | GuardianWarningCellState
+  | ContextCompactionCellState
   | ActivityCellState
   | ExecCellState
   | DiffCellState
@@ -248,6 +286,10 @@ export type HistoryCellState =
 
 // ── Turn State ──────────────────────────────────────────────────────
 
+export type TurnWorkItem =
+  | { kind: "process"; id: string; cells: Exclude<HistoryCellState, UserMessageCellState | StreamingAssistantTailCellState>[] }
+  | { kind: "user"; id: string; cell: UserMessageCellState };
+
 export interface ChatTurnState {
   id: string;
   /** Pure streaming receipts preserve the file evidence owned by this projection. */
@@ -255,6 +297,8 @@ export interface ChatTurnState {
   toolPage?: ToolHistoryPage;
   turnId?: string;
   userCell: UserMessageCellState | null;
+  /** Source-ordered activity and admitted input within this physical turn. */
+  workItems?: TurnWorkItem[];
   committedCells: Exclude<
     HistoryCellState,
     UserMessageCellState | StreamingAssistantTailCellState
@@ -262,7 +306,7 @@ export interface ChatTurnState {
   activeCell: HistoryCellState | null;
   finalAnswerCell: AssistantMarkdownCellState | null;
   status: "streaming" | "completed" | "partial" | "failed" | "interrupted";
-  startedAt: number;
+  startedAt?: number;
   completedAt?: number;
   durationMs?: number;
   usage?: MessageUsage;

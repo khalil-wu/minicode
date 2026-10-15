@@ -1,6 +1,7 @@
-import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, GitBranch, Image as ImageIcon, Maximize2, Quote, RotateCw, X } from "lucide-react";
+import { useI18n } from "../../i18n";
+import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, Image as ImageIcon, LoaderCircle, Maximize2, Quote, RotateCw, X } from "lucide-react";
 import { fileIcon } from "../../lib/file-icons";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
 import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
@@ -8,12 +9,15 @@ import type { ArtifactPreview, ProgressContentBlock } from "../../stores/types";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import { citationUrl } from "../citationProjection";
 import { BrandIcon } from "../../components/BrandIcon";
+import { ReplyActionIcon } from "../../components/ReplyActionIcon";
 import { useAppStore } from "../../stores";
 import { openWebTarget } from "../openWebTarget";
-import { sendClientCommand } from "../../protocol/ws-outbox";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../../protocol/ws-outbox";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
-import { copyText } from "../../lib/clipboard";
+import { copyContent, copyText } from "../../lib/clipboard";
+import { readMarkdownClipboard, writeMarkdownSelection } from "../../lib/markdown-clipboard";
+import { saveBlobFile } from "../../lib/save-blob";
 import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { sendChatMessage } from "../sendChatMessage";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../../lib/workspace-path";
@@ -35,6 +39,7 @@ import {
 import { markdownArtifactImageIds } from "../../lib/markdown-artifact-images";
 import { extractInlineCitationIndexes } from "../../lib/markdown";
 import "./cells.css";
+import { ProposedPlanAnswer } from "./ProposedPlanAnswer";
 
 export function AssistantMarkdownCell({
   cell,
@@ -53,8 +58,14 @@ export function AssistantMarkdownCell({
   knownFilePaths?: string[];
   afterContent?: React.ReactNode;
 }) {
+  const { t: tr } = useI18n();
   const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const [forking, setForking] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isChatMode = useAppStore((s) => s.appMode === "chat");
   const setQuotedMessage = useAppStore((s) => s.setQuotedMessage);
   const conversationId = String(ownerConversationId || "").trim();
   const workspaceRoot = String(ownerWorkspaceRoot || "").trim();
@@ -65,9 +76,9 @@ export function AssistantMarkdownCell({
   const copied = copiedSource?.text === displayMarkdown;
   useEffect(() => {
     if (!copiedSource) return;
-    const timer = window.setTimeout(() => setCopiedSource(null), 1200);
+    const timer = window.setTimeout(() => setCopiedSource(null), isChatMode ? 1200 : 2000);
     return () => window.clearTimeout(timer);
-  }, [copiedSource]);
+  }, [copiedSource, isChatMode]);
   const sources = uniqueCitationSources(rawMarkdown, cell.citations);
   const visibleSources = sourcesExpanded ? sources : sources.slice(0, 3);
   const hiddenSourceCount = Math.max(0, sources.length - visibleSources.length);
@@ -124,8 +135,15 @@ export function AssistantMarkdownCell({
   const isSettled = !cell.isStreaming && !hasPendingImage;
 
   const copy = useCallback(async () => {
-    if (await copyText(displayMarkdown, "回复")) setCopiedSource({ text: displayMarkdown });
-  }, [displayMarkdown]);
+    if (copyingRef.current || copied) return;
+    const content = isChatMode ? displayMarkdown : readMarkdownClipboard(contentRef.current!) ?? "";
+    copyingRef.current = true;
+    setCopying(true);
+    const succeeded = await copyContent(content, tr("回复"));
+    copyingRef.current = false;
+    setCopying(false);
+    if (succeeded) setCopiedSource({ text: displayMarkdown });
+  }, [copied, displayMarkdown, isChatMode, tr]);
 
   const quoteReply = useCallback(() => {
     const state = useAppStore.getState();
@@ -172,12 +190,12 @@ export function AssistantMarkdownCell({
     // current reply, so the data loss is clear.
     const trailingCount = Math.max(0, state.messages.length - index - 1);
     const ok = await showConfirm({
-      title: "重新生成",
+      title: tr("重新生成"),
       message:
         trailingCount > 0
-          ? `将删除当前回复及其后的 ${trailingCount} 条消息，并基于上一条提问重新生成。继续吗？`
-          : "将删除当前回复并重新生成。继续吗？",
-      confirmLabel: "重新生成",
+          ? tr("将删除当前回复及其后的 {v0} 条消息，并基于上一条提问重新生成。继续吗？", { v0: trailingCount })
+          : tr("将删除当前回复并重新生成。继续吗？"),
+      confirmLabel: tr("重新生成"),
       danger: false,
     });
     if (!ok) return;
@@ -216,22 +234,30 @@ export function AssistantMarkdownCell({
         retryFromMessageId: userMessage.id,
       });
     }
-  }, [cell.messageId, conversationId, workspaceRoot]);
+  }, [cell.messageId, conversationId, workspaceRoot, tr, tr]);
 
-  const forkConversation = useCallback(() => {
-    if (!cell.messageId) return;
+  const forkConversation = useCallback(async () => {
+    if (!cell.messageId || forking) return;
     const state = useAppStore.getState();
     if (!conversationId || state.conversationId !== conversationId
       || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
-    sendClientCommand({
-      type: "context.fork",
-      conversation_id: conversationId,
-      workspace_root: workspaceRoot,
-      message_id: cell.messageId,
-      create_branch: true,
-      activate: true,
-    });
-  }, [cell.messageId, conversationId, workspaceRoot]);
+    setForking(true);
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "context.fork",
+        conversation_id: conversationId,
+        workspace_root: workspaceRoot,
+        message_id: cell.messageId,
+        create_branch: true,
+        activate: true,
+      }, "context.fork");
+      if (!commandResultSucceeded(result)) pushToast(result.message, "error");
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setForking(false);
+    }
+  }, [cell.messageId, conversationId, workspaceRoot, forking]);
 
   return (
     <div
@@ -240,9 +266,12 @@ export function AssistantMarkdownCell({
       data-streaming={cell.isStreaming ? "true" : "false"}
       data-source={replySource}
     >
-      <div className="assistant-cell-content md-prose">
+      <div className="assistant-cell-content md-prose" ref={contentRef} onCopy={(event) => {
+        if (!isChatMode && !event.defaultPrevented && writeMarkdownSelection(event.currentTarget, event.clipboardData)) event.preventDefault();
+      }}>
         {(cell.markdownBeforeArtifacts ?? rawMarkdown) && (
-          <MarkdownRenderer
+          <ProposedPlanAnswer
+          failed={cell.source === "partial" || Boolean(cell.failureMessage)}
           content={cell.markdownBeforeArtifacts ?? rawMarkdown}
           isStreaming={cell.isStreaming || false}
           citations={cell.citations}
@@ -252,7 +281,7 @@ export function AssistantMarkdownCell({
           />
         )}
         {(visibleImageProgress.length > 0 || imageArtifacts.length > 0 || otherArtifacts.length > 0) && (
-          <div className="assistant-cell-generated" aria-label="生成结果">
+          <div className="assistant-cell-generated" aria-label={tr("生成结果")} data-markdown-copy="exclude">
             {visibleImageProgress.map((progress) => (
               <ImageGenerationProgress
                 key={progress.id}
@@ -288,7 +317,7 @@ export function AssistantMarkdownCell({
           />
         )}
         {visibleGeneratedFiles.length > 0 && (
-          <div className="assistant-cell-output-files" aria-label="生成文件">
+          <div className="assistant-cell-output-files" aria-label={tr("生成文件")} data-markdown-copy="exclude">
             {visibleGeneratedFiles.map((attachment) => (
                 <GeneratedFileLink
                   key={attachment.path}
@@ -304,7 +333,7 @@ export function AssistantMarkdownCell({
       {(sources.length > 0 || (!isTranscriptMode && isSettled)) && (
       <div className="assistant-cell-actions" data-has-sources={sources.length > 0 ? "true" : "false"}>
         {sources.length > 0 && (
-          <div className="assistant-cell-source-strip" aria-label="引用来源">
+          <div className="assistant-cell-source-strip" aria-label={tr("引用来源")}>
             {visibleSources.map((source) => source.url ? (
                 <a
                   key={source.key}
@@ -344,22 +373,20 @@ export function AssistantMarkdownCell({
                 type="button"
                 className="assistant-cell-source-more"
                 onClick={() => setSourcesExpanded(true)}
-                aria-label={`再显示 ${hiddenSourceCount} 个来源`}
+                aria-label={tr("再显示 {v0} 个来源", { v0: hiddenSourceCount })}
               >
                 <ChevronDown size={14} aria-hidden="true" />
-                再显示 {hiddenSourceCount} 个
-              </button>
+                {tr("再显示")}{hiddenSourceCount} {tr("个")}</button>
             )}
             {sourcesExpanded && sources.length > 3 && (
               <button
                 type="button"
                 className="assistant-cell-source-more"
                 onClick={() => setSourcesExpanded(false)}
-                aria-label="收起来源"
+                aria-label={tr("收起来源")}
               >
                 <ChevronUp size={14} aria-hidden="true" />
-                收起
-              </button>
+                {tr("收起")}</button>
             )}
           </div>
         )}
@@ -367,42 +394,46 @@ export function AssistantMarkdownCell({
           {cell.copyable && (
             <button
               type="button"
-              onClick={copy}
-              title={copied ? "已复制" : "复制回复"}
-              aria-label={copied ? "已复制" : "复制回复"}
+              onClick={copied ? undefined : (event) => { event.stopPropagation(); void copy(); }}
+              aria-busy={copying || undefined}
+              aria-disabled={copying || undefined}
+              title={copied ? tr("已复制") : tr("复制回复")}
+              aria-label={copied ? tr("已复制") : tr("复制回复")}
               className="cell-action-btn"
             >
-              <Copy size={14} />
+              <ReplyActionIcon name={copied ? "copied" : "copy"} />
             </button>
           )}
           {cell.messageId && canEditConversation && (
             <>
-            <button
+            {isChatMode && <button
               type="button"
               onClick={quoteReply}
-              title="引用回复"
-              aria-label="引用回复"
+              title={tr("引用回复")}
+              aria-label={tr("引用回复")}
               className="cell-action-btn"
             >
               <Quote size={14} />
-            </button>
-            <button
+            </button>}
+            {isChatMode && <button
               type="button"
               onClick={regenerate}
-              title="重新生成"
-              aria-label="重新生成"
+              title={tr("重新生成")}
+              aria-label={tr("重新生成")}
               className="cell-action-btn"
             >
               <RotateCw size={14} />
-            </button>
+            </button>}
             <button
               type="button"
               onClick={forkConversation}
-              title="从此处分支"
-              aria-label="从此处分支"
+              title={tr("从此处分支")}
+              aria-label={tr("从此处分支")}
+              aria-busy={forking || undefined}
+              disabled={forking}
               className="cell-action-btn"
             >
-              <GitBranch size={14} />
+              {forking ? <LoaderCircle size={14} className="animate-spin" /> : <ReplyActionIcon name="fork" />}
             </button>
             </>
           )}
@@ -426,6 +457,7 @@ function ImageGenerationProgress({
   fallbackFailureMessage?: string;
   recoverable?: boolean;
 }) {
+  const { t: tr } = useI18n();
   const failed = progress.status === "failed";
   const incomplete = progress.status === "partial";
   const completed = progress.status === "completed";
@@ -454,16 +486,16 @@ function ImageGenerationProgress({
       <span className="assistant-cell-image-placeholder-copy">
         <strong>
           {failed
-            ? "图像生成失败"
+            ? tr("图像生成失败")
             : incomplete
-              ? "图像生成未完整结束"
+              ? tr("图像生成未完整结束")
               : completed
-                ? "正在载入生成结果"
-                : progress.message || "正在生成图像"}
+                ? tr("正在载入生成结果")
+                : progress.message || tr("正在生成图像")}
         </strong>
         {detail && detail !== progress.message && <small>{detail}</small>}
         {failed && (
-          <small>{recoverable ? "服务暂时不可用，可以重试。" : "请检查图像模型与 Provider 配置后重试。"}</small>
+          <small>{recoverable ? tr("服务暂时不可用，可以重试。") : tr("请检查图像模型与 Provider 配置后重试。")}</small>
         )}
       </span>
     </div>
@@ -477,6 +509,7 @@ function GeneratedArtifactCard({
   artifact: ArtifactPreview;
   conversationId?: string;
 }) {
+  const { t: tr } = useI18n();
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState("");
   const [loadedImageUrl, setLoadedImageUrl] = useState("");
@@ -518,7 +551,7 @@ function GeneratedArtifactCard({
   const openImageLightbox = () => {
     const nextUrl = freshImageUrl();
     if (!nextUrl) {
-      pushToast("图片内容尚未载入。", "warning", 2400);
+      pushToast(tr("图片内容尚未载入。"), "warning", 2400);
       return;
     }
     setLightboxUrl(nextUrl);
@@ -529,7 +562,7 @@ function GeneratedArtifactCard({
     if (!conversationId) return;
     openArtifactPreview({
       artifactId: artifact.artifactId,
-      name: artifact.summary || (kind === "image" ? "生成图片" : "生成文件"),
+      name: artifact.summary || (kind === "image" ? tr("生成图片") : tr("生成文件")),
       summary: artifact.summary,
       mediaType,
       kind,
@@ -540,7 +573,7 @@ function GeneratedArtifactCard({
   const copyImage = async () => {
     const sourceUrl = freshImageUrl();
     if (!sourceUrl) {
-      pushToast("图片内容尚未载入，暂时无法复制。", "warning", 3200);
+      pushToast(tr("图片内容尚未载入，暂时无法复制。"), "warning", 3200);
       return;
     }
     try {
@@ -552,33 +585,25 @@ function GeneratedArtifactCard({
       if (!response.ok) throw new Error(`Image request failed (${response.status}).`);
       const blob = await response.blob();
       await navigator.clipboard.write([new ClipboardItemCtor({ [blob.type || mediaType || "image/png"]: blob })]);
-      pushToast("图片已复制", "success", 1800);
+      pushToast(tr("图片已复制"), "success", 1800);
     } catch {
-      pushToast("当前系统无法直接复制图片，请使用保存图片。", "warning", 3600);
+      pushToast(tr("当前系统无法直接复制图片，请使用保存图片。"), "warning", 3600);
     }
   };
 
   const saveImage = async () => {
     const sourceUrl = freshImageUrl();
     if (!sourceUrl) {
-      pushToast("图片内容尚未载入，暂时无法保存。", "warning", 3200);
+      pushToast(tr("图片内容尚未载入，暂时无法保存。"), "warning", 3200);
       return;
     }
     try {
       const response = await fetch(sourceUrl);
       if (!response.ok) throw new Error(`Image request failed (${response.status}).`);
       const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download = generatedImageFilename(artifact);
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-    } catch {
-      pushToast("图片保存失败，请稍后重试。", "warning", 3200);
+      await saveBlobFile(blob, generatedImageFilename(artifact));
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error", 3200);
     }
   };
 
@@ -597,12 +622,12 @@ function GeneratedArtifactCard({
             onClick={() => {
               if (imageLoaded) openImageLightbox();
             }}
-            aria-label="查看图片大图"
+            aria-label={tr("查看图片大图")}
           >
             <img
               className="assistant-cell-generated-image"
               src={imageUrl}
-              alt="图片"
+              alt={tr("图片")}
               loading="lazy"
               decoding="async"
               onLoad={() => {
@@ -612,9 +637,9 @@ function GeneratedArtifactCard({
               onError={() => setFailedImageUrl(imageUrl)}
             />
             {!imageLoaded && (
-              <span className="assistant-cell-image-load-mask" role="status" aria-label="正在载入图片">
+              <span className="assistant-cell-image-load-mask" role="status" aria-label={tr("正在载入图片")}>
                 <span aria-hidden="true"><ImageIcon size={24} /></span>
-                <strong>正在载入图片</strong>
+                <strong>{tr("正在载入图片")}</strong>
               </span>
             )}
           </button>
@@ -630,24 +655,24 @@ function GeneratedArtifactCard({
             <ImageIcon size={24} aria-hidden="true" />
             <span>
               {!conversationId
-                ? "图片未关联到会话"
+                ? tr("图片未关联到会话")
                 : isConnected
                 ? imageFailed
-                  ? "图片载入失败，点击重试"
-                  : "正在准备图片"
-                : "连接恢复后将自动载入图片"}
+                  ? tr("图片载入失败，点击重试")
+                  : tr("正在准备图片")
+                : tr("连接恢复后将自动载入图片")}
             </span>
           </button>
         )}
         {imageLoaded && (
-          <span className="assistant-cell-image-actions" aria-label="图片操作">
-            <button type="button" onClick={openImageLightbox} title="查看大图" aria-label="查看大图">
+          <span className="assistant-cell-image-actions" aria-label={tr("图片操作")}>
+            <button type="button" onClick={openImageLightbox} title={tr("查看大图")} aria-label={tr("查看大图")}>
               <Maximize2 size={15} />
             </button>
-            <button type="button" onClick={() => void copyImage()} title="复制图片" aria-label="复制图片">
+            <button type="button" onClick={() => void copyImage()} title={tr("复制图片")} aria-label={tr("复制图片")}>
               <Copy size={15} />
             </button>
-            <button type="button" onClick={() => void saveImage()} title="保存图片" aria-label="保存图片">
+            <button type="button" onClick={() => void saveImage()} title={tr("保存图片")} aria-label={tr("保存图片")}>
               <Download size={15} />
             </button>
           </span>
@@ -659,17 +684,17 @@ function GeneratedArtifactCard({
               className="assistant-cell-image-lightbox"
               role="dialog"
               aria-modal="true"
-              aria-label="图片大图"
+              aria-label={tr("图片大图")}
               onClick={() => setLightboxOpen(false)}
             >
               <div className="assistant-cell-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
-                <img src={lightboxUrl} alt="图片" />
+                <img src={lightboxUrl} alt={tr("图片")} />
                 <button
                   type="button"
                   className="assistant-cell-image-lightbox-close"
                   onClick={() => setLightboxOpen(false)}
-                  title="关闭"
-                  aria-label="关闭大图"
+                  title={tr("关闭")}
+                  aria-label={tr("关闭大图")}
                 >
                   <X size={18} />
                 </button>
@@ -686,11 +711,11 @@ function GeneratedArtifactCard({
       type="button"
       className="assistant-cell-artifact-card"
       onClick={openPreview}
-      aria-label={`打开${artifact.summary || "生成文件"}`}
+      aria-label={tr("打开{v0}", { v0: artifact.summary || tr("生成文件") })}
     >
       {fileIcon(artifact.summary || "file", { size: 18, className: "assistant-cell-artifact-file-icon" })}
       <span>
-        <strong>{artifact.summary || "生成文件"}</strong>
+        <strong>{artifact.summary || tr("生成文件")}</strong>
         <small>{[mediaType, artifact.bytes != null ? formatFileSize(artifact.bytes) : ""].filter(Boolean).join(" · ")}</small>
       </span>
     </button>
@@ -722,6 +747,7 @@ function GeneratedFileLink({
   conversationId?: string;
   workspaceRoot: string;
 }) {
+  const { t: tr } = useI18n();
   const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
   const mediaType = mediaTypeForPath(attachment.path);
   const openAttachment = () => {
@@ -740,11 +766,11 @@ function GeneratedFileLink({
     // OS shell actions have no meaning in browser mode; offering them there
     // produced a menu entry that did nothing at all.
     ...(isDesktop() ? [
-      { label: "使用默认应用打开", onClick: () => { void openPath(attachment.path); } },
-      { label: "在资源管理器中显示", onClick: () => { void revealPath(attachment.path); } },
+      { label: tr("使用默认应用打开"), onClick: () => { void openPath(attachment.path); } },
+      { label: tr("在资源管理器中显示"), onClick: () => { void revealPath(attachment.path); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void copyText(attachment.path, "路径"); } },
+    { label: tr("复制路径"), onClick: () => { void copyText(attachment.path, tr("路径")); } },
   ]);
 
   return (

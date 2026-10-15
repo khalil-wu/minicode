@@ -1,9 +1,11 @@
+import { useI18n } from "../i18n";
 import { useEffect, useMemo, useState } from "react";
 import { Pencil, RotateCcw, Search, Trash2 } from "lucide-react";
 import { findShortcutConflict, formatShortcut, shortcutFromEvent, SHORTCUT_DEFINITIONS, type ShortcutActionId } from "../lib/keyboard-shortcuts";
 import { useAppStore } from "../stores";
 
 export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: string; active?: boolean }) => {
+  const { t: tr } = useI18n();
   const [query, setQuery] = useState("");
   const [recording, setRecording] = useState<ShortcutActionId | null>(null);
   const [error, setError] = useState("");
@@ -14,10 +16,8 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
   const resetShortcutBindings = useAppStore((state) => state.resetShortcutBindings);
   const normalizedQuery = query.trim().toLowerCase();
   const shortcuts = useMemo(() => (
-    normalizedQuery
-      ? SHORTCUT_DEFINITIONS.filter((shortcut) => `${shortcut.label} ${shortcut.description} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])}`.toLowerCase().includes(normalizedQuery))
-      : SHORTCUT_DEFINITIONS
-  ), [bindings, normalizedQuery]);
+    SHORTCUT_DEFINITIONS.map((shortcut) => ({ ...shortcut, label: tr(shortcut.label), description: tr(shortcut.description) })).filter((shortcut) => !normalizedQuery || `${shortcut.label} ${shortcut.description} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])}`.toLowerCase().includes(normalizedQuery))
+  ), [bindings, normalizedQuery, tr]);
 
   useEffect(() => {
     if (!recording || !active) return;
@@ -39,12 +39,12 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
       const binding = shortcutFromEvent(event);
       if (!binding) return;
       if (!binding.includes("Mod") && !binding.includes("Alt") && !/^F\d+$/.test(event.key)) {
-        setError("快捷键需要 Ctrl/Cmd、Alt 或功能键。");
+        setError(tr("快捷键需要 Ctrl/Cmd、Alt 或功能键。"));
         return;
       }
       const conflict = findShortcutConflict(bindings, recording, binding);
       if (conflict) {
-        setError(`已用于“${conflict.label}”。`);
+        setError(tr("已用于“{v0}”。", { v0: tr(conflict.label) }));
         return;
       }
       setShortcutBinding(recording, binding);
@@ -58,17 +58,12 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
   return (
     <section className="settings-group">
       <div className="settings-section-heading settings-section-heading-row">
-        <div>
-          <h3 className="settings-group-title">快捷键</h3>
-          <p className="settings-section-description">当前运行时绑定。</p>
-        </div>
         <label className="settings-shortcut-search">
           <Search aria-hidden="true" />
-          <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="搜索快捷键" aria-label="搜索快捷键" />
+          <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder={tr("搜索快捷键")} aria-label={tr("搜索快捷键")} />
         </label>
         <button type="button" className="settings-action-button settings-shortcut-reset" onClick={resetShortcutBindings}>
-          <RotateCcw aria-hidden="true" />恢复默认
-        </button>
+          <RotateCcw aria-hidden="true" />{tr("恢复默认")}</button>
       </div>
       {error && <div className="settings-shortcut-error" role="alert">{error}</div>}
       <div className="settings-card settings-shortcuts-card">
@@ -81,9 +76,9 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
               data-recording={recording === shortcut.id ? "true" : "false"}
               data-shortcut-recording={active && recording === shortcut.id ? "true" : undefined}
               onClick={() => { setRecording(shortcut.id); setError(""); }}
-              aria-label={`编辑 ${shortcut.label}`}
+              aria-label={tr("编辑 {v0}", { v0: shortcut.label })}
             >
-              <kbd>{recording === shortcut.id ? "请按快捷键" : formatShortcut(bindings[shortcut.id])}</kbd>
+              <kbd>{recording === shortcut.id ? tr("请按快捷键") : formatShortcut(bindings[shortcut.id])}</kbd>
               <Pencil aria-hidden="true" />
             </button>
             <button
@@ -91,14 +86,14 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
               className="settings-shortcut-delete"
               onClick={() => setShortcutBinding(shortcut.id, "")}
               disabled={!bindings[shortcut.id]}
-              title="删除绑定"
-              aria-label={`删除 ${shortcut.label} 快捷键`}
+              title={tr("删除绑定")}
+              aria-label={tr("删除 {v0} 快捷键", { v0: shortcut.label })}
             >
               <Trash2 aria-hidden="true" />
             </button>
           </div>
         ))}
-        {shortcuts.length === 0 && <div className="settings-empty-inline">没有匹配的快捷键。</div>}
+        {shortcuts.length === 0 && <div className="settings-empty-inline">{tr("没有匹配的快捷键。")}</div>}
       </div>
     </section>
   );

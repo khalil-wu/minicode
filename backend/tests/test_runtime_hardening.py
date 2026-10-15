@@ -510,7 +510,9 @@ def test_read_only_mcp_results_are_not_cached_between_invocations() -> None:
 
     first, second, calls = asyncio.run(scenario())
 
-    assert (first, second, calls) == ("value-1", "value-2", 2)
+    assert first.endswith("value-1")
+    assert second.endswith("value-2")
+    assert calls == 2
 
 
 def test_auto_approval_rechecks_tool_capability_metadata() -> None:
@@ -742,6 +744,17 @@ def test_control_approval_payload_preserves_policy_scope() -> None:
         "turn_id": "",
         "workspace_root": "C:/workspace/worktree",
     }
+
+
+def test_approval_scope_read_failure_is_not_replaced_with_an_empty_workspace() -> None:
+    runtime = SessionApprovalRuntimeMixin()
+    def failed_read(_conversation_id):
+        raise OSError("Conversation storage failed")
+    runtime.conversation_repo = SimpleNamespace(get_conversation=failed_read)
+    event = AgentEvent.approval_request("call-1", "run_command", {"command": "echo ok"})
+    event.data["conversation_id"] = "conversation-a"
+    with pytest.raises(OSError, match="Conversation storage failed"):
+        runtime.build_approval_request_payload(event)
 
 
 def test_approval_payload_bounds_large_arguments_without_losing_action_identity() -> (

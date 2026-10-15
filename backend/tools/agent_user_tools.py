@@ -9,10 +9,10 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 
 
-class AskUserTool(BaseTool):
-    """Ask the user one concise clarification question."""
+class RequestUserInputTool(BaseTool):
+    """Codex's root-thread, collaboration-mode user-input control tool."""
 
-    name = "ask_user"
+    name = "request_user_input"
     # Required clarifications are part of the base interaction protocol, not a
     # capability the model should have to discover after it becomes blocked.
     should_defer = False
@@ -20,38 +20,24 @@ class AskUserTool(BaseTool):
     result_kind = "generic"
     activity_kind = "genericTool"
     display_label = "Ask user"
-    description = (
-        "Ask the user a focused clarification question when a required detail cannot be inferred from context or tools. "
-        "Ask at most ONE question per turn. Include enough context for the user to answer without reading the entire conversation. "
-        "When the user is making a decision, provide 2-4 short options plus leave room for a custom answer."
-    )
     permission = PermissionLevel.AUTO
+    read_only = True
+    idempotent = False
+    max_result_chars = None
+
+    def __init__(self, *, default_mode_enabled: bool = False) -> None:
+        self.available_modes = ("plan", "default") if default_mode_enabled else ("plan",)
+        modes = "Plan or Default mode" if default_mode_enabled else "Plan mode"
+        self.description = (
+            "Request user input for one to three short questions and wait for the response. "
+            f"This tool is only available in {modes}."
+        )
 
     def model_description(self) -> str:
-        return "Ask the user one clarification question."
+        return self.description
 
     def model_schema(self) -> ToolSchema:
-        return ToolSchema(
-            name=self.name,
-            description=self.model_description(),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The concise, self-contained question to ask the user.",
-                    },
-                    "options": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional 2-4 short answer choices. The UI also allows a custom answer.",
-                        "minItems": 2,
-                        "maxItems": 4,
-                    },
-                },
-                "required": ["question"],
-            },
-        )
+        return self.get_schema()
 
     def get_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -59,7 +45,7 @@ class AskUserTool(BaseTool):
             capability="user.ask",
             toolset="core",
             exposure="direct_model_only",
-            required_args=("question",),
+            required_args=("questions",),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -69,27 +55,43 @@ class AskUserTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The concise, self-contained question to ask the user. Include relevant context so the user can answer without scrolling back.",
-                    },
-                    "options": {
+                    "questions": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional short answer choices, such as ['删除', '不删除']. The UI will also allow a custom answer.",
-                        "maxItems": 4,
+                        "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Stable identifier for mapping answers (snake_case)."},
+                                "header": {"type": "string", "description": "Short header label shown in the UI (12 or fewer chars)."},
+                                "question": {"type": "string", "description": "Single-sentence prompt shown to the user."},
+                                "options": {
+                                    "type": "array",
+                                    "description": 'Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with "(Recommended)". Do not include an "Other" option in this list; the client will add a free-form "Other" option automatically.',
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "description": "User-facing label (1-5 words)."},
+                                            "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected."},
+                                        },
+                                        "required": ["label", "description"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
+                            "required": ["id", "header", "question", "options"],
+                            "additionalProperties": False,
+                        },
                     },
                 },
-                "required": ["question"],
+                "required": ["questions"],
+                "additionalProperties": False,
             },
+            strict=False,
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        question = args.get("question", "")
-        if not question:
-            return self._error_result("Missing question argument")
         return self._error_result(
-            "ask_user requires the host's user input handler. The question was not shown; do not assume an answer."
+            "request_user_input requires the host's user input handler. The questions were not shown; do not assume an answer."
         )
 
 

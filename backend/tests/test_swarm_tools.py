@@ -13,6 +13,7 @@ from backend.agent.mailbox_delivery import (
 from backend.agent.state import AgentState
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.swarm_tools import (
+    FollowupTaskTool,
     MessageListTool,
     SendMessageTool,
     TaskCreateTool,
@@ -251,8 +252,8 @@ async def _test_mailbox_messages_are_scoped_to_the_target_incarnation(tmp_path) 
 
     context, _events = _context(runtime)
     context.metadata["_tool_registry"] = Registry()
-    resumed_result = await SendMessageTool().execute(
-        {"recipient": "subagent-reused", "message": "resume with this instruction"},
+    resumed_result = await FollowupTaskTool().execute(
+        {"target": "subagent-reused", "message": "resume with this instruction"},
         context=context,
     )
     assert not resumed_result.is_error

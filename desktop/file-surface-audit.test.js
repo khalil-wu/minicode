@@ -25,7 +25,7 @@ function fileIpcHarness() {
       return require(name);
     },
   }, { filename: "ipc-handlers.js" });
-  mod.exports.init({ getMainWindow: () => win });
+  mod.exports.init({ getWindowForSender: (sender) => sender === win.webContents ? win : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }) });
   mod.exports.registerIpcHandlers();
   const event = { sender: webContents, senderFrame: webContents.mainFrame };
   return { handlers, event, trashed };

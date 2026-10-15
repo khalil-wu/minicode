@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { X } from "../lib/icons";
 import { BrandIcon } from "../components/BrandIcon";
 import { useEffect, useLayoutEffect, useRef } from "react";
@@ -11,6 +12,8 @@ interface Props {
   onSelectionChange?: (v: string, selection: ComposerSelection) => void;
   selectionRequest?: ComposerSelection;
   onSubmit: () => void | Promise<void>;
+  onAlternateSubmit?: () => void | Promise<void>;
+  isResponseInProgress?: boolean;
   menuOpen?: boolean;
   onDropFiles?: (files: File[]) => void;
   minimal?: boolean;
@@ -38,6 +41,8 @@ export const ComposerTextarea = ({
   onSelectionChange,
   selectionRequest,
   onSubmit,
+  onAlternateSubmit,
+  isResponseInProgress = false,
   menuOpen,
   onDropFiles,
   minimal = false,
@@ -52,8 +57,10 @@ export const ComposerTextarea = ({
   onRecallHistory,
   onEscape,
   conversationId,
-  ariaLabel = "消息输入",
+  ariaLabel,
 }: Props) => {
+  const { t: tr } = useI18n();
+  const draftsReady = useAppStore(state => state.composerDraftsReady);
   const sendShortcut = useAppStore((state) => state.sendShortcut);
   const ref = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
@@ -114,9 +121,11 @@ export const ComposerTextarea = ({
   const hasContextPrefix = Boolean(commandLabel || skillTokens.length > 0);
   const textarea = (
     <textarea
+      disabled={!draftsReady}
       ref={ref}
       data-composer-input
-      aria-label={ariaLabel}
+      data-enter-behavior={sendShortcut === "mod-enter" ? "cmdAlways" : sendShortcut}
+      aria-label={ariaLabel ?? tr("消息输入")}
       value={value}
       onChange={(e) => onChange(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
       onSelect={(e) => onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
@@ -178,9 +187,21 @@ export const ComposerTextarea = ({
             return;
           }
         }
-        const submitWithEnter = sendShortcut === "enter"
-          ? e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey
-          : e.key === "Enter" && (e.ctrlKey || e.metaKey);
+        const modifier = e.ctrlKey || e.metaKey;
+        if (e.key === "Enter" && modifier && e.repeat && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        const alternateFollowUp = sendShortcut === "enter" ? !e.shiftKey : e.shiftKey;
+        if (e.key === "Enter" && modifier && !e.altKey && alternateFollowUp && isResponseInProgress && onAlternateSubmit) {
+          e.preventDefault();
+          e.stopPropagation();
+          onAlternateSubmit();
+          return;
+        }
+        const submitWithEnter = e.key === "Enter" && !e.shiftKey && !e.altKey
+          && (modifier || sendShortcut === "enter" || (sendShortcut === "cmdIfMultiline" && !value.includes("\n")));
         if (submitWithEnter) {
           // Ignore Enter while an IME composition is active (CJK input commits
           // with Enter); otherwise the half-composed text is sent. Mirrors the
@@ -189,7 +210,7 @@ export const ComposerTextarea = ({
           onSubmit();
         }
       }}
-      placeholder={placeholder ?? "描述任务或提出问题…"}
+      placeholder={placeholder ?? tr("随心输入")}
       autoFocus
       className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
@@ -214,8 +235,8 @@ export const ComposerTextarea = ({
         {commandLabel && (
           <button
             type="button"
-            title="清除命令"
-            aria-label="清除命令"
+            title={tr("清除命令")}
+            aria-label={tr("清除命令")}
             onClick={onClearCommand}
             className="composer-prefix-token"
             style={commandPrefixStyle}
@@ -233,8 +254,8 @@ export const ComposerTextarea = ({
             <BrandIcon value={skill.displayName || skill.name} iconUrl={skill.icon} inferBrand={false} fallback="skill" size={16} />
             <span className="composer-skill-name" title={skill.description || skill.displayName || skill.name}>{skill.displayName || skill.name}</span>
             <button type="button" className="composer-skill-remove"
-              title={`移除技能 ${skill.displayName || skill.name}`}
-              aria-label={`移除技能 ${skill.displayName || skill.name}`}
+              title={tr("移除技能 {name}", { name: skill.displayName || skill.name })}
+              aria-label={tr("移除技能 {name}", { name: skill.displayName || skill.name })}
               onClick={() => { onRemoveSkill?.(skill.name); ref.current?.focus(); }}>
               <X size={13} aria-hidden="true" />
             </button>

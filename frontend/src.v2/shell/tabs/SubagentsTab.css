@@ -37,16 +37,17 @@
 .subagents-group-heading > span:last-child {
   font-variant-numeric: tabular-nums;
 }
+.subagents-group-empty { padding: 5px 8px 20px; color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; }
 
 .subagents-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 14px;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   width: 100%;
   min-width: 0;
-  min-height: 60px;
-  padding: 9px 8px;
+  min-height: 44px;
+  padding: 8px;
   border: 0;
   border-radius: var(--radius-lg);
   background: transparent;
@@ -56,7 +57,6 @@
   text-align: left;
   transition: background-color var(--transition-fast), color var(--transition-fast);
 }
-.subagents-row[data-status="completed"] { min-height: 44px; padding-block: 8px; }
 
 .subagents-row:hover {
   background: color-mix(in oklch, var(--surface-soft) 88%, transparent);
@@ -81,13 +81,16 @@
 .subagents-row-copy {
   display: grid;
   min-width: 0;
-  gap: 5px;
+  gap: 0;
 }
+.subagents-row[data-preview="true"] { align-items: start; }
+.subagents-row-heading { min-height: 24px; }
+.subagents-row-trailing { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+.subagents-row-preview { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.4; }
 .subagents-row-heading { display: flex; align-items: baseline; min-width: 0; gap: 10px; }
 .subagents-row-heading > .subagents-row-title { flex: 1; }
 
 .subagents-row-title,
-.subagents-row-summary,
 .subagents-row-time {
   min-width: 0;
   overflow: hidden;
@@ -102,7 +105,6 @@
   line-height: 1.35;
 }
 
-.subagents-row-summary,
 .subagents-row-status,
 .subagents-row-time {
   color: var(--text-muted);
@@ -123,36 +125,13 @@
   white-space: nowrap;
 }
 
-.subagents-row-summary {
-  flex: 1 1 auto;
-}
-
-.subagents-row-status:not(.sr-only) + .subagents-row-summary::before {
-  content: "·";
-  margin-right: 6px;
-  color: var(--border-strong);
-}
-
 .subagents-row-time {
   flex: 0 0 auto;
   white-space: nowrap;
 }
 
-.subagents-row[data-status="attention"] .subagents-row-status { color: var(--state-warning); }
+.subagents-row[data-status="attention"] .subagents-row-status { color: var(--text-secondary); }
 .subagents-row[data-status="running"] .subagents-row-status { color: var(--text-secondary); }
-
-.subagents-row-chevron {
-  color: var(--text-muted);
-  opacity: 0;
-  transform: translateX(-2px);
-  transition: opacity var(--transition-fast), transform var(--transition-fast);
-}
-
-.subagents-row:hover .subagents-row-chevron,
-.subagents-row:focus-visible .subagents-row-chevron {
-  opacity: 0.8;
-  transform: translateX(0);
-}
 
 .subagents-show-more {
   display: inline-flex;
@@ -176,31 +155,6 @@
   color: var(--text-secondary);
 }
 
-.subagents-empty {
-  display: grid;
-  justify-items: start;
-  gap: 6px;
-  padding: 30px 10px;
-}
-
-.subagents-empty-icon {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  margin-bottom: 4px;
-  place-items: center;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--surface-soft);
-  color: var(--text-muted);
-}
-
-.subagents-empty > span:last-child {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
 .subagents-detail {
   min-height: 100%;
 }
@@ -221,7 +175,7 @@
   margin: -7px 0 0;
   padding: 0 8px;
   box-sizing: border-box;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 0;
   background: var(--surface-base);
 }
 
@@ -274,7 +228,7 @@
 .subagents-detail-body {
   display: grid;
   gap: 12px;
-  padding: 20px 8px 28px;
+  padding: 8px 8px 28px;
 }
 
 .subagents-transcript {
@@ -300,11 +254,6 @@
   max-width: 100%;
 }
 
-.subagents-transcript .agent-loop-user-cell .user-cell-wrap {
-  width: min(88%, 760px);
-  max-width: min(88%, 760px);
-}
-
 .subagents-transcript-loading,
 .subagents-transcript-empty,
 .subagents-transcript-error {
@@ -319,24 +268,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border: 1px solid color-mix(in oklch, var(--state-danger) 24%, var(--border-subtle));
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  color: var(--state-danger);
-}
-
-.subagents-transcript-error button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  font-weight: var(--fw-semibold);
-}
-
-.subagents-detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
+  color: var(--text-secondary);
 }
 
 .subagents-context:empty { display: none; }
@@ -347,9 +281,7 @@
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.subagents-relation,
-.subagents-identity-row,
-.subagents-message-heading {
+.subagents-relation {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -374,16 +306,8 @@
 .subagents-relation-link:focus-visible { outline: 2px solid var(--focus-ring); }
 .subagents-relation-link .mc-agent-avatar { --agent-avatar-size: 17px; }
 .subagents-attention { padding: 4px 8px; color: var(--state-warning); font-size: var(--text-sm); line-height: 1.6; }
-.subagents-retained-result,
-.subagents-messages { min-width: 0; padding: 0 8px; }
-.subagents-retained-result > summary,
-.subagents-messages > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.7; }
+.subagents-retained-result { min-width: 0; padding: 0 8px; }
 .subagents-retained-result-content { padding-top: 10px; overflow-wrap: anywhere; }
-.subagents-message { padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
-.subagents-message:last-child { border-bottom: 0; }
-.subagents-message-heading { color: var(--text-muted); font-size: var(--text-xs); }
-.subagents-message-heading small { margin-left: auto; font-size: inherit; }
-.subagents-message p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-sm); line-height: 1.6; }
 @keyframes subagents-surface-enter {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -393,7 +317,6 @@
   .subagents-tab,
   .subagents-detail,
   .subagents-row,
-  .subagents-row-chevron,
   .subagents-back {
     animation: none;
     transition: none;
@@ -402,5 +325,4 @@
 
 @media (max-width: 420px) {
   .subagents-row { grid-template-columns: 24px minmax(0, 1fr); }
-  .subagents-row-chevron { display: none; }
 }

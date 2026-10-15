@@ -1,7 +1,8 @@
+/* @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { buildInterruptCommand } from "../lib/interrupt-command";
-import { resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
+import { resetPendingUserMessagesForTests, sendChatMessage } from "./sendChatMessage";
 import { handleRuntimeEvent } from "./runtimeEvents";
 import type { ServerEvent } from "../protocol/events";
 
@@ -12,7 +13,7 @@ const initialState = useAppStore.getState();
 
 beforeEach(() => {
   useAppStore.setState({ ...initialState, conversationId: null, messages: [], conversations: [], isStreaming: false, runtimeSession: null, workingDirectory: "C:/workspace", activeTabPath: "src/main.py", pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [], pendingDiffReview: null, diffReviewQueue: [] }, true);
-  resetSendDeduplication();
+  resetPendingUserMessagesForTests();
   transport.send.mockClear();
 });
 afterEach(() => useAppStore.setState(initialState, true));

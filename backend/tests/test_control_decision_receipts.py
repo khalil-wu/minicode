@@ -41,6 +41,7 @@ class ReceiptSocket:
 async def session(tmp_path):
     session = WebSocketSession.__new__(WebSocketSession)
     session.session_id = 'control-receipts'
+    session.ws_manager = None
     session.conversation_runtime = SimpleNamespace(active_conversation_id='conv_receipts')
     session.conversation_repo = ConversationRepository(tmp_path / 'conversations')
     session.conversation_repo.create_conversation(conversation_id='conv_receipts', memory_mode='disabled')

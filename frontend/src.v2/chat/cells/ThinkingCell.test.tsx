@@ -48,6 +48,7 @@ describe("ThinkingCell", () => {
     render(<ThinkingCell cell={thinkingCell({ source, isStreaming: true })} isStreaming />);
     expect(document.body.textContent).toContain("我先查一下昨天发生了什么新闻。");
     expect(document.querySelector(".thinking-cell-commentary")).toBeTruthy();
+    expect(document.querySelector('[data-processing="true"]')).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -65,6 +66,7 @@ describe("ThinkingCell", () => {
     expect(document.body.textContent).toContain("Provider reasoning preview");
     expect(screen.queryByRole("button")).toBeNull();
     expect(document.querySelector(".thinking-cell-live")).toBeTruthy();
+    expect(document.querySelector('.thinking-cell-live')?.getAttribute('data-processing')).toBe('true');
 
     rerender(<ThinkingCell
       cell={thinkingCell({
@@ -100,6 +102,7 @@ describe("ThinkingCell", () => {
     expect(document.body.textContent).toContain("Checking current conditions.");
     expect(document.querySelector("strong")).toBeTruthy();
     expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
+    expect(document.querySelector('.thinking-cell-summary')?.getAttribute('data-processing')).toBe('true');
 
     rerender(<ThinkingCell cell={thinkingCell({
       source: "provider",
@@ -111,5 +114,6 @@ describe("ThinkingCell", () => {
     expect(document.body.textContent).toContain("Fetching Beijing's Weather");
     expect(document.body.textContent).toContain("Checking current conditions.");
     expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
+    expect(document.querySelector('.thinking-cell-summary')?.getAttribute('data-processing')).toBeNull();
   });
 });

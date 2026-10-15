@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -241,6 +242,16 @@ class AgentEvent:
     def to_ws_message(self) -> dict[str, Any]:
         """Serialize this event as WebSocket JSON."""
         return {"type": self.type, **self.data}
+
+    @classmethod
+    def guardian_assessment(cls, assessment: dict[str, Any], *, conversation_id: str, message_id: str) -> AgentEvent:
+        """Host-owned synchronous review lifecycle, never a delegated agent."""
+        return cls("guardian_assessment", {**deepcopy(assessment), "conversation_id": conversation_id, "message_id": message_id})
+
+    @classmethod
+    def guardian_warning(cls, message: str, *, conversation_id: str, message_id: str, turn_id: str, interruption: bool = False) -> AgentEvent:
+        return cls("guardian_warning", {"message": message, "conversation_id": conversation_id,
+            "message_id": message_id, "turn_id": turn_id, "interruption": interruption})
 
     @classmethod
     def user_message_queue_updated(
@@ -584,6 +595,7 @@ class AgentEvent:
         idempotency_key: str = "",
         request_digest: str = "",
         diff: dict[str, Any] | None = None,
+        command_actions: list[dict[str, str]] | None = None,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "id": id,
@@ -599,6 +611,8 @@ class AgentEvent:
             data["result_kind"] = result_kind
         if activity_kind:
             data["activity_kind"] = activity_kind
+        if command_actions:
+            data["command_actions"] = deepcopy(command_actions)
         clean_visibility = _required_event_text(
             visibility,
             field_name="visibility",
@@ -705,6 +719,9 @@ class AgentEvent:
         artifact_kind: str = "",
         artifact_media_type: str = "",
         artifact_bytes: int | None = None,
+        delegations: list[dict[str, Any]] | None = None,
+        command_actions: list[dict[str, str]] | None = None,
+        recipient_id: str = "",
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
@@ -746,6 +763,10 @@ class AgentEvent:
             result["result_kind"] = result_kind
         if activity_kind:
             result["activity_kind"] = activity_kind
+        if command_actions:
+            result["command_actions"] = deepcopy(command_actions)
+        if recipient_id:
+            result["recipient_id"] = recipient_id
         clean_visibility = _required_event_text(
             visibility,
             field_name="visibility",
@@ -829,6 +850,8 @@ class AgentEvent:
         )
         if clean_request_digest:
             result["request_digest"] = clean_request_digest
+        if delegations is not None:
+            result["delegations"] = [dict(item) for item in delegations]
         return cls(type="tool_result", data=result)
 
     @classmethod
@@ -1530,7 +1553,7 @@ class AgentEvent:
         retained_categories: list[str] | None = None,
         ledger: ContextLedger | None = None,
     ) -> AgentEvent:
-        clean_summary = _required_event_text(
+        clean_summary = _optional_event_text(
             summary,
             field_name="summary",
             maximum=_MAX_EVENT_JSON_STRING_CHARS,
@@ -1630,6 +1653,7 @@ class AgentEvent:
         phase: str = "",
         stream_status: str = "",
         event_seq: int | None = None,
+        started_at: int | None = None,
         last_event_type: str = "",
         tool_states: list[dict[str, Any]] | None = None,
         snapshot_id: str = "",
@@ -1736,6 +1760,8 @@ class AgentEvent:
                 data[field_name] = clean_value
         if event_seq is not None:
             data["event_seq"] = _non_negative_event_int(event_seq, field_name="event_seq")
+        if started_at is not None:
+            data["started_at"] = started_at
         if states is not None:
             data["tool_states"] = states
         if snapshot_id:

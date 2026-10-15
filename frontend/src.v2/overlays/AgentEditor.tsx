@@ -125,7 +125,7 @@ export const AgentEditor = () => {
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const ownerWorkspaceRoot = useMemo(() => {
     const active = conversations.find((conversation) => conversation.id === conversationId);
-    return String(active ? active.worktreePath || active.workspaceRoot || "" : workingDirectory).trim();
+    return String(active ? active.executionCwd || active.worktreePath || active.workspaceRoot || "" : workingDirectory).trim();
   }, [conversationId, conversations, workingDirectory]);
   const newAgentDraft = useMemo<AgentRecord>(() => ({ ...EMPTY_DRAFT,
     source: ownerWorkspaceRoot ? "project" : "user", location: ownerWorkspaceRoot ? "project" : "user",

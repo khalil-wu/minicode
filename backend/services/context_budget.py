@@ -4,13 +4,16 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from backend.agent.context import ContextBuilder
+from backend.agent.context import CompactionNoopError, ContextBuilder
 from backend.agent.context_ledger import ContextLedger
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
 from backend.llm.base import LLMMessage
 from backend.hooks.manager import HookEvent
+from backend.agent.context_compaction_hooks import (
+    context_compaction_hook_events, run_context_compaction_hook, stop_context_compaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,12 @@ async def manage_context_budget(
     will loop indefinitely, burning API calls.
     """
     request_args = {"messages": messages} if messages is not None else {}
+    if isinstance(ctx, ContextBuilder) and ctx.token_budget_enabled:
+        if ctx.needs_compaction(state, tool_schemas=tool_schemas, **request_args):
+            from backend.agent.token_budget_runtime import run_context_window_compaction
+            async for event in run_context_window_compaction(ctx, state):
+                yield event
+        return
     if not ctx.needs_compaction(state, tool_schemas=tool_schemas, **request_args):
         warning = _pre_compaction_warning(ctx, state, budget, tool_schemas, **request_args)
         if warning is not None:
@@ -127,41 +136,18 @@ async def _run_normal_compaction(
     tool_schemas: list[dict[str, Any]],
 ) -> AsyncIterator[AgentEvent]:
     before_ledger = context_ledger_snapshot(ctx)
-    hook_mgr = ctx.hook_manager
-    pre_compact_result = None
-    if hook_mgr and hook_mgr.has_hooks(HookEvent.PRE_COMPACT):
-        try:
-            pre_compact_result = await hook_mgr.run_pre_compact(trigger="auto")
-        except Exception as exc:
-            # A hook execution failure is observable, but it must not turn an
-            # otherwise recoverable compaction into an unhandled task error.
-            logger.warning("pre_compact hook failed: %s", exc)
-            pre_compact_result = None
-
-        # Hook feedback is advisory for compaction. A blocking hook result is
-        # recorded below, but cannot veto the recovery operation or wedge every
-        # future turn at the budget boundary.
-        if pre_compact_result is not None and getattr(pre_compact_result, "blocked", False):
-            message = str(
-                getattr(pre_compact_result, "message", "")
-                or getattr(pre_compact_result, "feedback", "")
-                or ""
-            ).strip()
-            if message:
-                logger.warning("PreCompact hook message (non-blocking): %s", message)
-
-    # A PreCompact hook may supply a focused instruction for the summarizer.
-    # ContextBuilder's mature API exposes one focus string, so preserve the
-    # normal user focus and append the hook instruction at the boundary rather
-    # than dropping it.
-    focus = state.user_message
-    custom_instructions = str(
-        getattr(pre_compact_result, "custom_instructions", "") or ""
-    ).strip()
-    if custom_instructions:
-        focus = f"{focus}\n\n{custom_instructions}" if focus else custom_instructions
+    pre_compact_result = await run_context_compaction_hook(ctx, HookEvent.PRE_COMPACT, trigger="auto")
+    for event in context_compaction_hook_events(pre_compact_result):
+        yield event
+    if pre_compact_result is not None and pre_compact_result.prevent_continuation:
+        stop_context_compaction(state)
+        return
     try:
-        summary = await ctx.compact(focus=focus, restore_state=state)
+        summary = await ctx.compact(focus=state.user_message, restore_state=state)
+    except CompactionNoopError as exc:
+        # No eligible history was removed and no summarizer request failed.
+        logger.info("Automatic compaction made no change: %s", exc)
+        return
     except Exception as exc:
         logger.warning("Compaction failed: %s", exc)
         # Feed the circuit breaker in manage_context_budget.
@@ -177,24 +163,12 @@ async def _run_normal_compaction(
     ctx.reset_autocompact_failures()
     logger.info("Compaction done: %s", summary[:80] if summary else "(empty)")
     yield build_context_compacted_event(summary, before_ledger, context_ledger_snapshot(ctx))
-    post_compact_result = await _run_post_compact_hook(
-        summary,
-        hook_manager=ctx.hook_manager,
-    )
-    if post_compact_result is not None:
-        # PostCompact is non-blocking, but its context/system fields are part
-        # of the next model request.  Inject them into the same ContextBuilder
-        # used by the loop so they survive the compaction boundary.
-        additional_context = str(
-            getattr(post_compact_result, "additional_context", "") or ""
-        ).strip()
-        if additional_context:
-            ctx.append_user_context(additional_context)
-        system_message = str(
-            getattr(post_compact_result, "system_message", "") or ""
-        ).strip()
-        if system_message:
-            ctx.append_system_note(system_message)
+    post_compact_result = await run_context_compaction_hook(ctx, HookEvent.POST_COMPACT, trigger="auto")
+    for event in context_compaction_hook_events(post_compact_result):
+        yield event
+    if post_compact_result is not None and post_compact_result.prevent_continuation:
+        stop_context_compaction(state)
+        return
     if ctx.needs_compaction(state, tool_schemas=tool_schemas):
         # The local estimate can still sit above the trigger after a successful
         # compaction (tool schemas are over-counted by roughly a tenth), while
@@ -206,21 +180,6 @@ async def _run_normal_compaction(
             "Context estimate still above the compaction trigger after compaction; "
             "proceeding and letting the provider decide"
         )
-
-
-async def _run_post_compact_hook(
-    summary: str,
-    *,
-    hook_manager: Any | None,
-) -> Any | None:
-    hook_mgr = hook_manager
-    if not hook_mgr or not hook_mgr.has_hooks(HookEvent.POST_COMPACT):
-        return None
-    try:
-        return await hook_mgr.run_post_compact(summary=summary, trigger="auto")
-    except Exception as exc:
-        logger.warning("post_compact hook failed: %s", exc)
-        return None
 
 
 def context_ledger_snapshot(ctx: ContextBuilder) -> ContextLedger:

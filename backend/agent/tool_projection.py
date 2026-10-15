@@ -18,6 +18,7 @@ class ToolProjection:
     display_hint: str
     activity_kind: str = ""
     visibility: str = "timeline"
+    private_model_only: bool = False
 
 
 def projection_for_tool(
@@ -34,6 +35,7 @@ def projection_for_tool(
         display_hint=str(metadata.get("display_label") or tool_name),
         activity_kind=str(metadata.get("activity_kind") or "genericTool"),
         visibility=str(metadata.get("visibility") or "timeline"),
+        private_model_only=bool(metadata.get("private_model_only", False)),
     )
 
 
@@ -53,15 +55,10 @@ def display_summary_for_result(
     tool_registry: "ToolRegistry | None" = None,
 ) -> str:
     del diff
-    if result.display_summary:
+    projection = projection_for_tool(tc.name, tool_registry)
+    if result.display_summary and status == "success" and projection.activity_kind != "commandExecution":
         return result.display_summary
-    label = projection_for_tool(tc.name, tool_registry).display_hint
-    if status == "blocked":
-        return f"Blocked: {label}"
-    if status == "cancelled":
-        return f"Cancelled: {label}"
-    if status == "timeout":
-        return f"Timed out: {label}"
-    if status == "failed":
-        return f"Failed: {label}"
-    return f"Completed: {label}"
+    # Codex items keep the action separate from their status and raw output.
+    # Error diagnostics belong to the expanded result, not an invented receipt
+    # that replaces the operation in live or restored process rows.
+    return projection.display_hint

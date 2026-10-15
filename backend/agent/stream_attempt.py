@@ -21,6 +21,16 @@ ProcessEventFactory = Callable[..., AgentEvent | None]
 TextScrubber = Callable[[str], str]
 
 
+@dataclass(slots=True, eq=False)
+class ProviderTextItem:
+    """The character storage of one assistant item, shared by its phase views."""
+
+    chunks: list[str] = field(default_factory=list)
+
+    def text(self) -> str:
+        return "".join(self.chunks)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderEventOutcome:
     """Structured result of accepting one provider protocol event.
@@ -47,16 +57,10 @@ class StreamTextState:
     """
 
     iteration_id: str = ""
-    full_text: str = ""
-    final_candidate_text: str = ""
-    pending_process_text: str = ""
-    pending_unphased_text: str = ""
-    pending_unphased_visible_text: str = ""
     saw_final_answer_phase: bool = False
     agent_message_started: bool = False
     agent_message_sequence: int = 0
     active_agent_message_id: str = ""
-    active_agent_message_text: str = ""
     active_agent_message_source: str = ""
     # Source already published for the active item. ``item.started`` announces
     # the initial classification, so a delta only needs to carry a source when
@@ -67,10 +71,114 @@ class StreamTextState:
     pending_unphased_item_id: str = ""
     process_text_emitted: bool = False
     process_text_streamed: bool = False
-    process_text_last_emitted: str = ""
     process_text_source: str = "model_preamble"
-    emitted_agent_messages: dict[str, str] = field(default_factory=dict)
     sanitizer_owner: StreamEvent | None = None
+    _ordered_text: list[str] = field(default_factory=list, repr=False)
+    _final_item: ProviderTextItem | None = field(default=None, repr=False)
+    _current_final_item: ProviderTextItem | None = field(default=None, repr=False)
+    _current_final_item_id: str = ""
+    _unphased_item: ProviderTextItem | None = field(default=None, repr=False)
+    _process_item: ProviderTextItem | None = field(default=None, repr=False)
+    _active_item: ProviderTextItem | None = field(default=None, repr=False)
+    _completed_messages: dict[str, str] = field(default_factory=dict, repr=False)
+    _process_generation: int = 0
+    _process_emitted_generation: int = -1
+    _process_cursor: int = 0
+    _process_cursor_generation: int = -1
+    _process_cursor_source: str = ""
+    _process_tail: list[str] = field(default_factory=list, repr=False)
+    _process_has_visible_text: bool = False
+    _process_emitted_item: ProviderTextItem | None = field(default=None, repr=False)
+    _process_emitted_count: int = 0
+
+    @property
+    def full_text(self) -> str:
+        return "".join(self._ordered_text)
+
+    @property
+    def final_candidate_text(self) -> str:
+        return self._final_item.text() if self._final_item is not None else ""
+
+    @property
+    def pending_unphased_text(self) -> str:
+        return self._unphased_item.text() if self._unphased_item is not None else ""
+
+    @property
+    def pending_unphased_visible_text(self) -> str:
+        return self.pending_unphased_text
+
+    @property
+    def pending_process_text(self) -> str:
+        return self._process_item.text() if self._process_item is not None else ""
+
+    @property
+    def active_agent_message_text(self) -> str:
+        return self._active_item.text() if self._active_item is not None else ""
+
+    @property
+    def emitted_agent_messages(self) -> dict[str, str]:
+        result = dict(self._completed_messages)
+        if self.agent_message_started:
+            result[self.active_agent_message_id] = self.active_agent_message_text
+        return result
+
+    @property
+    def process_text_last_emitted(self) -> str:
+        item = self._process_emitted_item
+        return "".join(item.chunks[:self._process_emitted_count]).strip() if item is not None else ""
+
+    @property
+    def has_unphased_text(self) -> bool:
+        return self._unphased_item is not None and any(self._unphased_item.chunks)
+
+    def record_visible_text(self, delta: str) -> None:
+        if delta:
+            self._ordered_text.append(delta)
+
+    def append_final_text(self, delta: str, *, item_id: str = "") -> ProviderTextItem:
+        if (self._current_final_item is None
+                or (item_id and self._current_final_item_id and item_id != self._current_final_item_id)):
+            self._current_final_item = ProviderTextItem()
+        if item_id:
+            self._current_final_item_id = item_id
+        self._current_final_item.chunks.append(delta)
+        # Codex updates last_agent_message only for a nonblank visible item.
+        # A later whitespace/hidden-only item still owns its real lifecycle,
+        # while leaving the previously completed visible answer selected.
+        if delta.strip():
+            self._final_item = self._current_final_item
+            self.final_candidate_item_id = self._current_final_item_id
+        return self._current_final_item
+
+    def replace_final_text(self, text: str) -> None:
+        self._final_item = ProviderTextItem([text]) if text else None
+        self._current_final_item = self._final_item
+        self._current_final_item_id = self.final_candidate_item_id
+
+    def append_unphased_text(self, delta: str) -> ProviderTextItem:
+        if self._unphased_item is None:
+            self._unphased_item = ProviderTextItem()
+        self._unphased_item.chunks.append(delta)
+        return self._unphased_item
+
+    def append_process_text(self, delta: str) -> ProviderTextItem:
+        if self._process_item is None:
+            self._process_item = ProviderTextItem()
+        self._process_item.chunks.append(delta)
+        return self._process_item
+
+    def append_agent_text(self, delta: str, *, source: str = "", item_id: str = "") -> ProviderTextItem:
+        preserve = self.has_live_provisional_item and source in {"", "pending", "model_final"}
+        same_item = not item_id or item_id == self.active_agent_message_id or preserve
+        item = self._active_item if self.agent_message_started and same_item else None
+        if item is None:
+            item = ProviderTextItem()
+        item.chunks.append(delta)
+        return item
+
+    def replace_pending_process_text(self, text: str) -> None:
+        self._process_item = ProviderTextItem([text]) if text else None
+        self._process_generation += 1
 
     @property
     def has_live_provisional_item(self) -> bool:
@@ -90,6 +198,7 @@ class StreamTextState:
         *,
         source: str = "",
         item_id: str = "",
+        text_item: ProviderTextItem | None = None,
     ) -> AgentEvent | None:
         if self.agent_message_started:
             return None
@@ -98,11 +207,10 @@ class StreamTextState:
         self.active_agent_message_id = item_id or (
             f"{item_prefix}:agent-message:{self.agent_message_sequence}"
         )
-        self.active_agent_message_text = ""
+        self._active_item = text_item if text_item is not None else ProviderTextItem()
         self.active_agent_message_source = source
         self.published_agent_message_source = source
         self.agent_message_started = True
-        self.emitted_agent_messages[self.active_agent_message_id] = ""
         return AgentEvent.agent_message_started(
             item_id=self.active_agent_message_id,
             source=source,
@@ -112,6 +220,7 @@ class StreamTextState:
         self,
         delta: str,
         *,
+        text_item: ProviderTextItem,
         source: str = "",
         item_id: str = "",
     ) -> tuple[AgentEvent, ...]:
@@ -148,13 +257,12 @@ class StreamTextState:
             if preserve_provisional_item
             else item_id
         )
-        started = self.start_agent_message(source=source, item_id=effective_item_id)
+        started = self.start_agent_message(source=source, item_id=effective_item_id, text_item=text_item)
         if started is not None:
             events.append(started)
         if source:
             self.active_agent_message_source = source
-        self.active_agent_message_text += delta
-        self.emitted_agent_messages[self.active_agent_message_id] = self.active_agent_message_text
+        self._active_item = text_item
         reclassified = (
             self.active_agent_message_source != self.published_agent_message_source
         )
@@ -181,10 +289,10 @@ class StreamTextState:
         if not self.agent_message_started or not self.active_agent_message_id:
             return None
         item_id = self.active_agent_message_id
-        self.emitted_agent_messages[item_id] = text
+        self._completed_messages[item_id] = text
         self.agent_message_started = False
         self.active_agent_message_id = ""
-        self.active_agent_message_text = ""
+        self._active_item = None
         self.active_agent_message_source = ""
         self.published_agent_message_source = ""
         return AgentEvent.agent_message_completed(
@@ -216,14 +324,15 @@ class StreamTextState:
         return scrub(self.pending_unphased_text or self.final_candidate_text)
 
     def clear_pending(self) -> None:
-        self.pending_process_text = ""
-        self.pending_unphased_text = ""
-        self.pending_unphased_visible_text = ""
+        self._process_item = None
+        self._unphased_item = None
         self.pending_unphased_item_id = ""
+        self._process_generation += 1
 
     def clear_pending_process_text(self) -> None:
         """Clear commentary without discarding an unphased answer candidate."""
-        self.pending_process_text = ""
+        self._process_item = None
+        self._process_generation += 1
 
     def process_buffer(self) -> str:
         if self.has_live_provisional_item:
@@ -234,12 +343,14 @@ class StreamTextState:
 
     def reclassify_unphased_as_process(self) -> None:
         """Move provisional assistant text across the tool-use boundary in order."""
-        if self.pending_unphased_visible_text and not self.has_live_provisional_item:
-            self.pending_process_text = (
-                f"{self.pending_unphased_visible_text}{self.pending_process_text}"
-            )
-        self.pending_unphased_text = ""
-        self.pending_unphased_visible_text = ""
+        item = self._unphased_item
+        if item is not None and not self.has_live_provisional_item:
+            if self._process_item is None:
+                self._process_item = item
+            elif self._process_item is not item:
+                self._process_item.chunks[:0] = item.chunks
+            self._process_generation += 1
+        self._unphased_item = None
         self.pending_unphased_item_id = ""
 
     def maybe_stream_process_text(
@@ -248,46 +359,71 @@ class StreamTextState:
         source: str,
         event_factory: ProcessEventFactory,
     ) -> AgentEvent | None:
-        text = self.process_buffer()
-        if not text or text == self.process_text_last_emitted:
+        item = self._process_item
+        if item is None:
             return None
-        previous = self.process_text_last_emitted
-        self.process_text_last_emitted = text
-        # The first chunk announces the item with its full metadata. Later
-        # chunks extend it: a snapshot per provider delta would resend the
-        # whole narration every time and be replayed as such.
-        if (
+        same_view = (
+            self._process_cursor_generation == self._process_generation
+            and self._process_cursor_source == source
+        )
+        if not same_view:
+            self._process_cursor = 0
+            self._process_tail.clear()
+            self._process_has_visible_text = False
+        self._process_cursor_generation = self._process_generation
+        self._process_cursor_source = source
+        output: list[str] = []
+        for chunk in item.chunks[self._process_cursor:]:
+            if not self._process_has_visible_text:
+                chunk = chunk.lstrip()
+            visible = chunk.rstrip()
+            if visible:
+                output.extend(self._process_tail)
+                self._process_tail.clear()
+                output.append(visible)
+                self._process_has_visible_text = True
+                suffix = chunk[len(visible):]
+                if suffix:
+                    self._process_tail.append(suffix)
+            elif chunk and self._process_has_visible_text:
+                self._process_tail.append(chunk)
+        self._process_cursor = len(item.chunks)
+        delta = "".join(output)
+        if not delta:
+            return None
+        incremental = (
             self.process_text_streamed
             and self.process_text_source == source
-            and previous
-            and text.startswith(previous)
-        ):
-            return AgentEvent.agent_item_delta(
-                text[len(previous):],
-                item_id=f"{self.iteration_id}:model-output:{source or 'stream'}",
-            )
-        # Mark the process item as having a live projection.  The terminal
-        # flush still emits one completed update, while subsequent chunks only
-        # emit when the accumulated content actually changed.
+            and self._process_emitted_generation == self._process_generation
+        )
+        self._process_emitted_item = item
+        self._process_emitted_count = self._process_cursor
+        self._process_emitted_generation = self._process_generation
         self.process_text_emitted = True
         self.process_text_streamed = True
         self.process_text_source = source
+        if incremental:
+            return AgentEvent.agent_item_delta(
+                delta,
+                item_id=f"{self.iteration_id}:model-output:{source or 'stream'}",
+            )
         return event_factory(
-            text,
+            delta,
             [],
             iteration_id=self.iteration_id,
             source=source,
             status="running",
         )
 
-    def accept_unphased_answer(self) -> None:
-        if not self.pending_unphased_text:
+    def accept_unphased_answer(self, *, item_id: str = "") -> None:
+        if self._unphased_item is None:
             return
-        self.final_candidate_text += self.pending_unphased_text
-        if self.pending_unphased_item_id:
-            self.final_candidate_item_id = self.pending_unphased_item_id
-        self.pending_unphased_text = ""
-        self.pending_unphased_visible_text = ""
+        self._current_final_item = self._unphased_item
+        self._current_final_item_id = item_id or self.pending_unphased_item_id
+        if self._unphased_item.text().strip():
+            self._final_item = self._unphased_item
+            self.final_candidate_item_id = self._current_final_item_id
+        self._unphased_item = None
         self.pending_unphased_item_id = ""
 
     def flush_pending_process_text(
@@ -314,31 +450,40 @@ class StreamTextState:
 
     def reset_for_retry(self) -> None:
         self.sanitizer_owner = None
-        self.full_text = ""
-        self.final_candidate_text = ""
+        self._ordered_text.clear()
+        self._final_item = None
+        self._current_final_item = None
+        self._current_final_item_id = ""
         self.final_candidate_item_id = ""
         self.clear_pending()
 
     def reset_for_provider_retry(self) -> None:
         self.reset_for_retry()
-        self.emitted_agent_messages.clear()
+        self._completed_messages.clear()
         self.saw_final_answer_phase = False
         self.process_text_emitted = False
         self.process_text_streamed = False
-        self.process_text_last_emitted = ""
+        self._process_emitted_item = None
+        self._process_emitted_count = 0
+        self._process_emitted_generation = -1
+        self._process_cursor = 0
+        self._process_cursor_generation = -1
+        self._process_cursor_source = ""
+        self._process_tail.clear()
+        self._process_has_visible_text = False
         self.process_text_source = "model_preamble"
 
     def sanitize(self, scrub: TextScrubber) -> None:
-        for name in (
-            "full_text",
-            "final_candidate_text",
-            "pending_unphased_text",
-            "pending_unphased_visible_text",
-            "pending_process_text",
-        ):
-            value = getattr(self, name)
-            if value and "<" in value:
-                setattr(self, name, scrub(value))
+        full = self.full_text
+        if "<" in full:
+            self._ordered_text[:] = [scrub(full)]
+        seen: set[int] = set()
+        for item in (self._final_item, self._current_final_item, self._unphased_item, self._process_item, self._active_item):
+            if item is not None and id(item) not in seen:
+                seen.add(id(item))
+                value = item.text()
+                if "<" in value:
+                    item.chunks[:] = [scrub(value)]
 
 
 @dataclass(slots=True)
@@ -367,6 +512,7 @@ class StreamAttemptState:
     saw_provider_activity: bool = False
     final_tool_batch_received: bool = False
     committed_tool_ids: set[str] = field(default_factory=set)
+    private_tool_call_ids: set[str] = field(default_factory=set)
     partial_tool_names: dict[str, str] = field(default_factory=dict)
     partial_tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider_activities: dict[str, ProviderActivityEvent] = field(
@@ -509,6 +655,7 @@ class StreamAttemptState:
         self.saw_partial_tool_call = False
         self.final_tool_batch_received = False
         self.partial_tool_names.clear()
+        self.private_tool_call_ids.clear()
         self.partial_tool_args.clear()
         self.provider_activities.clear()
 

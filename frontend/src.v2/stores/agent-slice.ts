@@ -417,10 +417,17 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const existing = targetState.subagents.find((sa) => sa.id === id);
       const terminalStatuses = new Set(["done", "partial", "cancelled", "error"]);
       const incomingStatus = patch.status;
+      if (existing?.agentPath && patch.agentPath
+        && typeof existing.mailboxEpoch === "number" && typeof patch.mailboxEpoch === "number"
+        && (patch.mailboxEpoch < existing.mailboxEpoch
+          || patch.agentPath !== existing.agentPath)) return s;
+      const newerIncarnation = existing?.agentPath && patch.agentPath
+        && typeof existing.mailboxEpoch === "number" && typeof patch.mailboxEpoch === "number"
+        && patch.mailboxEpoch > existing.mailboxEpoch;
       if (existing
         && terminalStatuses.has(existing.status)
         && incomingStatus
-        && !terminalStatuses.has(incomingStatus)) return s;
+        && !terminalStatuses.has(incomingStatus) && !newerIncarnation) return s;
       const subagents = existing
         ? targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...patch } : sa))
         : upsertSubagentStable(targetState.subagents, {

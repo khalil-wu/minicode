@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.agent.context import ContextBuilder
+from backend.agent.agent_identity import AgentPath
 from backend.agent.iteration_budget import resolve_turn_max_iterations
 from backend.agent.lifecycle_observer import (
     resolve_lifecycle_runtime,
@@ -42,6 +43,7 @@ from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.permissions.grants import PermissionGrantStore
 from backend.tools.registry import ToolRegistry
 
 
@@ -196,6 +198,27 @@ async def bootstrap_agent_loop(
         agent_settings=settings,
         llm=request.llm,
     )
+    run_context.context_builder = context
+    context_tool = request.tool_registry.get_tool("new_context")
+    model_snapshot = run_context.model_execution
+    if model_snapshot is not None:
+        from backend.agent.token_budget_activation import register_context_window_tools
+        if (context_tool is not None
+                and request.tool_registry.get_tool_owner("new_context") != "codex-token-budget"
+                and model_snapshot.config.context_window_config is None
+                and model_snapshot.config.token_budget_startup_config is None):
+            from backend.feature_flags import FeatureFlags
+            source_config = replace(model_snapshot.config,
+                feature_flags=FeatureFlags({**model_snapshot.config.feature_flags.flags, "token_budget": True}),
+                context_window_config=context_tool.config)
+            model_snapshot = replace(model_snapshot, config=source_config)
+            run_context.model_execution = model_snapshot
+        context.bind_context_window_model(model_snapshot,
+            startup=context._context_window_source_config is None,
+            inherit_activation=resolved_metadata.get("fork_turns", resolved_metadata.get("_fork_turns")) == "all")
+        register_context_window_tools(request.tool_registry, context._context_window_config)
+    else:
+        context.configure_context_window(context_tool.config if context_tool is not None else None)
     if run_context.llm_turn_context is not None:
         run_context.llm_turn_context.lifecycle_runtime = lifecycle_runtime
         run_context.llm_turn_context.cost_session_id = str(
@@ -242,6 +265,10 @@ async def bootstrap_agent_loop(
     )
     for event in turn_kernel.start_events():
         yield event
+    context.bind_history_notes(
+        request.tool_registry, model_snapshot,
+        session_id=session_id, agent_name=AgentPath.parse(turn_kernel.run_record.agent_path).logical_name,
+    )
 
     # The absolute turn fence includes hooks and skill preflight, rather than
     # starting only at the first provider request.
@@ -262,7 +289,12 @@ async def bootstrap_agent_loop(
     stream_retry_policy = (
         settings.stream_retry_policy or DefaultStreamRetryPolicy(settings)
     )
-    effective_permission_context = permission_context or PermissionContext(mode="confirm")
+    if permission_context is not None:
+        effective_permission_context = permission_context
+    elif isinstance(request.permission_checker, PermissionChecker):
+        effective_permission_context = request.permission_checker.build_context(mode="confirm")
+    else:
+        effective_permission_context = PermissionContext(mode="confirm")
     from backend.security.sensitive_files import application_state_roots
 
     protected_state_roots = application_state_roots(run_context)
@@ -275,7 +307,20 @@ async def bootstrap_agent_loop(
     )
     from backend.config import load_config_layer_stack
 
-    turn_config_stack = load_config_layer_stack(cwd=workspace_root)
+    turn_config_stack = (model_snapshot.config.config_layer_stack
+        if model_snapshot is not None and model_snapshot.config.config_layer_stack is not None
+        else load_config_layer_stack(cwd=workspace_root))
+    if run_context.model_execution is None:
+        from backend.agent.model_execution import ModelExecutionSnapshot
+        from backend.config import load_config
+        run_context.model_execution = ModelExecutionSnapshot.capture(load_config(cwd=workspace_root), request.llm)
+        model_snapshot = run_context.model_execution
+    from backend.skills.manager import SkillManager
+
+    if isinstance(skill_manager, SkillManager):
+        context.bind_skill_manager(skill_manager, workspace_root, refresh=True, config_stack=turn_config_stack)
+        skill_manager = context.skill_manager
+        run_context.skill_manager = skill_manager
     managed_requirements = turn_config_stack.requirements
     configure_project_instructions = getattr(
         context,
@@ -298,6 +343,7 @@ async def bootstrap_agent_loop(
     resolved_mode, requirement_violation = managed_requirements.resolve_permission_mode(
         effective_permission_context.mode,
         sandbox_mode=effective_permission_context.sandbox_mode,
+        approval_policy=effective_permission_context.approval_policy_value(),
     )
     if requirement_violation is not None:
         raise requirement_violation
@@ -309,7 +355,8 @@ async def bootstrap_agent_loop(
     effective_permission_context = replace(
         effective_permission_context,
         mode=resolved_mode,
-        approval_policy=managed_requirements.approval_policy_for_mode(resolved_mode),
+        approval_policy=effective_permission_context.approval_policy,
+        granular_approval=effective_permission_context.granular_approval,
         sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(
             resolved_mode, sandbox_mode=effective_permission_context.sandbox_mode,
         ),
@@ -413,7 +460,7 @@ async def bootstrap_agent_loop(
 
     def _normalize_live_permission(current: PermissionContext) -> PermissionContext:
         live_mode, live_violation = managed_requirements.resolve_permission_mode(
-            current.mode, sandbox_mode=current.sandbox_mode,
+            current.mode, sandbox_mode=current.sandbox_mode, approval_policy=current.approval_policy_value(),
         )
         if live_violation is not None:
             raise live_violation
@@ -437,7 +484,8 @@ async def bootstrap_agent_loop(
                 *protected_state_roots,
             ))),
             mode=live_mode,
-            approval_policy=managed_requirements.approval_policy_for_mode(live_mode),
+            approval_policy=current.approval_policy,
+            granular_approval=current.granular_approval,
             sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(
                 live_mode, sandbox_mode=current.sandbox_mode,
             ),
@@ -489,8 +537,33 @@ async def bootstrap_agent_loop(
         llm=request.llm,
         artifact_store=request.artifact_store,
         turn_diff_tracker=run_context.turn_diff_tracker,
+        window_binding_token=run_context.window_binding_token,
+        permission_grants=(
+            session_context.permission_grants
+            if session_context is not None and session_context.permission_grants is not None
+            else PermissionGrantStore()
+        ),
+        turn_id=str(turn_kernel.metadata["turn_id"]),
+        environment_id=str(resolved_metadata.get("environment_id") or "local"),
     )
+    tool_context.permission_grants.begin_turn(tool_context.turn_id)
+    from backend.permissions.exec_policy import ExecPolicyOwner, config_folders
+    from backend.async_cleanup import to_thread_cancel_safe
+    owner = context._exec_policy_owner
+    if (owner is None or owner.folders != config_folders(turn_config_stack)
+            or owner._requirements_rules != turn_config_stack.requirements.value_for("rules")):
+        home = Path(next(layer.source.file for layer in reversed(turn_config_stack.get_layers()) if layer.source.kind == "user")).parent
+        owner = await to_thread_cancel_safe(ExecPolicyOwner, home=home, stack=turn_config_stack)
+        context._exec_policy_owner = owner
+        if owner.load_warning is not None and emit_event is not None:
+            await emit_event("system_notice", {"conversation_id": conversation_id,
+                "message": owner.load_warning.message, "level": "warning"})
+    run_context.exec_policy_owner = owner
     context.bind_tool_context(tool_context)
+    from backend.agent.model_activation import admit_model_activation
+
+    admit_model_activation(run_context, task=run_context.model_owner_task, cancel_event=cancel_event,
+        permission=effective_permission_context, turn_id=tool_context.turn_id)
 
     def _commit_live_permission_context(
         current: PermissionContext,
@@ -567,6 +640,8 @@ async def bootstrap_agent_loop(
     tool_context.permission_context_committer = _commit_live_permission_context
     tool_context.deadline_monotonic = deadline_controller.turn_deadline
     turn_kernel.bind_tool_context(tool_context)
+    if run_context.guardian_async_service is not None:
+        run_context.guardian_async_service.schedule_prewarm(tool_context)
 
     # Resolve hooks once for this turn and keep the exact manager on RunContext.
     from backend.hooks.manager import (

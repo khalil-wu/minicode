@@ -156,6 +156,18 @@ html[data-theme="dark"] ::selection {
 .mc-header-project-accessible, .mc-connected-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .mc-sidebar-heading { display: flex; align-items: center; gap: 4px; min-height: 36px; margin-bottom: 3px; }
 .mc-sidebar-heading-actions { display: flex; gap: 1px; margin-left: auto; }
+.mc-sidebar-mode-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.mc-sidebar-mode-menu { position: fixed; width: min(280px, calc(100vw - 24px)); padding: 6px; z-index: var(--z-popover); --mc-menu-origin: top left; }
+.mc-sidebar-mode-menu > button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 10px; border: 0; background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }
+.mc-sidebar-mode-menu > button:hover,
+.mc-sidebar-mode-menu > button:focus-visible { background: var(--workbench-hover); }
+.mc-sidebar-mode-menu > button > span { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.mc-sidebar-mode-menu small { color: var(--text-muted); font-size: var(--text-xs); }
+.mc-sidebar-catalog { display: flex; flex-direction: column; gap: 4px; overflow: auto; min-height: 0; }
+.mc-sidebar-catalog nav { display: grid; gap: 2px; padding: 8px 2px 12px; }
+.mc-sidebar-catalog-heading { padding: 16px 8px 8px; color: var(--text-muted); }
+.mc-sidebar-catalog-status { padding: 8px; color: var(--text-muted); }
+.mc-sidebar-catalog-status button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .mc-sidebar-brand { min-width: 0; flex: 1; padding-left: 8px; font-size: 19px; font-weight: var(--fw-semibold); }
 .mc-sidebar-recents { padding-top: 18px; }
 .mc-sidebar-recents > .mc-sidebar-project-heading { padding: 7px 10px; }
@@ -240,6 +252,9 @@ html[data-theme="dark"] ::selection {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
 }
 
 .workbench-empty-mark {
@@ -803,6 +818,9 @@ html[data-theme="light"] .workbench-home {
   gap: 2px;
   border-radius: var(--mc-control-radius);
 }
+
+.mc-workspace-group-header[data-active="true"] { background: var(--workbench-active); }
+.mc-workspace-group-header:hover { background: var(--workbench-hover); }
 
 .mc-workspace-group-toggle {
   width: auto;

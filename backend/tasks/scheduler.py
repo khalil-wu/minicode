@@ -81,6 +81,8 @@ class ScheduledTask:
     # switches projects between two ticks.
     workspace_root: str = ""
     conversation_id: str = ""
+    kind: str = "cron"
+    notification_policy: str | None = None
     enabled: bool = True
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     last_run_at: str | None = None
@@ -96,6 +98,8 @@ class ScheduledTask:
     def from_dict(cls, data: dict[str, Any]) -> "ScheduledTask":
         known = {f.name for f in cls.__dataclass_fields__.values()}
         values = {k: v for k, v in data.items() if k in known}
+        if "kind" not in data:
+            values["kind"] = "heartbeat" if data.get("conversation_id") else "cron"
         # Existing scheduled tasks historically ran in the configured
         # workspace. Preserve that behavior during migration; new tasks opt
         # into the safer Worktree default through ``add_task``.
@@ -110,6 +114,7 @@ class ScheduledTaskRun:
 
     id: str = field(default_factory=lambda: f"schedule_run_{uuid.uuid4().hex[:16]}")
     task_id: str = ""
+    turn_trigger: str | None = None
     scheduled_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     started_at: str = ""
     finished_at: str | None = None
@@ -117,6 +122,8 @@ class ScheduledTaskRun:
     conversation_id: str = ""
     workspace_root: str = ""
     result_summary: str = ""
+    message_id: str = ""
+    completion_notification: dict[str, Any] | None = None
     error: str = ""
     cleanup_pending: bool = False
     cleanup_reason: str = ""
@@ -592,6 +599,8 @@ class TaskScheduler:
         isolation: str = "worktree",
         recurring: bool = True,
         auto_expire: bool = False,
+        kind: str | None = None,
+        notification_policy: str | None = None,
     ) -> ScheduledTask:
         existing = self.list_tasks()
         if len([t for t in existing if t.get("status") != "deleted"]) >= MAX_SCHEDULED_JOBS:
@@ -610,6 +619,8 @@ class TaskScheduler:
             permission_mode=permission_mode,
             workspace_root=_normalize_workspace_root(workspace_root),
             conversation_id=conversation_id,
+            kind=kind or ("heartbeat" if conversation_id else "cron"),
+            notification_policy=notification_policy,
             timezone=str(timezone or "").strip(),
             isolation="workspace" if isolation == "workspace" else "worktree",
             recurring=bool(recurring),
@@ -625,6 +636,7 @@ class TaskScheduler:
         self, task_id: str, *, name: str, prompt: str, schedule: str,
         timezone: str, isolation: str, conversation_id: str,
         permission_mode: str, workspace_root: str | None = None,
+        kind: str | None = None, notification_policy: str | None | object = ...,
     ) -> bool:
         task = self._tasks.get(task_id)
         if task is None or task.deleted_at is not None or not self._workspace_matches(task.workspace_root, workspace_root):
@@ -635,6 +647,9 @@ class TaskScheduler:
         task.timezone = timezone
         task.isolation = isolation
         task.conversation_id = conversation_id
+        task.kind = kind or ("heartbeat" if conversation_id else "cron")
+        if notification_policy is not ...:
+            task.notification_policy = notification_policy
         task.permission_mode = permission_mode
         next_run = next_run_after(schedule, datetime.now(UTC), timezone=timezone) if task.enabled else None
         task.next_run_at = next_run.isoformat() if next_run else None
@@ -966,6 +981,8 @@ class TaskScheduler:
             raise ValueError(f"Cannot schedule deleted task '{task.id}'")
         run = ScheduledTaskRun(
             task_id=task.id,
+            turn_trigger=("automation_heartbeat_scheduled"
+                if consume_schedule and task.kind == "heartbeat" else None),
             scheduled_at=due_at.astimezone(UTC).isoformat(),
             workspace_root=task.workspace_root,
             conversation_id=retry_conversation_id or task.conversation_id,
@@ -1038,6 +1055,8 @@ class TaskScheduler:
             elif reported_workspace:
                 run.workspace_root = reported_workspace
             run.result_summary = str(result.get("summary") or result.get("reply") or "")[:8000]
+            run.completion_notification = result.get("completion_notification")
+            run.message_id = result.get("message_id", "")
             run.error = str(result.get("error") or "")[:4000]
             if run.status not in {"completed", "partial", "failed", "cancelled"}:
                 run.status = "completed" if not run.error else "failed"

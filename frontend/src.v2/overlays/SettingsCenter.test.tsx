@@ -8,6 +8,7 @@ import type { LLMSettingsPayload } from "./settingsShared";
 import { ProviderTab } from "./ProviderTab";
 import { SettingsCenter } from "./SettingsCenter";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -23,7 +24,7 @@ vi.hoisted(() => {
 const fetchLLMSettingsMock = vi.fn();
 const desktopModeMock = vi.fn(() => false);
 const openExternalMock = vi.fn(async () => true);
-const embeddedBrowserSetSettingsMock = vi.fn(async (payload: { downloadPolicy?: string }) => ({ downloadPolicy: payload.downloadPolicy || "block", origin: "", permissions: [] }));
+const embeddedBrowserSetSettingsMock = vi.fn(async (payload: { downloadPolicy?: string }) => ({ downloadPolicy: payload.downloadPolicy || "block", origin: "", permissions: [], revision: 1 }));
 const awaitCommandResultMock = vi.fn(async (command: { type: string }) => ({ type: "command.result", command: command.type, level: "info", message: "", data: {} }));
 
 vi.mock("../protocol/api", () => ({
@@ -45,7 +46,8 @@ vi.mock("../protocol/ws-outbox", () => ({
 
 vi.mock("../desktop/runtime", () => ({
   desktop: () => null,
-  embeddedBrowserGetSettings: vi.fn(async () => ({ downloadPolicy: "block", origin: "", permissions: [] })),
+  embeddedBrowserGetSettings: vi.fn(async () => ({ downloadPolicy: "block", origin: "", permissions: [], revision: 0 })),
+  onEmbeddedBrowserSettingsChanged: vi.fn(() => () => {}),
   embeddedBrowserList: vi.fn(async () => []),
   embeddedBrowserSetSettings: (payload: { downloadPolicy?: string }) => embeddedBrowserSetSettingsMock(payload),
   envDetect: vi.fn(async () => null),
@@ -191,7 +193,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("hides reasoning effort for DeepSeek chat completions because runtime will ignore it", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     render(<SettingsCenter />);
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(fetchLLMSettingsMock).toHaveBeenCalled();
@@ -213,7 +215,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("keeps a directly opened settings category visible in the narrow navigation", async () => {
-    const mediaMock = vi.mocked(window.matchMedia);
+    const mediaMock = vi.spyOn(window, "matchMedia");
     const previousMediaImplementation = mediaMock.getMockImplementation();
     const scrollDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
     const scrollIntoView = vi.fn();
@@ -350,20 +352,18 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("radio", { name: "使用规划模式" })).toBeNull();
   });
 
-  it("reuses workspace mode and activity density settings from the app store", () => {
+  it("keeps unsupported workspace mode and process-density selectors out of General", () => {
     useAppStore.setState({ allowedRemoteImageDomains: ["images.example.com"] });
     render(<SettingsCenter />);
 
     expect(screen.queryByRole("button", { name: "对话" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "协作" }));
-    expect(useAppStore.getState().appMode).toBe("cowork");
-    fireEvent.click(screen.getByRole("button", { name: "代码" }));
-    expect(useAppStore.getState().appMode).toBe("code");
+    expect(screen.queryByRole("button", { name: "协作" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "代码" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "详细" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "详细" }));
-    expect(useAppStore.getState().viewMode).toBe("verbose");
-
-    fireEvent.click(screen.getByRole("button", { name: "允许" }));
+    fireEvent.click(screen.getByText("高级"));
+    fireEvent.click(screen.getByRole("button", { name: /^远程 Markdown 图片，当前：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "允许" }));
     expect(useAppStore.getState().remoteImagePolicy).toBe("allow");
     fireEvent.click(screen.getByRole("button", { name: "清除列表" }));
     expect(useAppStore.getState().allowedRemoteImageDomains).toEqual([]);
@@ -388,6 +388,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("persists code sizing and reduced-motion preferences with real consumers", () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
+    fireEvent.click(within(document.querySelector('[data-settings-tab="appearance"]')!).getByText("高级"));
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "编辑器字号" }), { target: { value: "16" } });
     fireEvent.click(screen.getByRole("switch", { name: "减少动态效果" }));
@@ -401,8 +402,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("changes the composer send shortcut and running-turn follow-up behavior", () => {
     render(<SettingsCenter />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Ctrl/Cmd + Enter" }));
-    fireEvent.click(screen.getByRole("button", { name: "引导" }));
+    fireEvent.click(screen.getByRole("button", { name: /^发送快捷键，当前：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "总是使用 ^ + Enter" }));
+    fireEvent.click(screen.getByRole("button", { name: /^跟进行为，当前：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "引导" }));
 
     expect(useAppStore.getState().sendShortcut).toBe("mod-enter");
     expect(useAppStore.getState().followUpBehavior).toBe("steer");
@@ -461,7 +464,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("keeps a scoped configuration draft across pages and returning to the app", async () => {
     useAppStore.setState({ conversationId: "draft-owner", workingDirectory: "C:/draft-project", isConnected: true });
     render(<SettingsCenter />);
-    fireEvent.click(screen.getByRole("button", { name: "MCP" }));
+    fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "MCP 服务", exact: true }));
     fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
     fireEvent.change(screen.getByLabelText("服务名称"), { target: { value: "未保存的服务" } });
     fireEvent.change(screen.getByLabelText("启动命令"), { target: { value: "npx" } });
@@ -509,8 +513,24 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    expect(screen.getByRole("region", { name: "MCP" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "插件" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "MCP 服务", exact: true }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("region", { name: "常规" })).toBeNull();
+  });
+
+  it("groups installed capabilities under plugins while keeping real MCP state searchable", () => {
+    useAppStore.setState({ mcpServers: [{ name: "node_repl", status: "connected", tools: 7 }, { name: "browser", status: "connected", tools: 3 }] });
+    render(<SettingsCenter />);
+    const navigation = screen.getByRole("navigation", { name: "设置分类" });
+    expect(within(navigation).queryByRole("button", { name: "MCP", exact: true })).toBeNull();
+    expect(within(navigation).queryByRole("button", { name: "技能", exact: true })).toBeNull();
+    fireEvent.click(within(navigation).getByRole("button", { name: "插件", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "MCP 服务", exact: true }));
+    expect(screen.getByText("node_repl")).toBeTruthy();
+    expect(screen.queryByText("7 个工具")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索 MCP 服务器" }), { target: { value: "node" } });
+    expect(screen.getByText("node_repl")).toBeTruthy();
+    expect(screen.queryByText("browser", { exact: true })).toBeNull();
   });
 
   it("uses installed skills through the existing composer selection state", () => {
@@ -525,8 +545,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     });
     render(<SettingsCenter />);
 
-    fireEvent.click(screen.getByRole("button", { name: "技能" }));
-    expect(screen.getByText("查看任务工作流，并选择用于下一条消息。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "技能管理", exact: true }));
+    expect(screen.getByText("管理插件、技能和 MCP。")).toBeTruthy();
     expect(screen.queryByText("插件是能力包；技能是工作流；MCP 是外部工具服务。")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "使用" }));
 
@@ -644,8 +665,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: "Git 与工作树" }));
-    expect(screen.getByLabelText("Git 与工作树工具")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开 Git 工作区" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "已归档任务" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "打开 Git 工作区" }));
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, activeBottomTab: "git", dockCollapsed: false });
   });
 
   it("updates the existing desktop browser download policy", async () => {
@@ -653,11 +676,12 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: "浏览器" }));
-    const downloadPolicy = await screen.findByLabelText("浏览器下载策略");
-    fireEvent.change(downloadPolicy, { target: { value: "ask" } });
+    fireEvent.click(within(document.querySelector('[data-settings-tab="browser"]')!).getByText("高级", { selector: "summary" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^浏览器下载策略，当前：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "每次询问" }));
 
     await waitFor(() => expect(embeddedBrowserSetSettingsMock).toHaveBeenCalledWith({ downloadPolicy: "ask" }));
-    await waitFor(() => expect((downloadPolicy as HTMLSelectElement).value).toBe("ask"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "浏览器下载策略，当前：每次询问" })).toBeTruthy());
   });
 
   it("keeps environment variable values when the backend rejects them", async () => {
@@ -694,10 +718,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: "浏览器" }));
-    const downloadPolicy = await screen.findByLabelText("浏览器下载策略");
-    fireEvent.change(downloadPolicy, { target: { value: "ask" } });
+    fireEvent.click(within(document.querySelector('[data-settings-tab="browser"]')!).getByText("高级", { selector: "summary" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^浏览器下载策略，当前：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "每次询问" }));
 
-    await waitFor(() => expect((downloadPolicy as HTMLSelectElement).value).toBe("block"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "浏览器下载策略，当前：阻止" })).toBeTruthy());
   });
 
   it("opens the existing browser panel from browser settings", async () => {

@@ -6,6 +6,8 @@ import { ChatTurn } from "./ChatTurn";
 import { handleChatStreamEvent } from "../chatStreamEvents";
 import { projectMessagesToTurns } from "../chatSurfaceState";
 import { hydrateMessages } from "../transcriptHydration";
+import { releaseConversationReadingState } from "../transcriptReadingState";
+import { TranscriptSearchContext } from "../TranscriptSearchContext";
 import { useAppStore } from "../../stores";
 import type { ServerEvent } from "../../protocol/events";
 import type { StreamBuffer } from "../../lib/stream-buffer";
@@ -22,18 +24,21 @@ const complete = () => handle({type:"item.completed",conversation_id:"lifecycle"
   item:{id:"model-final",type:"agent_message",text:"完成验证。",source:"model_final",status:"completed"},finish_reason:"stop"});
 const done = () => handle({type:"done",conversation_id:"lifecycle",message_id:"assistant",turn_id:"actual-turn",status:"completed",usage:{}});
 
-beforeEach(() => useAppStore.setState({conversationId:"lifecycle",pendingConversationSwitchId:null,isStreaming:true,
+beforeEach(() => {
+  releaseConversationReadingState("lifecycle");
+  useAppStore.setState({conversationId:"lifecycle",pendingConversationSwitchId:null,isStreaming:true,
   conversationStreaming:{lifecycle:true},conversationMessages:{},sideChats:{},draft:"保留的草稿",viewMode:"normal",messages:[
     {id:"user",role:"user",content:"父任务指派：检查渲染",timestamp:1},
     {id:"assistant",role:"assistant",content:"",timestamp:2,isStreaming:true,turnId:"actual-turn",blocks:[
       {type:"text",itemId:"commentary",content:"我会先查询来源并核对日期。",source:"commentary",status:"completed",isStreaming:false},
       {type:"tool_call",record:{id:"read",name:"read_file",args:{file_path:"README.md"},status:"success",startedAt:3,finishedAt:4}},
     ]},
-  ]}));
+  ]});
+});
 afterEach(cleanup);
 
 describe("real item/terminal disclosure and child roles", () => {
-  it("settles automatic disclosure after the completed answer's first commit", () => {
+  it("folds work in the first committed paint containing the completed answer", () => {
     const committedDisclosure: string[] = [];
     const captureCommit = () => {
       if (screen.queryByText("完成验证。")) {
@@ -43,8 +48,8 @@ describe("real item/terminal disclosure and child roles", () => {
     const {rerender}=render(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
     complete();
     rerender(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
-    expect(committedDisclosure[0]).toBe("false");
-    expect(committedDisclosure.at(-1)).toBe("true");
+    expect(committedDisclosure.length).toBeGreaterThan(0);
+    expect(committedDisclosure.every((value) => value === "true")).toBe(true);
     done();
     rerender(<Profiler id="actual-disclosure-commit" onRender={captureCommit}><ChatTurn turn={turn()} /></Profiler>);
     expect(screen.getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("true");
@@ -78,18 +83,52 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(useAppStore.getState().draft).toBe("保留的草稿");
   });
 
-  it("retains the work area when a reader explicitly discloses a tool's details", () => {
+  it("keeps explicitly opened tool details visible when the final answer arrives", () => {
     useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
       blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Actual file contents" } } : block) } : message) }));
-    const {rerender}=render(<ChatTurn turn={turn()} />);
+    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
     fireEvent.click(screen.getByRole("button",{name:"展开活动详情"}));
     expect(screen.getByText("Actual file contents")).toBeTruthy();
-    complete();rerender(<ChatTurn turn={turn()} />);
+    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
     expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
     expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
     expect(screen.getByText("Actual file contents")).toBeTruthy();
-    done();rerender(<ChatTurn turn={turn()} />);
+    done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
     expect(screen.getByText("Actual file contents")).toBeTruthy();
+  });
+
+  it("folds a child work record when its complete final item arrives", () => {
+    const {rerender}=render(<ChatTurn turn={turn()} isTranscriptMode />);
+    complete();rerender(<ChatTurn turn={turn()} isTranscriptMode />);
+    expect(screen.queryByText("我会先查询来源并核对日期。")).toBeNull();
+    expect(screen.getByText("完成验证。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"展开处理步骤"}));
+    done();rerender(<ChatTurn turn={turn()} isTranscriptMode />);
+    expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+    expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
+  });
+
+  it.each([false,true])("preserves pre-final reading across virtual remount with completion offscreen=%s", (offscreen) => {
+    useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
+      blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Remounted details" } } : block) } : message) }));
+    const first = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    fireEvent.click(screen.getByRole("button", { name:"展开活动详情" }));
+    expect(screen.getByText("Remounted details")).toBeTruthy();
+    if (offscreen) first.unmount();
+    complete();
+    if (!offscreen) {
+      first.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+      expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+      first.unmount();
+    }
+    const restored = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    expect(screen.getByText("Remounted details")).toBeTruthy();
+    restored.unmount();
+    done();
+    render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    expect(screen.getByText("Remounted details")).toBeTruthy();
   });
 
   it("revokes final qualification when the same provider item is reclassified as commentary", () => {
@@ -130,13 +169,40 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(messages[0].content).toBe("真实父派遣指令");
   });
 
-  it.each(["normal","summary","verbose"] as const)("uses the %s disclosure preference for final item before terminal delivery", (mode) => {
+  it.each(["normal","summary","verbose"] as const)("collapses the completed final item in %s mode before terminal delivery", (mode) => {
     useAppStore.setState({viewMode:mode});
     const {rerender}=render(<ChatTurn turn={turn()} />);
     complete();rerender(<ChatTurn turn={turn()} />);
-    expect(screen.getByRole("button",{name:mode==='verbose'?"收起处理步骤":"展开处理步骤"})).toBeTruthy();
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
     done();rerender(<ChatTurn turn={turn()} />);
-    expect(screen.getByRole("button",{name:mode==='verbose'?"收起处理步骤":"展开处理步骤"})).toBeTruthy();
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
+  });
+
+  it("keeps the completed boundary and the later manual choice when mode/default props change", () => {
+    const {rerender}=render(<ChatTurn turn={turn()} />);
+    complete();rerender(<ChatTurn turn={turn()} />);
+    for (const mode of ["verbose", "summary", "normal"] as const) {
+      useAppStore.setState({viewMode:mode});
+      rerender(<ChatTurn turn={turn()} defaultProcessExpanded={false} />);
+      rerender(<ChatTurn turn={turn()} defaultProcessExpanded />);
+      expect(screen.getByRole("button", {name:"展开处理步骤"})).toBeTruthy();
+    }
+    fireEvent.click(screen.getByRole("button", {name:"展开处理步骤"}));
+    done();
+    for (const mode of ["summary", "verbose", "normal"] as const) {
+      useAppStore.setState({viewMode:mode});
+      rerender(<ChatTurn turn={turn()} defaultProcessExpanded={false} />);
+      expect(screen.getByRole("button", {name:"收起处理步骤"})).toBeTruthy();
+    }
+  });
+
+  it("temporarily exposes explicit search results without changing the completed disclosure choice", () => {
+    const {rerender}=render(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
+    complete();rerender(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
+    expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+    done();rerender(<TranscriptSearchContext.Provider value={false}><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
+    expect(screen.queryByText("我会先查询来源并核对日期。")).toBeNull();
+    expect(screen.getByRole("button", {name:"展开处理步骤"})).toBeTruthy();
   });
 
   it.each(["failed","partial","cancelled"] as const)("reopens automatically folded evidence when terminal status becomes %s", (status) => {

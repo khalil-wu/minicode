@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { lazy, Suspense, useRef, useLayoutEffect, useId, useMemo } from "react";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -130,6 +131,7 @@ export function MonacoDiffView({
   filePath: filePathProp,
   height = 400,
 }: MonacoDiffViewProps) {
+  const { t: tr } = useI18n();
   const monacoRef = useRef<typeof Monaco | null>(null);
   const diffEditorRef = useRef<Monaco.editor.IStandaloneDiffEditor | null>(null);
   const instanceId = useId();
@@ -190,7 +192,7 @@ export function MonacoDiffView({
           >
             {filePath}
           </span>
-          <span style={{ fontSize: "var(--text-xxs)", color: "var(--text-muted)" }}>{onlyEolChanged ? `换行符从 ${original.includes("\r\n") ? "CRLF" : "LF"} 改为 ${modified.includes("\r\n") ? "CRLF" : "LF"}` : patch ? "仅显示差异片段" : ""}</span>
+          <span style={{ fontSize: "var(--text-xxs)", color: "var(--text-muted)" }}>{onlyEolChanged ? tr("换行符从 {v0} 改为 {v1}", { v0: original.includes("\r\n") ? "CRLF" : "LF", v1: modified.includes("\r\n") ? "CRLF" : "LF" }) : patch ? tr("仅显示差异片段") : ""}</span>
         </div>
       )}
       {/* Editor */}
@@ -205,8 +207,7 @@ export function MonacoDiffView({
               color: "var(--text-muted)",
             }}
           >
-            正在加载差异编辑器…
-          </div>
+            {tr("正在加载差异编辑器…")}</div>
         }
       >
         <MonacoDiffEditor

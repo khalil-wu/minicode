@@ -1,13 +1,13 @@
 import type { Tab } from "./settingsShared";
+import type { TranslationKey } from "../i18n";
 
-type SettingsOption = { tab: Tab; title: string; description: string; keywords: string };
-const options = (tab: Tab, entries: [string, string, string][]): SettingsOption[] =>
+type SettingsOption = { tab: Tab; title: TranslationKey; description: TranslationKey; keywords: string };
+const options = (tab: Tab, entries: [TranslationKey, TranslationKey, string][]): SettingsOption[] =>
   entries.map(([title, description, keywords]) => ({ tab, title, description, keywords }));
 
 export const SETTINGS_OPTIONS: SettingsOption[] = [
   ...options("general", [
-    ["工作模式", "选择协作区或代码区。", "编辑器 代码 布局"],
-    ["过程详情", "控制活动和工具过程的展开程度。", "工具 日志 执行"],
+    ["语言", "应用界面的语言。", "language locale English 简体中文 自动检测 auto detect"],
     ["发送快捷键", "选择 Enter 或 Ctrl+Enter 发送消息。", "发送 换行 输入"],
     ["跟进行为", "选择运行中的消息排队或引导方式。", "队列 补充 消息"],
     ["远程 Markdown 图片", "决定外部图片的加载策略。", "远程 md 图像"],

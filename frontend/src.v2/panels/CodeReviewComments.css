@@ -1,0 +1,4 @@
+.code-review-comment { padding: 10px 14px; border-left: 3px solid var(--accent-primary); background: color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base)); }
+.code-review-comment .md-body { font-size: var(--text-sm); }
+[data-code-review-comment] { font-family: var(--font-ui); }
+.code-review-empty, .code-review-error { padding: 16px; color: var(--text-muted); font-size: var(--text-sm); }

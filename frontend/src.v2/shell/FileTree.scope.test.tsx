@@ -10,6 +10,8 @@ import { listWorkspaceTree } from "../protocol/workspace";
 import { isDesktop, desktop } from "../desktop/runtime";
 import { showAlert, showConfirm, showPrompt } from "../overlays/DialogService";
 import { pushToast } from "../overlays/ToastContainer";
+import { sendClientCommand } from "../protocol/ws-outbox";
+import { handleDiffEvent } from "../chat/diffEvents";
 
 vi.mock("../protocol/ws-outbox", async (load) => ({ ...await load<typeof import("../protocol/ws-outbox")>(), sendClientCommand: vi.fn(() => true) }));
 vi.mock("../protocol/api", async (load) => ({ ...await load<typeof import("../protocol/api")>(), fetchWithTimeout: vi.fn() }));
@@ -37,6 +39,7 @@ const renderFileMenu = (isDir = false) => render(<FileContextMenu menu={{ x: 20,
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(sendClientCommand).mockImplementation(() => true);
   requests.length = 0;
   roots = new Map([["C:/A", new Set(["same.txt"])], ["C:/B", new Set(["same.txt"])]]);
   localStorage.clear();
@@ -61,6 +64,58 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("FileTree root-bound user actions", () => {
+  it("honors the live project-search capability before opening search", async () => {
+    useAppStore.setState({ runtimeCapabilities: { feature_flags: { global_search: { enabled: false } } }, workspaceSearchOpen: false });
+    render(<FileTree />);
+    const button = await screen.findByRole("button", { name: "搜索项目内容" });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(button);
+    expect(useAppStore.getState().workspaceSearchOpen).toBe(false);
+    act(() => useAppStore.setState({ runtimeCapabilities: { feature_flags: { global_search: { enabled: true } } } }));
+    expect(button.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(button);
+    expect(useAppStore.getState().workspaceSearchOpen).toBe(true);
+  });
+  it("defers Git reads until navigation commits, including a different conversation in the same workspace", async () => {
+    useAppStore.setState({ conversations: [
+      { id: "A", title: "A", workspaceRoot: "C:/A", updatedAt: "" },
+      { id: "B", title: "B", workspaceRoot: "C:/A", updatedAt: "" },
+    ] });
+    render(<FileTree />);
+    const gitPackets = () => vi.mocked(sendClientCommand).mock.calls.map(([packet]) => packet)
+      .filter(packet => packet.type === "diff.git_working_tree" || packet.type === "diff.git_staged");
+    await waitFor(() => expect(gitPackets()).toHaveLength(2));
+    act(() => useAppStore.getState().requestConversationSwitch("B"));
+    expect(gitPackets()).toHaveLength(2);
+    act(() => useAppStore.getState().applyConversationSwitched({ conversationId: "B" }));
+    await waitFor(() => expect(gitPackets()).toHaveLength(4));
+    expect(gitPackets().slice(-2)).toEqual([
+      expect.objectContaining({ type: "diff.git_working_tree", conversation_id: "B", workspace: "C:/A" }),
+      expect.objectContaining({ type: "diff.git_staged", conversation_id: "B", workspace: "C:/A" }),
+    ]);
+  });
+
+  it("restarts Git after a synchronous refused switch in one React batch and rejects the old result", async () => {
+    render(<FileTree />);
+    const gitPackets = () => vi.mocked(sendClientCommand).mock.calls.map(([packet]) => packet)
+      .filter(packet => packet.type === "diff.git_working_tree" || packet.type === "diff.git_staged");
+    await waitFor(() => expect(gitPackets()).toHaveLength(2));
+    const oldId = useAppStore.getState().gitChanges.workingTreeRequestId;
+    vi.mocked(sendClientCommand).mockImplementation(packet => packet.type !== "conversation.switch");
+    act(() => {
+      useAppStore.getState().requestConversationSwitch("B");
+      handleDiffEvent({ type: "diff.git_working_tree", conversation_id: "A", workspace_root: "C:/A", request_id: oldId,
+        files: [{ path: "obsolete.txt", patch: "+old", additions: 1, deletions: 0 }], untracked: [], is_git_repo: true });
+    });
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+    expect(gitPackets().slice(-2)).toEqual([
+      expect.objectContaining({ type: "diff.git_working_tree", conversation_id: "A", workspace: "C:/A" }),
+      expect.objectContaining({ type: "diff.git_staged", conversation_id: "A", workspace: "C:/A" }),
+    ]);
+    expect(useAppStore.getState().gitChanges.workingTreeRequestId).not.toBe(oldId);
+    expect(useAppStore.getState().gitChanges.workingTree).toEqual([]);
+  });
+
   it("clears an A file menu rather than restoring it after B's tree refresh", async () => {
     const view = render(<FileTree />);
     await waitFor(() => expect(view.container.querySelector('[data-tree-path="same.txt"]')).toBeTruthy());

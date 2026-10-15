@@ -26,6 +26,50 @@ from backend.services.feature_flag_settings_service import (
 )
 
 
+@pytest.mark.parametrize("model,required", [
+    ("protected-model", True), ("provider_1/protected-model", True),
+    ("protected-model-preview", False), ("openai-codex/protected-model-preview", False),
+    ("protected-modelish", False), ("/protected-model", False),
+    ("bad.provider/protected-model", False), ("provider/nested/protected-model", False),
+])
+def test_source_auto_review_model_requirement_uses_actual_toml_and_exact_supported_aliases(tmp_path, model, required):
+    path = tmp_path / "requirements.toml"
+    path.write_text('[auto_review]\nrequired_on_models = ["protected-model"]\n', encoding="utf-8")
+    requirements = compose_requirements([load_requirements_toml(path)])
+    assert requirements.auto_review_required_for_model(model) is required
+    assert requirements.can_select_user_reviewer() is True
+
+
+def test_source_auto_review_model_union_cannot_remove_lower_layer_requirements_and_keeps_higher_ignore_rules(tmp_path):
+    lower = tmp_path / "system.toml"
+    higher = tmp_path / "managed.toml"
+    lower.write_text('[auto_review]\nrequired_on_models = ["alpha", "beta"]\nignore_rules = ["lower-model"]\n', encoding="utf-8")
+    higher.write_text('allowed_approvals_reviewers = ["auto_review"]\n[auto_review]\nrequired_on_models = ["beta", "gamma"]\nignore_rules = []\n', encoding="utf-8")
+    requirements = compose_requirements([load_requirements_toml(lower), load_requirements_toml(higher)])
+    assert set(requirements.value_for("auto_review")["required_on_models"]) == {"alpha", "beta", "gamma"}
+    assert requirements.value_for("auto_review")["ignore_rules"] == []
+    assert requirements.auto_review_required_for_model("source/alpha") is True
+    assert requirements.can_select_user_reviewer() is False
+    assert requirements.source_for("auto_review").kind == "composite"
+
+
+@pytest.mark.parametrize("slug", ["", " protected-model", "protected-model ", "provider/protected-model"])
+def test_source_managed_protected_slugs_reject_namespaces_and_whitespace_in_actual_file(tmp_path, slug):
+    path = tmp_path / "requirements.toml"
+    path.write_text(f'[auto_review]\nrequired_on_models = [{json.dumps(slug)}]\n', encoding="utf-8")
+    with pytest.raises(ConfigRequirementsError, match="non-empty model slugs"):
+        load_requirements_toml(path)
+
+
+def test_source_unset_higher_auto_review_fields_keep_lower_models_and_ignore_rules():
+    lower = RequirementsLayerEntry(RequirementSource("system_requirements_toml", location="lower.toml"),
+        {"auto_review": {"required_on_models": ["alpha"], "ignore_rules": ["ignore-alpha"]}})
+    higher = RequirementsLayerEntry(RequirementSource("enterprise_managed", name="actual requirement layer"),
+        {"auto_review": {"required_on_models": None, "ignore_rules": None}})
+    requirements = compose_requirements([lower, higher])
+    assert requirements.value_for("auto_review") == {"required_on_models": ["alpha"], "ignore_rules": ["ignore-alpha"]}
+
+
 @pytest.mark.parametrize("field,value", [
     ("allowed_domains", "example.com"),
     ("denied_domains", {"internal.example": True}),
@@ -188,6 +232,7 @@ def test_never_approval_policy_turns_prompts_into_policy_denials() -> None:
     assert decision.decision == "deny"
     assert decision.approval_policy == "deny"
     assert decision.matched_rule_source == "managed_requirements"
+    assert decision.scope["requirements_source"] == "requirements.toml"
 
 
 def test_feature_requirement_violation_reports_source() -> None:
@@ -216,3 +261,21 @@ def test_requirements_reject_empty_plugin_version_constraint() -> None:
         compose_requirements(
             [RequirementsLayerEntry(source, {"enabled_plugins": {"demo": [""]}})]
         )
+
+
+@pytest.mark.parametrize("allowed,expected", [
+    (["read-only"], ["plan"]),
+    (["read-only", "workspace-write"], ["confirm", "auto", "plan"]),
+    (["read-only", "workspace-write", "danger-full-access"], ["confirm", "auto", "plan", "bypass"]),
+])
+def test_composer_permission_range_is_the_real_managed_sandbox_range(monkeypatch, allowed, expected):
+    from types import SimpleNamespace
+    from backend.ws.handler import WebSocketSession
+
+    requirements = compose_requirements([RequirementsLayerEntry(
+        RequirementSource("system_requirements_toml", location="requirements.toml"), {"allowed_sandbox_modes": allowed})])
+    session = SimpleNamespace(permission_context=PermissionContext(mode="plan", source="fixture",
+        approval_policy="on-request", sandbox_mode="read-only", requirements_source="requirements.toml", workspace_scope="project"),
+        config=SimpleNamespace(permissions=PermissionSettings(), config_layer_stack=SimpleNamespace(requirements=requirements)),
+        session_lifecycle=SimpleNamespace(sandbox_capability_payload={"probe_status": "ready"}))
+    assert WebSocketSession._runtime_permission_payload(session)["available_modes"] == expected

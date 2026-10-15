@@ -3,15 +3,18 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { sendClientCommandMock, openWorkspaceFolderMock } = vi.hoisted(() => ({
+const { sendClientCommandMock, openWorkspaceFolderMock, showConfirmMock } = vi.hoisted(() => ({
   sendClientCommandMock: vi.fn(() => true),
   openWorkspaceFolderMock: vi.fn(async (): Promise<string | null> => 'C:\\OpenedProject'),
+  showConfirmMock: vi.fn(async () => false),
 }))
 
 vi.mock('../desktop/runtime', () => ({ isDesktop: () => false, revealPath: vi.fn() }))
 vi.mock('../overlays/ToastContainer', () => ({ pushToast: vi.fn() }))
 vi.mock('../workspace/openWorkspaceFolder', () => ({ openWorkspaceFolder: openWorkspaceFolderMock }))
+vi.mock('../overlays/DialogService', () => ({ showConfirm: showConfirmMock }))
 vi.mock('../protocol/ws-outbox', () => ({
+  LONG_COMMAND_RESULT_TIMEOUT_MS: 600_000,
   sendClientCommand: sendClientCommandMock,
   sendClientCommandAwaitResult: vi.fn(async (command: { type: string }) => ({
     type: 'command.result', command: command.type, level: 'success', message: '', data: {},
@@ -21,18 +24,24 @@ vi.mock('../protocol/ws-outbox', () => ({
 }))
 
 import { useAppStore } from '../stores'
+import type { ConversationWorkbenchState } from '../stores/types'
 import { ConversationsTab } from './ConversationsTab'
-import { sendClientCommandAwaitResult, sendConversationDeleteCommand } from '../protocol/ws-outbox'
+import { LONG_COMMAND_RESULT_TIMEOUT_MS, sendClientCommandAwaitResult, sendConversationDeleteCommand } from '../protocol/ws-outbox'
 import { pushToast } from '../overlays/ToastContainer'
 import { handleRuntimeEvent } from '../chat/runtimeEvents'
 
 describe('ConversationsTab project navigation', () => {
   beforeEach(() => {
     localStorage.removeItem('minicode.sidebar.conversations.state')
-    sendClientCommandMock.mockClear()
+    sendClientCommandMock.mockReset().mockReturnValue(true)
     openWorkspaceFolderMock.mockReset()
     openWorkspaceFolderMock.mockResolvedValue('C:\\OpenedProject')
-    vi.mocked(sendClientCommandAwaitResult).mockClear()
+    showConfirmMock.mockReset().mockResolvedValue(false)
+    vi.mocked(pushToast).mockClear()
+    vi.mocked(sendConversationDeleteCommand).mockReset().mockResolvedValue(true)
+    vi.mocked(sendClientCommandAwaitResult).mockReset().mockImplementation(async command => ({
+      type: 'command.result', command: command.type, level: 'success', message: '', data: {},
+    }))
     useAppStore.setState({
       appMode: 'cowork',
       conversationId: 'conv-represented',
@@ -42,6 +51,8 @@ describe('ConversationsTab project navigation', () => {
         updatedAt: '2026-08-15T00:00:00.000Z', workspaceRoot: 'C:\\Represented',
       }],
       conversationMessages: {}, conversationStreaming: {}, conversationHydration: {},
+      messages: [], draft: '', attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null,
+      conversationWorkbenchStates: {},
       recentWorkspaces: [
         { path: 'C:\\Represented', name: 'Represented workspace', projectType: 'node', lastOpened: 1_787_000_000 },
         { path: 'D:\\External\\Tools', name: 'External Tools', projectType: 'python', lastOpened: 1_787_100_000 },
@@ -54,6 +65,234 @@ describe('ConversationsTab project navigation', () => {
   })
 
   afterEach(() => { cleanup(); vi.useRealTimers() })
+
+  it('keeps project and recent occurrences but routes the selection to only the clicked row', () => {
+    useAppStore.setState({ draft: 'Unsent original input' })
+    const { container } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    const project = screen.getByRole('region', { name: '工作区 Represented' })
+    const recent = screen.getByRole('region', { name: '最近' })
+    const projectTask = within(project).getByRole('button', { name: 'Existing workspace task', exact: true })
+    const recentTask = within(recent).getByRole('button', { name: 'Existing workspace task', exact: true })
+    expect(container.querySelectorAll('[data-session-row]')).toHaveLength(2)
+    expect(container.querySelectorAll('[data-session-row][data-active="true"]')).toHaveLength(1)
+    expect(projectTask.getAttribute('aria-current')).toBe('page')
+    expect(recentTask.getAttribute('aria-current')).toBeNull()
+    fireEvent.click(recentTask)
+    expect(container.querySelectorAll('[data-session-row][data-active="true"]')).toHaveLength(1)
+    expect(recentTask.getAttribute('aria-current')).toBe('page')
+    expect(projectTask.getAttribute('aria-current')).toBeNull()
+    expect(useAppStore.getState().draft).toBe('Unsent original input')
+    fireEvent.click(projectTask)
+    expect(projectTask.getAttribute('aria-current')).toBe('page')
+    expect(recentTask.getAttribute('aria-current')).toBeNull()
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull()
+  })
+
+  it('uses Recents for an ordinary thread and selects the new owner when an external switch completes', () => {
+    useAppStore.setState({ conversations: [...useAppStore.getState().conversations, {
+      id: 'ordinary', title: 'Ordinary thread', updatedAt: '2026-10-14',
+    }] })
+    const { container, rerender } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    fireEvent.click(within(screen.getByRole('region', { name: '最近' })).getByRole('button', { name: 'Existing workspace task', exact: true }))
+    act(() => useAppStore.setState({ conversationId: 'ordinary' }))
+    rerender(<ConversationsTab conversationId="ordinary" onSetConfirmDialog={vi.fn()} />)
+    expect(container.querySelectorAll('[data-session-row][data-active="true"]')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Ordinary thread', exact: true }).getAttribute('aria-current')).toBe('page')
+    act(() => useAppStore.setState({ conversationId: 'conv-represented' }))
+    rerender(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByRole('button', { name: 'Existing workspace task', exact: true }).getAttribute('aria-current')).toBe('page')
+    expect(container.querySelectorAll('[data-session-row][data-active="true"]')).toHaveLength(1)
+  })
+
+  const prepareOtherWorktree = () => {
+    const worktreePath = 'C:\\Represented\\.minicode\\worktrees\\conv-other'
+    const messages = [{ id: 'current-user', role: 'user' as const, content: 'Current saved input', timestamp: 1, artifacts: [] }]
+    const hiddenDraft: ConversationWorkbenchState = {
+      draft: 'Other original draft', attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null,
+      diffReview: null, previewArtifact: null, livePreviewUrl: null,
+      previewServers: [], previewLaunchConfigs: [], previewLaunchProcesses: [], previewVerification: null,
+      activeTerminalSessionId: null, rightStackTab: 'tasks', rightPanelOpen: false, rightStackTabLocked: false,
+      allowedRemoteImageDomains: [],
+    }
+    useAppStore.setState({
+      messages, draft: 'Current unsent 中文',
+      conversationMessages: { 'conv-represented': messages },
+      conversationWorkbenchStates: { 'conv-other': hiddenDraft },
+      conversations: [...useAppStore.getState().conversations, {
+        id: 'conv-other', title: 'Other isolated task', updatedAt: '2026-10-11',
+        workspaceRoot: worktreePath, worktreePath, gitIsolated: true, parentConversationId: 'conv-represented',
+      }],
+      recentWorkspaces: [...useAppStore.getState().recentWorkspaces, {
+        path: worktreePath, name: 'Represented', projectType: 'node', lastOpened: 1_791_700_000,
+      }],
+    })
+    const original = useAppStore.getState()
+    return () => {
+      const current = useAppStore.getState()
+      expect(current.conversationId).toBe(original.conversationId)
+      expect(current.pendingConversationSwitchId).toBeNull()
+      expect(current.workingDirectory).toBe(original.workingDirectory)
+      expect(current.draft).toBe(original.draft)
+      expect(current.messages).toBe(original.messages)
+      expect(current.conversationMessages).toBe(original.conversationMessages)
+      expect(current.conversationWorkbenchStates).toBe(original.conversationWorkbenchStates)
+      expect(sendClientCommandMock).not.toHaveBeenCalled()
+    }
+  }
+
+  const clickOtherMenuAction = async (name: string) => {
+    const row = screen.getByText('Other isolated task').closest('[data-session-row="true"]')!
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: '会话操作' }))
+    if (name.startsWith('复制') && name !== '复制') fireEvent.click(screen.getByRole('menuitem', { name: '复制', exact: true }))
+    fireEvent.click(await screen.findByRole('menuitem', { name }))
+  }
+
+  it('exposes Source copy actions and omits unsupported clone, merge, export-tree and cleanup controls', async () => {
+    const readerUnchanged = prepareOtherWorktree()
+    render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+    const row = screen.getByText('Other isolated task').closest('[data-session-row="true"]')!
+    fireEvent.click(within(row as HTMLElement).getByRole('button', { name: '会话操作' }))
+    expect(screen.queryByRole('menuitem', { name: '克隆会话' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '合并到父会话' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '导出会话树' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '清理工作区' })).toBeNull()
+    fireEvent.click(screen.getByRole('menuitem', { name: '复制', exact: true }))
+    expect(screen.getAllByRole('menuitem').filter(item => item.closest('[role="menu"]')?.getAttribute('aria-label') === '复制').map(item => item.textContent))
+      .toEqual(['复制深度链接', '复制为 Markdown', '复制工作目录'])
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled()
+    readerUnchanged()
+  })
+
+  it('runs dirty handoff through stash preflight and fingerprinted execute for the menu owner', async () => {
+    const readerUnchanged = prepareOtherWorktree()
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({
+      type: 'command.result', command: 'conversation.worktree.handoff.preflight', level: 'warning', message: 'Dirty source',
+      data: { allowed: false, checks: [{
+        code: 'source.dirty', severity: 'blocking',
+        message: "Commit changes, or choose 'stash' to move tracked and untracked changes safely.",
+      }] },
+    }).mockResolvedValueOnce({
+      type: 'command.result', command: 'conversation.worktree.handoff.preflight', level: 'success', message: 'Stash admitted',
+      data: { allowed: true, fingerprint: 'stash-owner-fingerprint', dirty_action: 'stash', checks: [{ severity: 'warning', message: 'Untracked files will be restored' }] },
+    }).mockResolvedValueOnce({
+      type: 'command.result', command: 'conversation.worktree.handoff.execute', level: 'success', message: 'Other task moved', data: { completed: true },
+    })
+    showConfirmMock.mockResolvedValueOnce(true).mockResolvedValueOnce(true)
+    render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+    await clickOtherMenuAction('移到本地工作区')
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(3))
+    expect(sendClientCommandAwaitResult).toHaveBeenNthCalledWith(1, {
+      type: 'conversation.worktree.handoff.preflight', conversation_id: 'conv-other', target: 'local',
+    }, 'conversation.worktree.handoff.preflight', { silent: true, timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS })
+    expect(sendClientCommandAwaitResult).toHaveBeenNthCalledWith(2, {
+      type: 'conversation.worktree.handoff.preflight', conversation_id: 'conv-other', target: 'local', dirty_action: 'stash',
+    }, 'conversation.worktree.handoff.preflight', { silent: true, timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS })
+    expect(showConfirmMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ title: '检测到未提交改动', confirmLabel: '暂存后继续', danger: true }))
+    expect(showConfirmMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      title: '将“Other isolated task”移到本地检出？', message: expect.stringContaining('Untracked files will be restored'),
+    }))
+    expect(sendClientCommandAwaitResult).toHaveBeenNthCalledWith(3, {
+      type: 'conversation.worktree.handoff.execute', conversation_id: 'conv-other', target: 'local',
+      fingerprint: 'stash-owner-fingerprint', dirty_action: 'stash',
+    }, 'conversation.worktree.handoff.execute', { silent: true, timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS })
+    await waitFor(() => expect(pushToast).toHaveBeenCalledExactlyOnceWith('Other task moved', 'success', 5000))
+    readerUnchanged()
+  })
+
+  it('copies the clicked background thread as real Markdown and a deep link without switching the reader', async () => {
+    prepareOtherWorktree()
+    useAppStore.setState({ conversationMessages: { ...useAppStore.getState().conversationMessages, 'conv-other': [
+      { id: 'other-user', role: 'user', content: 'Original background request', timestamp: 1, artifacts: [] },
+      { id: 'other-final', role: 'assistant', content: 'Original background result', timestamp: 2, artifacts: [] },
+    ] } })
+    const original = useAppStore.getState()
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+      await clickOtherMenuAction('复制为 Markdown')
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+      expect(writeText.mock.calls[0][0]).toContain('Original background result')
+      expect(writeText.mock.calls[0][0]).toContain('Original background request')
+      expect(writeText.mock.calls[0][0]).not.toContain('Current saved input')
+      await clickOtherMenuAction('复制深度链接')
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
+      expect(writeText.mock.calls[1][0]).toBe('minicode://conversation?conversation_id=conv-other')
+      expect(sendClientCommandAwaitResult).not.toHaveBeenCalled()
+      const current = useAppStore.getState()
+      expect(current.conversationId).toBe(original.conversationId)
+      expect(current.messages).toBe(original.messages)
+      expect(current.conversationMessages).toBe(original.conversationMessages)
+      expect(current.draft).toBe(original.draft)
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
+  it('confirms stopping a running background thread before archive and preserves the main reader on cancel', async () => {
+    const readerUnchanged = prepareOtherWorktree()
+    useAppStore.setState({ conversationStreaming: { 'conv-other': true } })
+    showConfirmMock.mockResolvedValueOnce(false)
+    render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+    await clickOtherMenuAction('归档')
+    await waitFor(() => expect(showConfirmMock).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      title: '停止并归档此聊天？', confirmLabel: '停止并归档', danger: true,
+    })))
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled()
+    expect(useAppStore.getState().conversationStreaming['conv-other']).toBe(true)
+    readerUnchanged()
+  })
+
+  it('submits the real blank rename to the backend and surfaces its Source rejection', async () => {
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({
+      type: 'command.result', command: 'conversation.rename', level: 'error', message: 'Thread name must not be empty', data: {},
+    })
+    render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '会话操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '重命名', exact: true }))
+    const input = screen.getByDisplayValue('Existing workspace task')
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledExactlyOnceWith({
+      type: 'conversation.rename', conversation_id: 'conv-represented', title: '   ',
+    }, 'conversation.rename'))
+    expect(pushToast).toHaveBeenCalledWith('Thread name must not be empty', 'error', 6000)
+    expect(useAppStore.getState().conversations[0].title).toBe('Existing workspace task')
+  })
+
+  it('stops handoff at blocking preflight and reports the backend reasons', async () => {
+    const readerUnchanged = prepareOtherWorktree()
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({
+      type: 'command.result', command: 'conversation.worktree.handoff.preflight', level: 'warning', message: 'Cannot move',
+      data: { allowed: false, checks: [{ severity: 'blocking', message: 'Another task owns the local checkout' }] },
+    })
+    render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+    await clickOtherMenuAction('移到本地工作区')
+    await waitFor(() => expect(pushToast).toHaveBeenCalledExactlyOnceWith('Another task owns the local checkout', 'warning', 6000))
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1)
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    readerUnchanged()
+  })
+
+  it('reports a native clipboard rejection for the clicked worktree path', async () => {
+    const readerUnchanged = prepareOtherWorktree()
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const writeText = vi.fn().mockRejectedValue(new Error('Clipboard permission denied'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      render(<ConversationsTab conversationId="conv-represented" showRecent={false} onSetConfirmDialog={vi.fn()} />)
+      await clickOtherMenuAction('复制工作目录')
+      await waitFor(() => expect(pushToast).toHaveBeenCalledExactlyOnceWith('复制工作区路径失败：Clipboard permission denied', 'error', 3000))
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('C:\\Represented\\.minicode\\worktrees\\conv-other')
+      expect(sendClientCommandAwaitResult).not.toHaveBeenCalled()
+      readerUnchanged()
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
 
   it('highlights the requested conversation before the backend confirms the switch', () => {
     useAppStore.setState({ conversations: [
@@ -304,7 +543,7 @@ describe('ConversationsTab project navigation', () => {
   })
 
   it('groups real activity by priority and local calendar dates with only recorded summaries', () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
     const now = new Date(2026, 9, 5, 12)
     vi.setSystemTime(now)
     const localDate = (day: number) => new Date(2026, 9, day, 10).toISOString()
@@ -331,7 +570,7 @@ describe('ConversationsTab project navigation', () => {
     expect(container.querySelectorAll('.mc-sidebar-activity-summary')).toHaveLength(1)
     expect(screen.getByText('Recorded summary only')).toBeTruthy()
     fireEvent.click(screen.getByText('Today task').closest('button')!)
-    expect(sendClientCommandMock).toHaveBeenCalledExactlyOnceWith({ type: 'conversation.switch', conversation_id: 'today' })
+    expect(sendClientCommandMock).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: 'conversation.switch', conversation_id: 'today' }))
     expect(useAppStore.getState().conversationId).toBe('conv-represented')
   })
 
@@ -364,7 +603,7 @@ describe('ConversationsTab project navigation', () => {
   })
 
   it('debounces sidebar scroll persistence off the interaction path', () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] })
     const setItemSpy = vi.spyOn(Storage.prototype, 'setItem')
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     const list = screen.getByTestId('conversation-list')

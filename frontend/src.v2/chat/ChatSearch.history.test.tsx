@@ -71,7 +71,7 @@ describe("loaded transcript search", () => {
     expect(window.getSelection()?.toString()).toBe("historic-exact-needle");
     view.rerender(surface(false));
     expect(document.querySelector('[data-turn="assistant-0"]')).toBeNull();
-    expect(view.getByText("显示更早的消息（20）")).toBeTruthy();
+    expect(view.queryByRole("button", { name: /显示更早的消息/ })).toBeNull();
   });
 
   it("recomputes the same query after actual streamed DOM text changes", async () => {

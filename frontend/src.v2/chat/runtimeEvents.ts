@@ -26,7 +26,7 @@ import type {
 } from "../protocol/events";
 import { isReplayedEvent as isReplayedRuntimeEvent } from "../protocol/events";
 import type { McpServerStatus, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { fromBackendPermissionMode } from "../protocol/permissions";
 import { mergeCapabilities, withDerivedCapabilitySummary } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
@@ -34,10 +34,14 @@ import { addInspectorPayload } from "./inspectorEntries";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { normalizeContextLedger } from "./contextLedger";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
-import { LS, writeLS } from "../stores/shared-helpers";
+import { LS, writeLS, updateMessagesForConversation } from "../stores/shared-helpers";
+import { isTerminalToolCallStatus, isToolDelegations } from "../lib/tool-call-reducer";
+import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { applyToolDelegation, applySubagentTranscriptEvents } from "./subagentTranscript";
 import { eventMessageId } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
-import { applyActiveStreamSnapshot } from "./sessionEvents";
+import { capturePendingUserMessageStart } from "./sendChatMessage";
+import { applyActiveStreamSnapshot, applyPendingTurnInputSnapshot, applyQueuedUserMessageSnapshot } from "./sessionEvents";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -118,10 +122,50 @@ const transcriptSnapshotPatch = (
   };
 };
 
+const transcriptRecoveries = new Set<string>();
+const recoverSubagentTranscript = (subagentId: string, conversationId: string | undefined, existing?: SubagentState) => {
+  if (!conversationId) return;
+  const key = JSON.stringify([conversationId, subagentId, existing?.agentPath, existing?.mailboxEpoch]);
+  if (transcriptRecoveries.has(key)) return;
+  transcriptRecoveries.add(key);
+  void sendClientCommandAwaitResult({ type: "subagent.transcript", subagent_id: subagentId, conversation_id: conversationId }, "subagent.transcript", { silent: true })
+    .then(event => {
+      if (!commandResultSucceeded(event)) throw new Error(event.message || "子任务记录读取失败");
+      const current = visibleSubagentsForConversation(conversationId).find(subagent => subagent.id === subagentId);
+      if (!current || isStaleSubagentIncarnation(current, event.data ?? {})) return;
+      const patch = transcriptSnapshotPatch({ transcript_snapshot: event.data }, current);
+      if ("transcriptSeq" in patch) useAppStore.getState().updateSubagent(subagentId, patch, conversationId);
+    }).catch(error => pushToast(`无法恢复子任务记录：${error instanceof Error ? error.message : String(error)}`, "error"))
+    .finally(() => transcriptRecoveries.delete(key));
+};
+
+const applySubagentDelegationFact = (event: unknown, conversationId: string | undefined) => {
+  const fact = event as { parent_message_id?: string; parent_tool_call_id?: string; delegation?: unknown };
+  if (!fact.parent_message_id || !fact.parent_tool_call_id || !isToolDelegations([fact.delegation])) return;
+  const delegation = (fact.delegation as import("../lib/tool-call-reducer").ToolDelegation);
+  useAppStore.setState(state => updateMessagesForConversation(state, conversationId, messages => {
+    const updated = applyToolDelegation(messages, fact.parent_message_id!, fact.parent_tool_call_id!, delegation);
+    return updated === messages ? null : updated;
+  }));
+  for (const subagent of visibleSubagentsForConversation(conversationId)) {
+    if (!subagent.transcriptMessages) continue;
+    const updated = applyToolDelegation(subagent.transcriptMessages, fact.parent_message_id, fact.parent_tool_call_id, delegation);
+    if (updated !== subagent.transcriptMessages) useAppStore.getState().updateSubagent(subagent.id, { transcriptMessages: updated }, conversationId);
+  }
+};
+
 const transcriptDeltaPatch = (event: SubagentProgressEvent, existing?: SubagentState) => {
   const delta = event.transcript_delta;
   if (!delta || delta.seq <= (existing?.transcriptSeq ?? -1)) return {};
   const messages = existing?.transcriptMessages ?? [];
+  if (delta.kind === "events") {
+    const updated = delta.base_seq === existing?.transcriptSeq ? applySubagentTranscriptEvents(messages, delta) : null;
+    if (!updated) {
+      recoverSubagentTranscript(event.subagent_id, (event as SubagentProgressEvent & { conversation_id?: string }).conversation_id, existing);
+      return {};
+    }
+    return { transcriptMessages: updated, transcriptSeq: delta.seq };
+  }
   const index = messages.findIndex(message => message.id === delta.message_id);
   // Reconnection obtains an authoritative snapshot; a delta cannot invent a
   // missing user/assistant turn or advance past a snapshot we have not received.
@@ -253,8 +297,7 @@ const isStaleSubagentIncarnation = (
   if (!currentHasFence) return false;
   if (!incomingHasFence) return true;
   if (incoming.mailboxEpoch! < existing.mailboxEpoch!) return true;
-  return incoming.mailboxEpoch === existing.mailboxEpoch
-    && incoming.agentPath !== existing.agentPath;
+  return incoming.agentPath !== existing.agentPath;
 };
 
 const subagentMetadataPatch = (
@@ -271,6 +314,9 @@ const subagentMetadataPatch = (
   const waitingOn = userVisibleSubagentProgress(maybeString(value("waiting_on", "waitingOn"))) || undefined;
   const currentTool = maybeString(value("current_tool", "currentTool"));
   const lastProgressAt = maybeNumber(value("last_progress_at", "lastProgressAt"));
+  const acceptedAt = maybeNumber(value("accepted_at", "acceptedAt"));
+  const startedAt = maybeNumber(value("started_at", "startedAt"));
+  const completedAt = maybeNumber(value("completed_at", "completedAt"));
   const order = maybeNumber(value("order"));
   const dependsOn = maybeStringList(value("depends_on"));
   const blockedBy = maybeStringList(value("blocked_by"));
@@ -281,6 +327,8 @@ const subagentMetadataPatch = (
   const awaitingPlanApproval = maybeBoolean(value("awaiting_plan_approval", "awaitingPlanApproval"));
   const isIdle = maybeBoolean(value("is_idle", "isIdle"));
   const teammateName = maybeString(value("teammate_name", "teammateName"));
+  const displayName = maybeString(value("display_name", "displayName"));
+  const workspaceRoot = maybeString(value("workspace_root", "workspaceRoot"));
   const teamName = maybeString(value("team_name", "teamName"));
   const activePlanRequestId = value("active_plan_request_id", "activePlanRequestId");
   const parentRunId = maybeString(value("parent_run_id")) ?? maybeString(value("parent_id"));
@@ -296,6 +344,10 @@ const subagentMetadataPatch = (
   if (waitingOn) patch.waitingOn = waitingOn;
   if (currentTool !== undefined) patch.currentTool = currentTool;
   if (typeof lastProgressAt === "number") patch.lastProgressAt = lastProgressAt;
+  if (typeof acceptedAt === "number") patch.acceptedAt = acceptedAt;
+  if (typeof startedAt === "number") patch.startedAt = startedAt;
+  if (typeof completedAt === "number") patch.completedAt = completedAt;
+  else if ([payload.completed_at, payload.completedAt, record?.completed_at, record?.completedAt].includes(null)) patch.completedAt = undefined;
   if (typeof order === "number") patch.order = order;
   if (dependsOn) patch.dependsOn = dependsOn;
   if (blockedBy) patch.blockedBy = blockedBy;
@@ -306,6 +358,8 @@ const subagentMetadataPatch = (
   if (typeof awaitingPlanApproval === "boolean") patch.awaitingPlanApproval = awaitingPlanApproval;
   if (typeof isIdle === "boolean") patch.isIdle = isIdle;
   if (teammateName) patch.teammateName = teammateName;
+  if (displayName) patch.displayName = displayName;
+  if (workspaceRoot !== undefined) patch.workspaceRoot = workspaceRoot;
   if (teamName) patch.teamName = teamName;
   if (typeof activePlanRequestId === "string") patch.activePlanRequestId = activePlanRequestId;
   if (parentRunId) patch.parentRunId = parentRunId;
@@ -613,18 +667,20 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     : conversationId?.trim() || undefined;
   const messageId = eventMessageId(e);
   if (e.type === "agent.run.started" && (e as AgentRunStartedEvent).role === "main") {
+    if (conversationId && messageId && !isReplayedRuntimeEvent(e)) capturePendingUserMessageStart(conversationId, messageId);
     adoptGeneratedConversation(conversationId, messageId);
   }
   const s = useAppStore.getState();
   if (e.type === "agent.run.started" && conversationId && messageId) {
     const target = assistantForMessage(conversationId, messageId);
     const turnId = eventTurnIdentity(e);
+    const startedAt = (e as AgentRunStartedEvent).role === "main" ? (e as AgentRunStartedEvent).started_at : undefined;
     if (!target && (e as AgentRunStartedEvent).role === "main"
-      && !isReplayedRuntimeEvent(e)
-      && !s.getVisibleMessages(conversationId).some((message) => message.isStreaming || message.isThinkingStreaming)) {
+      && !isReplayedRuntimeEvent(e)) {
       // Resume and server-triggered turns have no composer-created placeholder.
-      // Admit their exact assistant before the normal turn/event fences run.
-      s.resumeStreaming(conversationId, undefined, messageId, turnId);
+      // The live main run owns its exact assistant even if an older checkpoint
+      // still has renderer streaming flags. Admit it before event fences run.
+      s.resumeStreaming(conversationId, undefined, messageId, turnId, undefined, startedAt);
     }
     // A restore snapshot can settle the optimistic placeholder before the
     // server admits its new run. Run-start is the authority for that message,
@@ -632,7 +688,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     if (target && !target.isStreaming && !target.isThinkingStreaming
       && !target.terminalStatus && target.completedAt == null
       && (!target.turnId || target.turnId === turnId)) {
-      s.resumeStreaming(conversationId, undefined, messageId, turnId);
+      s.resumeStreaming(conversationId, undefined, messageId, turnId, undefined, startedAt);
     }
   }
   const globalSessionSnapshot = e.type === "task.update"
@@ -685,6 +741,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
   if (
     messageId
     && TURN_SCOPED_RUNTIME_EVENTS.has(e.type)
+    && !["subagent.start", "subagent.event", "subagent.mailbox", "subagent.progress", "subagent.done"].includes(e.type)
     && !hasStreamingAssistantForMessage(conversationId, messageId)
     && !canApplyLateTerminalEvent(conversationId, messageId, e.type)
     && !providerWaitingForAssistant
@@ -804,6 +861,16 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         span_event: ev.event,
         event: "runtime.span",
       });
+      if (ev.event === "tool.started" && ev.tool_call_id && ev.started_at != null) {
+        const record = runtimeMessagesForConversation(conversationId)
+          .filter(message => message.id === ev.message_id)
+          .flatMap(getToolCallsFromMessage)
+          .find(candidate => candidate.id === ev.tool_call_id && candidate.commandPresentation);
+        if (record && !isTerminalToolCallStatus(record.status)) s.updateToolCall(record.id, {
+          executionStartedAt: record.executionStartedAt ?? ev.started_at,
+          status: "running", transition: "running", waitingOn: undefined, blockingReason: undefined,
+        }, conversationId, { turnId: record.turnId, iterationId: record.iterationId, stepId: record.stepId }, ev.message_id);
+      }
       return true;
     }
     case "agent.run.started":
@@ -812,7 +879,24 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const runId = String(ev.run_id || "").trim();
       if (!runId) return true;
       const runMessageId = String((ev as unknown as { message_id?: string }).message_id || "").trim();
-      s.bindStreamingTurn(ev.conversation_id || conversationId, runMessageId || undefined, runId);
+      s.bindStreamingTurn(ev.conversation_id || conversationId, runMessageId || undefined, eventTurnIdentity(e),
+        ev.type === "agent.run.started" && ev.role === "main" ? ev.started_at : undefined);
+      if (ev.type === "agent.run.started" && ev.role === "main" && conversationId && !isReplayedRuntimeEvent(e)) {
+        useAppStore.setState(state => {
+          // Child threads belong to the conversation. A new parent turn only
+          // starts a fresh plan/progress surface; it does not erase child runs.
+          const subagents = conversationId === state.conversationId ? state.subagents
+            : state.conversationAgentStates[conversationId]?.subagents ?? [];
+          const agentState = { plan: null, todos: [], subagents, agentProgress: [] };
+          const turnDiffs = { ...state.turnDiffs };
+          delete turnDiffs[conversationId];
+          return {
+            ...(conversationId === state.conversationId ? agentState : {}),
+            conversationAgentStates: { ...state.conversationAgentStates, [conversationId]: agentState },
+            turnDiffs,
+          };
+        });
+      }
       addInspectorPayload("message", runMessageId || runId, {
         ...ev,
         event: ev.type,
@@ -886,6 +970,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         after_tokens?: number;
         retained_categories?: string[];
         ledger?: unknown;
+        compaction_item_id?: string;
+        context_window_state?: Record<string, unknown>;
       };
       const summary = compacted.summary ?? "上下文已压缩。";
       const ledger = normalizeContextLedger(compacted.ledger);
@@ -904,6 +990,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         retained_categories: compacted.retained_categories,
         ledger,
         replayed: isReplayedRuntimeEvent(e),
+        compaction_item_id: compacted.compaction_item_id,
+        context_window_state: compacted.context_window_state,
       });
       if (!isActiveConversationEvent(conversationId)) return true;
       const currentUsage = useAppStore.getState().contextUsage;
@@ -917,13 +1005,15 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (!isReplayedRuntimeEvent(e)) {
         sendClientCommand({ type: "session.usage.inspect" });
       }
+      // Canonical item lifecycle already owns the visible Source divider.
+      if (compacted.compaction_item_id) return true;
       const tokenSummary = beforeTokens != null && afterTokens != null
-        ? `，从 ${beforeTokens.toLocaleString()} 降至 ${afterTokens.toLocaleString()} tokens${savedTokens ? `，节省 ${savedTokens.toLocaleString()}` : ""}`
+        ? `从 ${beforeTokens.toLocaleString()} 降至 ${afterTokens.toLocaleString()} tokens${savedTokens ? `，节省 ${savedTokens.toLocaleString()}` : ""}`
         : "";
       s.upsertSystemMessage(
         "system-compact-status",
-        `上下文已压缩${tokenSummary}，摘要已保存到会话记忆中。`,
-        { conversationId, replacePrefix: "正在压缩上下文" },
+        tokenSummary ? `${tokenSummary}，摘要已保存。` : "",
+        { conversationId, title: "上下文已压缩", processing: false, replacePrefix: "正在压缩上下文" },
       );
       return true;
     }
@@ -950,18 +1040,9 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     case "context_forked": {
       if (!conversationId) return true;
       const ev = e as ContextForkedEvent;
-      const branchId = String(ev.branch_conversation_id || "").trim();
-      const destination = ev.branch_created
-        ? ev.branch_activated
-          ? "已创建并切换到上下文分支"
-          : "已创建上下文分支"
-        : "已创建临时上下文分叉";
-      const identity = branchId || ev.fork_id;
-      s.upsertSystemMessage(
-        `context-forked:${ev.fork_id}`,
-        `${destination}（${identity}），从第 ${ev.message_index + 1} 条可见消息分叉，保留 ${ev.history_length} 条模型历史，估算 ${ev.estimated_tokens.toLocaleString()} tokens。`,
-        { conversationId },
-      );
+      addInspectorPayload("message", `context-forked:${ev.fork_id}`, {
+        ...ev, conversation_id: conversationId, replayed: isReplayedRuntimeEvent(e),
+      });
       return true;
     }
     case "context_side_query_result": {
@@ -1014,6 +1095,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
 
       if ("session" in ev && ev.session) {
         s.setRuntimeSession(ev.partial ? { ...s.runtimeSession, ...ev.session } : ev.session);
+        applyQueuedUserMessageSnapshot(ev.session.queued_user_messages);
+        applyPendingTurnInputSnapshot(ev.session.pending_turn_inputs);
         applyActiveStreamSnapshot(ev.session);
         useAppStore.setState(runtimeModelSelectionPatch(ev.session, useAppStore.getState()));
         const permissionOwner = ev.session.active_conversation_id === undefined
@@ -1070,6 +1153,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ev as unknown as Record<string, unknown>,
         record,
       )) return true;
+      applySubagentDelegationFact(ev, conversationId);
       // A delayed start can arrive after the durable done event (the real
       // provider path can flush the start envelope after the child settles).
       // Starting it again would erase the terminal result and leave the UI
@@ -1105,6 +1189,10 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         activityLog: [],
         terminationReason: undefined,
         terminationInitiator: undefined,
+        completedAt: undefined,
+        durationMs: undefined,
+        toolCallCount: undefined,
+        checkpointId: undefined,
         ...transcriptSnapshotPatch(ev, existingById),
         ...stableMetadata,
       }, conversationId);
@@ -1193,7 +1281,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       )) return true;
       const now = Date.now();
       const lastProgressAt = maybeNumber((ev as unknown as Record<string, unknown>).last_progress_at);
-      if (existing && isTerminalSubagentStatus(existing.status)) {
+      const metadata = subagentMetadataPatch(ev as unknown as Record<string, unknown>);
+      const newerIncarnation = existing?.agentPath && metadata.agentPath
+        && typeof existing.mailboxEpoch === "number" && typeof metadata.mailboxEpoch === "number"
+        && metadata.mailboxEpoch > existing.mailboxEpoch;
+      if (existing && isTerminalSubagentStatus(existing.status) && !newerIncarnation) {
         addInspectorPayload("subagent", subagentId, {
           conversation_id: conversationId,
           event: "subagent.progress",
@@ -1218,6 +1310,17 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ev.user_visible,
       ) || (ev.tool_name ? "tool" : undefined);
       const patch = {
+        ...(newerIncarnation ? {
+          resultAvailable: false,
+          resultContent: undefined,
+          resultError: undefined,
+          completedAt: undefined,
+          durationMs: undefined,
+          toolCallCount: undefined,
+          terminationReason: undefined,
+          terminationInitiator: undefined,
+          checkpointId: undefined,
+        } : {}),
         status: progressStatus,
         summary: subagentProgressSummary(ev),
         iteration: ev.iteration,
@@ -1240,7 +1343,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         lastEventAt: now,
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
-        ...subagentMetadataPatch(ev as unknown as Record<string, unknown>),
+        ...metadata,
         ...subagentModelPatch(ev as unknown as Record<string, unknown>, existing, maybeObject((ev as unknown as Record<string, unknown>).snapshot)),
         ...transcriptSnapshotPatch(ev, existing),
         ...transcriptDeltaPatch(ev, existing),
@@ -1307,6 +1410,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         record,
       )) return true;
       const targetSubagentId = existing?.id || e.subagent_id;
+      applySubagentDelegationFact(e, conversationId);
       const existingTerminal = Boolean(
         existing && ["done", "partial", "cancelled", "error"].includes(existing.status),
       );
@@ -1424,19 +1528,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (!isActiveConversationEvent(conversationId)) return true;
       const current = useAppStore.getState();
       s.setBudget(current.budgetBuckets, e.percent);
-      // The backend decides when a budget warning is warranted. The renderer
-      // only presents that event; it must not add its own percentage trigger.
-      const percentLabel = Number.isFinite(e.percent)
-        ? ` (${Math.round(e.percent * 100)}%)`
-        : "";
-      if (!isReplayedRuntimeEvent(e)) {
-        pushToast(
-          e.will_compact
-          ? `已安排压缩上下文${percentLabel}`
-          : `令牌预算提醒${percentLabel}`,
-          "warning",
-        );
-      }
       return true;
     }
     case "subagent.mailbox": {
@@ -1522,9 +1613,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (ev.mode) {
         const permissionMode = fromBackendPermissionMode(ev.mode);
         writeLS(LS.permissionMode, permissionMode);
-        const state = useAppStore.getState();
-        if (permissionMode === "plan" && state.agentMode !== "plan") state.setAgentMode("plan");
-        if (permissionMode !== "plan" && state.agentMode === "plan") state.setAgentMode("build");
         useAppStore.setState({ permissionMode });
       }
       return true;

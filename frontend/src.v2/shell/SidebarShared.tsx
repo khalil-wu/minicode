@@ -1,3 +1,4 @@
+import { useI18n, type TranslationKey } from "../i18n";
 /**
  * Shared components and styles for SidebarRight tabs.
  */
@@ -18,7 +19,7 @@ const statusAliases: Record<string, StatusIconStatus> = {
 
 export const statusColor = (status: string): string => statusIconColor(statusAliases[status] ?? 'pending')
 
-export const statusMarkLabel = (status: string): string => {
+export const statusMarkLabel = (status: string): TranslationKey => {
   if (status === 'running' || status === 'in_progress') return '运行中'
   if (status === 'done' || status === 'success' || status === 'completed') return '已完成'
   if (status === 'error' || status === 'failed') return '失败'
@@ -32,7 +33,8 @@ export const statusMarkLabel = (status: string): string => {
 }
 
 export const StatusMark = ({ status, animated = true }: { status: string; animated?: boolean }) => {
-  const label = statusMarkLabel(status)
+  const { t: tr } = useI18n();
+  const label = tr(statusMarkLabel(status))
   const iconStatus = statusAliases[status] ?? 'pending'
   return (
     <span role="img" aria-label={label} style={{ display: 'inline-flex', flexShrink: 0 }}>
@@ -127,6 +129,7 @@ export const ActivitySection = ({
   initialExpanded?: boolean
   previewCount?: number
 }) => {
+  const { t: tr } = useI18n();
   const childArray = Children.toArray(children)
   const childCount = childArray.length
   const canExpand = childCount > previewCount
@@ -160,7 +163,7 @@ export const ActivitySection = ({
           style={activitySectionMoreStyle}
           onClick={() => setExpanded(true)}
         >
-          {`再显示 ${childCount - previewCount} 项`}
+          {tr("再显示 {count} 项", { count: childCount - previewCount })}
         </button>
       )}
     </section>

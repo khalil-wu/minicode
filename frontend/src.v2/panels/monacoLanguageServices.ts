@@ -91,6 +91,7 @@ export async function getWorkspaceTypeScriptWorker(resource: Monaco.Uri) {
 
 export async function syncWorkspaceTypeScriptModels(resources: Monaco.Uri[]): Promise<{
   configurationRequests: () => Promise<string[]>;
+  dependencyRequests: () => Promise<string[]>;
   configurationDiagnostics: () => Promise<Array<{ path: string; message: string }>>;
   addConfigurationFiles: (files: Array<{ filePath: string; content: string }>) => Promise<void>;
 }> {
@@ -98,6 +99,7 @@ export async function syncWorkspaceTypeScriptModels(resources: Monaco.Uri[]): Pr
   const [typescriptWorker, javascriptWorker] = await Promise.all([typescriptFactory(...resources), javascriptFactory(...resources)]);
   const workers = [typescriptWorker, javascriptWorker] as unknown as Array<{
     getConfigurationFileRequests: () => Promise<string[]>;
+    getDependencyFileRequests: () => Promise<string[]>;
     getConfigurationDiagnostics: () => Promise<Array<{ path: string; message: string }>>;
     updateExtraLibs: (extraLibs: IExtraLibs) => Promise<void>;
   }>;
@@ -107,6 +109,7 @@ export async function syncWorkspaceTypeScriptModels(resources: Monaco.Uri[]): Pr
     ? typescriptServices.typescriptDefaults.getExtraLibs() : typescriptServices.javascriptDefaults.getExtraLibs())));
   return {
     configurationRequests: async () => [...new Set((await Promise.all(workers.map((worker) => worker.getConfigurationFileRequests()))).flat())],
+    dependencyRequests: async () => [...new Set((await Promise.all(workers.map((worker) => worker.getDependencyFileRequests()))).flat())],
     configurationDiagnostics: async () => [...new Map((await Promise.all(workers.map((worker) => worker.getConfigurationDiagnostics()))).flat().map((issue) => [`${issue.path}:${issue.message}`, issue])).values()],
     addConfigurationFiles: async (files) => {
       const extras = Object.entries(typescriptServices.typescriptDefaults.getExtraLibs()).map(([filePath, entry]) => ({ filePath, content: entry.content }));

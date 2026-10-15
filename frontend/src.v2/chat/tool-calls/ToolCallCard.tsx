@@ -325,7 +325,7 @@ export const ToolCallCard = memo(({
               <div className="flex items-center pt-1 px-3.5 pb-0 gap-2 text-[var(--text-muted)] text-xs">
                 <span className="flex-1 min-w-0 font-semibold">Diff</span>
               </div>
-              <InlineDiff patch={record.diff.patch} contextLines={1} />
+              <InlineDiff patch={record.diff.patch} contextLines={1} filePath={record.diff.files?.[0]?.path} readingKey={`tool:${record.id}:diff`} />
             </>
           )}
           <div className="grid gap-2 p-2.5 px-3.5 font-ui text-sm text-[var(--text-secondary)] whitespace-pre-wrap break-words">

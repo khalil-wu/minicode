@@ -10,9 +10,9 @@ if (process.env.MINICODE_VIEWPORT_TEST_CHILD === "1") {
   const browser = require("./embedded-browser-manager");
   app.whenReady().then(async () => {
     const window = new BrowserWindow({ width: 1200, height: 950, show: false });
-    browser.init({ getMainWindow: () => window });
+    browser.init({ getWindowByInstanceId: () => window });
     try {
-      await browser.create({ id: "viewport-test", conversationId: "viewport-owner", url: "about:blank" });
+      await browser.create({ id: "viewport-test", conversationId: "viewport-owner", url: "about:blank", window_instance_id: "fixture-window" });
       const guests = webContents.getAllWebContents().filter((item) => item.id !== window.webContents.id);
       assert.equal(guests.length, 1);
       const guest = guests[0];
@@ -20,12 +20,12 @@ if (process.env.MINICODE_VIEWPORT_TEST_CHILD === "1") {
       await guest.executeJavaScript('document.head.innerHTML = \'<meta name="viewport" content="width=device-width, initial-scale=1">\';');
       const metrics = (width) => guest.executeJavaScript('new Promise(resolve => { const started = Date.now(); const read = () => { const value = { width: innerWidth, height: innerHeight, mobile: matchMedia("(max-width: 500px)").matches }; if (value.width === ' + width + ' || Date.now() - started > 1500) resolve(value); else setTimeout(read, 10); }; read(); })');
       const bounds = { id: "viewport-test", conversationId: "viewport-owner", x: 0, y: 0, width: 900, height: 850 };
-      browser.activate("viewport-test", "viewport-owner");
-      browser.setBounds({ ...bounds, viewport: { width: 390, height: 844, mobile: true } });
+      browser.activate("viewport-test", "viewport-owner", "fixture-window");
+      browser.setBounds({ ...bounds, viewport: { width: 390, height: 844, mobile: true }, window_instance_id: "fixture-window" });
       assert.deepEqual(await metrics(390), { width: 390, height: 844, mobile: true });
-      browser.setBounds({ ...bounds, viewport: { width: 844, height: 390, mobile: true } });
+      browser.setBounds({ ...bounds, viewport: { width: 844, height: 390, mobile: true }, window_instance_id: "fixture-window" });
       assert.deepEqual(await metrics(844), { width: 844, height: 390, mobile: false });
-      browser.setBounds({ ...bounds, viewport: null });
+      browser.setBounds({ ...bounds, viewport: null, window_instance_id: "fixture-window" });
       assert.deepEqual(await metrics(900), { width: 900, height: 850, mobile: false });
       process.stdout.write("Real Electron viewport, rotation and reset passed.\n");
       browser.disposeAll(); window.destroy(); app.exit(0);

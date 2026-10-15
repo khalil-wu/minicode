@@ -127,6 +127,15 @@
 
 /* Application chrome and left navigation */
 
+.mc-desktop-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-header);
+  pointer-events: none;
+  box-shadow: var(--desktop-edge-glow);
+}
+
 .header-bar {
   min-height: var(--header-height) !important;
   height: var(--header-height) !important;
@@ -227,7 +236,7 @@
   padding: 8px 2px 10px !important;
 }
 
-.mc-sidebar-left :where(
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) :where(
   .mc-workspace-group-toggle,
   section[aria-label] > button,
   .session-row-hover,
@@ -239,14 +248,14 @@
   line-height: 1.35 !important;
 }
 
-.mc-sidebar-left :where(.mc-workspace-group-toggle, section[aria-label] > button) {
+:is(.mc-sidebar-left, .mc-sidebar-sort-overlay) :where(.mc-workspace-group-toggle, section[aria-label] > button) {
   min-height: 32px !important;
   border-radius: var(--mc-control-radius) !important;
   color: var(--text-secondary) !important;
   font-weight: var(--fw-regular) !important;
 }
 
-.mc-sidebar-left :where(.mc-workspace-group-toggle, section[aria-label] > button):hover {
+:is(.mc-sidebar-left, .mc-sidebar-sort-overlay) :where(.mc-workspace-group-toggle, section[aria-label] > button):hover {
   background: var(--surface-hover) !important;
   color: var(--text-primary) !important;
 }
@@ -261,36 +270,36 @@
   font-weight: var(--fw-regular) !important;
 }
 
-.mc-sidebar-left :where(.session-meta-line, time, small) {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) :where(.session-meta-line, time, small) {
   font-size: var(--mc-font-caption) !important;
 }
 
-.mc-sidebar-left .session-row-hover {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover {
   min-height: var(--mc-sidebar-row-height) !important;
   border: 1px solid transparent !important;
   border-radius: var(--radius-sm) !important;
 }
 
-.mc-sidebar-left .session-row-hover:hover {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover:hover {
   background: var(--workbench-hover) !important;
 }
 
 /* Active session stays neutral so the task list reads as one flat surface. */
-.mc-sidebar-left .session-row-hover[data-active] {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover[data-active] {
   border-color: transparent !important;
   background: var(--workbench-active) !important;
   box-shadow: none !important;
 }
 
-.mc-sidebar-left .session-row-hover :where(button, span) {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover :where(button, span) {
   font-family: var(--font-ui) !important;
 }
 
-.mc-sidebar-left .session-row-hover > button > span {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover > button > span {
   font-size: var(--mc-font-secondary) !important;
 }
 
-.mc-sidebar-left input {
+:is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) input {
   background: var(--surface-base) !important;
   font-size: var(--mc-font-secondary) !important;
 }
@@ -778,31 +787,6 @@
 }
 
 .composer-floating-model-icon { display: none; }
-#root .workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) {
-  min-height: 54px;
-  padding: 8px 12px !important;
-  border-radius: var(--radius-full) !important;
-}
-.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-textarea-frame {
-  position: absolute;
-  top: 16px;
-  left: 44px;
-  right: 122px;
-  padding: 0;
-  min-height: 22px;
-}
-#root .workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-textarea {
-  min-height: 22px !important;
-  height: 22px;
-  max-height: 22px;
-}
-.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) :is(.composer-context-usage, .composer-permission-btn > .composer-control-label, .composer-permission-btn > svg:last-child, .composer-model-select:not([data-reasoning-supported="true"]) > span:not(.composer-floating-model-icon), .composer-model-select:not([data-reasoning-supported="true"]) > svg) { display: none; }
-.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-permission-picker {
-  position: absolute;
-  right: 78px;
-}
-.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-floating-model-icon { display: inline-flex; }
-.workbench-primary[data-floating="true"] .composer-container[data-empty="true"]:not(:focus-within) .composer-footer { padding-top: 0 !important; }
 
 @keyframes mc-dropdown-enter {
   from { opacity: 0; transform: translateY(4px) scale(0.99); }
@@ -1101,10 +1085,9 @@
   background: transparent;
 }
 
-/* Conversation and process output use overlay-like rails: no permanent gray
-   gutter, no native arrow buttons, and a narrow thumb only while interacting.
-   同上：这里不能声明 scrollbar-width/-color，否则下面这整条伪元素链会被
-   标准滚动条路径顶掉，thumb 圆角失效、退回方角灰条。 */
+/* Bounded process output keeps its scroll affordance visible. Only the main
+   transcript hides its thumb while idle. Chromium's standard scrollbar
+   properties must stay unset so these rounded pseudo-elements remain active. */
 #root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar,
 #root :where(
   .exec-cell-output-pre,
@@ -1151,26 +1134,16 @@
   min-height: 36px;
   border: 1px solid transparent;
   border-radius: var(--radius-full);
-  background: transparent;
+  background: color-mix(in oklch, var(--text-primary) 24%, transparent);
   background-clip: padding-box;
 }
 
-/* hover 显形只由下面的伪元素规则负责。曾经这里还有一条 :hover 设
-   scrollbar-color，那会让元素在 hover 瞬间切到标准滚动条路径 —— 表现为「鼠标
-   一碰圆角就变方角」。 */
+#root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
 #root .message-list-scroll.chat-scrollbar-auto-hide:hover::-webkit-scrollbar-thumb,
-#root .message-list-scroll.chat-scrollbar-auto-hide.is-scrolling::-webkit-scrollbar-thumb,
-#root :where(
-  .exec-cell-output-pre,
-  .activity-cell-inline-output,
-  .activity-cell-browser-detail-card,
-  .activity-cell-change-card .inline-diff,
-  .agent-loop-timeline-group-items,
-  .activity-cell-output-pre,
-  .activity-cell-error-pre,
-  .error-cell-message,
-  .agent-loop-shell-output,
-):hover::-webkit-scrollbar-thumb {
+#root .message-list-scroll.chat-scrollbar-auto-hide.is-scrolling::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--text-primary) 24%, transparent);
   background-clip: padding-box;
 }

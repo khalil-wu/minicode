@@ -1,7 +1,8 @@
 import type { CSSProperties } from "react";
 import type { PanelKind } from "../stores/types";
+import { useI18n, type TranslationKey } from "../i18n";
 
-const PANEL_KIND_LABELS: Record<PanelKind, string> = {
+const PANEL_KIND_LABELS: Record<PanelKind | "browser" | "diagnostics", TranslationKey | "Diff"> = {
   chat: "对话",
   diff: "Diff",
   editor: "编辑器",
@@ -12,10 +13,15 @@ const PANEL_KIND_LABELS: Record<PanelKind, string> = {
   subagents: "子智能体",
   artifacts: "产物",
   inspector: "运行详情",
+  browser: "浏览器",
+  diagnostics: "运行状态",
 };
 
-export const PanelSkeleton = ({ kind }: { kind: PanelKind }) => (
-  <div style={shellStyle} aria-label={`正在加载${PANEL_KIND_LABELS[kind]}面板`}>
+export const PanelSkeleton = ({ kind }: { kind: PanelKind | "browser" | "diagnostics" }) => {
+  const { t: tr } = useI18n();
+  const label = PANEL_KIND_LABELS[kind];
+  return (
+  <div style={shellStyle} aria-label={tr("正在加载{label}面板", { label: label === "Diff" ? label : tr(label) })}>
     <div style={toolbarStyle}>
       <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 82 }} />
       <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 38 }} />
@@ -30,6 +36,7 @@ export const PanelSkeleton = ({ kind }: { kind: PanelKind }) => (
     </div>
   </div>
 );
+};
 
 const shimmer: CSSProperties = {
   background:

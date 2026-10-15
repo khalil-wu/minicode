@@ -29,10 +29,9 @@ def _availability(
     return payload
 
 
-_REVIEW_PROMPT = (
-    "Review the current code changes (staged, unstaged, and untracked files) "
-    "and provide prioritized findings."
-)
+from backend.services.code_review_service import review_template_prompt
+
+_REVIEW_PROMPT = review_template_prompt()
 
 _INIT_PROMPT = """Generate a file named .minicode/INSTRUCTIONS.md that serves as a contributor guide for this repository.
 Before writing, check whether .minicode/INSTRUCTIONS.md already exists. If it does, do not overwrite or modify it.
@@ -135,6 +134,15 @@ _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "conversation.goal.set",
         "label": "conversation.goal.set",
         "description": "Set, inspect, pause, resume, or clear the active conversation goal.",
+        "type": "protocol",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="websocket"),
+    },
+    {
+        "name": "conversation.agent_mode.set",
+        "label": "conversation.agent_mode.set",
+        "description": "Update this conversation's interaction mode independently of permissions.",
         "type": "protocol",
         "source": "builtin",
         "enabled": True,
@@ -248,7 +256,7 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "review",
         "command": "review",
         "label": "/review",
-        "description": "审查当前项目并按严重级别列出问题",
+        "description": "审查未提交的更改，或与某个分支进行比较",
         "template": _REVIEW_PROMPT,
         "search_text": "review audit code quality bug risk",
         "type": "template",
@@ -440,6 +448,20 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "source": "builtin",
         "enabled": True,
         "availability": _availability(scope="session"),
+    },
+    {
+        "id": "cmd-approve-local",
+        "name": "approve",
+        "command": "approve",
+        "label": "/approve",
+        "description": "Approve a recent auto-review denial",
+        "template": "/approve",
+        "search_text": "local guardian approve denied auto-review retry",
+        "type": "local",
+        "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="conversation"),
     },
     {
         "id": "cmd-compact-local",

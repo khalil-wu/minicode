@@ -704,7 +704,16 @@ async def _handle_resume(
     return True, ""
 
 
+async def _handle_guardian_approve(ws: "WebSocketSession", arg: str, attachments: Any) -> tuple[bool, str]:
+    _ = arg, attachments
+    # The Source command opens an owned denial selector. Text alone supplies
+    # no selected action and never creates a manual authorization.
+    await ws.emit_command_result("approve", "Select an auto-review denial to approve one retry. The retry will still go through auto-review.")
+    return True, ""
+
+
 _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
+    "approve": _handle_guardian_approve,
     "export": _handle_conversation_export,
     "plan": _handle_plan,
     "new": _handle_new,
@@ -864,12 +873,31 @@ def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
     return _handler
 
 
+async def _handle_code_review(ws: "WebSocketSession", arg: str, attachments: Any) -> tuple[bool, str]:
+    from backend.async_cleanup import to_thread_cancel_safe
+    from backend.services.code_review_service import prepare_code_review
+
+    owner_id = _active_conversation_id(ws)
+    owner = ws.conversation_repo.get_conversation_summary(owner_id)
+    cwd = ws.session_lifecycle.workspace_root_for_conversation(owner)
+    if cwd is None:
+        raise ValueError("Open a Git workspace before starting code review.")
+    target, _, branch = arg.strip().partition(" ")
+    mode = "base-branch" if target == "base-branch" else "uncommitted"
+    request = f"Please review my uncommitted changes\n\n{arg.strip()}" if arg.strip() and target not in {"uncommitted", "base-branch"} else ""
+    prepared = await to_thread_cancel_safe(prepare_code_review, cwd, mode, branch.strip() if mode == "base-branch" else "", "", request)
+    await ws.emit_command_result("review", "Code review request prepared.", data={"code_review": prepared["scope"]})
+    return False, prepared["prompt"]
+
+
 def build_slash_command_handler(entry: dict[str, Any]) -> SlashHandler | None:
     """Prepare one captured catalog entry without publishing another registry."""
     command_name = str(entry.get("command", "")).strip().lower()
     if not command_name or not bool(entry.get("enabled", True)):
         return None
     command_type = str(entry.get("type", "")).strip().lower()
+    if command_name == "review" and entry.get("source") == "builtin":
+        return _handle_code_review
     if command_type == "local":
         return _build_local_handler(command_name)
     if command_type == "template":

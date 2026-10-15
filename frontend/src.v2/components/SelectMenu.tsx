@@ -24,6 +24,7 @@ type SelectMenuProps = {
   style?: CSSProperties;
   menuMaxHeight?: number;
   align?: "start" | "end";
+  renderOptionIcon?: (value: string) => ReactNode;
 };
 
 const nodeText = (node: ReactNode): string => Children.toArray(node)
@@ -65,6 +66,7 @@ export const SelectMenu = ({
   style,
   menuMaxHeight = 280,
   align = "start",
+  renderOptionIcon,
 }: SelectMenuProps) => {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 0, maxHeight: menuMaxHeight, above: false });
@@ -73,6 +75,7 @@ export const SelectMenu = ({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const options = useMemo(() => optionsFromChildren(children), [children]);
+  const settingsSelect = className.split(/\s+/).includes("settings-select");
   const selected = options.find((option) => option.value === value);
   const enabledOptions = options.filter((option) => !option.disabled);
 
@@ -103,22 +106,26 @@ export const SelectMenu = ({
     const place = () => {
       const rect = triggerRef.current!.getBoundingClientRect();
       const menu = menuRef.current!;
+      const sideOffset = settingsSelect ? 2 : 6;
       const height = Math.min(menu.scrollHeight, menuMaxHeight);
       const below = window.innerHeight - rect.bottom - 14;
       const above = rect.top - 14;
       const useAbove = below < height && above > below;
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
-      const width = Math.min(Math.max(rect.width, 220), window.innerWidth - 16);
+      // The portal keeps its intrinsic content width. A short trigger must not
+      // constrain longer options, and a long label wraps only at the viewport.
+      const minWidth = Math.min(Math.max(rect.width, 220), window.innerWidth - 16);
+      const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
       setPosition({ left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
-        top: useAbove ? rect.top - 6 - Math.min(menu.scrollHeight, maxHeight) : rect.bottom + 6,
-        width, maxHeight, above: useAbove });
+        top: useAbove ? rect.top - sideOffset - Math.min(menu.scrollHeight, maxHeight) : rect.bottom + sideOffset,
+        width: minWidth, maxHeight, above: useAbove });
     };
     place();
     const observer = new ResizeObserver(place);
     observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
     return () => observer.disconnect();
-  }, [open, menuMaxHeight, options, align]);
+  }, [open, menuMaxHeight, options, align, settingsSelect]);
 
   useEffect(() => {
     if (!open) return;
@@ -216,7 +223,10 @@ export const SelectMenu = ({
         onClick={() => open ? setOpen(false) : openMenu()}
         onKeyDown={handleTriggerKeyDown}
       >
-        <span>{selected?.label || "请选择"}</span>
+        <span className="mc-select-trigger-value">
+          {selected && renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(selected.value)}</span>}
+          <span className="mc-select-trigger-label">{selected?.label || "请选择"}</span>
+        </span>
         <ChevronDown size={15} aria-hidden="true" />
       </button>
       {open && createPortal(
@@ -227,7 +237,8 @@ export const SelectMenu = ({
           aria-label={ariaLabel}
           className={`mc-select-popover${className.split(/\s+/).includes("mc-select-menu-mono") ? " mc-select-menu-mono" : ""}`}
           data-placement={position.above ? "top" : "bottom"}
-          style={{ left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight }}
+          data-settings-select={settingsSelect ? "true" : undefined}
+          style={{ left: position.left, top: position.top, minWidth: position.width, maxHeight: position.maxHeight }}
         >
           {options.map((option) => {
             const showGroup = Boolean(option.group && option.group !== previousGroup);
@@ -249,7 +260,10 @@ export const SelectMenu = ({
                   onKeyDown={(event) => handleOptionKeyDown(event, option)}
                 >
                   <span className="mc-select-check" data-visible={active ? "true" : "false"}><Check size={14} /></span>
-                  <span className="mc-select-option-label">{option.label}</span>
+                  <span className="mc-select-option-content">
+                    {renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(option.value)}</span>}
+                    <span className="mc-select-option-label">{option.label}</span>
+                  </span>
                 </button>
               </div>
             );

@@ -88,6 +88,14 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     case "conversation.compaction.updated": {
       const ev = e as ConversationCompactionUpdatedEvent;
       const targetId = ev.conversation_id;
+      if (!ev.compaction_item_id) {
+      s.upsertSystemMessage("system-compact-status", ev.state === "failed" ? ev.summary : "", {
+        conversationId: targetId,
+        title: ev.state === "compacting" ? "正在压缩上下文" : ev.state === "failed" ? "压缩失败" : "上下文已压缩",
+        processing: ev.state === "compacting",
+        failureMessage: ev.state === "failed" ? ev.summary : undefined,
+      });
+      }
       useAppStore.setState((state) => ({
         conversations: state.conversations.map((conversation) =>
           conversation.id === targetId
@@ -99,7 +107,7 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
             : conversation,
         ),
       }));
-      if (targetId !== useAppStore.getState().conversationId) return true;
+      if (ev.state !== "compacted" || targetId !== useAppStore.getState().conversationId) return true;
       const currentUsage = useAppStore.getState().contextUsage;
       s.setContextUsage({
         used: currentUsage?.used ?? 0,
@@ -122,6 +130,8 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
                 summary: ev.summary,
                 title: ev.title,
                 updatedAt: ev.updated_at,
+                ...(ev.has_unread_turn !== undefined ? { hasUnreadTurn: ev.has_unread_turn } : {}),
+                ...(ev.thread_source !== undefined ? { threadSource: ev.thread_source } : {}),
                 ...(incomingRevision !== undefined ? { revision: incomingRevision } : {}),
                 memoryMode: ev.memory_mode,
                 memoryPolluted: ev.memory_polluted,

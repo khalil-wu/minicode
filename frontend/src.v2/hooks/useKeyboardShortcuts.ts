@@ -38,7 +38,7 @@ export const useKeyboardShortcuts = () => {
       if (mod && !e.altKey && ["=", "+", "-", "0"].includes(e.key)) return;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {
-        s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
+        s.createConversation({ appMode: "cowork", bindWorkspace: s.appMode === "code" && Boolean(s.workingDirectory) });
       };
       const match = (action: ShortcutActionId) => matchesShortcut(e, s.shortcutBindings[action]);
       const modalOpen = isTopLevelModalOpen(s);

@@ -164,8 +164,12 @@ async def terminate_process_tree(
                     proc.kill()
         elif os.name == "nt":
             def kill_windows_tree() -> bool:
-                if not psutil.pid_exists(pid):
+                try:
+                    parent = psutil.Process(pid)
+                except psutil.NoSuchProcess:
                     return True
+                descendants = parent.children(recursive=True)
+                owned_tree = [*descendants, parent]
                 taskkill_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 try:
                     completed = subprocess.run(
@@ -178,22 +182,21 @@ async def terminate_process_tree(
                         creationflags=taskkill_flags,
                     )
                     if completed.returncode == 0:
-                        return True
+                        # ConPTY can retain descendants after the wrapper's
+                        # taskkill reports success. Prove exit for the captured
+                        # process identities before releasing their owner.
+                        _, alive = psutil.wait_procs(owned_tree, timeout=3.0)
+                        if not alive:
+                            return True
                 except (OSError, subprocess.TimeoutExpired):
                     pass
 
-                # Use a platform-native process-tree fallback after taskkill
-                # cannot reap the owner, retaining support for stripped-down
-                # hosts and transient taskkill failures.
-                try:
-                    parent = psutil.Process(pid)
-                except psutil.NoSuchProcess:
-                    return True
-                descendants = parent.children(recursive=True)
+                # Keep the original identities: an exited wrapper no longer
+                # supplies a process tree, and its PID can be reused.
                 for process in [*reversed(descendants), parent]:
                     with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                         process.kill()
-                _, alive = psutil.wait_procs([*descendants, parent], timeout=3.0)
+                _, alive = psutil.wait_procs(owned_tree, timeout=3.0)
                 return not alive
 
             tree_reaped = await asyncio.to_thread(kill_windows_tree)

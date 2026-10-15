@@ -21,6 +21,7 @@ type MenuState = { kind: "add" | "skill"; position: { x: number; y: number }; it
 export const SkillsMarketplace = () => {
   const open = useAppStore((s) => s.skillsMarketplaceOpen);
   const tab = useAppStore((s) => s.skillsMarketplaceTab);
+  const leftSidebarVisible = useAppStore(state => state.leftSidebarWidth > 0);
   const returnTarget = useAppStore((s) => s.skillsMarketplaceReturnTarget);
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
   const pageRef = useRef<HTMLElement>(null);
@@ -44,8 +45,8 @@ export const SkillsMarketplace = () => {
       event.preventDefault(); event.stopPropagation(); close();
     }}>
     <header className="skills-workspace-toolbar">
-      <button type="button" className="skills-icon-button" onClick={close} aria-label={returnTarget === "settings" ? "返回技能设置" : "返回应用"}><ArrowLeft /></button>
-      <div className="skills-product-tabs" role="tablist" aria-label="扩展" onKeyDown={(event) => {
+      <button type="button" className="skills-icon-button" hidden={leftSidebarVisible && returnTarget !== "settings"} onClick={close} aria-label={returnTarget === "settings" ? "返回技能设置" : "返回应用"}><ArrowLeft /></button>
+      <div data-sidebar-visible={leftSidebarVisible} className="skills-product-tabs" role="tablist" aria-label="扩展" onKeyDown={(event) => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();
         const next = event.key === "Home" ? "plugins" : event.key === "End" ? "skills" : tab === "plugins" ? "skills" : "plugins";

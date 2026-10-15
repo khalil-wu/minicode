@@ -1,27 +1,20 @@
-"""Deferred tool discovery bridge.
-
-Core tools stay directly visible to the model. Optional or connector tools are
-searched and invoked through this small bridge so the live registry remains the
-single source of truth.
-"""
-
+"""Codex's deferred BM25 discovery and native tool-search result contract."""
 from __future__ import annotations
 
+from collections import Counter
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 import json
 import math
-import re
-import html
-from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from backend.tools.catalog import BRIDGE_TOOL_NAMES
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.catalog import BRIDGE_TOOL_NAMES
 from backend.tools.contracts import ToolSpec
+from backend.tools.source_search_tokenizer import tokenize as _tokenize
 
-
-TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\.\u4e00-\u9fff]+")
-SELECT_PREFIX_RE = re.compile(r"^\s*select\s*:\s*(?P<names>.+?)\s*$", re.IGNORECASE)
-DEFAULT_DEFERRED_TOOL_PROMPT_LIMIT = 80
+TOOL_SEARCH_DEFAULT_LIMIT = 8
+MAX_TOOL_SEARCH_SOURCE_DESCRIPTION_BYTES = 512 * 1024
 DEFAULT_DEFERRED_CATALOG_SCOPE = "default"
 
 
@@ -30,59 +23,34 @@ class DeferredToolEntry:
     name: str
     description: str
     tokens: list[str] = field(default_factory=list)
+    code_mode_available: bool = True
 
 
-def _tokenize(text: str) -> list[str]:
-    tokens: list[str] = []
-    for raw in TOKEN_RE.findall(text.lower()):
-        tokens.extend(part for part in re.split(r"[_\-.]+", raw) if part)
-    return tokens
-
-
-def _bm25_score(
-    query_tokens: list[str],
-    doc_tokens: list[str],
-    doc_freq: dict[str, int],
-    avg_dl: float,
-    doc_count: int,
-) -> float:
-    if not query_tokens or not doc_tokens:
-        return 0.0
-    tf: dict[str, int] = {}
-    for token in doc_tokens:
-        tf[token] = tf.get(token, 0) + 1
+def _bm25_score(query_tokens: list[str], doc_tokens: list[str], doc_freq: dict[str, int],
+                avg_dl: float, doc_count: int) -> float:
+    # bm25 2.3.2 EmbedderBuilder + Scorer, with the English fitted corpus.
+    tf = Counter(doc_tokens)
+    avg_dl = avg_dl if avg_dl > 0 else 256.0
     score = 0.0
-    k1 = 1.5
-    b = 0.75
-    dl = len(doc_tokens)
     for token in query_tokens:
-        freq = tf.get(token, 0)
-        if not freq:
-            continue
-        df = doc_freq.get(token, 0)
-        idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
-        norm = freq * (k1 + 1) / (freq + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
-        score += idf * norm
+        freq = tf[token]
+        if freq:
+            df = doc_freq[token]
+            idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+            score += idf * freq * 2.2 / (freq + 1.2 * (0.25 + 0.75 * len(doc_tokens) / avg_dl))
     return score
 
 
 class DeferredToolCatalog:
-    def __init__(
-        self,
-        registry: Any,
-        *,
-        toolset_policy: Any | None = None,
-        permission_checker: Any | None = None,
-        permission_context: Any | None = None,
-        scope: str = DEFAULT_DEFERRED_CATALOG_SCOPE,
-    ) -> None:
+    def __init__(self, registry: Any, *, toolset_policy: Any | None = None,
+                 permission_checker: Any | None = None, permission_context: Any | None = None,
+                 scope: str = DEFAULT_DEFERRED_CATALOG_SCOPE) -> None:
         self.registry = registry
         self.toolset_policy = toolset_policy
         self.permission_checker = permission_checker
         self.permission_context = permission_context
-        self.scope = str(scope or DEFAULT_DEFERRED_CATALOG_SCOPE).strip() or DEFAULT_DEFERRED_CATALOG_SCOPE
+        self.scope = scope
         self._entries_cache: list[DeferredToolEntry] | None = None
-        self._direct_names: set[str] = set()
         self._doc_freq: dict[str, int] = {}
         self._avg_dl = 0.0
 
@@ -92,203 +60,32 @@ class DeferredToolCatalog:
             for entry in self._entries_cache:
                 for token in set(entry.tokens):
                     self._doc_freq[token] = self._doc_freq.get(token, 0) + 1
-            self._avg_dl = sum(len(entry.tokens) for entry in self._entries_cache) / max(len(self._entries_cache), 1)
+            if self._entries_cache:
+                self._avg_dl = sum(len(entry.tokens) for entry in self._entries_cache) / len(self._entries_cache)
         return list(self._entries_cache)
 
     def _build_entries(self) -> list[DeferredToolEntry]:
-        # ToolSchemaView is the only authority for deferred visibility.
-        build_views = getattr(self.registry, "build_schema_views", None)
-        if not callable(build_views):
-            raise TypeError("DeferredToolCatalog requires ToolRegistry.build_schema_views")
-        entries: list[DeferredToolEntry] = []
-        for view in build_views(
-            toolset_policy=self.toolset_policy,
-            permission_checker=self.permission_checker,
-            permission_context=self.permission_context,
-            materialize_schema=False,
-        ):
-            if view.direct and view.exposure != "hidden" and view.name not in BRIDGE_TOOL_NAMES:
-                self._direct_names.add(view.name)
-            if view.name in BRIDGE_TOOL_NAMES:
+        entries = []
+        for view in self.registry.build_schema_views(toolset_policy=self.toolset_policy,
+                permission_checker=self.permission_checker, permission_context=self.permission_context,
+                materialize_schema=False):
+            if (view.name in BRIDGE_TOOL_NAMES or view.exposure not in {"deferred", "deferred_model_only"}
+                    or not view.schema_available or not deferred_catalog_scope_allows(view.runtime_metadata, self.scope)):
                 continue
-            if (
-                view.exposure not in {"deferred", "deferred_model_only"}
-                or view.direct
-                or not bool(getattr(view, "schema_available", False))
-            ):
-                continue
-            meta = view.runtime_metadata or {}
-            if not deferred_catalog_scope_allows(meta, self.scope):
-                continue
-            catalog_text = str(getattr(view, "catalog_text", "") or "")
-            entry = DeferredToolEntry(
-                name=str(view.name),
-                description=str(getattr(view, "short_description", "") or catalog_text or view.name),
-            )
-            hint = (view.search_hint or "").strip()
-            entry.tokens = _tokenize(catalog_text + (" " + hint if hint else ""))
-            entries.append(entry)
+            entries.append(DeferredToolEntry(name=view.name, description=view.short_description,
+                tokens=_tokenize(view.catalog_text), code_mode_available=view.code_mode_available))
         return entries
 
-    def search(self, query: str, limit: int) -> list[DeferredToolEntry]:
-        catalog = self.entries()
-        selected = self._select_entries(query, catalog, limit)
-        if selected is not None:
-            return selected
-
+    def search(self, query: str, limit: int, *, nested: bool = False) -> list[DeferredToolEntry]:
+        entries = self.entries()
         query_tokens = _tokenize(query)
-        if not catalog or not query_tokens:
-            return []
-
-        scored: list[tuple[float, DeferredToolEntry]] = []
-        for entry in catalog:
-            score = _bm25_score(query_tokens, entry.tokens, self._doc_freq, self._avg_dl, len(catalog))
-            name_lower = entry.name.lower()
-            query_lower = query.lower()
-            if query_lower and query_lower in name_lower:
-                score += 3.0
-            if all(token in entry.tokens for token in query_tokens):
-                score += 1.0
-            if score > 0:
-                scored.append((score, entry))
-
-        scored.sort(key=lambda item: (-item[0], item[1].name))
-        return [entry for _, entry in scored[:limit]]
+        scored = [(_bm25_score(query_tokens, entry.tokens, self._doc_freq, self._avg_dl, len(entries)), entry)
+                  for entry in entries if not nested or entry.code_mode_available]
+        scored.sort(key=lambda item: -item[0])
+        return [entry for score, entry in scored if score > 0][:limit]
 
     def get(self, name: str) -> DeferredToolEntry | None:
-        for entry in self.entries():
-            if entry.name == name:
-                return entry
-        return None
-
-    def directly_visible_names(self) -> set[str]:
-        """Return directly visible names from the canonical schema view."""
-        self.entries()
-        return set(self._direct_names)
-
-    def select_names(self, query: str, limit: int) -> list[str] | None:
-        """Resolve exact/bare selection, including already-direct tools.
-
-        None means the input is a keyword query and should use BM25. An
-        explicit select: with no matches returns [] so callers can preserve
-        the canonical no-match response.
-        """
-        match = SELECT_PREFIX_RE.match(query)
-        raw_names = match.group("names") if match else query.strip()
-        names = [part.strip() for part in re.split(r"[,\n]+", raw_names) if part.strip()]
-        if not names:
-            return [] if match else None
-
-        deferred = {entry.name for entry in self.entries()}
-        direct = self.directly_visible_names()
-        by_lower = {name.lower(): name for name in (*deferred, *direct)}
-        selected: list[str] = []
-        seen: set[str] = set()
-        for requested in names:
-            resolved = by_lower.get(requested.lower())
-            if resolved is None or resolved in seen:
-                continue
-            selected.append(resolved)
-            seen.add(resolved)
-            if len(selected) >= limit:
-                break
-        if selected:
-            return selected
-        return [] if match else None
-
-    def _select_entries(
-        self,
-        query: str,
-        catalog: list[DeferredToolEntry],
-        limit: int,
-    ) -> list[DeferredToolEntry] | None:
-        """Return exact select: matches, or None when query is not selection.
-
-        MiniCode's ``select:name,name`` form performs exact deferred-tool
-        selection. Matching is forgiving about case and comma/space separators
-        so a model can reuse a tool name from a previous turn without paying a
-        search round trip.
-        """
-        names: list[str]
-        match = SELECT_PREFIX_RE.match(query)
-        if match:
-            raw_names = match.group("names")
-            names = [part.strip() for part in re.split(r"[,\n]+", raw_names) if part.strip()]
-        else:
-            names = [query.strip()]
-
-        if not names:
-            return [] if match else None
-
-        by_exact = {entry.name: entry for entry in catalog}
-        by_lower = {entry.name.lower(): entry for entry in catalog}
-        selected: list[DeferredToolEntry] = []
-        seen: set[str] = set()
-        for name in names:
-            entry = by_exact.get(name) or by_lower.get(name.lower())
-            if entry is None:
-                if not match:
-                    return None
-                continue
-            if entry.name in seen:
-                continue
-            selected.append(entry)
-            seen.add(entry.name)
-            if len(selected) >= limit:
-                break
-
-        if selected:
-            return selected
-        return [] if match else None
-
-
-def build_deferred_tools_prompt_block(
-    registry: Any,
-    *,
-    toolset_policy: Any | None = None,
-    permission_checker: Any | None = None,
-    permission_context: Any | None = None,
-    scope: str = DEFAULT_DEFERRED_CATALOG_SCOPE,
-    limit: int = DEFAULT_DEFERRED_TOOL_PROMPT_LIMIT,
-    schema_views: list[Any] | None = None,
-) -> str:
-    """Return a cc-style lightweight directory of deferred tool names.
-
-    The model needs the names to use ``select:tool_name`` without a keyword
-    discovery round trip, but it must not pay for full JSON schemas until a
-    deferred tool is actually selected. This block intentionally contains names
-    only; search hints, descriptions, and schemas stay behind tool_search until
-    a selected tool is activated for the next model iteration.
-    """
-    views = schema_views if schema_views is not None else registry.build_schema_views(
-        toolset_policy=toolset_policy or _toolset_policy_for_context(permission_context),
-        permission_checker=permission_checker,
-        permission_context=permission_context,
-        materialize_schema=False,
-    )
-    # A names-only directory does not need a tokenized BM25 index. The search
-    # tool builds its index only when an actual discovery request arrives.
-    names = sorted({
-        view.name for view in views
-        if view.name not in BRIDGE_TOOL_NAMES
-        and view.exposure in {"deferred", "deferred_model_only"}
-        and not view.direct and view.schema_available
-        and deferred_catalog_scope_allows(view.runtime_metadata, scope)
-    })
-    if not names:
-        return ""
-    safe_limit = max(1, min(int(limit or DEFAULT_DEFERRED_TOOL_PROMPT_LIMIT), 200))
-    shown = names[:safe_limit]
-    lines = [html.escape(name, quote=False) for name in shown]
-    if len(names) > len(shown):
-        lines.append(
-            f"... {len(names) - len(shown)} more deferred tools; use tool_search keywords."
-        )
-    return (
-        f'<available-deferred-tools total="{len(names)}">\n'
-        + "\n".join(lines)
-        + "\n</available-deferred-tools>"
-    )
+        return next((entry for entry in self.entries() if entry.name == name), None)
 
 
 def deferred_catalog_scope_allows(metadata: dict[str, Any], scope: str) -> bool:
@@ -296,19 +93,41 @@ def deferred_catalog_scope_allows(metadata: dict[str, Any], scope: str) -> bool:
     if isinstance(raw, str):
         scopes = {part.strip() for part in raw.split(",") if part.strip()}
     elif isinstance(raw, (list, tuple, set, frozenset)):
-        scopes = {str(part).strip() for part in raw if str(part).strip()}
+        scopes = set(raw)
     else:
         scopes = {DEFAULT_DEFERRED_CATALOG_SCOPE}
     return "*" in scopes or scope in scopes
 
 
-def _toolset_policy_for_context(
-    permission_context: Any | None,
-    metadata: dict[str, Any] | None = None,
-) -> Any | None:
+def _toolset_policy_for_context(permission_context: Any | None, metadata: dict[str, Any] | None = None) -> Any:
     from backend.tools.toolset_runtime import resolve_context_toolset_policy
-
     return resolve_context_toolset_policy(permission_context, metadata)
+
+
+def _loadable_tools(registry: Any, entries: list[DeferredToolEntry], *, policy: Any,
+                    checker: Any, permission: Any) -> list[dict[str, Any]]:
+    namespaces: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        schema = registry.get_tool_schema(entry.name, toolset_policy=policy,
+            permission_checker=checker, permission_context=permission)
+        function = schema["function"]
+        runtime = registry.get_tool(entry.name)
+        from backend.mcp.registry import MCPToolProxy
+
+        namespace_name = runtime.model_namespace if isinstance(runtime, MCPToolProxy) else "functions"
+        name = runtime.model_tool_name if isinstance(runtime, MCPToolProxy) else entry.name
+        namespace = namespaces.setdefault(namespace_name, {"type": "namespace", "name": namespace_name,
+            "description": f"Tools in the {namespace_name} namespace.", "tools": []})
+        if "_minicode_freeform" in schema:
+            native = schema["_minicode_freeform"]
+            tool = {"type": "custom", "name": name, "description": native["description"],
+                    "format": deepcopy(native["format"]), "defer_loading": True}
+        else:
+            tool = {"type": "function", "name": name, "description": function["description"],
+                    "parameters": deepcopy(function["parameters"]), "strict": bool(function.get("strict", False)),
+                    "defer_loading": True}
+        namespace["tools"].append(tool)
+    return list(namespaces.values())
 
 
 class ToolSearchTool(BaseTool):
@@ -319,138 +138,99 @@ class ToolSearchTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Find tools"
     projection_visibility = "debug"
-    description = (
-        "Search deferred tools that are not directly listed in the current tool set. "
-        "When to use: the directly listed tools do not cover a needed capability such as browser/desktop control, document work, connector actions, optional MCP tools, or specialized workflows. "
-        "Use 'select:tool_name' for exact tools. Matching tools are activated for the next iteration; in code-only mode, call them through tool_exec."
-    )
-
-    def model_description(self) -> str:
-        return (
-            "Searches deferred tool metadata with BM25 and exposes matching tools "
-            "for the next model call. Search capability keywords, or use "
-            "'select:ToolName' for an exact tool named in <available-deferred-tools>. "
-            "Until fetched, a deferred tool cannot be invoked. "
-            "In code-only mode, call selected tools through tool_exec. "
-            "For MCP tool discovery, always use tool_search instead of "
-            "list_mcp_resources or list_mcp_resource_templates."
-        )
-
-    def model_schema(self) -> ToolSchema:
-        return ToolSchema(
-            name=self.name,
-            description=self.model_description(),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Tool name or keywords describing the capability needed."},
-                    "max_results": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Maximum number of results to return. Default: 5.",
-                    },
-                },
-                "required": ["query"],
-            },
-        )
+    description = "Searches over deferred tool metadata with BM25 and exposes matching tools for the next model call."
 
     def __init__(self, registry: Any | None = None) -> None:
         self._registry = registry
         self._catalog_key: Any = None
         self._catalog: DeferredToolCatalog | None = None
 
-    def get_spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            capability="tool.discovery",
-            toolset="core",
-            exposure="core",
-            required_args=("query",),
-        )
+    def model_description(self) -> str:
+        return self._description({})
+
+    def model_description_for_policy(self, policy: Any) -> str:
+        sources: dict[str, str | None] = {}
+        if self._registry is not None:
+            for runtime in self._registry.get_tools():
+                spec = self._registry.get_tool_spec(runtime.name)
+                if spec.exposure not in {"deferred", "deferred_model_only"} or not policy.is_available(spec):
+                    continue
+                source = getattr(runtime, "server_name", None)
+                if source is not None:
+                    sources.setdefault(source, None)
+        return self._description(sources)
+
+    @staticmethod
+    def _description(sources: dict[str, str | None]) -> str:
+        reserved = sum(2 + len(name.encode("utf-8")) for name in sources) + max(0, len(sources) - 1)
+        budget = max(0, MAX_TOOL_SEARCH_SOURCE_DESCRIPTION_BYTES - reserved)
+        lines: list[str] = []
+        used = 0
+        for name, description in sorted(sources.items()):
+            line = "- " + name
+            if used + len(line.encode("utf-8")) + bool(lines) > MAX_TOOL_SEARCH_SOURCE_DESCRIPTION_BYTES:
+                continue
+            if description is not None and budget >= 2:
+                bounded = description.encode("utf-8")[:budget - 2].decode("utf-8", errors="ignore")
+                line += ": " + bounded
+                budget -= 2 + len(bounded.encode("utf-8"))
+            used += len(line.encode("utf-8")) + bool(lines)
+            lines.append(line)
+        listing = "\n".join(lines) if lines else "None currently enabled."
+        return ("# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call."
+                "\n\nYou have access to tools from the following sources:\n" + listing + "\n"
+                "Some of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. "
+                "For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`.")
+
+    def model_schema(self) -> ToolSchema:
+        return self.get_schema()
 
     def get_schema(self) -> ToolSchema:
-        return ToolSchema(
-            name=self.name,
-            description=self.description,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Capability keywords or exact names, e.g. 'browser click' or 'select:tool_a,tool_b'.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Maximum number of matches to return. Default 5.",
-                    },
-                },
-                "required": ["query"],
-            },
-        )
+        return ToolSchema(self.name, self.model_description(), {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Search query for deferred tools."},
+            "limit": {"type": "number", "description": "Maximum number of tools to return. Defaults to 8."}},
+            "required": ["query"], "additionalProperties": False})
+
+    def get_spec(self) -> ToolSpec:
+        return ToolSpec(name=self.name, capability="tool.discovery", toolset="core", exposure="core", required_args=("query",))
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        registry = getattr(context, "tool_registry", None) or self._registry
-        if registry is None:
-            return self._error_result("Tool registry is not available")
-        query = str(args.get("query") or "").strip()
+        registry = context.tool_registry if context is not None and context.tool_registry is not None else self._registry
+        query = args["query"].strip()
         if not query:
-            return self._error_result("query is required")
-        raw_max_results = args.get("max_results", args.get("limit", 5))
-        if isinstance(raw_max_results, bool):
-            return self._error_result("max_results must be a positive integer")
-        try:
-            max_results = int(raw_max_results or 5)
-        except (TypeError, ValueError):
-            return self._error_result("max_results must be a positive integer")
-        if max_results < 1:
-            return self._error_result("max_results must be a positive integer")
-        limit = min(max_results, 20)
-        permission = getattr(context, "permission", None)
-        checker = getattr(context, "permission_checker", None)
-        policy = _toolset_policy_for_context(permission, getattr(context, "metadata", None))
-        key = (id(registry), registry.version, policy.cache_key() if policy is not None else "",
-               asdict(permission) if permission is not None else None,
+            return self._error_result("query must not be empty")
+        limit = args.get("limit", TOOL_SEARCH_DEFAULT_LIMIT)
+        if type(limit) is not int or limit < 0:
+            return self._error_result("failed to parse tool_search arguments: limit must be a nonnegative integer")
+        if limit == 0:
+            return self._error_result("limit must be greater than zero")
+        permission = context.permission if context is not None else None
+        checker = context.permission_checker if context is not None else None
+        policy = _toolset_policy_for_context(permission, context.metadata if context is not None else None)
+        key = (id(registry), registry.version, policy.cache_key(), asdict(permission) if permission is not None else None,
                checker.policy_snapshot() if checker is not None else None)
         if self._catalog is None or key != self._catalog_key:
             self._catalog = DeferredToolCatalog(registry, toolset_policy=policy, permission_checker=checker, permission_context=permission)
             self._catalog_key = key
-        catalog = self._catalog
-        selected = catalog.select_names(query, limit)
-        deferred_entries = catalog.entries()
-        deferred_names = {entry.name for entry in deferred_entries}
-        if selected is not None:
-            # ``select:`` may name a tool that is already directly visible.
-            # That name is reported back as a harmless no-op, but it must not
-            # join the deferred activation set, so the reported matches and the
-            # activation list are tracked separately.
-            matched_names = list(selected)
-            deferred_matches = [name for name in matched_names if name in deferred_names]
-        else:
-            matched_names = [entry.name for entry in catalog.search(query, limit)]
-            deferred_matches = list(matched_names)
-        total = len(deferred_entries)
-        activated: list[str] = []
-        metadata = getattr(context, "metadata", None)
-        state = metadata.get("_agent_state") if isinstance(metadata, dict) else None
-        loaded = getattr(state, "loaded_deferred_tools", None)
-        if isinstance(loaded, set):
-            for name in deferred_matches:
-                if name not in loaded:
-                    loaded.add(name)
-                    activated.append(name)
-        payload = {
-            "query": query,
-            "matches": matched_names,
-            "activated": activated,
-            "total_deferred_tools": total,
-        }
-        return ToolResult(
-            content=json.dumps(payload, ensure_ascii=False, indent=2),
-            display_summary=(
-                f"Activated {len(activated)} deferred tools"
-                if activated
-                else f"Found {len(matched_names)} tools"
-            ),
-            result_kind="generic",
-        )
+        nested = context is not None and context.source_for_call(context.tool_call_id).kind == "code_mode"
+        entries = self._catalog.search(query, limit, nested=nested)
+        if nested:
+            from backend.tools.schema import code_mode_parameters
+            tools = []
+            for entry in entries:
+                schema = registry.get_tool_schema(entry.name, toolset_policy=policy,
+                    permission_checker=checker, permission_context=permission)
+                function = schema["function"]
+                parameters = code_mode_parameters(function["parameters"])
+                output_schema = schema.get("_minicode_output_schema")
+                output = f" -> Promise<{code_mode_parameters(output_schema)}>" if output_schema is not None else ""
+                description = function["description"] + f"\n\nDeclaration: tools.{entry.name}({parameters}){output}"
+                tools.append({"name": entry.name, "description": description})
+            payload = {"tools": tools}
+            return ToolResult(json.dumps(payload, ensure_ascii=False), runtime_metadata={"code_mode_result": payload})
+        tools = _loadable_tools(registry, entries, policy=policy, checker=checker, permission=permission)
+        state = context.metadata.get("_agent_state") if context is not None else None
+        if state is not None:
+            state.loaded_deferred_tools.update(entry.name for entry in entries)
+        return ToolResult(json.dumps(tools, ensure_ascii=False), display_summary=f"Found {len(entries)} tools",
+                          tool_search_output=tools)

@@ -104,6 +104,10 @@ async def stream_provider_response(
     """Consume one provider response, including bounded retries and recovery."""
 
     stream_state = StreamAttemptState()
+    stream_state.private_tool_call_ids.update(
+        message.tool_call_id for message in messages
+        if message.private_model_only and message.tool_call_id
+    )
     pending_tool_calls = stream_state.tool_calls
     usage = stream_state.usage
     finish_reason = ""
@@ -156,11 +160,32 @@ async def stream_provider_response(
                 max_retries=max_retries,
                 progress_id=provider_progress_key,
             )
+            request_metadata = dict(llm_request_metadata)
+            source_metadata = dict(request_metadata.get("_source_responses_metadata", {}))
+            if source_metadata or context_builder.token_budget_enabled:
+                from backend.agent.agent_identity import AgentPath
+
+                source_defaults = {
+                    "session_id": tool_context.run_context.responses_session_id,
+                    "thread_id": llm_request_metadata["thread_id"],
+                    "agent_name": AgentPath.parse(turn_kernel.run_record.agent_path).logical_name,
+                    "turn_id": llm_request_metadata["turn_id"],
+                    "request_kind": "turn",
+                    "turn_started_at_unix_ms": int(turn_kernel.run_record.started_at * 1000),
+                }
+                if context_builder.token_budget_enabled:
+                    window = context_builder._context_window_state
+                    source_defaults.update({"context_window_id": window.window_id, "window_number": window.window_number})
+                    if context_builder._context_window_config.use_history_notes_extension:
+                        source_defaults["history_ingest_requested"] = True
+                for key, value in source_defaults.items():
+                    source_metadata.setdefault(key, value)
+                request_metadata["_source_responses_metadata"] = source_metadata
             stream_iter = safe_stream_chat_with_request_metadata(
                 llm,
                 messages,
                 tools=tool_schemas,
-                metadata=dict(llm_request_metadata),
+                metadata=request_metadata,
             ).__aiter__()
             stream_read_context = copy_context()
             first_event = True

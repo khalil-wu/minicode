@@ -31,16 +31,18 @@ def build_answer_commit_projection(
     """Build accepted-answer events without reading mutable loop state."""
 
     text_events: list[AgentEvent] = []
-    if final_text:
+    already_completed = (
+        not stream_text.agent_message_started
+        and bool(stream_text.final_candidate_item_id)
+        and stream_text.final_candidate_item_id in stream_text.emitted_agent_messages
+    )
+    if (final_text or stream_text.agent_message_started) and not already_completed:
         active_item_text = (
             stream_text.active_agent_message_text
             if stream_text.agent_message_started
             else final_text
         )
-        started = stream_text.start_agent_message(
-            source="model_final",
-            item_id=stream_text.final_candidate_item_id,
-        )
+        started = stream_text.start_agent_message(source="model_final", item_id=stream_text.final_candidate_item_id)
         if started is not None:
             text_events.append(started)
         completed = stream_text.complete_active_agent_message(

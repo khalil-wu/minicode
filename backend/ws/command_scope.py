@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 
 @dataclass(frozen=True)
@@ -18,9 +20,23 @@ class CommandScope:
             payload["conversation_id"] = self.conversation_id
         if self.workspace_root:
             payload["workspace_root"] = self.workspace_root
+            payload["execution_cwd"] = self.workspace_root
         if self.request_id:
             payload["request_id"] = self.request_id
         return payload
+
+
+_execution_command_scope: ContextVar[tuple[str, CommandScope] | None] = ContextVar("execution_command_scope", default=None)
+
+
+@contextmanager
+def bind_execution_command_scope(session_id: str, scope: CommandScope) -> Iterator[None]:
+    """Bind a server-resolved execution target without changing the reader."""
+    token = _execution_command_scope.set((session_id, scope))
+    try:
+        yield
+    finally:
+        _execution_command_scope.reset(token)
 
 
 def resolve_command_scope(
@@ -29,7 +45,7 @@ def resolve_command_scope(
     *,
     require_conversation: bool = True,
     require_workspace: bool = False,
-    workspace_keys: tuple[str, ...] = ("workspace_root", "workspace"),
+    workspace_keys: tuple[str, ...] = ("execution_cwd", "workspace_root", "workspace"),
 ) -> CommandScope:
     """Resolve a MiniCode-style explicit command owner and reject stale owners."""
 
@@ -40,6 +56,19 @@ def resolve_command_scope(
         or data.get("conversation_id")
         or ""
     ).strip()
+    execution = _execution_command_scope.get()
+    if execution is not None and execution[0] == session.session_id:
+        scope = execution[1]
+        if requested_conversation_id and requested_conversation_id != scope.conversation_id:
+            raise ValueError("Command conversation does not match its execution owner")
+        for key in workspace_keys:
+            requested_root = str(data.get(key) or "").strip()
+            if requested_root and (not scope.workspace_root or Path(requested_root).expanduser().resolve() != Path(scope.workspace_root).resolve()):
+                raise ValueError("Command workspace does not match its execution owner")
+        if require_workspace and not scope.workspace_root:
+            raise ValueError("Open a workspace before running this command")
+        return CommandScope(scope.conversation_id, scope.workspace_root,
+            str(data.get("request_id") or data.get("requestId") or data.get("client_command_id") or scope.request_id))
     if requested_conversation_id and requested_conversation_id != active_conversation_id:
         raise ValueError(
             "Command conversation owner is stale; switch back to the originating conversation and retry"
@@ -62,7 +91,8 @@ def resolve_command_scope(
             requested_workspace = value
             break
     bound_workspace = str(
-        getattr(conversation, "worktree_path", "")
+        getattr(conversation, "execution_cwd", "")
+        or getattr(conversation, "worktree_path", "")
         or getattr(conversation, "workspace_root", "")
         or ""
     ).strip()

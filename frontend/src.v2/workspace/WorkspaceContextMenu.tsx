@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { FolderMinus } from "lucide-react";
 import { ContextMenu } from "../components/ContextMenu";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -9,21 +10,22 @@ export const WorkspaceContextMenu = ({ path, position, onClose }: {
   position: { x: number; y: number };
   onClose: () => void;
 }) => {
+  const { t: tr } = useI18n();
   const remove = async () => {
     try {
       const result = await sendClientCommandAwaitResult({
         type: "workspace.recent.remove", path, preserve_history: true,
       }, "workspace.recent.remove");
-      if (!commandResultSucceeded(result)) throw new Error(result.message || "无法移除工作区。");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法移除工作区。"));
       const state = useAppStore.getState();
       if (result.data?.closed_active === true && state.conversationId === result.data.conversation_id
         && result.data.workspace_root === "" && !state.workingDirectory) state.setAppMode("cowork");
-      pushToast("工作区已从列表移除，历史会话仍然保留，重新打开项目即可继续。", "success", 5000);
+      pushToast(tr("工作区已从列表移除，历史会话仍然保留，重新打开项目即可继续。"), "success", 5000);
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "无法移除工作区。", "error", 5000);
+      pushToast(error instanceof Error ? error.message : tr("无法移除工作区。"), "error", 5000);
     }
   };
   return <ContextMenu position={position} onClose={onClose} items={[{
-    label: "移除工作区", icon: <FolderMinus size={15} />, onClick: () => { void remove(); },
+    label: tr("移除工作区"), icon: <FolderMinus size={15} />, onClick: () => { void remove(); },
   }]} />;
 };

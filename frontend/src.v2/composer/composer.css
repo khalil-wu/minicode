@@ -49,6 +49,78 @@
   padding: 4px 4px 8px;
 }
 
+.composer-project-scope {
+  position: absolute;
+  inset-inline: 14px;
+  top: -38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  background: var(--surface-soft);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+.composer-project-scope > button,
+.composer-project-menu button { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; min-width: 0; text-align: left; }
+.composer-project-scope > button > span,
+.composer-project-menu button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-project-scope > button { max-width: 40%; border-radius: var(--radius-full); }
+.composer-project-scope > button:hover,
+.composer-project-scope > button[aria-expanded="true"] { background: var(--workbench-active); }
+.composer-scope-location { display: inline-flex; align-items: center; gap: 8px; padding: 7px 9px; white-space: nowrap; }
+.composer-project-scope > .composer-scope-branch { flex: 0 1 auto; max-width: 50%; color: var(--text-secondary); }
+.composer-project-scope svg { flex-shrink: 0; }
+.composer-project-menu { position: absolute; left: 0; bottom: calc(100% + 4px); width: min(300px, calc(100vw - 32px)); max-height: min(340px, 60dvh); display: flex; flex-direction: column; padding: 5px; z-index: var(--z-dropdown); --mc-menu-origin: bottom left; }
+.composer-project-menu button { width: 100%; border-radius: var(--radius-sm); }
+.composer-project-menu button:hover,
+.composer-project-menu button:focus-visible,
+.composer-project-actions > button[aria-pressed="true"] { background: var(--workbench-active); }
+.composer-project-menu > label { display: flex; align-items: center; gap: 7px; flex-shrink: 0; padding: 8px 10px 11px; margin: 0 5px 4px; border-bottom: 1px solid var(--border-subtle); }
+.composer-project-menu input { min-width: 0; width: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; }
+.composer-project-selected { margin-left: auto; flex-shrink: 0; color: var(--text-secondary); }
+.composer-project-options { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.composer-project-actions { flex-shrink: 0; border-top: 1px solid var(--border-subtle); margin-top: 5px; padding-top: 4px; }
+
+.composer-add-menu {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% + 8px);
+  max-height: min(420px, 65vh);
+  overflow-y: auto;
+  padding: 8px;
+  z-index: var(--z-dropdown);
+}
+.composer-add-menu > button,
+.composer-add-file-choices > button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.composer-add-menu > button:hover,
+.composer-add-menu > button:focus-visible,
+.composer-add-file-choices > button:hover,
+.composer-add-file-choices > button:focus-visible { background: var(--workbench-active); }
+.composer-add-file-choices { padding-left: 27px; }
+.composer-add-files-disclosure { margin-left: auto; transition: transform var(--duration-fast) var(--easing-standard); }
+.composer-add-files-disclosure[data-open="true"] { transform: rotate(90deg); }
+.composer-add-menu > button:disabled { opacity: .5; cursor: default; }
+.composer-add-menu small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: inherit; }
+.composer-add-section { display: flex; justify-content: space-between; align-items: center; padding: 12px 10px 5px; color: var(--text-muted); }
+.composer-add-section > button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.composer-add-status { display: flex; gap: 8px; padding: 7px 10px; color: var(--text-muted); }
+.composer-add-status > button { border: 0; background: transparent; color: inherit; cursor: pointer; }
+
 .composer-attachment-strip {
   display: flex;
   flex-wrap: nowrap;
@@ -366,6 +438,8 @@
 .composer-footer-primary {
   flex: 0 1 auto;
 }
+.composer-plan-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 0; border-radius: var(--radius-full); background: var(--surface-soft); color: var(--text-secondary); font: inherit; white-space: nowrap; cursor: pointer; }
+.composer-plan-chip:hover { background: var(--surface-hover); color: var(--text-primary); }
 
 .composer-footer-spacer {
   flex: 1 1 8px;
@@ -642,6 +716,22 @@
 .composer-model-menu-footer button:is(:hover, :focus-visible) { background: var(--surface-hover); outline: 0; }
 .composer-model-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-menu-footer { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border-subtle); }
+
+.composer-model-default { justify-content: space-between; }
+.composer-model-default > span { display: grid; gap: 3px; }
+.composer-model-default small { color: var(--text-muted); font-size: var(--text-xs); }
+.composer-permission-btn[data-warning="true"] { color: var(--state-warning); }
+.composer-permission-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 8px 9px; color: var(--text-muted); font-size: var(--text-xs); }
+.composer-permission-heading button, .composer-full-access-details button { flex-shrink: 0; padding: 0; background: transparent; border: 0; color: var(--state-info); font: inherit; cursor: pointer; }
+.composer-menu-choice:disabled { cursor: default; opacity: 0.45; }
+.composer-full-access-details { display: grid; gap: 12px; }
+.composer-full-access-details p { margin: 0; }
+.composer-full-access-capabilities { display: grid; gap: 14px; padding: 12px 16px; border-radius: var(--radius-lg); background: var(--surface-soft); }
+.composer-full-access-capabilities > div { display: flex; align-items: center; gap: 14px; }
+.composer-full-access-capabilities svg { flex-shrink: 0; }
+.composer-full-access-capabilities span { display: grid; gap: 3px; }
+.composer-full-access-capabilities strong { color: var(--text-primary); font-size: var(--text-sm); }
+.composer-full-access-capabilities small { font-size: var(--text-xs); line-height: 1.45; }
 
 .composer-control-label {
   min-width: 0;

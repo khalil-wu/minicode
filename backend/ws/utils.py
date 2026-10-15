@@ -19,12 +19,18 @@ from backend.permissions.patterns import normalize_tool_patterns as normalize_to
 # ── Constants ──────────────────────────────────────────────
 
 CONVERSATION_SUMMARY_MAX_CHARS = 320
-USER_INPUT_METADATA_KEYS = ("display_content", "context_refs", "quoted_message")
+USER_INPUT_METADATA_KEYS = ("display_content", "context_refs", "quoted_message", "code_review")
 
 
 def normalize_user_input_metadata(data: dict[str, Any]) -> dict[str, Any]:
     """Parse the renderer's user-input presentation at command admission."""
     result = {key: data[key] for key in USER_INPUT_METADATA_KEYS if key in data}
+    if "code_review" in result:
+        from backend.services.code_review_service import normalize_code_review_scope
+
+        result["code_review"] = normalize_code_review_scope(result["code_review"])
+        if "display_content" not in result:
+            raise ValueError("Code review input requires its visible request in display_content.")
     if "display_content" in result and not isinstance(result["display_content"], str):
         raise ValueError("display_content must be a string")
     if "context_refs" in result:

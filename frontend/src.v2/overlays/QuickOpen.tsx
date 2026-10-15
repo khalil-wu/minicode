@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { fileIcon } from "../lib/file-icons";
 import { X } from "lucide-react";
@@ -11,6 +12,7 @@ import { workspaceRootsEqual } from "../lib/workspace-path";
 const fileNameOf = (path: string) => path.split(/[\\/]/).pop() || path;
 
 export const QuickOpen = () => {
+  const { t: tr } = useI18n();
   const visible = useAppStore((s) => s.quickOpenVisible);
   const storeResults = useAppStore((s) => s.quickOpenResults);
   const storeLoading = useAppStore((s) => s.quickOpenLoading);
@@ -61,7 +63,7 @@ export const QuickOpen = () => {
         }
       }).catch((error: unknown) => {
         if (!isCurrent()) return;
-        setSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
+        setSearchError(error instanceof Error ? error.message : tr("文件搜索失败，请重试。"));
         useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
       });
     }, 200);
@@ -123,7 +125,7 @@ export const QuickOpen = () => {
         className="quick-open-surface"
         role="dialog"
         aria-modal="true"
-        aria-label="快速打开文件"
+        aria-label={tr("快速打开文件")}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(event) => {
@@ -153,7 +155,7 @@ export const QuickOpen = () => {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           role="combobox"
-          aria-label="搜索文件"
+          aria-label={tr("搜索文件")}
           aria-expanded={results.length > 0}
           aria-controls="quick-open-results"
           aria-activedescendant={results[activeIdx] ? `qo-${activeIdx}` : undefined}
@@ -173,7 +175,7 @@ export const QuickOpen = () => {
               }
             }
           }}
-          placeholder="搜索文件…"
+          placeholder={tr("搜索文件…")}
           style={{
             minWidth: 0,
             flex: 1,
@@ -185,29 +187,26 @@ export const QuickOpen = () => {
             outline: 0,
           }}
         />
-        <button type="button" className="mc-icon-btn" onClick={close} title="关闭快速打开" aria-label="关闭快速打开" style={{ width: 32, height: 32, flexShrink: 0, marginRight: 8 }}>
+        <button type="button" className="mc-icon-btn" onClick={close} title={tr("关闭快速打开")} aria-label={tr("关闭快速打开")} style={{ width: 32, height: 32, flexShrink: 0, marginRight: 8 }}>
           <X size={16} />
         </button>
         </div>
         <div ref={resultsRef} id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, minHeight: 0, overflowY: "auto" }}>
           {storeLoading && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              正在搜索…
-            </div>
+              {tr("正在搜索…")}</div>
           )}
           {!storeLoading && showingOpenTabs && results.length > 0 && (
             <div aria-hidden="true" style={{ padding: "8px 16px 4px", color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontWeight: "var(--fw-semibold)" }}>
-              打开的文件
-            </div>
+              {tr("打开的文件")}</div>
           )}
           {!storeLoading && showingOpenTabs && results.length === 0 && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              输入关键词搜索工作区文件。
-            </div>
+              {tr("输入关键词搜索工作区文件。")}</div>
           )}
           {!storeLoading && !showingOpenTabs && results.length === 0 && (
             <div role={searchError ? "alert" : undefined} style={{ padding: 14, color: searchError ? "var(--state-danger)" : "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              {searchError || "未找到文件。"}
+              {searchError || tr("未找到文件。")}
             </div>
           )}
           {results.map((file, i) => (
@@ -258,10 +257,10 @@ export const QuickOpen = () => {
             fontSize: "var(--text-2xs)",
           }}
         >
-          <span><kbd className="mc-kbd">↑↓</kbd> 导航</span>
-          <span><kbd className="mc-kbd">↵</kbd> 打开</span>
-          <span><kbd className="mc-kbd">⇧↵</kbd> 添加到上下文</span>
-          <span><kbd className="mc-kbd">Esc</kbd> 关闭</span>
+          <span><kbd className="mc-kbd">↑↓</kbd> {tr("导航")}</span>
+          <span><kbd className="mc-kbd">↵</kbd> {tr("打开")}</span>
+          <span><kbd className="mc-kbd">⇧↵</kbd> {tr("添加到上下文")}</span>
+          <span><kbd className="mc-kbd">Esc</kbd> {tr("关闭")}</span>
         </div>
       </div>
     </div>

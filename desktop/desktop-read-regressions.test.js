@@ -59,6 +59,40 @@ test("deep link subscription precedes pending pull, deduplicates and respects cl
   assert.equal(ipc.listenerCount("minicode:deep-link"), 0);
 });
 
+test("native window state preload reads the current snapshot and unsubscribes only its own event listener", async () => {
+  const ipc = new EventEmitter();
+  let state = { isMaximized: false };
+  const invokes = [];
+  ipc.sendSync = () => ({ apiBaseUrl: "http://127.0.0.1:8000", wsBaseUrl: "ws://127.0.0.1:8000" });
+  ipc.invoke = (channel) => { invokes.push(channel); return Promise.resolve(state); };
+  let runtime;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "preload.js"), "utf8"), {
+    require: () => ({ ipcRenderer: ipc, contextBridge: { exposeInMainWorld(_key, value) { runtime = value; } } }),
+    process: { env: {}, argv: [], contextIsolated: true, platform: process.platform, arch: process.arch },
+    window: {}, console,
+  });
+  const controls = runtime.desktop.windowControls;
+  assert.equal((await controls.getState()).isMaximized, false);
+  const first = [], second = [];
+  const unsubscribeFirst = controls.onStateChanged(value => first.push(value));
+  const unsubscribeSecond = controls.onStateChanged(value => second.push(value));
+  assert.equal(ipc.listenerCount("minicode:window:state"), 2);
+  state = { isMaximized: true };
+  ipc.emit("minicode:window:state", { sender: "native-ipc-event" }, state);
+  assert.equal(first[0], state);
+  assert.equal(second[0], state);
+  assert.equal((await controls.getState()).isMaximized, true);
+  assert.deepEqual(invokes, ["minicode:window:state", "minicode:window:state"]);
+  unsubscribeFirst();
+  assert.equal(ipc.listenerCount("minicode:window:state"), 1);
+  state = { isMaximized: false };
+  ipc.emit("minicode:window:state", {}, state);
+  assert.deepEqual(first.map(value => value.isMaximized), [true]);
+  assert.deepEqual(second.map(value => value.isMaximized), [true, false]);
+  unsubscribeSecond();
+  assert.equal(ipc.listenerCount("minicode:window:state"), 0);
+});
+
 function browserFixture() {
   const children = [];
   let id = 1;
@@ -87,7 +121,7 @@ function browserFixture() {
     dialog: {},
   });
   browser.init({
-    getMainWindow: () => ({
+    getWindowByInstanceId: () => ({
       isDestroyed: () => false, webContents: { send() {} },
       getContentBounds: () => ({ width: 800, height: 600 }),
       contentView: {
@@ -115,25 +149,24 @@ test("rejected browser settings leave download authorization unchanged", () => {
 test("concurrent tab creation cannot overwrite another owner's live view", async () => {
   const { browser, children } = browserFixture();
   const outcomes = await Promise.allSettled(["A", "B"].map((owner) => browser.create({
-    id: "same", url: "https://example.com", conversation_id: owner,
-  })));
+    id: "same", url: "https://example.com", conversation_id: owner, window_instance_id: "fixture-window" })));
   assert.equal(outcomes[0].status, "fulfilled");
   assert.equal(outcomes[1].status, "rejected");
   assert.match(outcomes[1].reason.message, /another conversation/);
   assert.equal(children.length, 1);
-  assert.equal(browser.closeConversation("A"), 1);
+  assert.equal(browser.closeConversation("A", "fixture-window"), 1);
   assert.equal(children.length, 0);
   browser.disposeAll();
 });
 
 test("latest same-owner creation supersedes the old request and keeps one registered view", async () => {
   const { browser, children } = browserFixture();
-  const outcomes = await Promise.allSettled([1, 2].map(() => browser.create({ id: "same", url: "https://example.com", conversation_id: "A" })));
+  const outcomes = await Promise.allSettled([1, 2].map(() => browser.create({ id: "same", url: "https://example.com", conversation_id: "A", window_instance_id: "fixture-window" })));
   assert.equal(outcomes[0].status, "rejected");
   assert.match(outcomes[0].reason.message, /navigation was cancelled/);
   assert.equal(outcomes[1].status, "fulfilled");
   assert.equal(children.length, 1);
-  assert.equal(browser.listTargets("A").length, 1);
+  assert.equal(browser.listTargets("A", "fixture-window").length, 1);
   const contents = children[0].webContents;
   browser.disposeAll();
   assert.equal(children.length, 0);

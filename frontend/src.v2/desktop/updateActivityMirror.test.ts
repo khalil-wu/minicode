@@ -3,6 +3,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppStore } from "../stores";
+import { emptyConversationWorkbenchState } from "../stores/ui-slice";
+import { emptyComposerDraft, flushComposerDrafts } from "../stores/composer-drafts";
+import { flushEditorDrafts } from "../stores/editor-drafts";
+import { cacheEditorStateForWorkspace, clearEditorWorkspaceBufferCacheForTests } from "../stores/shared-helpers";
 import { buildUpdateActivitySnapshot, startUpdateActivityMirror } from "./updateActivityMirror";
 
 describe("update activity snapshot", () => {
@@ -10,8 +14,14 @@ describe("update activity snapshot", () => {
     delete window.__MINICODE_RUNTIME__;
     vi.useRealTimers();
   });
-  beforeEach(() => {
+  beforeEach(async () => {
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
+    clearEditorWorkspaceBufferCacheForTests();
+    cacheEditorStateForWorkspace("C:/hidden", [{ id: "hidden-dirty", path: "background.ts", content: "pending", original: "disk", loading: false }], "background.ts", null);
     useAppStore.setState({
+      subagents: [], conversationAgentStates: {},
+      ...emptyComposerDraft(), workingDirectory: "", composerDraftsReady: true,
+      composerDraftStoragePending: false, composerDraftStorageError: null,
       conversationId: "conv-active",
       isStreaming: true,
       isConnected: true,
@@ -56,11 +66,14 @@ describe("update activity snapshot", () => {
       ],
       conversationWorkbenchStates: {
         "conv-background": {
+          ...emptyConversationWorkbenchState(),
           attachments: [
             { id: "upload-background", name: "c.txt", type: "text/plain", size: 1, status: "uploading" },
           ],
-        } as never,
+        },
       },
+      workspaceComposerDrafts: { "c:/hidden": { ...emptyComposerDraft(), draft: "hidden workspace draft",
+        attachments: [{ id: "upload-workspace", name: "workspace.txt", type: "text/plain", size: 1, status: "uploading" }] } },
       editorTabs: [
         { id: "editor-fixture-1", path: "clean.ts", content: "same", original: "same", loading: false },
         { id: "editor-fixture-2", path: "dirty.ts", content: "changed", original: "old", loading: false },
@@ -71,6 +84,7 @@ describe("update activity snapshot", () => {
         { id: "task-done", command: "lint", status: "completed", timestamp: 1, conversationId: "conv-active" },
       ],
     });
+    await Promise.all([flushComposerDrafts(), flushEditorDrafts()]);
   });
 
   it("projects all install-blocking work without message or file content", () => {
@@ -79,10 +93,30 @@ describe("update activity snapshot", () => {
       activeTurns: ["conv-active", "conv-background", "conv-runtime", "side-running"],
       sideChatStreams: ["side-running"],
       pendingPrompts: ["approval-1", "ask-1", "diff-1", "runtime-approval"],
-      uploadingAttachments: ["upload-background", "upload-live", "upload-side"],
-      dirtyEditors: ["dirty.ts"],
+      uploadingAttachments: ["upload-background", "upload-live", "upload-side", "upload-workspace"],
+      dirtyEditors: ["c:/hidden/background.ts", "dirty.ts"],
       backgroundTasks: ["runtime-task", "task-running", "task-stalled"],
+      pendingDrafts: [],
+      draftStates: [
+        `primary:revision:${useAppStore.getState().composerDraftRevision}`,
+        JSON.stringify(["primary", "conversation", "conv-active"]),
+        JSON.stringify(["primary", "conversation", "conv-background"]),
+        JSON.stringify(["primary", "side", "side-idle"]),
+        JSON.stringify(["primary", "workspace", "c:/hidden"]),
+      ].sort(),
     });
+  });
+
+  it("blocks upgrade for detached workers after the visible parent has completed", () => {
+    const state = useAppStore.getState();
+    useAppStore.setState({ isStreaming: false, conversationStreaming: {}, backgroundTasks: [],
+      runtimeSession: { ...state.runtimeSession, active_task_id: null, active_stream_conversation_ids: [], running_tasks: [],
+        active_subagents: [{ id: "cold-detached", status: "running" }], queued_user_messages: [{ conversation_id: "parent", message_id: "queued-input" }] },
+      subagents: [{ id: "live-detached", role: "Ada", status: "running" }],
+      conversationAgentStates: { hidden: { plan: null, todos: [], agentProgress: [],
+        subagents: [{ id: "pending-child", role: "Bo", status: "pending" }] } },
+    });
+    expect(buildUpdateActivitySnapshot(useAppStore.getState()).backgroundTasks).toEqual(["cold-detached", "live-detached", "pending-child", "queued-input"]);
   });
 
   it("fails closed while the runtime is disconnected and ignores read-only diffs", () => {
@@ -96,13 +130,21 @@ describe("update activity snapshot", () => {
 
     const snapshot = buildUpdateActivitySnapshot(useAppStore.getState());
     expect(snapshot.runtimeReady).toBe(false);
-    expect(snapshot.dirtyEditors).toEqual([]);
+    expect(snapshot.dirtyEditors).toEqual(["c:/hidden/background.ts"]);
+  });
+
+  it("reports unknown recovery, pending commit and storage failure as distinct owned blockers", () => {
+    useAppStore.setState({ composerDraftsReady: false, composerDraftStoragePending: true, composerDraftStorageError: "quota exhausted" });
+    expect(buildUpdateActivitySnapshot(useAppStore.getState()).pendingDrafts).toEqual([
+      "primary:recovery", "primary:commit", "primary:storage-error",
+    ]);
   });
 
   it("ACKs main-process snapshot requests with the current complete projection", async () => {
     const reportActivity = vi.fn().mockResolvedValue({ accepted: true, revision: 1 });
     let requestHandler: ((payload: { requestId?: string }) => void) | undefined;
     window.__MINICODE_RUNTIME__ = {
+      windowOwnerId: "primary",
       desktop: {
         updates: {
           reportActivity,
@@ -128,6 +170,7 @@ describe("update activity snapshot", () => {
   it("ignores store changes the snapshot does not read", async () => {
     const reportActivity = vi.fn().mockResolvedValue({ accepted: true, revision: 1 });
     window.__MINICODE_RUNTIME__ = {
+      windowOwnerId: "primary",
       desktop: {
         updates: { reportActivity, onActivityRequest: () => () => {} },
       } as never,
@@ -159,11 +202,12 @@ describe("update activity snapshot", () => {
   });
 
   it("retries a rejected activity report instead of confirming stale state", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     const reportActivity = vi.fn()
       .mockRejectedValueOnce(new Error("IPC unavailable"))
       .mockResolvedValue({ accepted: true, revision: 2 });
     window.__MINICODE_RUNTIME__ = {
+      windowOwnerId: "primary",
       desktop: {
         updates: {
           reportActivity,

@@ -1,14 +1,22 @@
 import asyncio
 import json
 from dataclasses import replace
+from types import SimpleNamespace
+
+import httpx
+import pytest
 
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import run_tool
 from backend.artifact.store import ArtifactStore
-from backend.config import PermissionSettings
+from backend.config import LLMSettings, PermissionSettings, TokenBudget
+from backend.agent.context import ContextBuilder
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.llm.base import ToolCallEvent
+from backend.llm.openai_adapter import OpenAIAdapter, _responses_function_call_output_item
+from backend.mcp.client import MCPCallResult, MCPToolDef
+from backend.mcp.registry import MCPToolProxy
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
@@ -18,20 +26,122 @@ from backend.tools.subagent_context import (
     build_agent_execution_profile,
     build_subagent_permission_context,
 )
-from backend.tools.tool_search import (
-    DeferredToolCatalog,
-    ToolSearchTool,
-    build_deferred_tools_prompt_block,
-)
+from backend.tools.tool_search import DeferredToolCatalog, ToolSearchTool
 from backend.tools.toolsets import ToolAvailabilityFilter, ToolsetPolicy
-from backend.agent.tool_schema_derivation import effective_toolset_policy, requested_tool_mode
+from backend.agent.tool_schema_derivation import derive_turn_tool_schema_state, effective_toolset_policy, requested_tool_mode
+from backend.tests.test_code_execution import run_model
+from backend.tests.test_harness_native_tool_protocol import ResponsesEndpoint, completed
 
 
-def test_default_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
+SEARCH_POLICY = ToolsetPolicy(supports_search_tool=True)
+
+
+def search_names(result):
+    assert json.loads(result.content) == result.tool_search_output
+    return {tool["name"] for namespace in result.tool_search_output for tool in namespace["tools"]}
+
+
+@pytest.mark.parametrize("terminal_only", [False, True])
+def test_native_search_namespace_call_and_journal_recovery_use_the_actual_responses_chain(tmp_path, terminal_only):
+    async def scenario():
+        calls = []
+
+        async def invoke(name, arguments, *, request_owner):
+            calls.append((name, arguments, request_owner))
+            return MCPCallResult(content=[{"type": "text", "text": "Inspected counter: 7"}])
+
+        tool = MCPToolProxy("catalog", MCPToolDef("inspect_counter", "Inspect a counter", annotations={"readOnlyHint": True}),
+            SimpleNamespace(connected=True, call_tool=invoke))
+        search = {"type": "tool_search_call", "id": "native-discovery", "call_id": "search-owned",
+            "execution": "client", "status": "completed", "arguments": {"query": "inspect counter", "limit": 1}}
+        search_events = [completed([search])] if terminal_only else [
+            {"type": "response.output_item.added", "output_index": 0, "item": {**search, "status": "in_progress", "arguments": {}}},
+            {"type": "response.output_item.done", "output_index": 0, "item": search},
+            completed([search]),
+        ]
+        invoke_item = {"type": "function_call", "id": "mcp-invoke", "call_id": "invoke-owned", "status": "completed",
+            "namespace": tool.model_namespace, "name": tool.model_tool_name, "arguments": "{}"}
+        endpoint = ResponsesEndpoint([search_events, [completed([invoke_item])], [completed([
+            {"type": "message", "id": "final", "role": "assistant", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "The counter was inspected."}]},
+        ])]])
+        settings = LLMSettings(api_key="fixture", model="fixture", base_url="https://fixture.invalid/v1", wire_api="responses",
+            tool_mode="direct", supports_search_tool=True, max_tokens=1024)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+            adapter = OpenAIAdapter(settings, http_client=client)
+            state, builder, journal, events, _ = await run_model(tmp_path, adapter, [tool])
+            assert state.terminal_status == "completed", state.stopped_reason
+            assert [(name, args) for name, args, _ in calls] == [("inspect_counter", {})]
+            assert calls[0][2]["conversation_id"] == "code-conv"
+            first_tools = endpoint.requests[0]["tools"]
+            assert any(item["type"] == "tool_search" and item["execution"] == "client" for item in first_tools)
+            assert not any(item.get("name") == tool.name for item in first_tools)
+            searched = next(item for item in endpoint.requests[1]["input"] if item.get("type") == "tool_search_output")
+            assert searched["call_id"] == "search-owned"
+            [namespace] = searched["tools"]
+            assert namespace["type"] == "namespace" and namespace["name"] == tool.model_namespace
+            assert namespace["tools"][0]["name"] == tool.model_tool_name
+            assert namespace["tools"][0]["defer_loading"] is True
+            assert sum(event.type == "tool_call" and event.data.get("name") == "tool_search" and event.data.get("status") != "pending"
+                for event in events) == 1
+            assert sum(record.tool_name == "tool_search" for record in state.tool_calls) == 1
+            assert sum(event.type == "tool_result" and event.data.get("id") == "search-owned" for event in events) == 1
+            recorded = next(item for item in endpoint.requests[2]["input"] if item.get("call_id") == "invoke-owned" and item.get("type") == "function_call")
+            assert recorded["namespace"] == tool.model_namespace and recorded["name"] == tool.model_tool_name
+            assert any(item.get("call_id") == "invoke-owned" and "Inspected counter: 7" in str(item.get("output"))
+                for item in endpoint.requests[2]["input"] if item.get("type") == "function_call_output")
+            snapshot = builder.export_snapshot()
+            snapshot["history"] = journal.reconstruct_history()
+            cold = ContextBuilder(llm=adapter, token_budget=TokenBudget(total=96000), workspace_root=tmp_path)
+            cold.load_snapshot(snapshot)
+            restored = next(message for message in cold._history if message.name == "tool_search")
+            assert _responses_function_call_output_item(restored) == searched
+            call = next(call for message in cold._history if message.tool_calls for call in message.tool_calls if call.id == "invoke-owned")
+            assert call.native_namespace == tool.model_namespace and call.native_name == tool.model_tool_name
+            assert "tool_search_output" not in json.dumps([event.data for event in events if event.type == "tool_result"])
+    asyncio.run(scenario())
+
+
+def test_model_without_search_capability_receives_mcp_schema_on_first_call():
+    registry = ToolRegistry()
+    registry.register(ToolSearchTool(registry))
+    tool = MCPToolProxy("catalog", MCPToolDef("inspect_counter", "Inspect a counter", annotations={"readOnlyHint": True}), None)
+    registry.register(tool)
+    assert {schema["function"]["name"] for schema in registry.get_schemas()} == {tool.name}
+    assert {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=SEARCH_POLICY)} == {"tool_search"}
+
+
+def test_search_default_and_explicit_limits_use_source_native_definitions():
+    registry = ToolRegistry()
+    for index in range(24):
+        registry.register(MCPToolProxy("catalog", MCPToolDef(f"inspect_counter_{index}", "Inspect a counter", annotations={"readOnlyHint": True}), None))
+    search = ToolSearchTool(registry)
+    default = asyncio.run(search.execute({"query": "inspect counter"}))
+    [namespace] = default.tool_search_output
+    assert len(namespace["tools"]) == 8
+    expanded = asyncio.run(search.execute({"query": "inspect counter", "limit": 24}))
+    assert len(expanded.tool_search_output[0]["tools"]) == 24
+    assert all(tool["defer_loading"] is True for tool in expanded.tool_search_output[0]["tools"])
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_search_rejects_invalid_source_limits_without_catalog_side_effects(limit):
+    registry = ToolRegistry()
+    state = AgentState(user_message="find tools")
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), tool_registry=registry,
+        metadata={"_agent_state": state, "_toolset_policy": SEARCH_POLICY})
+    result = asyncio.run(ToolSearchTool(registry).execute({"query": "inspect", "limit": limit}, context=context))
+    assert result.is_error
+    assert result.tool_search_output is None
+    assert "limit" in result.content
+    assert state.loaded_deferred_tools == set()
+
+
+def test_search_capable_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
-    direct_names = {schema["function"]["name"] for schema in registry.get_schemas()}
-    deferred_names = {entry.name for entry in DeferredToolCatalog(registry).entries()}
+    direct_names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=SEARCH_POLICY)}
+    deferred_names = {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY).entries()}
 
     assert "tool_search" in direct_names
     assert {"tool_describe", "tool_call"}.isdisjoint(direct_names)
@@ -47,7 +157,7 @@ def test_default_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
         "skill_search",
     }.isdisjoint(direct_names)
     assert {
-        "ask_user",
+        "request_user_input",
         "list_files",
         "task",
         "task_status",
@@ -65,7 +175,7 @@ def test_default_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
     assert {"web_search", "web_fetch"}.isdisjoint(deferred_names)
     assert "skill_search" not in deferred_names
     assert {
-        "ask_user",
+        "request_user_input",
         "list_files",
         "task",
         "task_status",
@@ -86,7 +196,7 @@ def test_default_schema_budget_never_hides_core_execution_entrypoints(tmp_path) 
     assert {
         "task",
         "list_files",
-        "ask_user",
+        "request_user_input",
         "task_status",
         "task_stop",
         "send_message",
@@ -132,7 +242,8 @@ def test_empty_model_tool_mode_uses_explicit_adapter_setting() -> None:
         config=SimpleNamespace(llm=SimpleNamespace(tool_mode="direct")),
     )
     assert requested_tool_mode(default_code_mode_only=True, model_execution=snapshot, llm=llm) == "direct"
-    assert "In code-only mode, call selected tools through tool_exec" in ToolSearchTool().model_description()
+    assert "Searches over deferred tool metadata with BM25" in ToolSearchTool().model_description()
+    assert "select:" not in ToolSearchTool().model_description()
 
 
 def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> None:
@@ -161,7 +272,7 @@ def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> No
     ):
         registry.register(tool)
 
-    model_policy = ToolsetPolicy(code_mode_only=True)
+    model_policy = ToolsetPolicy(code_mode_only=True, supports_search_tool=True)
     direct = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=model_policy)}
     assert "model_only" in direct
     assert "nested_only" not in direct
@@ -178,8 +289,9 @@ def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> No
         metadata={"_agent_state": state, "_toolset_policy": model_policy},
         tool_registry=registry,
     )
-    discovered = asyncio.run(ToolSearchTool(registry).execute({"query": "select:deferred_model"}, context=context))
-    assert json.loads(discovered.content)["activated"] == ["deferred_model"]
+    discovered = asyncio.run(ToolSearchTool(registry).execute({"query": "deferred_model"}, context=context))
+    assert search_names(discovered) == {"deferred_model"}
+    assert state.loaded_deferred_tools == {"deferred_model"}
     activated = replace(model_policy, enabled_tools=frozenset({"deferred_model"}))
     assert "deferred_model" in {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=activated)}
 
@@ -188,36 +300,34 @@ def test_schema_postprocess_preserves_common_task_words(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
     descriptions = {
         schema["function"]["name"]: schema["function"].get("description", "")
-        for schema in registry.get_schemas()
+        for schema in registry.get_schemas(toolset_policy=SEARCH_POLICY)
     }
 
     assert "tool_search" in descriptions
 
     assert "Updates the task plan" in descriptions["update_plan"]
-    deferred_names = {entry.name for entry in DeferredToolCatalog(registry).entries()}
+    deferred_names = {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY).entries()}
     assert {"update_plan", "todo_write"}.isdisjoint(deferred_names)
-def test_tool_search_selects_and_activates_optional_tools(tmp_path) -> None:
+def test_tool_search_returns_namespaces_and_activates_optional_tools(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
     state = AgentState(user_message="activate tools")
     context = ToolExecutionContext(
         permission=PermissionContext(),
-        metadata={"_agent_state": state},
+        metadata={"_agent_state": state, "_toolset_policy": SEARCH_POLICY},
     )
 
     search_result = asyncio.run(
         ToolSearchTool(registry).execute(
-            {"query": "select:preview_server"},
+            {"query": "preview_server", "limit": 1},
             context=context,
         )
     )
-    search_payload = json.loads(search_result.content)
-    selected_names = set(search_payload["matches"])
+    selected_names = search_names(search_result)
 
     assert selected_names == {"preview_server"}
-    assert set(search_payload["activated"]) == selected_names
     assert state.loaded_deferred_tools == selected_names
 
-    active_policy = ToolsetPolicy.from_iterables(enabled_tools=state.loaded_deferred_tools)
+    active_policy = ToolsetPolicy.from_iterables(enabled_tools=state.loaded_deferred_tools, supports_search_tool=True)
     direct_names = {
         schema["function"]["name"]
         for schema in registry.get_schemas(toolset_policy=active_policy)
@@ -230,48 +340,49 @@ def test_tool_search_selects_and_activates_optional_tools(tmp_path) -> None:
         ).entries()
     }
     assert selected_names <= direct_names
-    assert selected_names.isdisjoint(deferred_names)
+    # Source retains loaded definitions in the searchable catalog.
+    assert selected_names <= deferred_names
 
     repeated = asyncio.run(
         ToolSearchTool(registry).execute(
-            {"query": "select:preview_server"},
+            {"query": "preview_server", "limit": 1},
             context=context,
         )
     )
-    assert json.loads(repeated.content)["activated"] == []
+    assert search_names(repeated) == selected_names
+    assert state.loaded_deferred_tools == selected_names
 
 
-def test_deferred_keyword_search_returns_cc_style_match_names(tmp_path) -> None:
+def test_deferred_keyword_search_returns_source_namespace_definitions(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
     schema_result = asyncio.run(
-        ToolSearchTool(registry).execute({"query": "preview dev server", "max_results": 1})
+        ToolSearchTool(registry).execute({"query": "preview dev server", "limit": 1})
     )
-    schema_payload = json.loads(schema_result.content)
+    assert search_names(schema_result) == {"preview_server"}
+    namespace = schema_result.tool_search_output[0]
+    assert namespace["type"] == "namespace" and namespace["name"] == "functions"
+    assert namespace["tools"][0]["type"] == "function"
+    assert namespace["tools"][0]["defer_loading"] is True
 
-    assert schema_payload["matches"] == ["preview_server"]
-    assert schema_payload["total_deferred_tools"] > 0
 
-
-def test_tool_search_selects_an_already_direct_tool_as_a_noop(tmp_path) -> None:
+def test_tool_search_does_not_return_core_tools(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
     state = AgentState(user_message="select an already visible tool")
     context = ToolExecutionContext(
         permission=PermissionContext(),
-        metadata={"_agent_state": state},
+        metadata={"_agent_state": state, "_toolset_policy": SEARCH_POLICY},
     )
 
     result = asyncio.run(
         ToolSearchTool(registry).execute(
-            {"query": "select:read_file"},
+            {"query": "read_file"},
             context=context,
         )
     )
-    payload = json.loads(result.content)
-
-    assert payload["matches"] == ["read_file"]
-    assert payload["activated"] == []
-    assert state.loaded_deferred_tools == set()
+    assert "read_file" not in search_names(result)
+    assert "read_file" not in state.loaded_deferred_tools
+    assert state.loaded_deferred_tools == search_names(result)
 
 
 def test_no_workspace_policy_is_shared_by_schema_catalog_and_tool_search(tmp_path) -> None:
@@ -283,6 +394,7 @@ def test_no_workspace_policy_is_shared_by_schema_catalog_and_tool_search(tmp_pat
         requires_explicit_workspace=True,
         workspace_root=None,
         permission_mode="confirm",
+        supports_search_tool=True,
     )
     direct_names = {
         schema["function"]["name"]
@@ -299,7 +411,7 @@ def test_no_workspace_policy_is_shared_by_schema_catalog_and_tool_search(tmp_pat
     )
     result = asyncio.run(
         ToolSearchTool(registry).execute(
-            {"query": "select:read_file,grep_files,list_files,run_command"},
+            {"query": "read_file grep_files list_files run_command"},
             context=context,
         )
     )
@@ -307,8 +419,8 @@ def test_no_workspace_policy_is_shared_by_schema_catalog_and_tool_search(tmp_pat
     workspace_tools = {"read_file", "grep_files", "list_files", "run_command"}
     assert workspace_tools.isdisjoint(direct_names)
     assert workspace_tools.isdisjoint(deferred_names)
-    assert json.loads(result.content)["matches"] == []
-    assert "ask_user" in direct_names
+    assert workspace_tools.isdisjoint(search_names(result))
+    assert "request_user_input" in direct_names
 
 
 def test_execution_boundary_rejects_unactivated_deferred_tool() -> None:
@@ -347,7 +459,7 @@ def test_execution_boundary_rejects_unactivated_deferred_tool() -> None:
             registry,
             ToolExecutionContext(
                 permission=PermissionContext(mode="bypass"),
-                metadata={"_toolset_policy": ToolsetPolicy.default()},
+                metadata={"_toolset_policy": SEARCH_POLICY},
             ),
         )
     )
@@ -365,6 +477,7 @@ def test_execution_boundary_rejects_unactivated_deferred_tool() -> None:
                 metadata={
                     "_toolset_policy": ToolsetPolicy.from_iterables(
                         enabled_tools={tool.name},
+                        supports_search_tool=True,
                     )
                 },
             ),
@@ -396,19 +509,15 @@ def test_availability_filter_mapping_treats_strings_as_single_values() -> None:
         raise AssertionError("invalid availability filter must fail closed")
 
 
-def test_deferred_tools_prompt_block_lists_names_without_schemas(tmp_path) -> None:
+def test_source_guidance_has_no_synthetic_available_tools_directory(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
-    block = build_deferred_tools_prompt_block(registry)
-
-    assert block.startswith("<available-deferred-tools")
-    assert "preview_server" in block
-    assert "todo_write" not in block
-    assert "update_plan" not in block
-    assert "schema" not in block.lower()
-    assert "description" not in block.lower()
-    assert "routine task tracking" not in block
-    assert '"function"' not in block
+    state = derive_turn_tool_schema_state(
+        base_tool_schemas=registry.get_schemas(toolset_policy=SEARCH_POLICY),
+        mcp_instructions={}, tool_registry=registry, toolset_policy=SEARCH_POLICY,
+    )
+    assert state.deferred_tools_prompt_block == ""
+    assert "available-deferred-tools" not in state.runtime_guidance
 
 
 def test_coordination_tools_are_direct_not_deferred(tmp_path) -> None:
@@ -436,25 +545,23 @@ def test_coordination_tools_are_direct_not_deferred(tmp_path) -> None:
     assert coordination_names == set()
 
 
-def test_deferred_tools_prompt_block_uses_catalog_scope(tmp_path) -> None:
+def test_deferred_catalog_respects_its_scope_without_prompt_directory(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
-    default_block = build_deferred_tools_prompt_block(registry)
-    coordination_block = build_deferred_tools_prompt_block(registry, scope="coordination")
-
-    assert "task_create" not in default_block
-    assert "reply" not in default_block
-    assert "send_message" not in coordination_block
-    assert "task_create" not in coordination_block
-    assert "reply" not in coordination_block
+    default_names = {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY).entries()}
+    coordination_names = {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY, scope="coordination").entries()}
+    assert {"task_create", "reply"}.isdisjoint(default_names)
+    assert {"send_message", "task_create", "reply"}.isdisjoint(coordination_names)
 
 
 def test_tool_search_model_schema_stays_minimal(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
     schema = ToolSearchTool(registry).model_schema()
 
-    assert set(schema.parameters["properties"].keys()) == {"query", "max_results"}
+    assert set(schema.parameters["properties"].keys()) == {"query", "limit"}
     assert schema.parameters["required"] == ["query"]
+    assert schema.parameters["additionalProperties"] is False
+    assert "Defaults to 8" in schema.parameters["properties"]["limit"]["description"]
 
 
 def test_should_defer_hint_moves_core_spec_out_of_direct_schema() -> None:
@@ -479,13 +586,13 @@ def test_should_defer_hint_moves_core_spec_out_of_direct_schema() -> None:
     registry = ToolRegistry()
     registry.register(OptionalCoreTool())
 
-    view = registry.get_schema_view("optional_core_tool")
+    view = registry.get_schema_view("optional_core_tool", toolset_policy=SEARCH_POLICY)
 
     assert view is not None
     assert view.exposure == "deferred"
     assert view.direct is False
-    assert registry.get_schemas() == []
-    assert [entry.name for entry in DeferredToolCatalog(registry).entries()] == [
+    assert registry.get_schemas(toolset_policy=SEARCH_POLICY) == []
+    assert [entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY).entries()] == [
         "optional_core_tool"
     ]
 
@@ -513,7 +620,7 @@ class _DeferredFakeTool(BaseTool):
 
 def test_subagent_deferred_catalog_filters_denied_parent_tools() -> None:
     registry = ToolRegistry()
-    registry.register(_DeferredFakeTool("ask_user"))
+    registry.register(_DeferredFakeTool("request_user_input"))
     registry.register(_DeferredFakeTool("update_plan"))
     registry.register(_DeferredFakeTool("optional_lookup"))
     sub_permission = build_subagent_permission_context(
@@ -527,7 +634,8 @@ def test_subagent_deferred_catalog_filters_denied_parent_tools() -> None:
         metadata={
             "_agent_execution_profile": build_agent_execution_profile(
                 background=False,
-            )
+            ),
+            "_session_toolset_policy": SEARCH_POLICY,
         },
     )
 
@@ -540,14 +648,12 @@ def test_subagent_deferred_catalog_filters_denied_parent_tools() -> None:
         ).entries()
     }
     search_result = asyncio.run(
-        ToolSearchTool(registry).execute({"query": "select:ask_user,optional_lookup"}, context=context)
+        ToolSearchTool(registry).execute({"query": "request_user_input optional_lookup"}, context=context)
     )
-    search_payload = json.loads(search_result.content)
-
     assert "optional_lookup" in entries
-    assert "ask_user" not in entries
+    assert "request_user_input" not in entries
     assert "update_plan" not in entries
-    assert search_payload["matches"] == ["optional_lookup"]
+    assert search_names(search_result) == {"optional_lookup"}
 
 
 def test_enabled_toolsets_is_a_whitelist_that_can_exclude_by_omission(tmp_path) -> None:
@@ -668,23 +774,23 @@ def test_runtime_review_same_object_replacement_refreshes_only_visible_schemas()
     deferred = DeferredTool()
     registry.register(direct)
     registry.register(deferred)
-    default_schemas = registry.get_schemas()
+    default_schemas = registry.get_schemas(toolset_policy=SEARCH_POLICY)
     assert default_schemas[0]["function"]["parameters"]["required"] == ["old_arg"]
     deferred.field = "changed_deferred_arg"
     registry.register(deferred, replace=True)
-    assert registry.get_schemas() is default_schemas
+    assert registry.get_schemas(toolset_policy=SEARCH_POLICY) is default_schemas
     fork = registry.fork()
-    assert fork.get_schemas() == default_schemas
+    assert fork.get_schemas(toolset_policy=SEARCH_POLICY) == default_schemas
     direct.field = "new_arg"
     direct.description = "updated description"
     registry.register(direct, replace=True)
-    refreshed = registry.get_schemas()
+    refreshed = registry.get_schemas(toolset_policy=SEARCH_POLICY)
     assert refreshed[0]["function"]["parameters"]["required"] == ["new_arg"]
     assert refreshed[0]["function"]["description"] == "updated description"
     assert default_schemas[0]["function"]["parameters"]["required"] == ["old_arg"]
     fork.register(direct, replace=True)
-    assert fork.get_schemas()[0]["function"]["parameters"]["required"] == ["new_arg"]
-    activated = ToolsetPolicy.from_iterables(enabled_tools=[deferred.name])
+    assert fork.get_schemas(toolset_policy=SEARCH_POLICY)[0]["function"]["parameters"]["required"] == ["new_arg"]
+    activated = ToolsetPolicy.from_iterables(enabled_tools=[deferred.name], supports_search_tool=True)
     visible_deferred = registry.get_schemas(toolset_policy=activated)
     deferred.field = "another_deferred_arg"
     registry.register(deferred, replace=True)

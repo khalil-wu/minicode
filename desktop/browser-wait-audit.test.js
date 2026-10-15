@@ -37,14 +37,14 @@ function harness(found) {
     require(name) { return name === "electron" ? { WebContentsView: View, app: {}, dialog: {} } : require(name); },
   });
   const manager = moduleValue.exports;
-  manager.init({ getMainWindow: () => ownerWindow, browserSettingsPath: path.join(__dirname, ".nonexistent-wait-audit-settings.json") });
+  manager.init({ getWindowByInstanceId: () => ownerWindow, browserSettingsPath: path.join(__dirname, ".nonexistent-wait-audit-settings.json") });
   return { manager, waits, insertions, evaluations: () => evaluations };
 }
 
 for (const found of [true, false]) test(`zero selector timeout checks the ${found ? "present" : "missing"} element once`, async () => {
   const { manager, waits, evaluations } = harness(found);
-  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
-  const result = await manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: 0 });
+  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
+  const result = await manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: 0, window_instance_id: "fixture-window" });
   assert.equal(result.ok, found);
   assert.equal(evaluations(), 1);
   assert.deepEqual(waits, []);
@@ -53,8 +53,8 @@ for (const found of [true, false]) test(`zero selector timeout checks the ${foun
 
 test("selector polling does not add a full interval past its deadline", async () => {
   const { manager, waits } = harness(false);
-  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
-  const result = await manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: 25 });
+  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
+  const result = await manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: 25, window_instance_id: "fixture-window" });
   assert.equal(result.ok, false);
   assert.deepEqual(waits, [25]);
   manager.disposeAll();
@@ -62,8 +62,8 @@ test("selector polling does not add a full interval past its deadline", async ()
 
 test("malformed external selector timeout rejects instead of polling forever", async () => {
   const { manager, waits } = harness(false);
-  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
-  await assert.rejects(manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: "not-a-number" }), /finite number/);
+  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
+  await assert.rejects(manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: "not-a-number", window_instance_id: "fixture-window" }), /finite number/);
   assert.deepEqual(waits, []);
   manager.disposeAll();
 });
@@ -72,9 +72,9 @@ test("a cancelled selector-focus does not submit the following text insertion", 
   let completeFocus;
   const focus = new Promise((resolve) => { completeFocus = resolve; });
   const { manager, insertions } = harness(() => focus);
-  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
+  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
   const controller = new AbortController();
-  const operation = manager.executeControlCommand({ action: "type", target_id: "target", conversation_id: "owner", selector: "#fixture", text: "pending text" }, { signal: controller.signal });
+  const operation = manager.executeControlCommand({ action: "type", target_id: "target", conversation_id: "owner", selector: "#fixture", text: "pending text", window_instance_id: "fixture-window" }, { signal: controller.signal });
   controller.abort(new Error("cancelled fixture"));
   completeFocus({ ok: true });
   await assert.rejects(operation, /cancelled fixture/);

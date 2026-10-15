@@ -118,6 +118,7 @@ class ToolsetPolicy:
     code_mode_only: bool = False
     code_mode_enabled: bool = True
     nested_surface: bool = False
+    supports_search_tool: bool = False
     availability_filters: tuple[ToolAvailabilityFilter, ...] = ()
 
     @classmethod
@@ -135,6 +136,7 @@ class ToolsetPolicy:
             "include_deferred_directly": bool(self.include_deferred_directly),
             "code_mode_only": bool(self.code_mode_only),
             "code_mode_enabled": bool(self.code_mode_enabled),
+            "supports_search_tool": self.supports_search_tool,
             "availability_filters": [
                 clause.to_mapping() for clause in self.availability_filters
             ],
@@ -155,6 +157,7 @@ class ToolsetPolicy:
             "include_deferred_directly",
             "code_mode_only",
             "code_mode_enabled",
+            "supports_search_tool",
             "availability_filters",
         }
         unknown_keys = sorted(str(key) for key in raw if key not in allowed_keys)
@@ -213,6 +216,7 @@ class ToolsetPolicy:
                 True if "code_mode_enabled" not in raw else _bool(raw["code_mode_enabled"])
             ),
             availability_filters=filters,
+            supports_search_tool=_bool(raw.get("supports_search_tool", False)),
         )
 
     @classmethod
@@ -227,6 +231,7 @@ class ToolsetPolicy:
         code_mode_only: bool = False,
         code_mode_enabled: bool = True,
         nested_surface: bool = False,
+        supports_search_tool: bool = False,
     ) -> "ToolsetPolicy":
         # ``None`` means "use the normal session selection: every group".  An
         # explicitly empty iterable is a real whitelist boundary used by Pi's
@@ -247,6 +252,7 @@ class ToolsetPolicy:
             code_mode_only=code_mode_only,
             code_mode_enabled=code_mode_enabled,
             nested_surface=nested_surface,
+            supports_search_tool=supports_search_tool,
         )
 
     def with_disabled_tools(self, values: Iterable[str]) -> "ToolsetPolicy":
@@ -341,6 +347,7 @@ class ToolsetPolicy:
                 "code_mode_only=1" if self.code_mode_only else "code_mode_only=0",
                 "code_mode_enabled=1" if self.code_mode_enabled else "code_mode_enabled=0",
                 "nested_surface=1" if self.nested_surface else "nested_surface=0",
+                "search=1" if self.supports_search_tool else "search=0",
                 *(
                     f"availability[{index}]={clause.cache_key()}"
                     for index, clause in enumerate(self.availability_filters)
@@ -372,12 +379,19 @@ class ToolsetPolicy:
             )
         unknown_tools = sorted(self.enabled_tools - known_tools)
         if unknown_tools:
+            migration = (
+                "; MCP selections must use the tool's policy_identity (mcp::server/tool). "
+                "Reauthorize legacy or model wire aliases."
+                if any(name.startswith("mcp__") for name in unknown_tools) else ""
+            )
             raise ValueError(
-                "Unknown tool name(s) in enabled_tools: " + ", ".join(unknown_tools)
+                "Unknown tool name(s) in enabled_tools: " + ", ".join(unknown_tools) + migration
             )
 
     def is_available(self, spec: ToolSpec) -> bool:
-        if any(name in self.disabled_tools for name in spec.policy_names) or spec.toolset in self.disabled_toolsets:
+        if spec.name == "tool_search" and not self.supports_search_tool:
+            return False
+        if any(name in self.disabled_tools for name in spec.restriction_policy_names) or spec.toolset in self.disabled_toolsets:
             return False
         if spec.exposure == "hidden":
             return False
@@ -414,7 +428,7 @@ class ToolsetPolicy:
         if spec.exposure in {"core", "direct_model_only", "code_mode_only"}:
             return self._toolset_enabled(spec.toolset)
         if spec.exposure in {"deferred", "deferred_model_only"}:
-            return self.include_deferred_directly and self._toolset_enabled(spec.toolset)
+            return (self.nested_surface or not self.supports_search_tool or self.include_deferred_directly) and self._toolset_enabled(spec.toolset)
         return False
 
 

@@ -10,6 +10,7 @@ import { useWorkspaceGit } from "./hooks/useWorkspaceGit";
 import { useAppStore } from "./stores";
 import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
 import { capabilityFeatureEnabled } from "./protocol/capabilities";
+import { DesktopLanguageProvider, useI18n } from "./i18n";
 
 const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
@@ -17,13 +18,17 @@ const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHel
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
 
-const RouteLoading = ({ settings = false }: { settings?: boolean }) => (
-  <div className="app-route-loading" data-scope={settings ? "settings" : "overlay"} role="status" aria-label={settings ? "正在加载设置" : "正在加载页面"}>
+const RouteLoading = ({ settings = false }: { settings?: boolean }) => {
+  const { t } = useI18n();
+  return (
+  <div className="app-route-loading" data-scope={settings ? "settings" : "overlay"} role="status" aria-label={settings ? t("正在加载设置") : t("正在加载页面")}>
     <LoaderCircle className="animate-spin" aria-hidden="true" />
   </div>
 );
+};
 
-export const App = () => {
+const AppContent = () => {
+  const { t } = useI18n();
   useWebSocketConnection();
   useKeyboardShortcuts();
   useDesktopEvents();
@@ -48,7 +53,7 @@ export const App = () => {
 
   return (
     <>
-      <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>Something went wrong. <button onClick={() => window.location.reload()}>Reload</button></div>}>
+      <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>{t("发生错误。")} <button onClick={() => window.location.reload()}>{t("重新加载")}</button></div>}>
         <WorkbenchShell />
       </SafeBoundary>
       <ChunkErrorBoundary key={overlayRoute}>
@@ -77,3 +82,5 @@ export const App = () => {
     </>
   );
 };
+
+export const App = () => <DesktopLanguageProvider><AppContent /></DesktopLanguageProvider>;

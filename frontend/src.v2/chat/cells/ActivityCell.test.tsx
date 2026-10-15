@@ -95,20 +95,21 @@ describe("ActivityCell", () => {
       status: "done", collapsed: true, startedAt: 1,
       skill: { name: "review-workflow", reason: "核对项目约定", content: "先阅读项目的审阅规则。" },
     }} />);
-    expect(screen.getByText("读取技能 review-workflow")).toBeTruthy();
+    expect(screen.getByText("已读取技能 review-workflow")).toBeTruthy();
     expect(screen.queryByText("先阅读项目的审阅规则。")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
     expect(screen.getByText("核对项目约定")).toBeTruthy();
     expect(screen.getByText("先阅读项目的审阅规则。")).toBeTruthy();
   });
   it.each([
-    ["failed", "失败"],
+    ["failed", ""],
     ["interrupted", "已中断"],
-    ["partial", "部分完成"],
+    ["partial", ""],
   ] as const)("does not claim an edit was applied after %s", (status, label) => {
     render(<ActivityCell cell={{ kind: "activity", id: "edit", activityKind: "fileChange", title: "Edit", status,
       toolCallRecords: [{ id: "edit", name: "edit_file", args: { file_path: "pricing.py" }, status: "failed" }] }} />);
-    expect(screen.getByText(label)).toBeTruthy();
+    if (label) expect(screen.getByText(label)).toBeTruthy();
+    else expect(screen.queryByText("失败")).toBeNull();
     expect(screen.queryByText("Edited")).toBeNull();
   });
   it("preserves a user's disclosure choice across tool status updates", () => {
@@ -118,6 +119,7 @@ describe("ActivityCell", () => {
     fireEvent.click(screen.getByRole("button", { name: "收起活动详情" }));
     rerender(<ActivityCell cell={{ ...cell, status: "done", toolCallRecords: [{ ...cell.toolCallRecords![0], status: "success" }] }} />);
     expect(screen.getByRole("button", { name: "展开活动详情" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "展开活动详情" }).getAttribute("data-processing")).toBeNull();
   });
 
   it("hides the provider request ladder while retaining expandable actual errors", () => {
@@ -311,7 +313,9 @@ describe("ActivityCell", () => {
     expect(screen.queryByRole("button", { name: "展开活动详情" })).toBeNull();
     expect(container.querySelector(".activity-cell-tool-expanded")).toBeNull();
     expect(container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe("正在读取");
-    expect(document.body.textContent).toContain("src/live.ts");
+    expect(container.querySelector(".activity-cell-read-target")?.textContent).toBe("live.ts");
+    expect(container.querySelector(".activity-cell-read-target")?.getAttribute("title")).toBe("src/live.ts");
+    expect(container.querySelector(".activity-cell-main-button")?.getAttribute("data-processing")).toBe("true");
   });
 
   it("renders multiple reads in one ordered expandable group", () => {
@@ -402,7 +406,9 @@ describe("ActivityCell", () => {
 
     expect(container.querySelector(".activity-cell-file-change-expanded")).toBeTruthy();
     expect(container.querySelector(".activity-cell-change-card")).toBeTruthy();
-    expect(screen.getAllByText(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/)).toHaveLength(2);
+    expect(screen.getByText("fuzzy-match.ts").getAttribute("title")).toMatch(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/);
+    expect(screen.getAllByText(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /展开 .*fuzzy-match\.ts 的修改/ }));
     expect(screen.getByText("new value")).toBeTruthy();
     expect(screen.queryByText("其余上下文已折叠")).toBeNull();
   });
@@ -450,6 +456,9 @@ describe("ActivityCell", () => {
 
     const cards = container.querySelectorAll(".activity-cell-change-card");
     expect(cards).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: /展开 .*fuzzy-match\.ts 的修改/ })[0]);
+    expect(cards[1]?.textContent).not.toContain("new two");
+    fireEvent.click(screen.getByRole("button", { name: /展开 .*fuzzy-match\.ts 的修改/ }));
     expect(cards[0]?.textContent).toContain("+1");
     expect(cards[0]?.textContent).toContain("-1");
     expect(cards[0]?.textContent).toContain("new one");
@@ -549,7 +558,7 @@ describe("ActivityCell", () => {
       </>,
     );
     const labels = [...container.querySelectorAll(".activity-cell-name")].map((node) => node.textContent);
-    expect(labels).toEqual(["查看目录", "搜索"]);
+    expect(labels).toEqual(["已查看目录", "已搜索"]);
     expect(container.querySelectorAll(".activity-cell-detail")[0]?.textContent).toBe("frontend/src.v2/lib");
     expect(container.querySelectorAll(".activity-cell-detail")[1]?.textContent)
       .toBe("AgentTimeline · frontend/src.v2/agent-loop");
@@ -732,7 +741,7 @@ describe("ActivityCell", () => {
     };
 
     const { rerender, container } = render(React.createElement(ActivityCell, { cell: fetchCell }));
-    expect(screen.getByText("读取网页")).toBeTruthy();
+    expect(screen.getByText("已读取网页")).toBeTruthy();
     expect(container.querySelector(".activity-cell-tool-icon")).toBeTruthy();
     expect(container.querySelector(".activity-cell[data-web-action=\"fetch\"]")).toBeTruthy();
 
@@ -749,7 +758,7 @@ describe("ActivityCell", () => {
         inputSummary: "MiniCode",
       }],
     } }));
-    expect(screen.getByText("搜索网页")).toBeTruthy();
+    expect(screen.getByText("已搜索网页")).toBeTruthy();
   });
 
   it("does not repeat a single fetch URL inside a second disclosure card", () => {
@@ -813,7 +822,7 @@ describe("ActivityCell", () => {
 
   it("renders read file targets as separate clickable file links", () => {
     const openEditorFile = vi.fn();
-    useAppStore.setState({ openEditorFile });
+    useAppStore.setState({ openEditorFile, workingDirectory: "C:/Desktop/MiniCode" });
     const cell: ActivityCellState = {
       kind: "activity",
       id: "read-files",
@@ -1003,12 +1012,12 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getAllByText("读取文件").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("已读取").length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")).toBeNull();
     expect(document.body.textContent).toContain("Dimensions: 1029x1071");
   });
 
-  it("keeps failed activity evidence folded while showing the failure state", () => {
+  it("keeps failed activity evidence folded without adding a failure marker", () => {
     const cell: ActivityCellState = {
       kind: "activity",
       id: "failed-tool",
@@ -1033,7 +1042,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getByText("失败", { selector: ".activity-cell-detail-meta" })).toBeTruthy();
+    expect(screen.queryByText("失败", { selector: ".activity-cell-detail-meta" })).toBeNull();
     const disclosure = screen.getByRole("button", { name: "展开活动详情" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
@@ -1045,6 +1054,18 @@ describe("ActivityCell", () => {
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
     expect(document.body.textContent).toContain("stack trace detail");
     expect(document.body.textContent).toContain("custom_tool");
+  });
+
+  it("keeps the backend failure summary and distinct diagnostics inside disclosure", () => {
+    const view = render(<ActivityCell cell={{ kind: "activity", id: "failure-summary-and-detail", activityKind: "genericTool", title: "custom_tool", status: "failed", collapsed: true, startedAt: 1,
+      toolCallRecords: [{ id: "failed-record", name: "custom_tool", args: {}, status: "failed", startedAt: 1,
+        userSummary: "找不到目标文件。", outputPreview: "Traceback (most recent call last):\nFileNotFoundError: missing.txt" }] }} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(view.container.textContent).not.toContain("找不到目标文件。");
+    expect(view.container.textContent).not.toContain("Traceback");
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(view.container.textContent).toContain("找不到目标文件。");
+    expect(view.container.textContent).toContain("FileNotFoundError: missing.txt");
   });
 
   it("never renders model-only untrusted result wrappers", () => {

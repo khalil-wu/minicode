@@ -7,6 +7,8 @@ import asyncio
 import time
 import os
 import sys
+import hashlib
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _desktop_bridge_fingerprint() -> str:
+    endpoint = os.environ.get("MINICODE_EMBEDDED_BROWSER_ENDPOINT", "").strip()
+    token = os.environ.get("MINICODE_EMBEDDED_BROWSER_TOKEN", "")
+    if not endpoint or not token:
+        return ""
+    target = urlsplit(endpoint)
+    host = (target.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = target.port or 80
+    origin = f"{target.scheme.lower()}://{host}" + (f":{port}" if port != 80 else "")
+    return hashlib.sha256(f"{origin}\0{token}".encode("utf-8")).hexdigest()
+
+
 # ── Health / status endpoints ──
 
 
@@ -52,7 +68,8 @@ async def readiness_check(response: Response) -> dict[str, Any]:
     )
     response.status_code = 200 if ready else 503
     response.headers["Cache-Control"] = "no-store"
-    return {"status": "ok" if ready else "starting", "ready": ready}
+    return {"status": "ok" if ready else "starting", "ready": ready,
+            "desktop_bridge_fingerprint": _desktop_bridge_fingerprint()}
 
 
 @router.get("/healthz")

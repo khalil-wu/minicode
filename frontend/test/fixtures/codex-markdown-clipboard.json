@@ -1,0 +1,104 @@
+{
+  "source": {
+    "app": "26.1007.2314.0",
+    "entry": "app-initial::TBr / OBr / FBr / JBr",
+    "clipboard": "app-shared::ONi",
+    "generator": "output\\playwright\\codex-control-audit-20261013\\source\\extract-markdown-clipboard-fixtures.cjs",
+    "cases": 12
+  },
+  "fixtures": [
+    {
+      "name": "formatted prose",
+      "html": "<h2 id=\"ui-heading\">Result</h2><p>A <strong>bold</strong> and <em>italic</em> reply with <a href=\"https://example.test/docs\" title=\"Docs\" class=\"chip\">documentation</a>.</p>",
+      "expected": {
+        "htmlText": "<h2>Result</h2><p>A <strong>bold</strong> and <em>italic</em> reply with <a href=\"https://example.test/docs\" title=\"Docs\">documentation</a>.</p>",
+        "plainText": "Result\nA bold and italic reply with documentation."
+      }
+    },
+    {
+      "name": "code controls and line numbers",
+      "html": "<div data-markdown-copy=\"code-block\" data-markdown-copy-text=\"const value = 1;\nconsole.log(value);\"><button>Copy</button><div>JavaScript</div><pre><span aria-hidden=\"true\">1</span>highlighted rendering</pre></div>",
+      "expected": {
+        "htmlText": "<pre dir=\"ltr\"><code>const value = 1;\nconsole.log(value);</code></pre>",
+        "plainText": "const value = 1;\nconsole.log(value);"
+      }
+    },
+    {
+      "name": "nested ordered and unordered lists",
+      "html": "<ol start=\"3\"><li>third<ul><li>child</li><li>second child</li></ul></li><li value=\"7\"><p>seventh</p><p>next paragraph</p></li><li></li></ol>",
+      "expected": {
+        "htmlText": "<ol start=\"3\"><li>third<ul><li>child</li><li>second child</li></ul></li><li value=\"7\"><p>seventh</p><p>next paragraph</p></li><li></li></ol>",
+        "plainText": "3. third\n   - child\n   - second child\n7. seventh\n   next paragraph\n8."
+      }
+    },
+    {
+      "name": "task checkboxes",
+      "html": "<ul><li><span role=\"checkbox\" aria-checked=\"true\"></span>done</li><li><span role=\"checkbox\" aria-checked=\"false\"></span>pending</li></ul>",
+      "expected": {
+        "htmlText": "<ul><li><input type=\"checkbox\" disabled=\"\" checked=\"\">done</li><li><input type=\"checkbox\" disabled=\"\">pending</li></ul>",
+        "plainText": "- [x] done\n- [ ] pending"
+      }
+    },
+    {
+      "name": "table cells and spans",
+      "html": "<table class=\"surface\"><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td rowspan=\"2\">One</td><td><strong>Two</strong></td></tr><tr><td>Three</td></tr></tbody></table>",
+      "expected": {
+        "htmlText": "<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td rowspan=\"2\">One</td><td><strong>Two</strong></td></tr><tr><td>Three</td></tr></tbody></table>",
+        "plainText": "Name\tValue\nOne\tTwo\nThree"
+      }
+    },
+    {
+      "name": "inline and display math",
+      "html": "<p>Inline <span class=\"katex\"><annotation encoding=\"application/x-tex\">x^2</annotation><span aria-hidden=\"true\">visual</span></span>.</p><span class=\"katex-display\"><span class=\"katex\"><annotation encoding=\"application/x-tex\">a+b</annotation></span></span>",
+      "expected": {
+        "htmlText": "<p>Inline <span data-math-source=\"x^2\" data-math-display=\"false\">\\(x^2\\)</span>.</p><span data-math-source=\"a+b\" data-math-display=\"true\">\\[\na+b\n\\]</span>",
+        "plainText": "Inline \\(x^2\\).\n\\[\na+b\n\\]"
+      }
+    },
+    {
+      "name": "hidden and collapsed presentation",
+      "html": "<p>Visible<span class=\"sr-only\">accessible label</span><span aria-hidden=\"true\">icon</span></p><div inert aria-hidden=\"true\"><p>collapsed internal body</p></div><div data-markdown-copy=\"exclude\">copy button</div>",
+      "expected": {
+        "htmlText": "<p>Visible</p>",
+        "plainText": "Visible"
+      }
+    },
+    {
+      "name": "file button and prompt link escaping",
+      "html": "<p><button data-file-reference data-markdown-copy-text=\"src/main.ts:12\"><svg><text>icon</text></svg>different visual label</button> <span data-prompt-link-label=\"a](b\" data-prompt-link-href=\"C:\\file).ts\">short label</span></p>",
+      "expected": {
+        "htmlText": "<p>src/main.ts:12 <span data-prompt-link-label=\"a](b\" data-prompt-link-href=\"C:\\file).ts\">[a\\]\\(b](C:\\\\file\\).ts)</span></p>",
+        "plainText": "src/main.ts:12 [a\\]\\(b](C:\\\\file\\).ts)"
+      }
+    },
+    {
+      "name": "contents rich and inline blocks",
+      "html": "<div data-markdown-copy=\"contents\"><p>Before</p><div data-markdown-copy=\"rich-block\"><button>controls</button><div data-markdown-copy-content><strong>Rich</strong></div></div><div data-markdown-copy=\"inline-code\">inline()</div></div>",
+      "expected": {
+        "htmlText": "<p>Before</p><div><strong>Rich</strong></div><code dir=\"ltr\">inline()</code>",
+        "plainText": "Before\nRich\ninline()"
+      }
+    },
+    {
+      "name": "images with surrounding text",
+      "html": "<p>Picture</p><img src=\"https://example.test/image.png\" alt=\"Chart\" width=\"20\" class=\"preview\"><img src=\"icon.png\" alt=\"\">",
+      "expected": {
+        "htmlText": "<p>Picture</p><img src=\"https://example.test/image.png\" alt=\"Chart\" width=\"20\">",
+        "plainText": "Picture"
+      }
+    },
+    {
+      "name": "empty image only",
+      "html": "<img src=\"https://example.test/image.png\" alt=\"Chart\">",
+      "expected": null
+    },
+    {
+      "name": "blank lines",
+      "html": "<p>Before</p><span data-markdown-copy=\"blank-lines\">\n\n</span><p>After</p>",
+      "expected": {
+        "htmlText": "<p>Before</p><p></p><p></p><p>After</p>",
+        "plainText": "Before\n\n\nAfter"
+      }
+    }
+  ]
+}

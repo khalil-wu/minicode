@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useState } from "react";
 import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, Upload } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
@@ -14,7 +15,8 @@ interface DeliveryStatus {
   commits: Array<{ hash: string; subject: string }>; detached: boolean; error?: string;
   github?: { eligible: boolean; host: string; available: boolean; authenticated: boolean | null; message: string };
 }
-export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey = 0 }: { workspaceRoot: string; stagedCount: number; onChanged: () => void; refreshKey?: number }) {
+export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey = 0, active = true }: { workspaceRoot: string; stagedCount: number; onChanged: () => void; refreshKey?: number; active?: boolean }) {
+  const { t: tr } = useI18n();
   const [draft] = useState(() => safeJsonParse<Record<string, string>>(readLS("minicode.git.draft:" + workspaceRoot) ?? "{}", {}));
   const [status, setStatus] = useState<DeliveryStatus | null>(null);
   const [message, setMessage] = useState(draft.message ?? "");
@@ -33,6 +35,7 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
   const endpoint = new URL("/api/workspace/git/delivery", apiBase());
   endpoint.searchParams.set("workspace_root", workspaceRoot);
   useEffect(() => {
+    if (!active) return;
     const controller = new AbortController();
     setStatusLoading(true);
     void fetchWithTimeout(endpoint, { signal: controller.signal, headers: authHeaders() }).then(async (response) => {
@@ -42,13 +45,13 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
       .catch((reason) => { if (!controller.signal.aborted) { setStatus(null); setError(String(reason)); } })
       .finally(() => { if (!controller.signal.aborted) setStatusLoading(false); });
     return () => controller.abort();
-  }, [workspaceRoot, revision, refreshKey]);
+  }, [workspaceRoot, revision, refreshKey, active]);
   const run = async (action: string) => {
     const branchAtClick = status?.branch ?? "";
     if (action === "push" || action === "draft_pr") {
-      const confirmed = await showConfirm({ title: action === "push" ? "推送当前分支" : "创建草稿 PR",
-        message: action === "push" ? "将 " + branchAtClick + " 推送到 " + remote + "。" : "从 " + branchAtClick + " 向 " + base + " 创建草稿 PR：\n" + title,
-        confirmLabel: action === "push" ? "推送" : "创建草稿 PR" });
+      const confirmed = await showConfirm({ title: action === "push" ? tr("推送当前分支") : tr("创建草稿 PR"),
+        message: action === "push" ? tr("将 {branch} 推送到 {remote}。", { branch: branchAtClick, remote }) : tr("从 {branch} 向 {base} 创建草稿 PR：{title}", { branch: branchAtClick, base, title: "\n" + title }),
+        confirmLabel: action === "push" ? tr("推送") : tr("创建草稿 PR") });
       if (!confirmed || useAppStore.getState().workingDirectory !== workspaceRoot) return;
     }
     setBusy(action); setError(""); setFeedback("");
@@ -58,7 +61,7 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
       const result = await response.json() as { message: string; url?: string };
       if (useAppStore.getState().workingDirectory !== workspaceRoot) return;
-      setFeedback(result.message || "操作完成"); setUrl(result.url ?? "");
+      setFeedback(result.message || tr("操作完成")); setUrl(result.url ?? "");
       if (action === "commit") setMessage("");
       setRevision((value) => value + 1); onChanged();
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -66,27 +69,27 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
   };
   const github = status?.github;
   const githubReady = !statusLoading && Boolean(github?.eligible && github.available && github.authenticated === true);
-  const githubReason = statusLoading ? "正在读取 GitHub 连接状态…" : !github ? "GitHub 连接状态待确认。"
-    : !github.eligible ? github.message || "当前仓库未关联 GitHub 远端。"
-    : !github.available ? "GitHub 连接组件未就绪。"
-    : github.authenticated === null ? github.message || "GitHub 连接状态待确认。"
-    : !github.authenticated ? "连接 GitHub 后可创建草稿 PR。" : "";
-  return <section className="mc-git-delivery" aria-label="Git 交付">
-    {status?.is_git_repo === false ? <button type="button" disabled={Boolean(busy)} onClick={() => void run("init")}><GitBranch size={14} />初始化 Git 仓库</button> : <>
-      <textarea aria-label="提交说明" placeholder="提交说明…" rows={3} value={message} onChange={(event) => setMessage(event.target.value)} disabled={Boolean(busy)} />
-      <button type="button" disabled={!status || !message.trim() || !stagedCount || Boolean(busy)} onClick={() => void run("commit")}><GitCommitHorizontal size={14} />{busy === "commit" ? "提交中…" : "提交已暂存的 " + stagedCount + " 个文件"}</button>
-      <details><summary>分支与推送</summary><small>{status?.repo_root}<br />{status?.upstream ? "跟踪 " + status.upstream : "尚未设置跟踪分支"}</small>
-        <div className="mc-git-delivery-row"><input aria-label="新分支名称" placeholder="新分支名称" value={branch} onChange={(event) => setBranch(event.target.value)} /><button type="button" disabled={!status || !branch.trim() || Boolean(busy)} onClick={() => void run("branch")}>创建</button></div>
-        <div className="mc-git-delivery-row"><SelectMenu ariaLabel="推送远端" value={remote} onValueChange={setRemote} disabled={Boolean(busy) || !status?.remotes?.length} style={{ flex: 1, minWidth: 0 }}>{!status?.remotes?.length && <option value="">没有远端</option>}{status?.remotes?.map((item) => <option key={item} value={item}>{item}</option>)}</SelectMenu>
-          <button type="button" disabled={!remote || Boolean(busy) || status?.detached} onClick={() => void run("push")}><Upload size={13} />推送</button></div>
+  const githubReason = statusLoading ? tr("正在读取 GitHub 连接状态…") : !github ? tr("GitHub 连接状态待确认。")
+    : !github.eligible ? github.message || tr("当前仓库未关联 GitHub 远端。")
+    : !github.available ? tr("GitHub 连接组件未就绪。")
+    : github.authenticated === null ? github.message || tr("GitHub 连接状态待确认。")
+    : !github.authenticated ? tr("连接 GitHub 后可创建草稿 PR。") : "";
+  return <section className="mc-git-delivery" aria-label={tr("Git 交付")}>
+    {status?.is_git_repo === false ? <button type="button" disabled={Boolean(busy)} onClick={() => void run("init")}><GitBranch size={14} />{tr("初始化 Git 仓库")}</button> : <>
+      <textarea aria-label={tr("提交说明")} placeholder={tr("提交说明…")} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} disabled={Boolean(busy)} />
+      <button type="button" disabled={!status || !message.trim() || !stagedCount || Boolean(busy)} onClick={() => void run("commit")}><GitCommitHorizontal size={14} />{busy === "commit" ? tr("提交中…") : tr("提交已暂存的 {count} 个文件", { count: stagedCount })}</button>
+      <details><summary>{tr("分支与推送")}</summary><small>{status?.repo_root}<br />{status?.upstream ? tr("跟踪 {branch}", { branch: status.upstream }) : tr("尚未设置跟踪分支")}</small>
+        <div className="mc-git-delivery-row"><input aria-label={tr("新分支名称")} placeholder={tr("新分支名称")} value={branch} onChange={(event) => setBranch(event.target.value)} /><button type="button" disabled={!status || !branch.trim() || Boolean(busy)} onClick={() => void run("branch")}>{tr("创建")}</button></div>
+        <div className="mc-git-delivery-row"><SelectMenu ariaLabel={tr("推送远端")} value={remote} onValueChange={setRemote} disabled={Boolean(busy) || !status?.remotes?.length} style={{ flex: 1, minWidth: 0 }}>{!status?.remotes?.length && <option value="">{tr("没有远端")}</option>}{status?.remotes?.map((item) => <option key={item} value={item}>{item}</option>)}</SelectMenu>
+          <button type="button" disabled={!remote || Boolean(busy) || status?.detached} onClick={() => void run("push")}><Upload size={13} />{tr("推送")}</button></div>
       </details>
-      {!githubReady && <div className="mc-git-pr-connection"><p role="status">{githubReason}</p><button type="button" onClick={() => openSettings("workspaceGit")}>查看 GitHub 连接设置</button></div>}
-      <details><summary>创建草稿 PR</summary><input aria-label="PR 标题" placeholder="标题" value={title} disabled={!githubReady || Boolean(busy)} onChange={(event) => setTitle(event.target.value)} /><input aria-label="PR 目标分支" placeholder="目标分支" value={base} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBase(event.target.value)} />
-        <textarea aria-label="PR 说明" placeholder="说明与验证结果" rows={4} value={body} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBody(event.target.value)} /><button type="button" disabled={!githubReady || !title.trim() || !base.trim() || Boolean(busy) || status?.detached} onClick={() => void run("draft_pr")}><GitPullRequest size={14} />创建草稿 PR</button>
+      {!githubReady && <div className="mc-git-pr-connection"><p role="status">{githubReason}</p><button type="button" onClick={() => openSettings("workspaceGit")}>{tr("查看 GitHub 连接设置")}</button></div>}
+      <details><summary>{tr("创建草稿 PR")}</summary><input aria-label={tr("PR 标题")} placeholder={tr("标题")} value={title} disabled={!githubReady || Boolean(busy)} onChange={(event) => setTitle(event.target.value)} /><input aria-label={tr("PR 目标分支")} placeholder={tr("目标分支")} value={base} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBase(event.target.value)} />
+        <textarea aria-label={tr("PR 说明")} placeholder={tr("说明与验证结果")} rows={4} value={body} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBody(event.target.value)} /><button type="button" disabled={!githubReady || !title.trim() || !base.trim() || Boolean(busy) || status?.detached} onClick={() => void run("draft_pr")}><GitPullRequest size={14} />{tr("创建草稿 PR")}</button>
       </details>
-      {status?.commits?.length ? <details><summary>最近提交</summary>{status.commits.map((commit) => <p key={commit.hash}><code>{commit.hash}</code> {commit.subject}</p>)}</details> : null}
+      {status?.commits?.length ? <details><summary>{tr("最近提交")}</summary>{status.commits.map((commit) => <p key={commit.hash}><code>{commit.hash}</code> {commit.subject}</p>)}</details> : null}
     </>}
     {error && <p role="alert">{error}</p>}{feedback && <p role="status"><Check size={13} />{feedback}</p>}
-    {url && <button type="button" onClick={() => void openExternal(url)}>打开草稿 PR</button>}
+    {url && <button type="button" onClick={() => void openExternal(url)}>{tr("打开草稿 PR")}</button>}
   </section>;
 }

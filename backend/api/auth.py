@@ -127,6 +127,44 @@ def _is_workspace_raw_token_authorized(request: Request) -> bool:
     return _constant_time_equal(supplied_signature, expected_signature)
 
 
+def _workspace_browser_raw_token_signature(
+    session_id: str,
+    conversation_id: str,
+    execution_cwd: str,
+    path: str,
+    expires_at: int,
+    secret: str,
+) -> str:
+    payload = f"browser_raw:v1:{session_id}:{conversation_id}:{execution_cwd}:{path}:{expires_at}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _is_workspace_browser_raw_token_authorized(request: Request) -> bool:
+    secret = _runtime_token()
+    route = request.scope.get("path", "")
+    if not secret or route not in {"/api/workspace/browser-raw", "/api/v1/workspace/browser-raw"}:
+        return False
+    raw_token = request.query_params.get("raw_token", "").strip()
+    session_id = request.query_params.get("session_id", "").strip()
+    conversation_id = request.query_params.get("conversation_id", "").strip()
+    execution_cwd = request.query_params.get("execution_cwd", "").strip()
+    path = request.query_params.get("path", "").strip()
+    if not raw_token or not session_id or not conversation_id or not execution_cwd or not path:
+        return False
+    expires_at_text, separator, supplied_signature = raw_token.partition(".")
+    if not separator or not supplied_signature:
+        return False
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    expected = _workspace_browser_raw_token_signature(session_id, conversation_id, execution_cwd, path, expires_at, secret)
+    return _constant_time_equal(supplied_signature, expected)
+
+
 def _skill_asset_token_signature(skill_path: str, variant: str, expires_at: int, secret: str) -> str:
     payload = f"skill_asset:v1:{skill_path}:{variant}:{expires_at}".encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()

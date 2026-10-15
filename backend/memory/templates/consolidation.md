@@ -848,9 +848,10 @@ WORKFLOW
    - add clear related-skill pointers as plain bullets in the BODY of corresponding task
      sections (do not change the `# Task Group` / `scope:` block header format)
 
-6. Housekeeping (optional):
-   - remove clearly redundant/low-signal rollout summaries
-   - if multiple summaries overlap for the same thread, keep the best one
+6. Keep host-owned inputs unchanged:
+   - `rollout_summaries/` and `raw_memories.md` are immutable source material.
+   - consolidate overlapping or low-signal summaries in `MEMORY.md`; do not edit,
+     rename, or delete the source summaries.
 
 7. Final pass:
    - remove duplication in memory_summary, skills/, and MEMORY.md

@@ -34,6 +34,7 @@ class AgentLoopSessionContext:
     task_manager: Any | None = None
     background_manager: Any | None = None
     terminal_manager: Any | None = None
+    permission_grants: Any | None = None
     # Host-owned lifecycle capability. The core borrows it for one turn and
     # never owns or shuts it down.
     lifecycle_runtime: Any | None = None
@@ -142,6 +143,9 @@ def populate_prompt_context(
         environment = {}
     cwd = str(workspace_root or "")
     environment["cwd"] = cwd
+    projectless = metadata.get("projectless_context")
+    if isinstance(projectless, dict) and projectless.get("output_directory") and projectless.get("browser_root"):
+        prompt_context["projectless_context"] = dict(projectless)
     for key in ("primary_file", "active_tab_path"):
         value = str(metadata.get(key) or "").strip()
         if value:
@@ -149,7 +153,7 @@ def populate_prompt_context(
         else:
             environment.pop(key, None)
     if workspace_root is not None:
-        environment["workspace_roots"] = [str(workspace_root)]
+        environment["workspace_roots"] = [str(projectless["browser_root"])] if isinstance(projectless, dict) and projectless.get("browser_root") else [str(workspace_root)]
     else:
         environment["workspace_roots"] = []
     user_directories = {
@@ -198,19 +202,23 @@ def populate_prompt_context(
         prompt_context.pop("plan_file_path", None)
         prompt_context.pop("plan_file_exists", None)
     prompt_context["environment"] = environment
-    prompt_context["collaboration_mode"] = (
-        "plan"
-        if mode == "plan"
-        or str(metadata.get("collaboration_mode") or "").strip().lower() == "plan"
-        else "confirm"
-    )
     agent_mode = str(
         metadata.get("agent_mode") or "build"
     ).strip().lower()
+    if metadata.get("code_review"):
+        agent_mode = "build"
     if agent_mode == "subagent":
         agent_mode = str(metadata.get("agent_role") or "").removeprefix("subagent:")
     prompt_context["agent_mode"] = (
         agent_mode if agent_mode in {"build", "plan", "review", "explore"} else "build"
+    )
+    conversational_plan = prompt_context["agent_mode"] == "plan" or metadata.get("collaboration_mode") == "plan"
+    prompt_context["collaboration_mode"] = "plan" if conversational_plan else "default"
+    # Legacy permission planning owns a writable plan file. The composer mode
+    # is Codex's conversational plan and never changes this permission profile.
+    explicit_agent_mode = "agent_mode" in metadata or "collaboration_mode" in metadata
+    prompt_context["collaboration_plan_style"] = (
+        "conversational" if conversational_plan or (explicit_agent_mode and mode != "plan") else "permission"
     )
     prompt_context["previous_turn_aborted"] = bool(
         (
@@ -230,3 +238,5 @@ def populate_prompt_context(
     prompt_context["agent_role"] = str(
         metadata.get("agent_role") or "main"
     ).strip() or "main"
+    prompt_context["conversation_type"] = metadata.get("conversation_type", "main")
+    prompt_context["parent_conversation_id"] = metadata.get("parent_conversation_id")

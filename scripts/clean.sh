@@ -29,9 +29,6 @@ echo ""
 echo "📂 清理临时文件..."
 find . -name ".DS_Store" -delete 2>/dev/null || true
 find . -name "Thumbs.db" -delete 2>/dev/null || true
-find . -name "*~" -delete 2>/dev/null || true
-find . -name "*.bak" -delete 2>/dev/null || true
-find . -name "*.swp" -delete 2>/dev/null || true
 echo "✅ 临时文件已清理"
 
 # 3. 清理日志文件（可选）

@@ -5,6 +5,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const bridge = require("./embedded-browser-bridge");
+bridge.init({ getWindowRecordByInstanceId: (instance) => instance === "fixture-window" ? {
+  windowInstanceId: instance, windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => false },
+} : null });
 
 function browserHarness(dialog = {}) {
   let id = 0;
@@ -14,6 +17,9 @@ function browserHarness(dialog = {}) {
   let responseStarted;
   const session = {
     setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {},
+    clearedOrigins: [], clearCacheCalls: 0,
+    async clearStorageData(options) { this.clearedOrigins.push(options?.origin ?? "all"); },
+    async clearCache() { this.clearCacheCalls++; },
     async resolveProxy() { return "DIRECT"; },
     webRequest: { onResponseStarted(_filter, callback) { responseStarted = callback; } },
   };
@@ -25,6 +31,9 @@ function browserHarness(dialog = {}) {
         id: ++id, session, url: "", dead: false, navigationHistory: {},
         pickerCalls: [], stopCalls: 0,
         captureCalls: 0,
+        backgroundThrottling: true,
+        getBackgroundThrottling() { return this.backgroundThrottling; },
+        setBackgroundThrottling(value) { this.backgroundThrottling = value; },
         async capturePage() {
           this.captureCalls++;
           return { isEmpty: () => false, getSize: () => ({ width: 500, height: 600 }), toPNG: () => Buffer.from("actual-frame") };
@@ -49,19 +58,80 @@ function browserHarness(dialog = {}) {
   const moduleValue = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "embedded-browser-manager.js"), "utf8"), {
     module: moduleValue, exports: moduleValue.exports, URL, Buffer, setTimeout, clearTimeout,
-    require(name) { return name === "electron" ? { WebContentsView: View, app: {}, dialog } : require(name); },
+    require(name) { return name === "electron" ? { WebContentsView: View, app: {}, dialog, session: { fromPartition: () => session } } : require(name); },
   });
   const manager = moduleValue.exports;
   manager.init({
-    getMainWindow: () => ownerWindow,
+    getWindowByInstanceId: () => ownerWindow,
     browserSettingsPath: path.join(__dirname, ".nonexistent-audit-settings.json"),
     lookupHostAddresses: () => new Promise((resolve) => { finishDns = resolve; }),
   });
-  return { manager, views, events,
+  return { manager, views, events, session,
     responseStarted: (details) => responseStarted(details),
     resolveDns: () => finishDns([{ address: "93.184.216.34", family: 4 }]),
   };
 }
+
+function browserSettingsRenderer() {
+  const ipcRenderer = new EventEmitter();
+  ipcRenderer.sendSync = () => ({ apiBaseUrl: "http://127.0.0.1:8000", wsBaseUrl: "ws://127.0.0.1:8000" });
+  const window = {};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "preload.js"), "utf8"), {
+    process: { env: {}, argv: [], contextIsolated: false }, window,
+    require: () => ({ ipcRenderer, contextBridge: {} }),
+  });
+  return { browser: window.__MINICODE_RUNTIME__.desktop.embeddedBrowser,
+    hostWindow: { webContents: { send: (channel, payload) => ipcRenderer.emit(channel, {}, structuredClone(payload)) } } };
+}
+
+test("committed browser settings cross the actual preload subscription in both windows and clear per-origin permissions", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-browser-settings-sync-"));
+  const first = browserSettingsRenderer();
+  const second = browserSettingsRenderer();
+  const firstChanges = []; const secondChanges = [];
+  const stop = first.browser.onSettingsChanged(value => firstChanges.push(value));
+  second.browser.onSettingsChanged(value => secondChanges.push(value));
+  const { manager, session } = browserHarness();
+  manager.init({ browserSettingsPath: path.join(root, "settings.json"),
+    getMainWindows: () => [first.hostWindow, second.hostWindow],
+    lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+    browserHistory: { clear() {} } });
+  manager.setBrowserSettings({ downloadPolicy: "allow" });
+  manager.setBrowserSettings({ origin: "https://a.example/one", permission: "notifications", allowed: true });
+  manager.setBrowserSettings({ origin: "https://b.example/two", permission: "geolocation", allowed: true });
+  assert.deepEqual(firstChanges, secondChanges);
+  assert.deepEqual(firstChanges.at(-1), { downloadPolicy: "allow", sitePermissions: { "https://a.example": ["notifications"], "https://b.example": ["geolocation"] } });
+  assert.deepEqual(firstChanges.at(-1), JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")));
+  await manager.create({ id: "clear-a", url: "https://a.example/one", conversation_id: "settings-owner", window_instance_id: "fixture-window" });
+  await manager.clearSiteData({ id: "clear-a", conversation_id: "settings-owner", window_instance_id: "fixture-window" });
+  assert.equal(session.clearedOrigins[0], "https://a.example");
+  assert.deepEqual(secondChanges.at(-1), { downloadPolicy: "allow", sitePermissions: { "https://b.example": ["geolocation"] } });
+  stop();
+  const firstCount = firstChanges.length;
+  await manager.clearBrowsingData();
+  assert.equal(firstChanges.length, firstCount);
+  assert.equal(session.clearedOrigins.at(-1), "all");
+  assert.equal(session.clearCacheCalls, 1);
+  assert.deepEqual(secondChanges.at(-1), { downloadPolicy: "allow", sitePermissions: {} });
+});
+
+test("a failed browser settings commit cannot emit a new selection to another window", (t) => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-browser-settings-publish-"));
+  const renderer = browserSettingsRenderer();
+  const changes = [];
+  renderer.browser.onSettingsChanged(value => changes.push(value));
+  const { manager } = browserHarness();
+  manager.init({ browserSettingsPath: path.join(root, "settings.json"), getMainWindows: () => [renderer.hostWindow] });
+  manager.setBrowserSettings({ downloadPolicy: "ask" });
+  t.mock.method(fs, "renameSync", () => { throw new Error("settings commit failed"); });
+  assert.throws(() => manager.setBrowserSettings({ downloadPolicy: "allow" }), /settings commit failed/);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].downloadPolicy, "ask");
+  assert.equal(manager.getBrowserSettings("").downloadPolicy, "ask");
+});
 
 test("authenticated backend owned-preview navigation skips host approval while manual payload claims do not", async () => {
   let prompts = 0;
@@ -77,7 +147,7 @@ test("authenticated backend owned-preview navigation skips host approval while m
   bridge.init({ token: "backend-only-token", manager });
   const endpoint = await bridge.start();
   try {
-    const payload = { action: "navigate", url, conversation_id: owner,
+    const payload = { action: "navigate", url, conversation_id: owner, window_instance_id: "fixture-window", window_binding_token: "fixture-binding",
       operation_id: "owned-navigation", navigation_authorization: authorization };
     const rendererRequest = await fetch(`${endpoint}/v1/command`, {
       method: "POST", headers: { authorization: "Bearer renderer-api-token" }, body: JSON.stringify(payload),
@@ -112,9 +182,9 @@ test("authenticated backend owned-preview navigation skips host approval while m
     assert.equal(contents.stopCalls, 1);
     assert.match(events.at(-1).error, /private peer/);
     await assert.rejects(manager.create({ id: "forged-manual", conversation_id: "manual-owner", url,
-      navigation_authorization: { ...authorization, conversation_id: "manual-owner" } }), /cancelled/);
+      navigation_authorization: { ...authorization, conversation_id: "manual-owner" }, window_instance_id: "fixture-window" }), /cancelled/);
     assert.equal(prompts, 2);
-    await assert.rejects(manager.create({ id: "other-private", conversation_id: owner, url: "http://192.168.1.20/admin" }), /cancelled/);
+    await assert.rejects(manager.create({ id: "other-private", conversation_id: owner, url: "http://192.168.1.20/admin", window_instance_id: "fixture-window" }), /cancelled/);
     assert.equal(prompts, 3);
     assert.equal(views.length, 1);
   } finally { await bridge.stop(); manager.disposeAll(); }
@@ -130,7 +200,7 @@ for (const interrupt of ["timeout", "cancelled"]) test(`late host confirmation c
   const endpoint = await bridge.start();
   const owner = { operation_id: `late-${interrupt}`, conversation_id: "owner" };
   const post = (payload, suffix = "command") => fetch(`${endpoint}/v1/${suffix}`, {
-    method: "POST", headers: { authorization: "Bearer backend-only-token" }, body: JSON.stringify(payload),
+    method: "POST", headers: { authorization: "Bearer backend-only-token" }, body: JSON.stringify({ window_instance_id: "fixture-window", window_binding_token: "fixture-binding", ...payload }),
   }).then((response) => response.json());
   try {
     const navigation = post({ ...owner, action: "navigate", url: "http://127.0.0.1:5173/",
@@ -146,7 +216,7 @@ for (const interrupt of ["timeout", "cancelled"]) test(`late host confirmation c
     assert.equal(settled.cleanup_receipt.completed, true);
     assert.equal(settled.cleanup_receipt.execution_outcome, interrupt);
     assert.equal(views.length, 0);
-    assert.equal(manager.listTargets("owner").length, 0);
+    assert.equal(manager.listTargets("owner", "fixture-window").length, 0);
     assert.equal((await post({ ...owner, action: "navigate", url: "https://example.com" })).ok, false);
   } finally { confirm({ response: 0 }); await bridge.stop(); manager.disposeAll(); }
 });
@@ -158,7 +228,7 @@ for (const terminal of ["cancelled", "load-failed"]) test(`late redirect confirm
   const started = new Promise((resolve) => { dialogStarted = resolve; });
   const dialog = new Promise((resolve) => { confirm = resolve; });
   const { manager, views, events } = browserHarness({ showMessageBox() { dialogStarted(); return dialog; } });
-  await manager.create({ id: "redirect", conversation_id: "owner", url: "about:blank" });
+  await manager.create({ id: "redirect", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
   const contents = views[0].webContents;
   const loads = [];
   contents.loadURL = (url) => {
@@ -168,7 +238,7 @@ for (const terminal of ["cancelled", "load-failed"]) test(`late redirect confirm
   };
   const controller = new AbortController();
   const navigation = manager.executeControlCommand({ action: "navigate", target_id: "redirect",
-    conversation_id: "owner", url: "https://93.184.216.34/" }, { signal: controller.signal });
+    conversation_id: "owner", url: "https://93.184.216.34/", window_instance_id: "fixture-window" }, { signal: controller.signal });
   const failed = assert.rejects(navigation, /ERR_ABORTED/);
   try {
     await started;
@@ -184,17 +254,17 @@ for (const terminal of ["cancelled", "load-failed"]) test(`late redirect confirm
 
 test("agent page has an initial viewport but waits for the presented panel's actual frame", async () => {
   const { manager, views, events } = browserHarness();
-  await manager.executeControlCommand({ action: "navigate", conversation_id: "owner", url: "about:blank" }, { requestPresentation: true });
-  const target = manager.listTargets("owner")[0];
+  await manager.executeControlCommand({ action: "navigate", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" }, { requestPresentation: true });
+  const target = manager.listTargets("owner", "fixture-window")[0];
   const view = views[0];
   assert.deepEqual({ ...view.getBounds() }, { x: 0, y: 0, width: 1000, height: 800 });
   assert.equal(view.visible, false);
   assert.equal(events.at(-1).type, "presentation-requested");
-  manager.activate(target.id, "owner");
+  manager.activate(target.id, "owner", "fixture-window");
   assert.equal(view.visible, false, "activation cannot expose the initial full-window viewport over chat");
-  const capture = manager.executeControlCommand({ action: "screenshot", target_id: target.id, conversation_id: "owner" });
+  const capture = manager.executeControlCommand({ action: "screenshot", target_id: target.id, conversation_id: "owner", window_instance_id: "fixture-window" });
   assert.equal(view.webContents.captureCalls, 0);
-  manager.setBounds({ id: target.id, conversation_id: "owner", x: 200, y: 80, width: 500, height: 600 });
+  manager.setBounds({ id: target.id, conversation_id: "owner", x: 200, y: 80, width: 500, height: 600, window_instance_id: "fixture-window" });
   assert.equal(view.visible, true);
   const result = await capture;
   assert.equal(result.width, 500);
@@ -206,12 +276,12 @@ test("agent page has an initial viewport but waits for the presented panel's act
 
 for (const terminal of ["cancelled", "closed"]) test(`screenshot presentation wait is released when ${terminal}`, async () => {
   const { manager, views } = browserHarness();
-  await manager.create({ id: "capture", conversation_id: "owner", url: "about:blank" });
+  await manager.create({ id: "capture", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
   const controller = new AbortController();
-  const capture = manager.executeControlCommand({ action: "screenshot", target_id: "capture", conversation_id: "owner" }, { signal: controller.signal });
+  const capture = manager.executeControlCommand({ action: "screenshot", target_id: "capture", conversation_id: "owner", window_instance_id: "fixture-window" }, { signal: controller.signal });
   const failed = assert.rejects(capture, /cancelled|closed/);
   if (terminal === "cancelled") controller.abort(new Error("capture cancelled"));
-  else manager.close({ id: "capture", conversation_id: "owner" });
+  else manager.close({ id: "capture", conversation_id: "owner", window_instance_id: "fixture-window" });
   await failed;
   assert.equal(views[0].webContents.captureCalls, 0);
   manager.disposeAll();
@@ -219,34 +289,34 @@ for (const terminal of ["cancelled", "closed"]) test(`screenshot presentation wa
 
 test("background navigation preserves the selected owner's visible browser", async () => {
   const { manager, views } = browserHarness();
-  await manager.create({ id: "a", conversation_id: "A", url: "about:blank" });
-  await manager.create({ id: "b", conversation_id: "B", url: "about:blank" });
-  manager.activate("b", "B");
-  manager.setBounds({ id: "b", conversation_id: "B", x: 0, y: 0, width: 600, height: 400 });
-  await manager.executeControlCommand({ action: "navigate", target_id: "a", conversation_id: "A", url: "about:blank" });
+  await manager.create({ id: "a", conversation_id: "A", url: "about:blank", window_instance_id: "fixture-window" });
+  await manager.create({ id: "b", conversation_id: "B", url: "about:blank", window_instance_id: "fixture-window" });
+  manager.activate("b", "B", "fixture-window");
+  manager.setBounds({ id: "b", conversation_id: "B", x: 0, y: 0, width: 600, height: 400, window_instance_id: "fixture-window" });
+  await manager.executeControlCommand({ action: "navigate", target_id: "a", conversation_id: "A", url: "about:blank", window_instance_id: "fixture-window" });
   assert.equal(views[0].visible, false);
   assert.equal(views[1].visible, true);
-  await manager.executeControlCommand({ action: "navigate", target_id: "b", conversation_id: "B", url: "about:blank" });
+  await manager.executeControlCommand({ action: "navigate", target_id: "b", conversation_id: "B", url: "about:blank", window_instance_id: "fixture-window" });
   assert.equal(views[1].visible, true);
 });
 
 for (const scope of ["tab", "conversation", "all"]) test(`closing ${scope} cancels an unpublished navigation`, async () => {
   const { manager, views, resolveDns } = browserHarness();
-  const pending = manager.create({ id: "pending", conversation_id: "A", url: "https://pending.example/" });
+  const pending = manager.create({ id: "pending", conversation_id: "A", url: "https://pending.example/", window_instance_id: "fixture-window" });
   const cancelled = assert.rejects(pending, /cancelled/);
-  if (scope === "tab") manager.close({ id: "pending", conversation_id: "A" });
-  else if (scope === "conversation") manager.closeConversation("A");
+  if (scope === "tab") manager.close({ id: "pending", conversation_id: "A", window_instance_id: "fixture-window" });
+  else if (scope === "conversation") manager.closeConversation("A", "fixture-window");
   else manager.disposeAll();
   resolveDns();
   await cancelled;
   assert.equal(views.length, 0);
-  assert.equal(manager.listTargets("A").length, 0);
+  assert.equal(manager.listTargets("A", "fixture-window").length, 0);
 });
 
 for (const action of ["pick_element", "pick_region"]) test(`${action} gives Escape to the selected native page before starting selection`, async () => {
   const { manager, views } = browserHarness();
-  await manager.create({ id: "design", conversation_id: "A", url: "about:blank" });
-  const result = await manager.executeControlCommand({ action, target_id: "design", conversation_id: "A" });
+  await manager.create({ id: "design", conversation_id: "A", url: "about:blank", window_instance_id: "fixture-window" });
+  const result = await manager.executeControlCommand({ action, target_id: "design", conversation_id: "A", window_instance_id: "fixture-window" });
   assert.equal(views[0].webContents.pickerCalls[0], "focus");
   assert.match(views[0].webContents.pickerCalls[1], /Escape/);
   assert.equal(result.ok, true);

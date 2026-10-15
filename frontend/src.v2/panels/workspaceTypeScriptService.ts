@@ -41,6 +41,8 @@ class WorkspaceSnapshot {
   private files = new Map<string, { fileName: string; entry: IExtraLibs[string] }>();
   private directories = new Map<string, { files: Set<string>; directories: Set<string> }>();
   private configurationRequests = new Set<string>();
+  private dependencyRequests = new Set<string>();
+  private dependencyFiles = new Set<string>();
 
   constructor(readonly context: WorkspaceTypeScriptContext, readonly extraLibs: IExtraLibs) {
     this.metadata = JSON.parse(extraLibs[WORKSPACE_TYPESCRIPT_METADATA_URI].content);
@@ -48,6 +50,11 @@ class WorkspaceSnapshot {
       if (!fileName.startsWith("file:")) continue;
       const normalized = canonicalUri(fileName);
       this.files.set(this.key(normalized), { fileName: normalized, entry });
+      this.addDirectoryEntry(normalized);
+    }
+    for (const fileName of this.metadata.dependencyFileNames ?? []) {
+      const normalized = canonicalUri(fileName);
+      this.dependencyFiles.add(this.key(normalized));
       this.addDirectoryEntry(normalized);
     }
     // Monaco creates this service before its worker server exists. Mirror
@@ -70,9 +77,11 @@ class WorkspaceSnapshot {
 
   readFile = (fileName: string): string | undefined => {
     const key = this.key(fileName);
-    return this.mirrors.get(key)?.getValue() ?? this.files.get(key)?.entry.content;
+    const content = this.mirrors.get(key)?.getValue() ?? this.files.get(key)?.entry.content;
+    if (content === undefined && this.dependencyFiles.has(key)) this.dependencyRequests.add(canonicalUri(fileName));
+    return content;
   };
-  fileExists = (fileName: string): boolean => this.readFile(fileName) !== undefined;
+  fileExists = (fileName: string): boolean => this.dependencyFiles.has(this.key(fileName)) || this.readFile(fileName) !== undefined;
   readConfigurationFile = (fileName: string): string | undefined => {
     const content = this.readFile(fileName);
     if (content === undefined && fileName.startsWith("file:") && /\.json$/i.test(URI.parse(fileName).path)) {
@@ -82,6 +91,7 @@ class WorkspaceSnapshot {
   };
   configurationFileExists = (fileName: string): boolean => this.readConfigurationFile(fileName) !== undefined;
   requestedConfigurationFiles(): string[] { return Array.from(this.configurationRequests); }
+  requestedDependencyFiles(): string[] { return Array.from(this.dependencyRequests); }
   directoryExists = (directory: string): boolean => this.directories.has(this.directoryKey(directory));
   getDirectories = (directory: string): string[] => Array.from(this.directories.get(this.directoryKey(directory))?.directories ?? []);
   version(fileName: string): string | undefined {
@@ -142,7 +152,7 @@ class WorkspaceProjectWorker extends NativeTypeScriptWorker {
   _getScriptText = (fileName: string): string | undefined => this.snapshot.readFile(fileName) ?? super._getScriptText(fileName);
   getScriptVersion = (fileName: string): string => this.snapshot.version(fileName) ?? super.getScriptVersion(fileName);
   readFile = (fileName: string): string | undefined => this._getScriptText(fileName);
-  fileExists = (fileName: string): boolean => this._getScriptText(fileName) !== undefined;
+  fileExists = (fileName: string): boolean => this.snapshot.fileExists(fileName) || this._getScriptText(fileName) !== undefined;
   getCompilerOptionsDiagnostics(fileName: string) {
     return super.getCompilerOptionsDiagnostics(fileName).then((diagnostics) => [
       ...diagnostics,
@@ -288,6 +298,14 @@ export class WorkspaceTypeScriptService implements TypeScriptWorkerRpc {
   getScriptText(fileName: string) { return this.workerFor(fileName).getScriptText(fileName); }
   getLibFiles() { return this.workerFor(this.snapshot.sourceNames()[0] ?? this.snapshot.metadata.workspaceRoot).getLibFiles(); }
   async getConfigurationFileRequests(): Promise<string[]> { return this.snapshot.requestedConfigurationFiles(); }
+  async getDependencyFileRequests(): Promise<string[]> {
+    this.snapshot.refreshMirrors();
+    for (const project of [...this.projects.values(), this.defaultProject]) {
+      const worker = project.worker ??= new WorkspaceProjectWorker(this.snapshot, project, this, this.createData);
+      worker._languageService.getProgram();
+    }
+    return this.snapshot.requestedDependencyFiles();
+  }
   async getConfigurationDiagnostics(): Promise<Array<{ path: string; message: string }>> {
     return Array.from(this.projects.values()).flatMap((project) => project.parsed.errors.map((diagnostic) => ({
       path: project.configFileName!,

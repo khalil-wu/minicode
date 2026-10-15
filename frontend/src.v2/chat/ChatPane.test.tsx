@@ -88,21 +88,25 @@ describe("ChatPane search shortcuts", () => {
     const { container } = render(<ChatPane />);
     expect(screen.getByText("messages")).toBeTruthy();
     const composer = screen.getByRole("textbox", { name: "composer" });
+    fireEvent.change(composer, { target: { value: "Unsent prompt" } });
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
     expect(container.querySelector(".chat-pane")?.getAttribute("data-switching")).toBe("true");
     expect(screen.queryByText("messages")).toBeNull();
-    expect(screen.getByRole("textbox", { name: "composer" })).toBe(composer);
-    expect(composer.closest<HTMLElement>(".chat-pane-composer-region")?.inert).toBe(true);
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "composer", hidden: true })).toBe(composer);
+    expect(container.querySelector<HTMLElement>(".chat-pane-layout")?.style.display).toBe("none");
+    expect(container.querySelector("aside")?.closest<HTMLElement>(".chat-pane-layout")?.style.display).toBe("none");
     const opening = screen.getByRole("status");
     expect(opening.textContent).toContain("正在打开会话");
     expect(opening.className).toBe("chat-pane-switch-status");
-    expect(opening.parentElement?.classList.contains("chat-pane-message-transition")).toBe(true);
+    expect(opening.parentElement?.classList.contains("chat-pane")).toBe(true);
     expect(opening.querySelector("svg.animate-spin")?.getAttribute("aria-hidden")).toBe("true");
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
-    expect(composer.closest<HTMLElement>(".chat-pane-composer-region")?.inert).toBe(false);
+    expect(screen.getByRole("textbox", { name: "composer" })).toBe(composer);
+    expect((composer as HTMLTextAreaElement).value).toBe("Unsent prompt");
     expect(screen.getByText("messages")).toBeTruthy();
     expect(screen.queryByText("正在打开会话…")).toBeNull();
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
@@ -123,12 +127,13 @@ describe("ChatPane search shortcuts", () => {
     expect(screen.getByRole("status").querySelector(".animate-spin")).toBeNull();
   });
 
-  it("centers cold-loading progress in the message area and retains the composer", () => {
+  it("centers cold-loading progress in the entire chat pane while its retained composer is hidden", () => {
     useAppStore.setState({ conversationHydration: { "conv-chat-pane": { isHydrating: true, updatedAt: 1 } } });
     render(<ChatPane />);
     expect(screen.queryByText("messages")).toBeNull();
     expect(screen.getByRole("status").querySelector(".animate-spin")).toBeTruthy();
-    expect(screen.getByRole("textbox", { name: "composer" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "composer", hidden: true })).toBeTruthy();
     act(() => useAppStore.setState({ conversationHydration: {} }));
     expect(screen.getByText("messages")).toBeTruthy();
     expect(screen.queryByText("正在打开会话…")).toBeNull();

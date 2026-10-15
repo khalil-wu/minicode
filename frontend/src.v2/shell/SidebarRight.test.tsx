@@ -42,6 +42,7 @@ let notifyTabResize = () => {};
 
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => false,
+  runtime: () => null,
   revealPath: vi.fn(),
 }));
 
@@ -85,6 +86,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 }));
 
 import { useAppStore } from "../stores";
+import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { SidebarRight } from "./SidebarRight";
 import type { ChatMessage } from "../stores/types";
 
@@ -96,6 +98,7 @@ const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "rol
 });
 
 const resetSidebarState = () => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600, writable: true });
   vi.stubGlobal("ResizeObserver", class {
     constructor(callback: () => void) { notifyTabResize = callback; }
     observe() {}
@@ -124,6 +127,8 @@ const resetSidebarState = () => {
     rightPanelOpen: true,
     rightPanelExpanded: false,
     rightSidebarWidth: 380,
+    rightSidebarWidthRatio: null,
+    leftSidebarWidth: 340,
     plan: null,
     todos: [],
     subagents: [],
@@ -241,15 +246,15 @@ describe("SidebarRight activity", () => {
     expect(actions.contains(screen.getByRole("button", { name: "关闭右侧栏" }))).toBe(true);
   });
 
-  it("opens Inspector explicitly from the panel launcher", () => {
+  it("keeps diagnostics out of the panel launcher and honors explicit Inspector navigation", () => {
     useAppStore.setState({ rightStackTab: "tasks", rightStackTabLocked: false });
     render(<SidebarRight />);
 
     fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    const inspectorButton = screen.getByRole("menuitem", { name: "运行详情" });
-    expect(inspectorButton).toBeTruthy();
-
-    fireEvent.click(inspectorButton);
+    expect(screen.queryByRole("menuitem", { name: "运行详情" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "运行状态" })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    act(() => useAppStore.getState().setRightStackTab("inspector"));
 
     expect(useAppStore.getState()).toMatchObject({
       rightStackTab: "inspector",
@@ -750,7 +755,7 @@ describe("SidebarRight activity", () => {
     expect(screen.getByText(/stable_system \[content, \+30 chars\]/)).toBeTruthy();
     expect(screen.getByText(/Prompt unchanged · Tools changed \(\+web_search\) · Params changed \(prompt_cache_retention, reasoning\) · Cache routing unchanged · Input items \+2 \(function_call_output \+1, message \+1\) · Metadata keys unchanged · Request scaffold changed/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Copy Trace/ }));
+    fireEvent.click(screen.getByRole("button", { name: "复制调用记录" }));
     expect(writeTextMock).toHaveBeenCalledOnce();
     const exported = JSON.parse(String(writeTextMock.mock.calls[0][0]));
     expect(exported).toMatchObject({
@@ -1064,7 +1069,7 @@ describe("SidebarRight activity", () => {
     fireEvent.pointerDown(handle, { pointerId: 1, clientX: 800 });
     fireEvent.pointerMove(window, { pointerId: 1, clientX: 620 });
 
-    expect(useAppStore.getState().rightSidebarWidth).toBe(600);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(560);
     expect(document.body.classList.contains("layout-dragging")).toBe(true);
 
     fireEvent.pointerUp(window, { pointerId: 1 });
@@ -1073,7 +1078,7 @@ describe("SidebarRight activity", () => {
 
     fireEvent.doubleClick(handle);
 
-    expect(useAppStore.getState().rightSidebarWidth).toBe(640);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(760);
   });
 
   it("supports keyboard resizing from the right sidebar separator", () => {
@@ -1084,11 +1089,55 @@ describe("SidebarRight activity", () => {
     fireEvent.keyDown(handle, { key: "ArrowLeft" });
     expect(useAppStore.getState().rightSidebarWidth).toBe(396);
     fireEvent.keyDown(handle, { key: "Home" });
-    expect(useAppStore.getState().rightSidebarWidth).toBe(360);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(320);
     fireEvent.keyDown(handle, { key: "End" });
-    expect(useAppStore.getState().rightSidebarWidth).toBe(1040);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(908);
+    expect(handle.getAttribute("aria-valuenow")).toBe("908");
+    expect(handle.getAttribute("aria-valuemax")).toBe("908");
     fireEvent.keyDown(handle, { key: "Enter" });
-    expect(useAppStore.getState().rightSidebarWidth).toBe(380);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(760);
+  });
+
+  it("keeps rendered width and separator bounds equal after the viewport shrinks", () => {
+    useAppStore.setState({ rightStackTab: "diff", rightPanelOpen: true, rightSidebarWidth: 800 });
+    const { container } = render(<SidebarRight />);
+    const handle = screen.getByRole("separator", { name: "调整右侧栏宽度" });
+    act(() => { window.innerWidth = 1200; fireEvent(window, new Event("resize")); });
+    expect(container.querySelector("aside")?.style.width).toBe("508px");
+    expect(handle.getAttribute("aria-valuenow")).toBe("508");
+    expect(handle.getAttribute("aria-valuemax")).toBe("508");
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(useAppStore.getState().rightSidebarWidth).toBe(492);
+    expect(container.querySelector("aside")?.style.width).toBe("492px");
+  });
+
+  it("persists a drag only on release and keeps its ratio across tabs and viewport changes", () => {
+    const { container } = render(<SidebarRight />);
+    const handle = screen.getByRole("separator", { name: "调整右侧栏宽度" });
+    const persisted = localStorage.getItem("minicode.layout.right-width-ratio:v3");
+    fireEvent.pointerDown(handle, { pointerId: 8, clientX: 1000 });
+    fireEvent.pointerMove(window, { pointerId: 8, clientX: 766 });
+    expect(useAppStore.getState().rightSidebarWidth).toBe(614);
+    expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe(persisted);
+    fireEvent.pointerUp(window, { pointerId: 8 });
+    expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe("0.5");
+    act(() => useAppStore.getState().setRightStackTab("browser"));
+    expect(container.querySelector("aside")?.style.width).toBe("614px");
+    act(() => { window.innerWidth = 1400; fireEvent(window, new Event("resize")); });
+    expect(container.querySelector("aside")?.style.width).toBe("514px");
+    expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe("0.5");
+  });
+
+  it("saves the actual resized width when native pointer capture ends before pointer-up", () => {
+    render(<SidebarRight />);
+    const handle = screen.getByRole("separator", { name: "调整右侧栏宽度" });
+    fireEvent.pointerDown(handle, { pointerId: 9, clientX: 1000 });
+    fireEvent.pointerMove(window, { pointerId: 9, clientX: 766 });
+    fireEvent(handle, new Event("lostpointercapture"));
+    expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe("0.5");
+    expect(document.body.classList.contains("layout-dragging")).toBe(false);
+    fireEvent.pointerMove(window, { pointerId: 9, clientX: 600 });
+    expect(useAppStore.getState().rightSidebarWidth).toBe(614);
   });
 
   it("keeps Review available in the primary tabs", () => {
@@ -1159,6 +1208,7 @@ describe("SidebarRight activity", () => {
     render(<SidebarRight />);
     act(() => useAppStore.getState().toggleSideChat());
     const input = await screen.findByRole("textbox", { name: "侧边对话消息" });
+    const id = Object.keys(useAppStore.getState().sideChats)[0];
     fireEvent.change(input, { target: { value: "keep this draft" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("tab", { name: "打开上下文" }));
@@ -1173,8 +1223,22 @@ describe("SidebarRight activity", () => {
     act(() => useAppStore.getState().toggleSideChat());
     expect(screen.getByRole("textbox", { name: "侧边对话消息" })).toBe(input);
     fireEvent.click(screen.getByRole("button", { name: "关闭侧边聊天标签页" }));
-    await waitFor(() => expect(deleteConversationMock).toHaveBeenCalledTimes(1));
-    expect(useAppStore.getState().sideChats).toEqual({});
+    expect(deleteConversationMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().sideChats[id].draft).toBe("keep this draft");
+    await flushComposerDrafts();
+    await resetComposerDraftStorageForTests(true);
+    const recovered = (await loadComposerDrafts()).find(record => record.owner.kind === "side" && record.owner.id === id)!;
+    expect(recovered.draft.draft).toBe("keep this draft");
+    act(() => useAppStore.setState({ sideChats: {} }));
+    act(() => {
+      useAppStore.setState({ sideChats: { [id]: { id, messages: [], isStreaming: false, workspaceRoot: recovered.owner.workspaceRoot,
+        ...recovered.side, draft: recovered.draft.draft, attachments: recovered.draft.attachments } } });
+      useAppStore.getState().toggleSideChat();
+    });
+    const reopened = await screen.findByRole("textbox", { name: "侧边对话消息" });
+    expect((reopened as HTMLTextAreaElement).value).toBe("keep this draft");
+    expect(Object.keys(useAppStore.getState().sideChats)).toEqual([id]);
+    expect(deleteConversationMock).not.toHaveBeenCalled();
   });
 
   it("lets the final tab close and restores a context panel when reopened", () => {
@@ -1227,7 +1291,7 @@ describe("SidebarRight activity", () => {
     useAppStore.setState({ rightStackTab: "tasks", rightStackTabLocked: true });
     render(<SidebarRight />);
 
-    for (const label of ["子智能体", "产物", "运行详情", "浏览器"]) {
+    for (const label of ["子智能体", "产物", "浏览器"]) {
       fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
       fireEvent.click(screen.getByRole("menuitem", { name: label, exact: true }));
     }
@@ -1239,7 +1303,7 @@ describe("SidebarRight activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭浏览器标签页" }));
 
     expect(screen.queryByRole("tab", { name: "打开浏览器" })).toBeNull();
-    expect(useAppStore.getState().rightStackTab).toBe("inspector");
+    expect(useAppStore.getState().rightStackTab).toBe("artifacts");
   });
 
   it("shows delegated work after an external Agents navigation request", () => {
@@ -1278,6 +1342,7 @@ describe("SidebarRight activity", () => {
 describe("SidebarRight diagnostics", () => {
   beforeEach(() => {
     resetSidebarState();
+    useAppStore.setState({ isConnected: true, connectionPhase: "connected", connectionError: null });
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,
       json: async () => ({

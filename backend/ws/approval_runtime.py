@@ -13,7 +13,7 @@ from backend.agent.message import AgentEvent
 from backend.tools.base import PermissionLevel
 from backend.ws.stream_state import get_stream_content_blocks
 from backend.ws.stream_resume_pages import stream_resume_pages
-from backend.ws.turn_wait_state import TurnWaitState
+from backend.ws.turn_wait_state import ApprovalNotificationClaim, TurnWaitState
 
 APPROVAL_INLINE_PATCH_LIMIT_BYTES = 100_000
 APPROVAL_INLINE_FILE_LIMIT = 10
@@ -27,6 +27,30 @@ logger = logging.getLogger(__name__)
 
 class SessionApprovalRuntimeMixin:
     """Mixin providing approval request lifecycle + session-level approval caching."""
+
+    def permission_grants_for_conversation(self, conversation_id: str):
+        from backend.permissions.grants import PermissionGrantStore
+
+        stores = self.__dict__.setdefault("_conversation_permission_grants", {})
+        if conversation_id not in stores:
+            stores[conversation_id] = PermissionGrantStore()
+        return stores[conversation_id]
+
+    def guardian_host_for_conversation(self, conversation_id: str, *, evidence_checkpoint: dict | None = None):
+        from backend.agent.guardian.host import GuardianHostState
+
+        states = self.__dict__.setdefault("_conversation_guardian_hosts", {})
+        if conversation_id not in states:
+            states[conversation_id] = GuardianHostState(conversation_id, evidence_checkpoint=evidence_checkpoint)
+        return states[conversation_id]
+
+    def mcp_approvals_for_conversation(self, conversation_id: str):
+        from backend.mcp.approval import MCPApprovalStore
+
+        stores = self.__dict__.setdefault("_conversation_mcp_tool_approvals", {})
+        if conversation_id not in stores:
+            stores[conversation_id] = MCPApprovalStore()
+        return stores[conversation_id]
 
     @property
     def turn_wait_state(self) -> TurnWaitState:
@@ -78,16 +102,19 @@ class SessionApprovalRuntimeMixin:
         *,
         reason: str,
         conversation_id: str = "",
+        notification_claims: dict[str, ApprovalNotificationClaim] | None = None,
     ) -> list[str]:
-        """Emit at most one terminal notification per approval request."""
-        notified = getattr(self, "_settled_approval_notifications", None)
-        if not isinstance(notified, set):
-            notified = self._settled_approval_notifications = set()
-        fresh = [
-            request_id
-            for request_id in dict.fromkeys(request_ids)
-            if request_id and request_id not in notified
-        ]
+        """Claim a terminal notification for its live request, not the session lifetime."""
+        claims: dict[str, ApprovalNotificationClaim] = {}
+        for request_id in dict.fromkeys(request_ids):
+            claim = (notification_claims or {}).get(request_id)
+            if claim is None:
+                claim = self.turn_wait_state.approval_notification_claims.get(request_id)
+            if claim is None and request_id in self.turn_wait_state.pending_approval_payloads:
+                claim = self.turn_wait_state.approval_notification_claim(request_id)
+            if claim is not None and not claim.claimed:
+                claims[request_id] = claim
+        fresh = list(claims)
         if not fresh:
             return []
 
@@ -118,7 +145,8 @@ class SessionApprovalRuntimeMixin:
         for payload_owner, payload_request_ids in grouped.items():
             if not payload_request_ids:
                 continue
-            notified.update(payload_request_ids)
+            for request_id in payload_request_ids:
+                claims[request_id].claimed = True
             event = AgentEvent.approval_cancelled(
                 payload_request_ids,
                 reason=reason,
@@ -140,6 +168,7 @@ class SessionApprovalRuntimeMixin:
     ) -> str:
         """Build a policy-scoped key from the immutable approval request."""
         request_payload = payload or {}
+        captured_identity = str(request_payload.get("policy_identity") or request_payload.get("request", {}).get("policy_identity") or tool_name)
         request_digest = str(
             request_payload.get("request_digest")
             or request_payload.get("request", {}).get("request_digest")
@@ -153,7 +182,7 @@ class SessionApprovalRuntimeMixin:
         if not request_digest:
             canonical = json.dumps(
                 {
-                    "tool_name": str(tool_name or "").strip(),
+                    "tool_name": captured_identity,
                     "arguments": dict(args or {}),
                 },
                 ensure_ascii=False,
@@ -180,7 +209,7 @@ class SessionApprovalRuntimeMixin:
         capability = "escalated" if escalation_requested else "ordinary"
         return (
             f"{session_id}::{conversation_id}::{workspace_root}::{permission_mode}::"
-            f"{workspace_scope}::{capability}::{tool_name}::{request_digest}::{args_str}"
+            f"{workspace_scope}::{capability}::{captured_identity}::{request_digest}::{args_str}"
         )
 
     def _is_session_approved(self, tool_name: str, args: dict[str, Any], *, payload: dict[str, Any] | None = None) -> bool:
@@ -240,6 +269,53 @@ class SessionApprovalRuntimeMixin:
                         {"tool": "run_command", "prompt": prompt}
                         for prompt in normalized_prompts
                     ]
+        if isinstance(pending_request, dict) and pending_request.get("subtype") == "request_user_input":
+            answers = payload.get("answers")
+            if payload.get("action") not in {"cancel", "reject", "decline", "deny"} and (
+                not isinstance(answers, dict) or any(
+                    not isinstance(key, str) or not isinstance(value, dict)
+                    or not isinstance(value.get("answers"), list)
+                    or any(not isinstance(answer, str) for answer in value["answers"])
+                    for key, value in answers.items()
+                )
+            ):
+                return False
+        if isinstance(pending_request, dict) and pending_request.get("subtype") == "request_permissions":
+            # This response is a permission profile, not a cached approval of
+            # the request_permissions invocation. Core intersects it with the
+            # immutable request in its originating environment.
+            if payload.get("auto_approved") or payload.get("session_approved"):
+                return False
+            if payload.get("action") in {"reject", "cancel"}:
+                payload = {**payload, "permissions": {}, "scope": "turn", "strict_auto_review": False}
+            scope = payload.get("scope", "turn")
+            if scope not in {"turn", "session"} or not isinstance(payload.get("permissions"), dict):
+                return False
+            if not isinstance(payload.get("strict_auto_review", False), bool):
+                return False
+            if scope == "session" and payload.get("strict_auto_review"):
+                payload = {**payload, "permissions": {}, "scope": "turn", "strict_auto_review": False}
+            payload = dict(payload)
+            payload.pop("remember_for_session", None)
+        if isinstance(pending_request, dict) and pending_request.get("subtype") == "write_stdin":
+            if payload.get("auto_approved") or payload.get("session_approved"):
+                return False
+            if payload.get("action") not in {"approve", "reject"}:
+                return False
+            payload = dict(payload)
+            payload.pop("remember_for_session", None)
+        if isinstance(pending_request, dict) and "command" in pending_request:
+            decision = payload.get("decision")
+            available = pending_request["available_decisions"]
+            if payload.get("remember_for_session") or payload.get("remember_for_future") or payload.get("auto_approved") or payload.get("session_approved"):
+                return False
+            if decision is None:
+                decision = "approved" if payload.get("action") == "approve" else "abort"
+            if decision not in available or (decision != "abort" and payload.get("action") != "approve"):
+                return False
+            if isinstance(decision, dict):
+                payload = dict(payload)
+                payload.pop("remember_for_session", None)
         expected_digest = self._pending_request_digest(pending_payload)
         payload = dict(payload)
         if expected_digest:
@@ -261,11 +337,17 @@ class SessionApprovalRuntimeMixin:
         if future is not None:
             if future.done():
                 return False
+            if isinstance(pending_request, dict) and pending_request.get("subtype") == "request_user_input":
+                owner = self.guardian_host_for_conversation(pending_payload["conversation_id"]).evidence
+                payload["_guardian_acceptance_order"] = owner.reserve_order()
             future.set_result(payload)
             return True
         # The request is emitted before the waiter is registered. Keep a valid
         # response that races with that hand-off instead of dropping it.
         if request_key in state.pending_approval_payloads and request_key not in state.pending_approval_responses:
+            if isinstance(pending_request, dict) and pending_request.get("subtype") == "request_user_input":
+                owner = self.guardian_host_for_conversation(pending_payload["conversation_id"]).evidence
+                payload["_guardian_acceptance_order"] = owner.reserve_order()
             self.turn_wait_state.pending_approval_responses[request_key] = payload
             return True
         return False
@@ -338,7 +420,7 @@ class SessionApprovalRuntimeMixin:
             if str(request.get("subtype") or "").strip() != "can_use_tool":
                 continue
             tool_name = str(request.get("tool_name") or "").strip()
-            if tool_name == "exit_plan_mode":
+            if tool_name == "exit_plan_mode" or request.get("strict_auto_review"):
                 continue
             if not self._pending_tool_payload_is_auto_allowed(payload):
                 continue
@@ -380,10 +462,10 @@ class SessionApprovalRuntimeMixin:
         registry = getattr(self, "tool_registry", None)
         tool = None
         if registry is not None:
-            try:
-                tool = registry.get_tool(tool_name)
-            except Exception:
-                tool = None
+            tool = registry.get_tool(tool_name)
+        captured_identity = str(payload.get("policy_identity") or request.get("policy_identity") or "")
+        if captured_identity and (tool is None or tool.policy_identity != captured_identity):
+            return False
         try:
             from backend.permissions.checker import evaluate_permission_decision
 
@@ -425,6 +507,13 @@ class SessionApprovalRuntimeMixin:
             guidance = str(response.get("error") or "control response rejected").strip()
             payload = {"action": "reject", "guidance": guidance}
 
+        pending = self.turn_wait_state.pending_approval_payloads.get(request_id, {})
+        if pending.get("request", {}).get("subtype") in {"request_user_input", "elicitation", "request_permissions"}:
+            for key in ("conversation_id", "turn_id", "message_id"):
+                if key in data:
+                    payload[key] = data[key]
+            return request_id, payload
+
         action_raw = payload.get("action")
         if isinstance(action_raw, bool):
             payload["action"] = "approve" if action_raw else "reject"
@@ -457,13 +546,17 @@ class SessionApprovalRuntimeMixin:
 
     async def approval_handler(self, tool_call_id: str) -> dict[str, Any]:
         # Check session cache first
+        notification_claim = self.turn_wait_state.approval_notification_claim(tool_call_id)
         payload = self.turn_wait_state.pending_approval_payloads.get(tool_call_id, {})
         request = payload.get("request")
         request = request if isinstance(request, dict) else {}
         tool_name = str(request.get("tool_name") or "").strip()
         args = request.get("input") or {}
         try:
-            if tool_name != "exit_plan_mode" and tool_name and self._is_session_approved(tool_name, args, payload=payload):
+            # Native MCP approvals are remembered by the thread's issuing
+            # execution owner, not this generic request/argument cache.
+            cacheable = request.get("subtype") == "can_use_tool" and tool_name != "exit_plan_mode" and not request.get("strict_auto_review") and "mcp_approval" not in request and "available_decisions" not in request
+            if cacheable and tool_name and self._is_session_approved(tool_name, args, payload=payload):
                 logger.debug("Session-approved: %s %s", tool_name, tool_call_id)
                 return {
                     "action": "approve",
@@ -478,18 +571,20 @@ class SessionApprovalRuntimeMixin:
                     tool_call_id,
                     future,
                     kind=(
-                        "elicitation"
+                        "user_input"
+                        if request.get("subtype") == "request_user_input"
+                        else "elicitation"
                         if str(request.get("subtype") or "").strip() == "elicitation"
                         else "approval"
                     ),
                 )
-                timeout_seconds = self._approval_timeout_seconds()
+                timeout_seconds = None if request.get("subtype") == "request_user_input" else self._approval_timeout_seconds()
                 result = await asyncio.wait_for(future, timeout=timeout_seconds)
             else:
                 result = queued_response
             # Remember approval for session if user opted in
             if isinstance(result, dict) and result.get("action") == "approve":
-                if result.get("remember_for_session") and tool_name and tool_name != "exit_plan_mode":
+                if result.get("remember_for_session") and tool_name and cacheable:
                     self._mark_session_approved(tool_name, args, payload=payload)
             return result
         except asyncio.TimeoutError:
@@ -500,6 +595,7 @@ class SessionApprovalRuntimeMixin:
                 [tool_call_id],
                 reason="approval_timeout",
                 conversation_id=conversation_id,
+                notification_claims={tool_call_id: notification_claim},
             )
             return {
                 "action": "reject",
@@ -512,6 +608,7 @@ class SessionApprovalRuntimeMixin:
                 [tool_call_id],
                 reason="approval_wait_cancelled",
                 conversation_id=str(payload.get("conversation_id") or "").strip(),
+                notification_claims={tool_call_id: notification_claim},
             )
             raise
         finally:
@@ -540,6 +637,10 @@ class SessionApprovalRuntimeMixin:
         # Capture owners and settle concrete waiters before yielding. A new
         # run may register its approvals while the old run's notice is sent.
         grouped: dict[str, list[str]] = {}
+        notification_claims = {
+            request_id: self.turn_wait_state.approval_notification_claim(request_id)
+            for request_id in request_ids
+        }
         for request_id in request_ids:
             owner = target_conversation_id or str(
                 pending_payloads.get(request_id, {}).get("conversation_id") or ""
@@ -565,6 +666,7 @@ class SessionApprovalRuntimeMixin:
                     owned_request_ids,
                     reason=reason,
                     conversation_id=owner,
+                    notification_claims=notification_claims,
                 )
             return request_ids
 
@@ -616,6 +718,11 @@ class SessionApprovalRuntimeMixin:
         conversation_id: str | None = None,
     ) -> None:
         target_conversation_id = str(conversation_id or "").strip()
+        manager = getattr(self, "ws_manager", None)
+        if manager is not None:
+            observed = target_conversation_id or self.active_conversation_id
+            if observed:
+                await manager.observe_conversation_stream(self, observed)
         for payload in list(self.turn_wait_state.pending_approval_payloads.values()):
             if target_conversation_id:
                 payload_conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -655,6 +762,7 @@ class SessionApprovalRuntimeMixin:
                 "phase": str(stream_state.get("phase") or ""),
                 "stream_status": str(stream_state.get("status") or "running"),
                 "event_seq": int(stream_state.get("event_seq") or 0),
+                "started_at": stream_state.get("started_at"),
                 "last_event_type": str(stream_state.get("last_event_type") or ""),
             })
             # Freeze before yielding; pending delivery of older live events is
@@ -862,6 +970,9 @@ class SessionApprovalRuntimeMixin:
             ),
         }
         request_digest = str(event.data.get("request_digest") or "").strip()
+        policy_identity = str(event.data.get("policy_identity") or "").strip()
+        if policy_identity:
+            payload["policy_identity"] = policy_identity
         if request_digest:
             payload["request_digest"] = request_digest
         timeout_seconds = self._approval_timeout_seconds()
@@ -881,10 +992,7 @@ class SessionApprovalRuntimeMixin:
         conversation = None
         repository = getattr(self, "conversation_repo", None)
         if conversation_id and repository is not None:
-            try:
-                conversation = repository.get_conversation(conversation_id)
-            except Exception:
-                conversation = None
+            conversation = repository.get_conversation(conversation_id)
         workspace_root = str(
             getattr(conversation, "worktree_path", "")
             or getattr(conversation, "workspace_root", "")
@@ -915,16 +1023,36 @@ class SessionApprovalRuntimeMixin:
         elif isinstance(diff, dict) and diff:
             payload["diff"] = diff
 
+        subtype = str(event.data.get("subtype") or "can_use_tool")
         request: dict[str, Any] = {
-            "subtype": "can_use_tool",
+            "subtype": subtype,
             "tool_name": payload["tool_name"],
             "input": payload["args"],
             "tool_use_id": request_id,
         }
+        if subtype == "request_permissions":
+            request["permissions"] = self._clone_json_dict(event.data["permissions"])
+            for key in ("reason", "cwd", "environment_id"):
+                if event.data.get(key) is not None:
+                    request[key] = event.data[key]
+        elif subtype == "write_stdin":
+            request["stdin_action"] = self._clone_json_dict(event.data["stdin_action"])
         if event.data.get("network_unisolated") is True:
             request["network_unisolated"] = True
+        if event.data.get("strict_auto_review") is True:
+            request["strict_auto_review"] = True
+        if "mcp_approval" in event.data:
+            request["mcp_approval"] = self._clone_json_dict(event.data["mcp_approval"])
+        for key in ("command", "cwd", "proposed_execpolicy_amendment", "available_decisions"):
+            if key in event.data:
+                request[key] = event.data[key]
+        if "command" in event.data:
+            request["display_command"] = event.data["display_command"]
+            request["reason"] = event.data["reason"]
         if request_digest:
             request["request_digest"] = request_digest
+        if policy_identity:
+            request["policy_identity"] = policy_identity
         if "diff" in payload:
             request["diff"] = payload["diff"]
         for key in ("source_agent", "source_thread", "source_tool"):

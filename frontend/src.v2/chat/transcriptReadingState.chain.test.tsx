@@ -71,7 +71,7 @@ it("retains the reader's process and tool disclosure through unmounts without bo
   expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
 });
 
-it("keeps explicitly read live work expanded when the final item completes after virtualization remounts it", () => {
+it("folds pre-completion reading when the final item completes and retains a new post-completion expansion", () => {
   const live: ChatMessage[] = messages.map((message) => message.role === "assistant" ? { ...message,
     terminalStatus: undefined, isStreaming: true, blocks: message.blocks?.slice(0, 1) } : message);
   let view = render(<ChatTurn turn={projectMessagesToTurns(live, true)[0]} conversationId={owner} />);
@@ -80,8 +80,12 @@ it("keeps explicitly read live work expanded when the final item completes after
   view = render(<ChatTurn turn={projectMessagesToTurns(live, true)[0]} conversationId={owner} />);
   expect(screen.getByText("真实文件内容")).toBeTruthy();
   view.rerender(<ChatTurn turn={projectMessagesToTurns(messages, false)[0]} conversationId={owner} />);
+  expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
+  expect(screen.queryByText("真实文件内容")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+  view.unmount();
+  render(<ChatTurn turn={projectMessagesToTurns(messages, false)[0]} conversationId={owner} />);
   expect(screen.getByRole("button", { name: "收起处理步骤" })).toBeTruthy();
-  expect(screen.getByText("真实文件内容")).toBeTruthy();
 });
 
 it("restores scroll and paused follow after a pending switch unmounts the transcript", async () => {

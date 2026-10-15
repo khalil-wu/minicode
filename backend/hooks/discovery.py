@@ -514,12 +514,12 @@ def _read_json_object(path: Path, warnings: list[str]) -> Mapping[str, Any]:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         warnings.append(f"Failed to read hook settings {path}: {exc}")
         return {}
     try:
         value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         warnings.append(f"Failed to parse hook settings {path}: {exc}")
         return {}
     if not isinstance(value, Mapping):

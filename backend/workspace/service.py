@@ -49,28 +49,16 @@ class WorkspaceService:
         self._get_workspace_root = get_workspace_root
         self._max_file_bytes = max_file_bytes
 
-    @staticmethod
-    def _invalidate_derived_caches(*, file_tree_changed: bool) -> None:
-        """Keep model-side workspace views coherent after API mutations.
+    def _invalidate_derived_caches(self, *, file_tree_changed: bool, changed_paths: tuple[Path, ...]) -> None:
+        """Publish committed editor mutations to the same caches used by tools."""
+        from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-        The HTTP workspace editor and the agent file tools share the same
-        process, but they do not share an execution path.  The file watcher
-        eventually catches most changes; invalidating synchronously here makes
-        an immediate read/list/search after a UI save deterministic as well.
-        Cache state is derived and must never turn a successful disk mutation
-        into a failed API response.
-        """
-        try:
-            from backend.tools.file_tools_common import invalidate_workspace_file_caches
-
-            invalidate_workspace_file_caches(
-                file_tree_changed=file_tree_changed,
-                clear_file_state=True,
-            )
-        except Exception:
-            # Cache invalidation is best-effort.  The filesystem write already
-            # succeeded and the watcher remains a second-line invalidation.
-            pass
+        invalidate_workspace_file_caches(
+            file_tree_changed=file_tree_changed,
+            clear_file_state=True,
+            changed_paths=changed_paths,
+            workspace_root=self.workspace_root_path(),
+        )
 
     def list_tree(self, path: str) -> WorkspaceTreeResponse:
         root = self.workspace_root_path()
@@ -190,7 +178,7 @@ class WorkspaceService:
         )
         return snapshot, stat
 
-    def project_index(self, *, include_dependencies: bool = True) -> WorkspaceProjectIndexResponse:
+    def project_index(self, *, include_dependencies: bool = False) -> WorkspaceProjectIndexResponse:
         from .project_index import build_project_index
 
         return build_project_index(self, include_dependencies=include_dependencies)
@@ -299,7 +287,7 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}") from exc
 
-        self._invalidate_derived_caches(file_tree_changed=True)
+        self._invalidate_derived_caches(file_tree_changed=True, changed_paths=(target,))
 
         return WorkspaceFileResponse(
             workspace_root=str(self.workspace_root_path()),
@@ -356,6 +344,7 @@ class WorkspaceService:
             raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}") from exc
 
         self._invalidate_derived_caches(
+            changed_paths=(target,),
             file_tree_changed=not file_existed_before_write or target.name == ".gitignore"
         )
 
@@ -385,7 +374,7 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to create directory: {exc}") from exc
 
-        self._invalidate_derived_caches(file_tree_changed=True)
+        self._invalidate_derived_caches(file_tree_changed=True, changed_paths=(target,))
 
         return self.workspace_path_payload(target)
 
@@ -416,7 +405,7 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to rename path: {exc}") from exc
 
-        self._invalidate_derived_caches(file_tree_changed=True)
+        self._invalidate_derived_caches(file_tree_changed=True, changed_paths=(source, destination))
 
         return self.workspace_path_payload(destination)
 
@@ -454,7 +443,7 @@ class WorkspaceService:
                 ) from exc
             raise HTTPException(status_code=500, detail=f"Failed to delete path: {exc}") from exc
 
-        self._invalidate_derived_caches(file_tree_changed=True)
+        self._invalidate_derived_caches(file_tree_changed=True, changed_paths=(target,))
 
         return WorkspaceDeleteResponse(
             workspace_root=str(self.workspace_root_path()),

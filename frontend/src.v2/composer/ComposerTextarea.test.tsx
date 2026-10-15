@@ -134,6 +134,42 @@ describe("ComposerTextarea paste-to-attachment", () => {
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["single-line", "soft wrapped text ".repeat(80), "first\nsecond", "first\n"])("requires a modifier only when Source's multiline mode has an actual hard break: %s", value => {
+    useAppStore.setState({ sendShortcut: "cmdIfMultiline" });
+    const onSubmit = vi.fn();
+    const { textarea } = renderTextarea({ value, onSubmit });
+    const prevented = !fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledTimes(value.includes("\n") ? 0 : 1);
+    expect(prevented).toBe(!value.includes("\n"));
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", altKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true, repeat: true });
+    expect(onSubmit).toHaveBeenCalledTimes(value.includes("\n") ? 0 : 1);
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onSubmit).toHaveBeenCalledTimes(value.includes("\n") ? 1 : 2);
+  });
+
+  it.each(["enter", "cmdIfMultiline", "mod-enter"] as const)("uses Source's opposite follow-up chord for %s only during a real running response", shortcut => {
+    useAppStore.setState({ sendShortcut: shortcut });
+    const normal = vi.fn(), alternate = vi.fn();
+    const view = render(<ComposerTextarea value="follow up\nsecond line" onChange={vi.fn()} onSubmit={normal}
+      onAlternateSubmit={alternate} isResponseInProgress />);
+    const input = screen.getByRole("textbox");
+    const chord = { key: "Enter", metaKey: true, shiftKey: shortcut !== "enter" };
+    fireEvent.keyDown(input, { ...chord, isComposing: true });
+    fireEvent.keyDown(input, { ...chord, altKey: true });
+    expect(alternate).not.toHaveBeenCalled();
+    expect(normal).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, chord);
+    expect(alternate).toHaveBeenCalledExactlyOnceWith();
+    expect(normal).not.toHaveBeenCalled();
+    view.rerender(<ComposerTextarea value="follow up\nsecond line" onChange={vi.fn()} onSubmit={normal}
+      onAlternateSubmit={alternate} isResponseInProgress={false} />);
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(normal).toHaveBeenCalledExactlyOnceWith();
+    expect(alternate).toHaveBeenCalledOnce();
+  });
+
   it("uses one font metric set for Latin placeholder and CJK input", () => {
     const { textarea } = renderTextarea({ value: "你好 Hello" });
 
@@ -149,7 +185,7 @@ describe("ComposerTextarea paste-to-attachment", () => {
 
     expect(textarea.style.padding).toBe("0px");
     expect(textarea.parentElement?.className).toBe("composer-textarea-frame");
-    expect(textarea.getAttribute("placeholder")).toBe("描述任务或提出问题…");
+    expect(textarea.getAttribute("placeholder")).toBe("随心输入");
   });
 
   it("keeps vertical scrolling enabled when an editable draft exceeds the height cap", () => {

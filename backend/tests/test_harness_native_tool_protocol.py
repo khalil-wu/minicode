@@ -70,6 +70,34 @@ def settings(**changes):
                        base_url="https://fixture.invalid/v1", wire_api="responses", **changes)
 
 
+@pytest.mark.parametrize("phase", [None, "final_answer", "commentary"])
+def test_responses_message_done_publishes_exact_item_boundary_before_response_done(phase):
+    async def scenario():
+        item = {"type": "message", "id": "message-owned", "role": "assistant",
+                "status": "completed", "content": [{"type": "output_text", "text": "Exact original text", "annotations": []}]}
+        if phase is not None:
+            item["phase"] = phase
+        endpoint = ResponsesEndpoint([[
+            {"type": "response.output_item.added", "output_index": 0, "item": {**item, "content": []}},
+            {"type": "response.output_text.delta", "item_id": item["id"], "delta": "Exact original text"},
+            {"type": "response.output_text.done", "item_id": item["id"], "text": "Exact original text"},
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            completed([item], text="Exact original text"),
+        ]])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+            adapter = OpenAIAdapter(settings(), http_client=client)
+            emitted = [event async for event in adapter.stream_chat([LLMMessage(role="user", content="answer")])]
+        at = next(index for index, event in enumerate(emitted) if event.lifecycle == "item_completed")
+        boundary = emitted[at]
+        assert boundary.provider_items == [item]
+        assert boundary.item_id == item["id"]
+        assert boundary.content == ""
+        assert not any(event.type == StreamEventType.DONE for event in emitted[:at + 1])
+        assert sum(event.lifecycle == "item_completed" for event in emitted) == 1
+        assert "".join(event.content for event in emitted if event.type == StreamEventType.TEXT_CHUNK) == "Exact original text"
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("terminal_only, duplicate_done, approve", [(False, False, True), (False, True, True), (True, False, True), (False, False, False)])
 def test_native_patch_executes_once_through_query_engine_and_replays_after_checkpoint(
     tmp_path, monkeypatch, terminal_only, duplicate_done, approve,
@@ -203,7 +231,9 @@ def test_truncated_native_patch_recovers_without_orphan_calls_or_partial_writes(
         endpoint = ResponsesEndpoint([[truncated], patch_events(), [completed([], text="Finished.")]])
         async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
             adapter = OpenAIAdapter(settings(supports_custom_tools=True), http_client=client)
-            state, _, _ = await run_case(tmp_path, adapter, [ApplyPatchTool()])
+            async def approve(*args, **kwargs):
+                return {"action": "approve"}
+            state, _, _ = await run_case(tmp_path, adapter, [ApplyPatchTool()], approval=approve)
             assert state.terminal_status == "completed", state.stopped_reason
             assert len(endpoint.requests) == 3
             assert len(state.tool_calls) == 1

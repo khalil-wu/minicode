@@ -1,9 +1,11 @@
+param([string]$OutputDirectory = "")
 $ErrorActionPreference = "Stop"
 $version = "0.158.0-alpha.2.1"
 $archiveHash = "e0a5e3ba9421f3f3f46836974d0396bbd8782721b4913b614ff0267911e0a3ee"
 $desktopRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $desktopRoot ".."))
 $destinationRoot = Join-Path $desktopRoot "windows-sandbox-runtime"
+if ($OutputDirectory) { $destinationRoot = [IO.Path]::GetFullPath($OutputDirectory) }
 $cacheRoot = Join-Path $repoRoot ".tmp"
 $archive = Join-Path $cacheRoot "codex-rust-v$version.zip"
 $buildRoot = Join-Path $cacheRoot "minicode-windows-sandbox-v$version"

@@ -43,7 +43,10 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
 
     first.ws = SimpleNamespace(receive_text=receive)
     dispatcher = SessionCommandDispatcher(first, root_dir=tmp_path / "receipts")
-    dispatcher._schedule_durable_client_command = lambda *_args: None
+    def retain_without_dispatch(command_id, generation, *, command_type):
+        assert command_id == 'cmd_first' and generation == 1 and command_type == 'user_message'
+
+    dispatcher._schedule_durable_client_command = retain_without_dispatch
     try:
         with pytest.raises(WebSocketDisconnect):
             await dispatcher.run(1)
@@ -51,6 +54,7 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
         assert first.active_conversation_id is None
         assert "conversation_id" not in pending[0].data
         claimed = queue.claim_client_command("cmd_first")
+        claimed.data["_client_queue_key"] = queue.path.stem
         async with first.conversation_lifecycle_lock():
             first._ensure_active_conversation()
             dispatcher._bind_user_message_owner(claimed, first.active_conversation_id)
@@ -134,7 +138,9 @@ async def test_first_input_owner_waits_for_prior_selection_without_blocking_inte
         await asyncio.wait_for(interrupted.wait(), 1)
         assert admitted == []
         assert queue.has_client_command("cmd_unscoped")
-        assert "conversation_id" not in queue._client_inflight["cmd_unscoped"].data
+        accepted_inputs = [*queue.pending_client_commands(), *queue._client_inflight.values()]
+        pending_input = next(item for item in accepted_inputs if item.data["client_command_id"] == "cmd_unscoped")
+        assert "conversation_id" not in pending_input.data
         release.set()
         await switch
         await _drain(dispatcher)

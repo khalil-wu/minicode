@@ -61,12 +61,10 @@ _POLICIES: dict[str, HookEventPolicy] = {
         additional_context=True,
     ),
     "notification": HookEventPolicy(matcher_applies=True),
-    "pre_compact": HookEventPolicy(
-        exit_two_blocks=True,
-        json_can_block=True,
-        successful_output=SuccessfulOutput.COMPACT_INSTRUCTIONS,
-    ),
-    "post_compact": HookEventPolicy(successful_output=SuccessfulOutput.USER),
+    # Source compact hooks are stateless observers. Only universal continue=false
+    # stops work; stdout/exit 2 do not become instructions or a veto.
+    "pre_compact": HookEventPolicy(),
+    "post_compact": HookEventPolicy(),
     "permission_request": HookEventPolicy(json_can_block=True),
     "permission_denied": HookEventPolicy(matcher_applies=True),
     "stop_failure": HookEventPolicy(

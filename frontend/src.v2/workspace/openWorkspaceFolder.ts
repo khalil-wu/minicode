@@ -4,9 +4,9 @@ import { pushToast } from "../overlays/ToastContainer";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { toBackendPermissionMode } from "../protocol/permissions";
-import { workspaceRootsEqual } from "../lib/workspace-path";
+import { normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
 
-export const openWorkspaceFolder = async (): Promise<string | null> => {
+export const openWorkspaceFolder = async (mode: "code" | "cowork" = "code"): Promise<string | null> => {
   try {
     const workspacePath = isDesktop()
       ? await pickWorkspaceDirectory()
@@ -18,14 +18,14 @@ export const openWorkspaceFolder = async (): Promise<string | null> => {
         confirmLabel: "打开项目",
       });
     if (!workspacePath?.trim()) return null;
-    return activateWorkspaceFolder(workspacePath.trim());
+    return activateWorkspaceFolder(workspacePath.trim(), mode);
   } catch (error) {
     pushToast(error instanceof Error ? error.message : "无法打开项目选择器。", "error", 5000);
     return null;
   }
 };
 
-export const activateWorkspaceFolder = async (workspacePath: string): Promise<string | null> => {
+export const activateWorkspaceFolder = async (workspacePath: string, mode: "code" | "cowork" = "code", onActivated?: () => void): Promise<string | null> => {
   try {
     const result = await sendClientCommandAwaitResult(
       { type: "workspace.set", path: workspacePath, permission_mode: toBackendPermissionMode(useAppStore.getState().permissionMode) },
@@ -43,7 +43,8 @@ export const activateWorkspaceFolder = async (workspacePath: string): Promise<st
     // Applying the directory again here can overwrite a later user selection.
     const state = useAppStore.getState();
     if (state.conversationId === result.data?.conversation_id && workspaceRootsEqual(state.workingDirectory, activatedPath)) {
-      state.setAppMode("code");
+      state.setAppMode(mode);
+      onActivated?.();
     }
     pushToast(`已打开工作区：${activatedPath}`, "info", 2200);
     return activatedPath;
@@ -51,4 +52,18 @@ export const activateWorkspaceFolder = async (workspacePath: string): Promise<st
     pushToast(error instanceof Error ? error.message : "无法打开工作区。", "error", 5000);
     return null;
   }
+};
+
+/** Disk navigation uses its actual workspace and the existing activation owner check. */
+export const openWorkspaceSourceFile = (path: string, workspaceRoot?: string, line?: number): void => {
+  if (workspaceRoot === "") return;
+  const state = useAppStore.getState();
+  const target = { ...(line !== undefined ? { line } : {}), exact: true };
+  if (!workspaceRoot || workspaceRootsEqual(workspaceRoot, state.workingDirectory)) {
+    state.openEditorFile(path, path.split(/[/\\]/).pop(), target);
+    return;
+  }
+  const normalized = normalizeWorkspacePath(path);
+  const absolutePath = normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) ? normalized : `${normalizeWorkspacePath(workspaceRoot)}/${normalized}`;
+  void activateWorkspaceFolder(workspaceRoot, "code", () => useAppStore.getState().openEditorFile(absolutePath, path.split(/[/\\]/).pop(), target));
 };

@@ -7,6 +7,7 @@ from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE
 from backend.permissions.profiles import workspace_scope_for
 from backend.agent.plans import merge_plan_constraints, plan_path_for_snapshot
 from backend.tools.base import PermissionLevel
+from backend.permissions.approval_policy import ApprovalPolicy, policy_for_mode
 from backend.ws.utils import (
     normalize_permission_mode,
     normalize_permission_overrides,
@@ -15,11 +16,12 @@ from backend.ws.utils import (
 )
 
 
-def _managed_permission_projection(mode: str) -> tuple[str, str, str, str]:
+def _managed_permission_projection(mode: str, configured_policy: ApprovalPolicy | None = None, *, config_stack: Any = None) -> tuple[str, Any, str, str]:
     from backend.config import get_config_requirements
 
-    requirements = get_config_requirements()
-    effective_mode, violation = requirements.resolve_permission_mode(mode)
+    requirements = config_stack.requirements if config_stack is not None else get_config_requirements()
+    policy = policy_for_mode(mode, configured_policy)
+    effective_mode, violation = requirements.resolve_permission_mode(mode, approval_policy=policy)
     if violation is not None:
         raise violation
     requirement_source = requirements.source_for("allowed_approval_policies") or requirements.source_for(
@@ -27,7 +29,7 @@ def _managed_permission_projection(mode: str) -> tuple[str, str, str, str]:
     )
     return (
         effective_mode,
-        requirements.approval_policy_for_mode(effective_mode),
+        policy.to_wire(),
         requirements.sandbox_mode_for_permission_mode(effective_mode),
         str(requirement_source or ""),
     )
@@ -45,7 +47,7 @@ class SessionPermissionRuntimeMixin:
             or DEFAULT_CONVERSATION_PERMISSION_MODE
         )
         requested, approval_policy, sandbox_mode, requirements_source = _managed_permission_projection(
-            requested
+            requested, self.config.permissions.approval_policy, config_stack=self.config.config_layer_stack
         )
         deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
         overrides = normalize_permission_overrides(getattr(conversation, "permission_overrides", {}))
@@ -95,7 +97,7 @@ class SessionPermissionRuntimeMixin:
             or DEFAULT_CONVERSATION_PERMISSION_MODE
         )
         normalized_mode, approval_policy, sandbox_mode, requirements_source = _managed_permission_projection(
-            normalized_mode
+            normalized_mode, self.config.permissions.approval_policy, config_stack=self.config.config_layer_stack
         )
         normalized_overrides = dict(session_overrides if session_overrides is not None else current.session_overrides)
         normalized_prompt_rules = tuple(
@@ -120,7 +122,7 @@ class SessionPermissionRuntimeMixin:
             and current.command_prompt_allow_rules == normalized_prompt_rules
             and current.tool_deny_rules == normalized_deny_rules
             and current.source == source
-            and current.approval_policy == approval_policy
+            and current.approval_policy_value() == approval_policy
             and current.sandbox_mode == sandbox_mode
             and current.requirements_source == requirements_source
         ):
@@ -207,7 +209,7 @@ class SessionPermissionRuntimeMixin:
                     or DEFAULT_CONVERSATION_PERMISSION_MODE
                 )
                 mode, _approval_policy, _sandbox_mode, _requirements_source = _managed_permission_projection(
-                    mode
+                    mode, self.config.permissions.approval_policy, config_stack=self.config.config_layer_stack
                 )
                 context_source = "conversation.record"
                 deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
@@ -269,16 +271,30 @@ class SessionPermissionRuntimeMixin:
     ) -> None:
         target_id = str(conversation_id or self.active_conversation_id or "").strip()
         target = self.conversation_repo.get_conversation(target_id) if target_id else None
+        rules = self.build_permission_rules_payload(conversation=target)
         await self.send_payload(
             {
                 "type": "permission.rules.updated",
                 "session_id": self.session_id,
                 "conversation_id": target_id,
                 "source": source,
-                "rules": self.build_permission_rules_payload(conversation=target),
+                "rules": rules,
             },
             log_context="permission.rules.updated",
         )
+        from backend.permissions.patterns import legacy_mcp_allow_warnings
+
+        warnings = legacy_mcp_allow_warnings([
+            *self.permission_checker.policy_snapshot().get("auto_allow", []),
+            *(rule["pattern"] for rule in rules["session_overrides"] if rule.get("level") == "auto"),
+        ])
+        if warnings:
+            await self.emit_command_result(
+                "permissions.rules.legacy",
+                "\n".join(warnings),
+                level="warning",
+                data={"conversation_id": target_id},
+            )
 
     async def emit_command_result(
         self,

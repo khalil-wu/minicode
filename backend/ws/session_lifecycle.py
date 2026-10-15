@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,12 @@ from backend.workspace.file_watcher import WorkspaceFileWatcher
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ForegroundNavigationReceipt:
+    client_command_id: str
+    target_conversation_id: str | None
+
+
 class SessionLifecycle:
     """Own workspace, connection, and shutdown lifecycle for one WS session."""
 
@@ -36,6 +45,10 @@ class SessionLifecycle:
         self._retired_workspace_tasks: set[asyncio.Task[Any]] = set()
         self._workspace_generation = 0
         self._workspace_root: Path | None = None
+        self._foreground_navigation_receipt: ForegroundNavigationReceipt | None = None
+        self._navigation_receipt: ContextVar[ForegroundNavigationReceipt | None] = ContextVar("foreground_navigation_receipt", default=None)
+        self._foreground_navigation_target_id: str | None = None
+        self._foreground_navigation_pending = False
         self.file_watcher: WorkspaceFileWatcher | None = None
         self._background_recovery_lock = asyncio.Lock()
         self._background_recovery_loaded = False
@@ -45,7 +58,55 @@ class SessionLifecycle:
         self._sandbox_capability_generation = 0
         self._sandbox_capability_scope: tuple[Any, ...] | None = None
         self._task_runtime_update_task: asyncio.Task[Any] | None = None
+        self._task_runtime_update_pending = False
         self.is_shutting_down = False
+
+    def admit_foreground_navigation(self, command: Any) -> ForegroundNavigationReceipt | None:
+        """Bind selection intent before this command's first async preparation."""
+        kind = command.type
+        data = command.data
+        target = str(data.get("conversation_id") or "")
+        activating = (
+            kind == "conversation.switch"
+            or kind in {"workspace.set", "workspace.switch", "workspace.import"}
+            or (kind == "conversation.create" and data.get("activate", True)
+                and data.get("conversation_type", "main") == "main")
+            or (kind == "context.fork" and data.get("create_branch", True) and data.get("activate", False))
+            or (kind == "conversation.archive" and data.get("archive_navigation") == "home")
+            or (kind == "user_message" and not target and not self._session.active_conversation_id)
+            or (kind == "conversation.delete" and target == (
+                self._foreground_navigation_target_id if self._foreground_navigation_pending
+                else self._session.active_conversation_id
+            ))
+        )
+        if activating:
+            if kind == "context.fork" or (kind == "conversation.archive" and data.get("archive_navigation") == "home"):
+                # These intents leave the source owner: fork assigns a child
+                # later, while Header archive navigates to an empty home.
+                target = ""
+            receipt = ForegroundNavigationReceipt(str(data.get("client_command_id") or ""), target or None)
+            self._foreground_navigation_receipt = receipt
+            self._foreground_navigation_target_id = target or None
+            self._foreground_navigation_pending = True
+            return receipt
+        return None
+
+    @contextmanager
+    def bind_foreground_navigation(self, receipt: ForegroundNavigationReceipt | None):
+        token = self._navigation_receipt.set(receipt)
+        try:
+            yield
+        finally:
+            self._navigation_receipt.reset(token)
+
+    def foreground_navigation_is_current(self) -> bool:
+        receipt = self._navigation_receipt.get()
+        return receipt is None or receipt is self._foreground_navigation_receipt
+
+    def finish_foreground_navigation(self) -> None:
+        if self._navigation_receipt.get() is not None and self.foreground_navigation_is_current():
+            self._foreground_navigation_pending = False
+            self._foreground_navigation_target_id = self._session.active_conversation_id
 
     @property
     def workspace_context(self) -> Any | None:
@@ -389,11 +450,16 @@ class SessionLifecycle:
             self._pending_background_recovery = pending
 
     def start_file_watcher(self):
+        if not self._session.is_connected:
+            return
         workspace_root = self.workspace_root_for_conversation()
         if workspace_root is None:
             logger.info("No workspace bound for session %s; file watcher not started", self._session.session_id)
             return
         captured_workspace_root = workspace_root.resolve()
+
+        async def on_index_invalidated(instance_id: str, revision: int) -> None:
+            await self.on_project_index_invalidated(captured_workspace_root, instance_id, revision)
 
         async def on_change(path: Path, event_type: str) -> None:
             current_workspace_root = self.workspace_root_for_conversation()
@@ -410,6 +476,7 @@ class SessionLifecycle:
             self.file_watcher = WorkspaceFileWatcher(
                 workspace_root=workspace_root,
                 on_change=on_change,
+                on_index_invalidated=on_index_invalidated,
                 stability_threshold=0.5,
             )
             self.file_watcher.start()
@@ -422,7 +489,13 @@ class SessionLifecycle:
             self.file_watcher.stop()
             self.file_watcher = None
 
+        if not self._session.is_connected:
+            return
+
         resolved_workspace_root = workspace_root.resolve()
+
+        async def on_index_invalidated(instance_id: str, revision: int) -> None:
+            await self.on_project_index_invalidated(resolved_workspace_root, instance_id, revision)
 
         async def on_change(path: Path, event_type: str) -> None:
             current_workspace_root = self.workspace_root_for_conversation()
@@ -439,6 +512,7 @@ class SessionLifecycle:
             self.file_watcher = WorkspaceFileWatcher(
                 workspace_root=resolved_workspace_root,
                 on_change=on_change,
+                on_index_invalidated=on_index_invalidated,
                 stability_threshold=0.5,
             )
             self.file_watcher.start()
@@ -535,14 +609,28 @@ class SessionLifecycle:
         wait_for_initialize: bool = False,
         error_command: str | None = "workspace.activate",
     ) -> bool:
-        from backend.services.workspace_service import conversation_workspace_path, workspace_matches_context
+        from backend.services.workspace_service import conversation_execution_path, workspace_matches_context
 
-        workspace_path = conversation_workspace_path(conversation)
+        if not self.foreground_navigation_is_current():
+            return False
+
+        workspace_path = conversation_execution_path(conversation)
         if not workspace_path:
             self.clear_workspace_runtime()
             return True
 
+        project_root = str(conversation.workspace_root or conversation.worktree_path or "").strip()
         if workspace_matches_context(workspace_path, self._workspace_context):
+            if project_root:
+                from backend.services.workspace_service import record_recent_workspace_project, list_workspace_recent_payload
+
+                metadata = self._workspace_context.metadata
+                if metadata is None:
+                    metadata = await self._workspace_context.initialize()
+                if not self.foreground_navigation_is_current():
+                    return False
+                record_recent_workspace_project(Path(project_root), metadata)
+                await self._session.send_payload(list_workspace_recent_payload(), log_context="workspace.recent.list")
             return True
 
         return await self.activate_workspace_path(
@@ -551,6 +639,7 @@ class SessionLifecycle:
             wait_for_initialize=wait_for_initialize,
             error_command=error_command,
             conversation_id=str(conversation.id or "").strip(),
+            project_root=project_root,
         )
 
     async def activate_workspace_path(
@@ -561,6 +650,7 @@ class SessionLifecycle:
         wait_for_initialize: bool = False,
         error_command: str | None = "workspace.activate",
         conversation_id: str | None = None,
+        project_root: str = "",
     ) -> bool:
         from backend.services.workspace_service import (
             create_workspace_context,
@@ -599,7 +689,8 @@ class SessionLifecycle:
 
         old_workspace_context = self._workspace_context
         old_workspace_root = workspace_context_root(old_workspace_context)
-        self._workspace_generation = int(self._workspace_generation) + 1
+        if not wait_for_initialize:
+            self._workspace_generation = int(self._workspace_generation) + 1
         activation_generation = self._workspace_generation
         ctx: Any | None = None
         restart_file_watcher = self.restart_file_watcher
@@ -613,6 +704,7 @@ class SessionLifecycle:
             return (
                 self._workspace_generation == activation_generation
                 and self._workspace_context is ctx
+                and self.foreground_navigation_is_current()
             )
 
         async def reload_workspace_mcp(
@@ -636,6 +728,8 @@ class SessionLifecycle:
             if manager is None:
                 return
             if enforce_generation and ctx is not None and not activation_is_current():
+                return
+            if not enforce_generation and (self._workspace_generation != activation_generation or self._workspace_context is not old_workspace_context):
                 return
             self._session.mcp_manager = manager
             refresh_registry = self._session.refresh_tool_registry_if_mcp_changed
@@ -695,7 +789,7 @@ class SessionLifecycle:
         async def rollback_workspace() -> None:
             """Restore every session surface changed before indexing completes."""
 
-            if ctx is None or not activation_is_current():
+            if ctx is None or self._workspace_generation != activation_generation or self._workspace_context is not ctx:
                 return
             self._workspace_context = old_workspace_context
             restored_root = Path(old_workspace_root) if old_workspace_root else None
@@ -710,6 +804,8 @@ class SessionLifecycle:
                     self.file_watcher = None
 
             await reload_workspace_mcp(restored_root, enforce_generation=False)
+            if self._workspace_generation != activation_generation or self._workspace_context is not old_workspace_context:
+                return
 
             skill_manager = self._session.skill_manager
             if skill_manager is not None:
@@ -726,6 +822,16 @@ class SessionLifecycle:
 
         try:
             ctx = create_workspace_context(project_path)
+            prepared_metadata = None
+            if wait_for_initialize:
+                # Blocking creation prepares the index off to the side. Its
+                # old receipt must never publish a root while a newer selected
+                # conversation is already opening.
+                prepared_metadata = await ctx.initialize()
+                if self._workspace_generation != activation_generation or not self.foreground_navigation_is_current():
+                    return False
+                self._workspace_generation = int(self._workspace_generation) + 1
+                activation_generation = self._workspace_generation
             # Superseded initialization remains session-owned until it settles,
             # but must never delay this user-visible switch or publish into the
             # new generation.
@@ -742,6 +848,9 @@ class SessionLifecycle:
             if wait_for_initialize:
                 publish_mcp_manager(None)
                 await reload_workspace_mcp(project_path)
+                if not activation_is_current():
+                    await rollback_workspace()
+                    return False
             else:
                 # Never expose the previous workspace's MCP tools while the
                 # new manager is being prepared. The preparation itself may
@@ -760,9 +869,9 @@ class SessionLifecycle:
             async def prepare_workspace_projection() -> None:
                 """Finish non-index workspace projections for this generation."""
 
-                refresh_commands(project_path)
                 if not activation_is_current():
                     return
+                refresh_commands(project_path)
                 skill_manager = self._session.skill_manager
                 if skill_manager is not None:
                     skill_manager.set_project_root(project_path)
@@ -801,17 +910,20 @@ class SessionLifecycle:
                         projection_task = asyncio.create_task(
                             prepare_workspace_projection_background()
                         )
-                    metadata = await ctx.initialize()
+                    metadata = prepared_metadata if wait_for_initialize else await ctx.initialize()
                     if projection_task is not None:
                         await projection_task
                     if not activation_is_current():
+                        if wait_for_initialize:
+                            await rollback_workspace()
                         return False
-                    record_recent_workspace_project(project_path, metadata)
-                    await self._session.send_payload(
-                        list_workspace_recent_payload(),
-                        log_context="workspace.recent.list",
-                    )
-                    if announce:
+                    if project_root:
+                        record_recent_workspace_project(Path(project_root), metadata)
+                        await self._session.send_payload(
+                            list_workspace_recent_payload(),
+                            log_context="workspace.recent.list",
+                        )
+                    if announce and project_root:
                         await self._session.send_payload(
                             workspace_imported_payload(
                                 ctx,
@@ -1028,14 +1140,22 @@ class SessionLifecycle:
         )
 
     def schedule_task_runtime_update(self) -> None:
+        if self.is_shutting_down:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
         existing = self._task_runtime_update_task
+        self._task_runtime_update_pending = True
         if existing is not None and not existing.done():
             return
-        coroutine = self.send_task_runtime_update(include_capabilities=False)
+        async def publish_pending_updates() -> None:
+            while self._task_runtime_update_pending:
+                self._task_runtime_update_pending = False
+                await self.send_task_runtime_update(include_capabilities=False)
+
+        coroutine = publish_pending_updates()
         try:
             task = loop.create_task(coroutine)
         except RuntimeError:
@@ -1073,6 +1193,15 @@ class SessionLifecycle:
 
     def current_workspace_root(self) -> Path | None:
         """Return the workspace currently mounted by this session, if any."""
+        owner = self._session.active_conversation_id
+        if owner:
+            target = self._session.conversation_repo.get_conversation_summary(owner)
+            if target is not None:
+                directory = self.workspace_path_for_conversation(target)
+                mounted = self._workspace_context.root_path if self._workspace_context is not None else self._workspace_root
+                if not directory or mounted is None or Path(directory).expanduser().resolve() != mounted.resolve():
+                    return None
+                return Path(directory).expanduser().resolve()
         # Prefer workspace_context if available (for active conversation)
         workspace_context = self._workspace_context
         if workspace_context is not None:
@@ -1090,7 +1219,25 @@ class SessionLifecycle:
         target = conversation if conversation is not None else self._session.conversation_repo.get_conversation_summary(owner) if owner else None
         if target is None:
             return ""
-        return str(target.worktree_path or target.workspace_root or "").strip()
+        # Browsing reads summary provenance only. Private record hydration is
+        # asynchronous; an old thread without a recorded cwd stays unknown
+        # until hydration or a real execution boundary establishes its owner.
+        return str(target.execution_cwd or target.worktree_path or target.workspace_root or "").strip()
+
+    def bind_execution_for_operation(self, conversation: Any) -> Any:
+        """Fix cwd at a real execution boundary, preserving historical grants."""
+        record = self._session.conversation_repo.get_conversation(conversation.id)
+        if not record.execution_cwd:
+            actual_directory = Path.cwd().resolve()
+            record = self._session.conversation_repo.bind_execution_cwd(record.id, str(actual_directory))
+            if record.id == self._session.active_conversation_id:
+                self._workspace_root = actual_directory
+        if not record.workspace_root and not record.projectless_output_dir:
+            # Old projectless uploads used the empty owner scope. Grant only
+            # this same conversation's fixed cwd, keeping the original scope.
+            self._session.attachment_store.share_for_conversation(record.id, record.id, record.execution_cwd, source_workspace_root="")
+            self._session.artifact_store.share_for_conversation(record.id, record.id, record.execution_cwd, source_workspace_root="")
+        return record
 
     def workspace_root_for_conversation(self, conversation: Any | None = None) -> Path | None:
         workspace_path = self.workspace_path_for_conversation(conversation)
@@ -1106,6 +1253,20 @@ class SessionLifecycle:
         if workspace_context is not None and workspace_context.root_path.resolve() == workspace_root:
             return workspace_context
         return None
+
+    async def on_project_index_invalidated(self, workspace_root: Path, instance_id: str, revision: int) -> None:
+        if self.workspace_root_for_conversation() != workspace_root:
+            return
+        owner = str(self._session.active_conversation_id or "").strip()
+        if not owner:
+            return
+        await self._session.send_payload({
+            "type": "workspace.project_index.invalidated",
+            "conversation_id": owner,
+            "workspace_root": str(workspace_root),
+            "index_instance_id": instance_id,
+            "revision": revision,
+        }, log_context="workspace.project_index.invalidated")
 
     async def on_file_changed(
         self,
@@ -1216,26 +1377,120 @@ class SessionLifecycle:
                 await self._session.artifact_store.flush()
                 self._session.artifact_store.clear()
 
+    def llm_borrower_tasks(self) -> frozenset[asyncio.Task[Any]]:
+        """Actual model users, including independent memory maintenance."""
+        return frozenset(task for owners in self._session._llm_adapter_leases.values()
+            for task in owners if not task.done())
+
+    async def _drain_llm_borrowers(self) -> None:
+        deadline = asyncio.get_running_loop().time() + CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        current = asyncio.current_task()
+        while borrowers := self.llm_borrower_tasks() - {current}:
+            receipt = await cancel_and_drain_receipt(
+                borrowers, timeout=deadline - asyncio.get_running_loop().time(),
+                label="session model borrowers", owner=self._session.cleanup_tasks,
+            )
+            if receipt.pending:
+                raise RuntimeError(f"Session {self._session.session_id} still owns {receipt.pending} model borrower(s)")
+
+    async def retire_transport(self) -> None:
+        """Retire connection-owned UI/RPC work while the original core lives."""
+        session = self._session
+        session.mark_disconnected()
+        current = asyncio.current_task()
+        tasks = {task for task in session.command_dispatcher.command_tasks
+                 if task is not current and not task.done()}
+        if tasks:
+            await cancel_and_drain_receipt(
+                tasks, timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="retired connection commands", owner=session.command_dispatcher.command_tasks,
+            )
+        # Hydration and workspace/MCP preparation can be borrowed by input
+        # already accepted on Home. Those exact tasks leave with that core.
+        if not session.ws_manager.core_borrows_reader_hydration(session):
+            await session.conversation_runtime.shutdown()
+        update = self._task_runtime_update_task
+        if update is not None and update is not current and not update.done():
+            await cancel_and_drain_receipt(
+                [update], timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="retired connection runtime projection", owner=session.cleanup_tasks,
+            )
+        self._task_runtime_update_task = None
+        self._task_runtime_update_pending = False
+        if self.file_watcher and self.file_watcher.is_running():
+            self.file_watcher.stop()
+        from backend.preview import stop_preview_launches_for_session
+
+        await session.terminal_manager.destroy_all()
+        await stop_preview_launches_for_session(session.session_id)
+        await session.event_outbox.drain_delivery()
+        await session.event_outbox.drain_persistence()
+        await session.artifact_store.flush()
+
+    async def unload_conversation(self, conversation_id: str, *, reason: str) -> None:
+        """Shut down one real core without closing another thread on its host."""
+        session = self._session
+        await session.run_manager.unwatch_conversation_notifications(conversation_id)
+        await session.cancel_pending_approvals(reason=reason, conversation_id=conversation_id)
+        await session.cancel_agent_runs(conversation_id=conversation_id, reason=reason)
+        from backend.agent.runtime import default_runtime_if_initialized
+        from backend.preview.launcher import stop_preview_launches_for_conversation
+
+        runtime = default_runtime_if_initialized()
+        if runtime is not None:
+            stopped = await runtime.stop_subagent_tasks_for_conversation(conversation_id, reason=reason)
+            if not stopped:
+                raise RuntimeError(f"Subagents for {conversation_id} have not stopped")
+        await session.background_manager.destroy_for_conversation(conversation_id)
+        await session.terminal_manager.destroy_sessions_for_conversation(conversation_id)
+        await stop_preview_launches_for_conversation(conversation_id)
+        guardian = session.__dict__.get("_conversation_guardian_hosts", {}).pop(conversation_id, None)
+        if guardian is not None:
+            await guardian.aclose()
+        session.conversation_runtime.forget_code_store(conversation_id)
+
     async def shutdown(self, *, reason: str = "session_shutdown") -> None:
         """Cancel and drain every resource owned by this websocket session."""
         self.is_shutting_down = True
         self._session.mark_disconnected()
         self._session.run_manager.stop_notification_wake_intake()
+        current = asyncio.current_task()
+        commands = {task for task in (self._session.command_dispatcher.execution_command_tasks
+                    | self._session.command_dispatcher.command_tasks)
+                    if task is not current and not task.done()}
+        if commands:
+            receipt = await cancel_and_drain_receipt(
+                commands, timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="execution and connection command shutdown", owner=self._session.cleanup_tasks,
+            )
+            if receipt.pending:
+                raise RuntimeError(f"Session {self._session.session_id} still owns {receipt.pending} command task(s)")
         # Retirement stops execution, not admitted user work. Follow-ups,
         # inflight dispatches and unacknowledged steers are already durable;
         # cancellation cleanup restores the latter and closing the owner lease
         # below lets the next session recover them.
         self._workspace_generation += 1
         self._sandbox_capability_generation += 1
-        try:
-            await self._session.cancel_agent_runs(reason=reason)
-        except Exception:
-            logger.debug("Failed to cancel agent runs during session shutdown", exc_info=True)
+        await self._session.cancel_agent_runs(reason=reason)
+        from backend.agent.runtime import default_runtime_if_initialized
+
+        runtime = default_runtime_if_initialized()
+        if runtime is not None:
+            stopped = await runtime.stop_subagent_tasks_for_session(self._session.session_id, reason=reason)
+            if not stopped:
+                raise RuntimeError(f"Session {self._session.session_id} still owns running subagents")
+        # A memory job can wake when its foreground turn ends. Cancel/drain
+        # that exact lease owner before retiring its ModelRuntime/extensions
+        # or closing the adapter it is about to use.
+        await self._drain_llm_borrowers()
         # Run cancellation emits owned terminal notifications first.  The
         # state container is then the final cleanup authority for any waiter
         # whose owning task disappeared before it could run its own finally.
         self._session.turn_wait_state.clear_pending_waiters()
         self._session.approval_diff_cache.clear()
+        for host in self._session.__dict__.get("_conversation_guardian_hosts", {}).values():
+            await host.aclose()
+        self._session.__dict__.get("_conversation_guardian_hosts", {}).clear()
         await self._session.run_manager.shutdown_notification_wakes()
         # Notification hooks are observational and session-owned. Drain them
         # before extension/session teardown so no hook runs against a retired
@@ -1310,23 +1565,11 @@ class SessionLifecycle:
             )
         except Exception:
             logger.debug("Failed to finalize session hooks during shutdown", exc_info=True)
-        try:
-            from backend.agent.runtime import default_runtime_if_initialized
-
-            runtime = default_runtime_if_initialized()
-            if runtime is not None:
-                # A process that never ran a turn owns no child tasks; anything
-                # else must go through the draining stop so a surviving child
-                # keeps its cleanup owner.
-                await runtime.stop_subagent_tasks_for_session(self._session.session_id, reason=reason)
-        except Exception:
-            logger.exception("Failed to stop subagents during session %s shutdown", self._session.session_id)
-
         current = asyncio.current_task()
         command_dispatcher = self._session.command_dispatcher
         command_tasks = [
             task
-            for task in list(command_dispatcher.command_tasks)
+            for task in command_dispatcher.command_tasks | self._session.execution_cleanup_tasks
             if task is not current and not task.done()
         ]
         if command_tasks:
@@ -1356,6 +1599,7 @@ class SessionLifecycle:
                 owner=self._session.cleanup_tasks,
             )
         self._task_runtime_update_task = None
+        self._task_runtime_update_pending = False
         if self.file_watcher and self.file_watcher.is_running():
             self.file_watcher.stop()
         try:
@@ -1409,32 +1653,19 @@ class SessionLifecycle:
                 exc,
                 exc_info=True,
             )
-        try:
-            from backend.ws.agent_runner import (
-                _clear_session_llm_cache,
-                _schedule_session_llm_close,
-            )
+        from backend.ws.agent_runner import _clear_session_llm_cache
 
-            _clear_session_llm_cache(self._session)
-            for adapter in list(self._session._retired_llm_adapters.values()):
-                _schedule_session_llm_close(self._session, adapter)
-            self._session._retired_llm_adapters.clear()
-            self._session._llm_adapter_leases.clear()
-            if self._session._llm_close_tasks:
-                await await_with_deadline(
-                    asyncio.gather(
-                        *tuple(self._session._llm_close_tasks),
-                        return_exceptions=True,
-                    ),
-                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-                    label="LLM adapter close tasks",
-                    owner=self._session.cleanup_tasks,
-                )
-                self._session._llm_close_tasks = {
-                    task for task in self._session._llm_close_tasks if not task.done()
-                }
-        except Exception:
-            logger.debug("Failed to close session LLM adapters", exc_info=True)
+        await self._drain_llm_borrowers()
+        # The existing lease release callback closes retired adapters only
+        # after their last real owner settles. Never force-clear that graph.
+        _clear_session_llm_cache(self._session)
+        closing = tuple(self._session._llm_close_tasks)
+        if closing:
+            done, pending = await asyncio.wait(closing, timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS)
+            for task in done:
+                task.result()
+            if pending:
+                raise RuntimeError(f"Session {self._session.session_id} still owns {len(pending)} closing model adapter(s)")
         try:
             await self._session.event_outbox.drain_delivery()
             await self._session.event_outbox.drain_persistence()

@@ -23,6 +23,7 @@
   color-scheme: dark;
   --desktop-shell-background: #151719;
   --desktop-frame-border: #ffffff0d;
+  --desktop-edge-glow: inset 0 0 24px 3px #87cefa1a, inset 0 0 64px 8px #87cefa0a;
 
   /* ── Surface layers (9) — Pillar 1.1
      Tonal monotonicity invariant (P1.2):
@@ -120,6 +121,7 @@
   --state-danger:       oklch(0.71 0.16 28);
   --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
   --state-info:         oklch(0.76 0 0);
+  --sidebar-pin-drop-info: #63a8f8;
   --state-info-soft:    oklch(0.76 0 0 / 0.12);
   /* Agent identity colors remain independent of execution state. */
   --agent-identity-teal:   oklch(0.76 0.10 183);
@@ -224,6 +226,8 @@
 
   /* ── Easing ────────────────────────────────────────── */
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --easing-css-default: ease;
+  --easing-css-out: ease-out;
   --easing-enter: cubic-bezier(0.19, 1, 0.22, 1);
   --easing-enter-snappy: cubic-bezier(0.23, 1, 0.32, 1);
   --easing-exit: cubic-bezier(0.8, 0, 0.4, 1);
@@ -232,11 +236,12 @@
   /* Panels settle without overshooting the text baseline. */
   --easing-spring: var(--easing-enter);
 
-  /* ── Duration primitives (4) — raw ms values for @keyframes
+  /* ── Duration primitives — raw ms values for @keyframes
      Used by animations.css utility classes. The --transition-*
      shorthands below compose these with easing + property. ──── */
   --duration-micro: 100ms;
   --duration-fast:  150ms;
+  --duration-reveal: 160ms;
   --duration-base:  200ms;
   --duration-slow:  250ms;
   --duration-status-sweep: calc(var(--duration-slow) * 7);
@@ -375,6 +380,7 @@ uses in its UI. The `--cjk-leading` and
   color-scheme: light;
   --desktop-shell-background: #eef3f9;
   --desktop-frame-border: #e5e9ee;
+  --desktop-edge-glow: inset 0 0 24px 3px #87cefa2b, inset 0 0 64px 8px #87cefa12;
 
   /* Light mode uses white content planes with neutral, low-contrast interaction
      fills. This keeps hierarchy without turning every page into a grey card. */
@@ -471,6 +477,7 @@ uses in its UI. The `--cjk-leading` and
   --state-danger:       oklch(0.55 0.18 28);
   --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
   --state-info:         oklch(0.48 0 0);
+  --sidebar-pin-drop-info: #3a83f7;
   --state-info-soft:    oklch(0.48 0 0 / 0.12);
   --agent-identity-teal:   oklch(0.55 0.10 183);
   --agent-identity-blue:   oklch(0.55 0.11 242);

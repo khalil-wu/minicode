@@ -1,8 +1,10 @@
+import { useI18n } from "../i18n";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, AtSign, LoaderCircle, MessageCirclePlus, Plus, Square, X } from "lucide-react";
 import { useAppStore } from "../stores";
+import type { CommandResultEvent } from "../protocol/events";
 import { attachmentRefFromPayload, sendChatMessage } from "../chat/sendChatMessage";
-import type { CodeSelectionContext, MessageContextRef, PermissionMode } from "../stores/types";
+import type { CodeSelectionContext, FollowUpBehavior, MessageContextRef, PermissionMode } from "../stores/types";
 import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
 import { AttachmentStrip } from "../composer/AttachmentStrip";
 import { ComposerTextarea } from "../composer/ComposerTextarea";
@@ -30,26 +32,39 @@ import { releasePreviewScope } from "../chat/previewRequestScope";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { useReplyViewport } from "../chat/useReplyViewport";
+import { newSideChatId } from "../chat/openSideChat";
+import { hydrateMessages } from "../chat/transcriptHydration";
+import type { ConversationTranscriptMessage } from "../protocol/conversation-types";
 import "./SideChatPanel.css";
 
-const newSideChatId = (): string =>
-  `side-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-type SideChatOwner = { id: string; workspaceRoot: string; permissionMode: PermissionMode };
+type SideChatOwner = { id: string; workspaceRoot: string; permissionMode: PermissionMode; parentConversationId?: string };
 
 export const SideChatPanel = ({ active = true }: { active?: boolean }) => {
   const workspaceRoot = useAppStore((state) => state.workingDirectory);
   const permissionMode = useAppStore((state) => state.permissionMode);
-  const [owners, setOwners] = useState<SideChatOwner[]>(() => [{ id: newSideChatId(), workspaceRoot, permissionMode }]);
+  const parentConversationId = useAppStore((state) => state.conversationId);
+  const activeSideChatId = useAppStore((state) => state.activeSideChatId);
+  const draftsReady = useAppStore(state => state.composerDraftsReady);
+  const [owners, setOwners] = useState<SideChatOwner[]>([]);
   useLayoutEffect(() => {
-    if (active && !owners.some((owner) => workspaceRootsEqual(owner.workspaceRoot, workspaceRoot))) {
-      setOwners((current) => [...current, { id: newSideChatId(), workspaceRoot, permissionMode }]);
-    }
-  }, [active, owners, workspaceRoot, permissionMode]);
+    if (!draftsReady || !active) return;
+    const state = useAppStore.getState();
+    const selected = activeSideChatId ? state.sideChats[activeSideChatId] : undefined;
+    const owned = selected && workspaceRootsEqual(selected.workspaceRoot, workspaceRoot)
+      && (selected.parentConversationId === parentConversationId || selected.parentConversationId == null) ? selected : undefined;
+    const saved = owned ?? Object.values(state.sideChats).find(thread => workspaceRootsEqual(thread.workspaceRoot, workspaceRoot)
+      && (thread.parentConversationId === parentConversationId || thread.parentConversationId == null)
+      && (thread.draft || thread.attachments?.length || thread.contextRefs?.length || thread.selectedContext || thread.isStreaming));
+    const id = saved?.id ?? newSideChatId();
+    if (!saved) state.ensureSideChat(id, { workspaceRoot, permissionMode, parentConversationId: parentConversationId ?? undefined });
+    if (!owners.some(owner => owner.id === id)) setOwners(current => [...current, { id, workspaceRoot,
+      permissionMode: saved?.permissionMode ?? permissionMode, parentConversationId: saved ? saved.parentConversationId : parentConversationId ?? undefined }]);
+    if (activeSideChatId !== id) useAppStore.setState({ activeSideChatId: id });
+  }, [active, owners, workspaceRoot, permissionMode, draftsReady, parentConversationId, activeSideChatId]);
 
   return <div style={{ display: "flex", flex: 1, minHeight: 0, minWidth: 0 }}>
     {owners.map((owner) => {
-      const selected = workspaceRootsEqual(owner.workspaceRoot, workspaceRoot);
+      const selected = owner.id === activeSideChatId;
       return <div key={owner.id} hidden={!selected} data-side-chat-workspace={owner.workspaceRoot}
         style={{ display: selected ? "flex" : "none", flex: 1, minHeight: 0, minWidth: 0 }}>
         <SideChatThreadPanel owner={owner} active={active && selected} />
@@ -59,6 +74,7 @@ export const SideChatPanel = ({ active = true }: { active?: boolean }) => {
 };
 
 const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideChatOwner }) => {
+  const { t: tr } = useI18n();
   const sideChats = useAppStore((s) => s.sideChats);
   const ensureSideChat = useAppStore((s) => s.ensureSideChat);
   const removeSideChat = useAppStore((s) => s.removeSideChat);
@@ -98,6 +114,8 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const [creationAttempt, setCreationAttempt] = useState(0);
 
   const cleanupServerConversation = () => {
+    const saved = useAppStore.getState().sideChats[id];
+    if (saved && (saved.draft || saved.attachments?.length || saved.contextRefs?.length || saved.selectedContext || saved.isStreaming)) return;
     if (!createdOnServerRef.current || deleteRequestedRef.current) return;
     deleteRequestedRef.current = true;
     void sendConversationDeleteCommand({
@@ -108,9 +126,11 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
 
   useEffect(() => {
     mountedRef.current = true;
-    ensureSideChat(id, { workspaceRoot: workingDirectory, permissionMode });
+    ensureSideChat(id, { workspaceRoot: workingDirectory, permissionMode, parentConversationId: owner.parentConversationId });
     return () => {
       mountedRef.current = false;
+      const saved = useAppStore.getState().sideChats[id];
+      if (saved && (saved.draft || saved.attachments?.length || saved.contextRefs?.length || saved.selectedContext || saved.isStreaming)) return;
       for (const attachment of useAppStore.getState().sideChats[id]?.attachments ?? []) {
         cancelComposerUpload(attachment.id);
         if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
@@ -134,13 +154,28 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         const result = await sendClientCommandAwaitResult({
           type: "conversation.create",
           conversation_id: id,
-          title: "侧边对话",
+          title: tr("侧边对话"),
           conversation_type: "side_chat",
+          ...(owner.parentConversationId ? { source_conversation_id: owner.parentConversationId } : {}),
           workspace_root: workingDirectory || undefined,
           permission_mode: toBackendPermissionMode(permissionMode),
+          activate: false,
         }, "conversation.create");
-        if (!commandResultSucceeded(result)) throw new Error(result.message || "无法创建侧边对话。");
-        if (result.data?.conversation_id !== id) throw new Error("服务器没有确认当前侧边对话的标识。");
+        if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法创建侧边对话。"));
+        if (result.data?.conversation_id !== id) throw new Error(tr("服务器没有确认当前侧边对话的标识。"));
+        if (result.data.side_chat_transcript !== undefined) {
+          const restored = hydrateMessages(result.data.side_chat_transcript as ConversationTranscriptMessage[]);
+          useAppStore.setState(state => {
+            const saved = state.sideChats[id];
+            if (!saved) return state;
+            const live = new Map(saved.messages.map(message => [message.id, message]));
+            const restoredIds = new Set(restored.map(message => message.id));
+            return { sideChats: { ...state.sideChats, [id]: { ...saved, messages: [
+              ...restored.map(message => live.get(message.id)?.isStreaming ? live.get(message.id)! : message),
+              ...saved.messages.filter(message => !restoredIds.has(message.id)),
+            ] } } };
+          });
+        }
         createdOnServerRef.current = true;
         if (mountedRef.current) {
           setServerReady(true);
@@ -174,55 +209,67 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
     range: thread.selectedContext.range, text: thread.selectedContext.text, workspaceRoot: thread.selectedContext.workspaceRoot,
   } : undefined;
 
-  const submit = async () => {
+  const submit = () => submitWithBehavior(useAppStore.getState().followUpBehavior);
+  const submitAlternateFollowUp = () => submitWithBehavior(useAppStore.getState().followUpBehavior === "queue" ? "steer" : "queue");
+  const submitWithBehavior = async (busyBehavior: FollowUpBehavior) => {
     const content = (thread?.draft ?? "").trim();
     if (!thread || submitting || waitingForInput || !isConnected || !serverReady) return;
     const attachments = thread.attachments ?? [];
     if (!content && !attachments.length) return;
     if (attachments.some((attachment) => attachment.status !== "ready")) {
-      pushToast("请等待附件上传完成，或重试 / 移除失败的附件。", "warning");
+      pushToast(tr("请等待附件上传完成，或重试 / 移除失败的附件。"), "warning");
       return;
     }
     const selectedPrefix = hasPendingContext && !selectionRef && thread.selectedContext?.text
       ? `Selected context${thread.selectedContext.source ? ` (${thread.selectedContext.source})` : ""}:\n\n${thread.selectedContext.text}\n\n`
       : "";
-    const inheritedPrefix = thread.messages.length === 0 && thread.inheritedContext
-      ? `${thread.inheritedContext}\n\nSide-chat question:\n`
-      : "";
     const contextRefs = [...(thread.contextRefs ?? []), ...(selectionRef ? [selectionRef] : [])];
     setSubmitting(true);
     try {
+      const accepted: { result?: CommandResultEvent } = {};
       const nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, id, workingDirectory);
       const prefix = await buildContextPayload(contextRefs);
       if (!mountedRef.current) return;
       const sent = await sendChatMessage({
         displayContent: content,
-        backendContent: [selectedPrefix, inheritedPrefix, prefix, nativeContext.notes, content].filter(Boolean).join("\n\n"),
+        backendContent: [selectedPrefix, prefix, nativeContext.notes, content].filter(Boolean).join("\n\n"),
         conversationId: id,
         primaryFile: thread.selectedContext?.source,
         attachments: [...attachments.map((attachment) => attachment.attachment!), ...nativeContext.attachments],
         attachmentRefs: [...attachments.map((attachment) => ({ ...attachmentRefFromPayload(attachment.attachment!)!, dataUrl: attachment.dataUrl })), ...nativeContext.attachmentRefs],
         contextRefs,
         allowWhileStreaming: thread.isStreaming,
-        busyBehavior: useAppStore.getState().followUpBehavior,
+        busyBehavior,
+        awaitAdmission: true,
+        onAdmission: event => { accepted.result = event; },
       });
-      if (!mountedRef.current) return;
       if (sent) {
+        if (accepted.result?.data?.native_completion === "completed") {
+          useAppStore.setState(state => {
+            const current = state.sideChats[id];
+            return current?.draft === thread.draft ? { sideChats: { ...state.sideChats,
+              [id]: { ...current, draft: "" },
+            } } : state;
+          });
+          return;
+        }
         for (const attachment of attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
         submittedContextRef.current = thread.selectedContext;
         isFollowingRef.current = true;
         setShowScrollButton(false);
         useAppStore.setState((state) => {
           const current = state.sideChats[id];
+          if (!current) return state;
           return { sideChats: { ...state.sideChats, [id]: { ...current,
             draft: current.draft === thread.draft ? "" : current.draft,
+            selectedContext: current.selectedContext === thread.selectedContext ? undefined : current.selectedContext,
             contextRefs: current.contextRefs?.filter((ref) => !contextRefs.includes(ref)),
             attachments: current.attachments?.filter((attachment) => !attachments.includes(attachment)),
           } } };
         });
       }
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "侧边消息发送失败，请重试。", "error");
+      pushToast(error instanceof Error ? error.message : tr("侧边消息发送失败，请重试。"), "error");
     } finally { setSubmitting(false); }
   };
 
@@ -239,7 +286,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
     ...state.sideChats, [id]: { ...state.sideChats[id], contextRefs: refs },
   } }));
   const attachFiles = (files: File[]) => {
-    if (!serverReady) { pushToast("侧边对话正在准备，完成后即可添加附件。", "info"); return; }
+    if (!serverReady) { pushToast(tr("侧边对话正在准备，完成后即可添加附件。"), "info"); return; }
     uploadComposerFiles(files, id);
   };
   const onMentionSelect = (value: string) => {
@@ -280,7 +327,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
           ref={listRef}
           className="side-chat-transcript"
           role="log"
-          aria-label="侧边对话历史"
+          aria-label={tr("侧边对话历史")}
           tabIndex={0}
           onScroll={(event) => {
             const list = event.currentTarget;
@@ -293,8 +340,8 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
           {thread.messages.length === 0 ? (
             <div className="side-chat-empty">
               <MessageCirclePlus size={32} strokeWidth={1.5} aria-hidden="true" />
-              <h2>侧边聊天</h2>
-              <p>临时聊天。关闭此标签后会清除，主任务保持不变。</p>
+              <h2>{tr("侧边聊天")}</h2>
+              <p>{tr("临时聊天。关闭此标签后会清除，主任务保持不变。")}</p>
             </div>
           ) : (
             turns.map((turn, index) => <div key={turn.id}
@@ -304,7 +351,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
             </div>)
           )}
         </div>
-        {showScrollButton && <button type="button" className="side-chat-follow-latest" aria-label="回到侧边对话最新消息" onClick={() => {
+        {showScrollButton && <button type="button" className="side-chat-follow-latest" aria-label={tr("回到侧边对话最新消息")} onClick={() => {
           isFollowingRef.current = true;
           setShowScrollButton(false);
           listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
@@ -316,45 +363,46 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         <div ref={composerRef} className="side-chat-composer composer-container" data-command-mode="false" hidden={hasPendingApproval}>
           {creationError && <div role="alert" className="side-chat-creation-error">
             <span>{creationError}</span>
-            <button type="button" disabled={!isConnected} onClick={() => setCreationAttempt((attempt) => attempt + 1)}>重试创建</button>
+            <button type="button" disabled={!isConnected} onClick={() => setCreationAttempt((attempt) => attempt + 1)}>{tr("重试创建")}</button>
           </div>}
           {thread.selectedContext && hasPendingContext && <details className="side-chat-selected-context">
-            <summary>{selectionRef ? contextReferenceLabel(selectionRef) : "所选内容"} · {thread.selectedContext.text.length.toLocaleString()} 字符</summary>
+            <summary>{selectionRef ? contextReferenceLabel(selectionRef) : tr("所选内容")} · {thread.selectedContext.text.length.toLocaleString()} {tr("字符")}</summary>
             <div className="side-chat-context-actions">
-              {selectionRef && <button type="button" onClick={() => openContextReference(selectionRef, id)}>返回原选区</button>}
-              <button type="button" onClick={() => useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], selectedContext: undefined } } }))}>移除引用</button>
+              {selectionRef && <button type="button" onClick={() => openContextReference(selectionRef, id)}>{tr("返回原选区")}</button>}
+              <button type="button" onClick={() => useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], selectedContext: undefined } } }))}>{tr("移除引用")}</button>
             </div>
             <pre>{thread.selectedContext.text}</pre>
           </details>}
           <div className="side-chat-context-chips">{thread.contextRefs?.map((ref) => <span key={ref.path}>
             <button type="button" onClick={() => openContextReference(ref, id)} title={ref.path}>{contextReferenceLabel(ref)}</button>
-            <button type="button" aria-label={`移除 ${ref.name}`} onClick={() => updateContext(thread.contextRefs!.filter((item) => item !== ref))}><X size={12} /></button>
+            <button type="button" aria-label={tr("移除 {v0}", { v0: ref.name })} onClick={() => updateContext(thread.contextRefs!.filter((item) => item !== ref))}><X size={12} /></button>
           </span>)}</div>
           <AttachmentStrip conversationId={id} />
-          <ComposerTextarea value={thread.draft} conversationId={id} ariaLabel="侧边对话消息"
+          <ComposerTextarea value={thread.draft} conversationId={id} ariaLabel={tr("侧边对话消息")}
             onChange={(value, selection = { start: value.length, end: value.length }) => { setDraft(id, value); refreshMentionMenu(value, selection); }}
             onSelectionChange={refreshMentionMenu}
             selectionRequest={selectionRequest}
-            onSubmit={submit} menuOpen={mentionFilter !== null} onDropFiles={attachFiles}
+            onSubmit={submit} onAlternateSubmit={submitAlternateFollowUp} isResponseInProgress={thread.isStreaming}
+            menuOpen={mentionFilter !== null} onDropFiles={attachFiles}
             onEscape={() => { if (thread.isStreaming) { stop(); return true; } return false; }}
-            placeholder={thread.isStreaming ? "补充要求，将加入队列…" : "描述任务或提出问题…"} />
+            placeholder={thread.isStreaming ? tr("补充要求，将加入队列…") : tr("描述任务或提出问题…")} />
           <MenuOverlay open={mentionFilter !== null && !hasPendingApproval} kind="mention" filter={mentionFilter ?? ""} workspaceRoot={workingDirectory} onSelect={onMentionSelect} />
           <div className="side-chat-composer-footer composer-footer">
             <input type="file" ref={fileInputRef} multiple hidden onChange={(event) => { attachFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-            <button type="button" className="composer-attach-btn" aria-label="添加附件" disabled={!serverReady} onClick={() => fileInputRef.current?.click()}><Plus size={17} /></button>
-            <button type="button" className="composer-attach-btn" aria-label="添加上下文" onClick={() => {
+            <button type="button" className="composer-attach-btn" aria-label={tr("添加附件")} disabled={!serverReady} onClick={() => fileInputRef.current?.click()}><Plus size={17} /></button>
+            <button type="button" className="composer-attach-btn" aria-label={tr("添加上下文")} onClick={() => {
               const next = `${thread.draft}${thread.draft && !/\s$/.test(thread.draft) ? " " : ""}@`;
               setDraft(id, next); refreshMentionMenu(next, { start: next.length, end: next.length });
               setSelectionRequest({ start: next.length, end: next.length });
             }}><AtSign size={15} /></button>
-            <span className="side-chat-send-hint" title={sendShortcut === "enter" ? "Enter 发送 · Shift Enter 换行" : "Ctrl Enter 发送"}>{!isConnected ? "正在连接…" : !serverReady ? "正在准备对话…" : thread.model ? formatModelLabel(thread.model) : "会话默认模型"}</span>
-            {thread.isStreaming && <button type="button" className="composer-stop-current-btn" aria-label="停止" onClick={stop}><Square size={12} fill="currentColor" /></button>}
+            <span className="side-chat-send-hint" title={sendShortcut === "enter" ? tr("Enter 发送 · Shift Enter 换行") : sendShortcut === "cmdIfMultiline" ? tr("单行按 Enter 发送，多行按 Ctrl/Cmd + Enter 发送") : tr("Ctrl Enter 发送")}>{!isConnected ? tr("正在连接…") : !serverReady ? tr("正在准备对话…") : thread.model ? formatModelLabel(thread.model) : tr("会话默认模型")}</span>
+            {thread.isStreaming && <button type="button" className="composer-stop-current-btn" aria-label={tr("停止")} onClick={stop}><Square size={12} fill="currentColor" /></button>}
             <button
               type="button"
               onClick={submit}
               disabled={sendDisabled}
-              aria-label={thread.isStreaming ? "将消息加入队列" : "发送"}
-              title={thread.isStreaming ? "将消息加入队列" : "发送"}
+              aria-label={thread.isStreaming ? tr("将消息加入队列") : tr("发送")}
+              title={thread.isStreaming ? tr("将消息加入队列") : tr("发送")}
               className="composer-send-btn"
             >
               {submitting ? <LoaderCircle size={16} className="animate-spin" /> : <ArrowUp size={18} />}

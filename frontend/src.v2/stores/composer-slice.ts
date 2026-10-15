@@ -5,6 +5,9 @@ import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protoco
 import { pushToast } from "../overlays/ToastContainer";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { LS, readLS, writeLS } from "./shared-helpers";
+import { uniqueMessageId } from "./shared-helpers";
+import { composerDraftOf, composerWorkspaceKey } from "./composer-drafts";
+import { emptyConversationWorkbenchState, liveConversationWorkbenchState } from "./ui-slice";
 
 /**
  * The permission mode and reasoning effort pills only move when the backend
@@ -46,13 +49,6 @@ const revokeBlobDataUrl = (dataUrl: string | undefined | null): void => {
   }
 };
 
-const initialAgentMode = (): ComposerSlice["agentMode"] => {
-  const stored = readLS(LS.agentMode);
-  if (stored === "build" || stored === "plan" || stored === "review" || stored === "explore") return stored;
-  writeLS(LS.agentMode, "build");
-  return "build";
-};
-
 const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
   const stored = readLS(LS.permissionMode);
   const normalized = initialUiPermissionMode(stored);
@@ -63,12 +59,19 @@ const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
 };
 
 export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> = (set, get) => ({
+  workspaceComposerDrafts: {},
+  composerDraftsReady: false,
+  composerDraftStoragePending: false,
+  composerDraftStorageError: null,
+  composerDraftRevision: 0,
   draft: "",
   attachments: [],
   quotedMessage: null,
   permissionMode: initialPermissionMode(),
   pendingPermissionModeChanges: {},
-  agentMode: initialAgentMode(),
+  agentMode: "build",
+  pendingAgentModeChanges: {},
+  latestAgentModeCommandIds: {},
   // Match MiniCode's balanced default; model/runtime capabilities still decide
   // which effort levels are actually exposed and accepted.
   effortLevel: "medium" as const,
@@ -88,6 +91,8 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   updateAttachment: (id, patch) =>
     set((s) => ({
       attachments: s.attachments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+      workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+        { ...draft, attachments: draft.attachments.map(attachment => attachment.id === id ? { ...attachment, ...patch } : attachment) }])),
       conversationWorkbenchStates: Object.fromEntries(
         Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
           conversationId,
@@ -108,6 +113,8 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
       revokeBlobDataUrl(removed?.dataUrl);
       return {
         attachments: s.attachments.filter((a) => a.id !== id),
+        workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+          { ...draft, attachments: draft.attachments.filter(attachment => attachment.id !== id) }])),
         conversationWorkbenchStates: Object.fromEntries(
           Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
             conversationId,
@@ -124,6 +131,8 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
       const removedIds = new Set(s.attachments.map((attachment) => attachment.id));
       return {
         attachments: [],
+        workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+          { ...draft, attachments: draft.attachments.filter(attachment => !removedIds.has(attachment.id)) }])),
         conversationWorkbenchStates: Object.fromEntries(
           Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
             conversationId,
@@ -167,10 +176,53 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     } }));
     return confirmation;
   },
-  setAgentMode: (m) => {
-    writeLS(LS.agentMode, m);
-    set({ agentMode: m });
+  setAgentMode: async (m, conversationId) => {
+    const before = get();
+    const owner = conversationId ?? before.conversationId;
+    if (!owner) {
+      set(state => ({ agentMode: m, workspaceComposerDrafts: { ...state.workspaceComposerDrafts,
+        [composerWorkspaceKey(state.workingDirectory)]: composerDraftOf({ ...state, agentMode: m }) } }));
+      return true;
+    }
+    const commandId = uniqueMessageId("cmd");
+    set(state => ({ ...(owner === state.conversationId ? { agentMode: m } : {}),
+      conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [owner]: { ...(owner === state.conversationId ? liveConversationWorkbenchState(state)
+          : state.conversationWorkbenchStates[owner] ?? emptyConversationWorkbenchState()), agentMode: m } },
+      pendingAgentModeChanges: { ...state.pendingAgentModeChanges, [owner]: { commandId, mode: m } },
+      latestAgentModeCommandIds: { ...state.latestAgentModeCommandIds, [owner]: commandId },
+    }));
+    let acceptedRevision: number | undefined;
+    const accepted = await reportCommandOutcome(sendClientCommandAwaitResult({
+      type: "conversation.agent_mode.set", conversation_id: owner, agent_mode: m, client_command_id: commandId,
+    }, "conversation.agent_mode.set").then(result => {
+      if (commandResultSucceeded(result) && typeof result.data?.revision === "number") acceptedRevision = result.data.revision;
+      return result;
+    }), "切换会话模式失败");
+    if (get().latestAgentModeCommandIds[owner] !== commandId) return false;
+    set(state => {
+      const pending = { ...state.pendingAgentModeChanges };
+      delete pending[owner];
+      return { pendingAgentModeChanges: pending };
+    });
+    const actualMode = accepted ? m : get().conversations.find(conversation => conversation.id === owner)?.agentMode ?? "build";
+    get().syncConversationAgentMode(actualMode, owner, commandId, acceptedRevision);
+    return accepted;
   },
+  syncConversationAgentMode: (m, owner, commandId, revision) => set(state => {
+    if (state.pendingAgentModeChanges[owner]) return state;
+    if (commandId && state.latestAgentModeCommandIds[owner] && state.latestAgentModeCommandIds[owner] !== commandId) return state;
+    const meta = state.conversations.find(conversation => conversation.id === owner);
+    if (revision !== undefined && meta?.revision !== undefined && revision < meta.revision) return state;
+    const workbench = owner === state.conversationId ? liveConversationWorkbenchState(state)
+      : state.conversationWorkbenchStates[owner] ?? emptyConversationWorkbenchState();
+    return {
+      ...(owner === state.conversationId ? { agentMode: m } : {}),
+      conversationWorkbenchStates: { ...state.conversationWorkbenchStates, [owner]: { ...workbench, agentMode: m } },
+      conversations: state.conversations.map(conversation => conversation.id === owner ? { ...conversation, agentMode: m,
+        ...(revision !== undefined ? { revision } : {}) } : conversation),
+    };
+  }),
   setEffortLevel: (e) => {
     const before = get();
     return reportCommandOutcome(
@@ -183,6 +235,15 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
       }, "effort"),
       "切换推理强度失败",
     );
+  },
+  setModelSelection: (selection) => {
+    const before = get();
+    return reportCommandOutcome(sendClientCommandAwaitResult({
+      type: "llm.model.set",
+      selection_mode: selection.mode,
+      ...(selection.mode === "model" ? { model: selection.model } : {}),
+      ...(before.conversationId ? { conversation_id: before.conversationId } : {}),
+    }, "model.set"), "切换模型失败");
   },
   setPRMonitor: (pr) => set({ prMonitor: pr }),
   setPRStatusIssue: (prStatusIssue) => set({ prStatusIssue }),

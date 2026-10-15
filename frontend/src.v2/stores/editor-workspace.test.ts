@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "./index";
 import { cachedEditorWorkspaceIndex, flushEditorDrafts } from "./editor-drafts";
@@ -10,6 +11,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 const storage = new Map<string, string>();
 
 beforeEach(() => {
+  window.__MINICODE_RUNTIME__ = { ...window.__MINICODE_RUNTIME__, windowOwnerId: "primary" };
   clearEditorWorkspaceBufferCacheForTests();
   storage.clear();
   vi.stubGlobal("localStorage", {
@@ -285,17 +287,17 @@ describe("editor workspace isolation", () => {
   });
 
   it("persists clamped right sidebar width for side panel resizing", () => {
-    useAppStore.getState().setRightSidebarWidth(999);
+    useAppStore.getState().setRightSidebarWidth(999, { mainContentWidth: 1600 });
 
     expect(useAppStore.getState().rightSidebarWidth).toBe(999);
     expect(storage.get("minicode.layout.right-width")).toBe("999");
 
-    useAppStore.getState().setRightSidebarWidth(1200);
+    useAppStore.getState().setRightSidebarWidth(1600, { mainContentWidth: 1600 });
 
-    expect(useAppStore.getState().rightSidebarWidth).toBe(1040);
-    expect(storage.get("minicode.layout.right-width")).toBe("1040");
+    expect(useAppStore.getState().rightSidebarWidth).toBe(1248);
+    expect(storage.get("minicode.layout.right-width")).toBe("1248");
 
-    useAppStore.getState().setRightSidebarWidth(100);
+    useAppStore.getState().setRightSidebarWidth(100, { mainContentWidth: 1600 });
 
     expect(useAppStore.getState().rightSidebarWidth).toBe(320);
     expect(storage.get("minicode.layout.right-width")).toBe("320");
@@ -316,6 +318,26 @@ describe("editor workspace isolation", () => {
 
     expect(useAppStore.getState().leftSidebarWidth).toBe(520);
     expect(storage.get("minicode.layout.left-width")).toBe("520");
+  });
+
+  it("keeps left resize previews in memory and commits the expanded width only at the end", () => {
+    useAppStore.getState().setLeftSidebarWidth(320);
+    useAppStore.getState().setLeftSidebarWidth(400, { persist: false });
+    expect(useAppStore.getState()).toMatchObject({ leftSidebarWidth: 400, leftSidebarExpandedWidth: 320 });
+    expect(storage.get("minicode.layout.left-width")).toBe("320");
+    expect(storage.get("minicode.layout.left-expanded-width")).toBe("320");
+
+    useAppStore.getState().setLeftSidebarWidth(400);
+    expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(400);
+    expect(storage.get("minicode.layout.left-width")).toBe("400");
+    expect(storage.get("minicode.layout.left-expanded-width")).toBe("400");
+
+    useAppStore.getState().setLeftSidebarWidth(0, { persist: false });
+    expect(storage.get("minicode.layout.left-width")).toBe("400");
+    useAppStore.getState().setLeftSidebarWidth(0);
+    expect(storage.get("minicode.layout.left-width")).toBe("0");
+    expect(storage.get("minicode.layout.left-expanded-width")).toBe("400");
+    expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(400);
   });
 
   it("persists right sidebar open state when toggled or opened by a tab", () => {

@@ -4,10 +4,10 @@ import { useAppStore } from "../stores";
 import { initialDiffReviewPatch } from "./diffReviewState";
 import { loadMessageTurnDiff } from "./loadMessageTurnDiff";
 import { pushToast } from "../overlays/ToastContainer";
-import type { TurnDiffState } from "../stores/types";
+import type { DiffReviewState, TurnDiffState } from "../stores/types";
 import type { TurnDiffSummary } from "../lib/turn-diff";
 
-export function useTurnChanges() {
+export function useTurnChanges(previewReturnTarget?: DiffReviewState["previewReturnTarget"]) {
   const pending = useRef<AbortController | null>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const turnDiff = useAppStore((state) => state.conversationId ? state.turnDiffs[state.conversationId] : undefined);
@@ -38,6 +38,7 @@ export function useTurnChanges() {
       mode: "view",
       fileDecisions: {},
       lineComments: [],
+      ...(previewReturnTarget ? { previewReturnTarget } : {}),
     });
     store.setRightStackTab("diff");
   };

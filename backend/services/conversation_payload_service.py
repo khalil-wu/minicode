@@ -13,8 +13,9 @@ from backend.conversations.models import (
     DEFAULT_CONVERSATION_PERMISSION_MODE,
     ConversationType,
     normalize_conversation_type,
+    normalize_conversation_agent_mode,
 )
-from backend.conversations.public_projection import project_public_conversation
+from backend.conversations.public_projection import project_public_conversation, project_public_transcript
 from backend.services.runtime_control_service import CommandOutcome
 from backend.ws.utils import normalize_permission_mode
 
@@ -26,9 +27,14 @@ class ConversationCreateRequest:
     conversation_type: ConversationType
     memory_mode: str
     permission_mode: str
+    agent_mode: str
     workspace_root: str
     git_isolated: bool
     activate: bool
+    source_conversation_id: str = ""
+    execution_cwd: str = ""
+    projectless_base: str = ""
+    initial_prompt: str = ""
     workspace_required_error: AgentEvent | None = None
     error_event: AgentEvent | None = None
 
@@ -45,6 +51,12 @@ class ConversationTruncateRequest:
 class ConversationRenameRequest:
     conversation_id: str
     title: str
+
+
+@dataclass(frozen=True)
+class ConversationArchiveRequest:
+    conversation_id: str
+    archive_navigation: str | None
 
 
 @dataclass(frozen=True)
@@ -169,6 +181,21 @@ def parse_conversation_rename_request(data: dict[str, Any]) -> ConversationRenam
     )
 
 
+def parse_conversation_archive_request(data: dict[str, Any]) -> ConversationArchiveRequest:
+    navigation = data.get("archive_navigation")
+    if navigation not in {None, "home"}:
+        raise ValueError("archive_navigation must be home when supplied")
+    return ConversationArchiveRequest(str(data.get("conversation_id") or "").strip(), navigation)
+
+
+def build_blank_conversation_switched_payload(runtime_snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "conversation.switched", "conversation_id": None, "conversation": None,
+        "is_hydrating": False, "session": runtime_snapshot,
+        "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
 def _request_flag(data: dict[str, Any], name: str) -> bool:
     value = data.get(name, False)
     if not isinstance(value, bool):
@@ -234,7 +261,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
         if requested_memory_mode in {"enabled", "disabled"}
         else ("disabled" if conversation_type == "side_chat" else "enabled")
     )
-    activate = conversation_type == "main"
+    activate = conversation_type == "main" and data.get("activate") is not False
     workspace_root = str(data.get("workspace_root") or "").strip()
     raw_permission_mode = data.get("permission_mode")
     permission_mode_error: AgentEvent | None = None
@@ -267,7 +294,12 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
         conversation_type=conversation_type,
         memory_mode=memory_mode,
         permission_mode=permission_mode,
+        agent_mode=normalize_conversation_agent_mode(data.get("agent_mode", "build")),
         workspace_root=workspace_root,
+        source_conversation_id=str(data.get("source_conversation_id") or "").strip(),
+        execution_cwd=str(data.get("execution_cwd") or "").strip(),
+        projectless_base=str(data.get("projectless_base") or "").strip(),
+        initial_prompt=str(data.get("initial_prompt") or ""),
         git_isolated=git_isolated,
         activate=activate,
         workspace_required_error=workspace_required_error,
@@ -295,6 +327,16 @@ def build_conversation_switched_payload(
     }
 
 
+def build_side_chat_created_data(conversation: Any, source_conversation_id: str) -> dict[str, Any]:
+    start = conversation.parent_message_index + 1 if conversation.parent_message_index is not None else 0
+    return {
+        "source_conversation_id": source_conversation_id,
+        "parent_conversation_id": conversation.parent_conversation_id,
+        "parent_message_index": conversation.parent_message_index,
+        "side_chat_transcript": project_public_transcript(conversation.transcript[start:]),
+    }
+
+
 def restore_tool_artifact_sources(payload: dict[str, Any], artifact_store: Any) -> dict[str, Any]:
     """Read old image provenance without mutating the stored conversation."""
     transcript = []
@@ -302,7 +344,7 @@ def restore_tool_artifact_sources(payload: dict[str, Any], artifact_store: Any) 
         artifacts = []
         for artifact in message.get("artifacts", []):
             if not artifact.get("source") and (artifact.get("kind") == "image" or str(artifact.get("mediaType") or "").startswith("image/")):
-                meta = artifact_store.get_meta(artifact["artifactId"], conversation_id=payload["id"], workspace_root=payload.get("workspace_root", ""))
+                meta = artifact_store.get_meta(artifact["artifactId"], conversation_id=payload["id"], workspace_root=payload.get("execution_cwd") or payload.get("workspace_root", ""))
                 if meta is not None:
                     if meta.source == "generated_image":
                         artifact = {**artifact, "source": "image_generation"}

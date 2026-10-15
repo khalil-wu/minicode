@@ -4,6 +4,7 @@ import type {
   StreamingAssistantTailCellState,
 } from "../../chat/cells/cellTypes";
 import type { ViewMode } from "../../stores/types";
+import { proposedPlanParts } from "../../lib/proposed-plan";
 
 export type AgentLoopProcessCell = ChatTurnState["committedCells"][number];
 export type AgentLoopAnswerCell = AssistantMarkdownCellState;
@@ -13,6 +14,7 @@ export interface AgentLoopTurnProjection {
   id: string;
   status: AgentTurnStatus;
   userCell: ChatTurnState["userCell"];
+  workItems?: ChatTurnState["workItems"];
   processCells: AgentLoopProcessCell[];
   answerCell: AgentLoopAnswerCell | null;
   activeAnswerCell: StreamingAssistantTailCellState | null;
@@ -46,18 +48,18 @@ export function projectChatTurnToAgentLoop(
       ? appendActiveTail(turn.finalAnswerCell, activeAnswerCell)
       : turn.finalAnswerCell
     : activeAnswerMarkdownCell;
-  const processCells = committedCells;
-
   // AgentTimeline is the one grouping/disclosure path. Keep every ordered
   // cell intact so live work stays immediate and only a closed semantic
   // segment is folded.
-  const projectedProcessCells = processCells;
   const durationMs = turnDurationMs(turn);
+  const proposedPlan = turn.finalAnswerCell ? proposedPlanParts(turn.finalAnswerCell.markdownSource) : null;
   const hasCompleteFinalAnswer = Boolean(
     (turn.status === "completed" || turn.status === "streaming")
     && finalAnswerHasContent
     && turn.finalAnswerCell
     && !turn.finalAnswerCell.isStreaming
+    && (!proposedPlan || proposedPlan.complete)
+    && (turn.finalAnswerCell.imageProgress ?? []).every((progress) => progress.status === "completed")
     && !activeAnswerCell,
   );
 
@@ -65,13 +67,14 @@ export function projectChatTurnToAgentLoop(
     id: turn.id,
     status: mapStatus(turn.status),
     userCell: turn.userCell,
-    processCells: projectedProcessCells,
+    workItems: turn.workItems,
+    processCells: committedCells,
     answerCell,
     activeAnswerCell,
     answerIsStreaming: Boolean(activeAnswerCell) || Boolean(turn.finalAnswerCell?.isStreaming),
     hasCompleteFinalAnswer,
     hasProcessContent:
-      projectedProcessCells.length > 0
+      committedCells.length > 0
       || Boolean(turn.toolPage?.remaining)
       || turn.status === "interrupted"
       || (turn.status === "streaming" && !answerCell),
@@ -80,14 +83,8 @@ export function projectChatTurnToAgentLoop(
     failureMessage: turn.finalAnswerCell?.failureMessage
       || turn.committedCells.find((cell) => cell.kind === "error")?.message,
     processDetailMode,
-    // The setting controls the work-area disclosure itself, not only the
-    // contents of individual tool cards:
-    // - summary: compact transcript
-    // - normal: collapse completed work after a complete final answer
-    // - verbose: keep the complete work trace visible
-    initialProcessExpanded:
-      processDetailMode === "verbose"
-      || !hasCompleteFinalAnswer,
+    // Detail mode controls the visible trace, not the completion boundary.
+    initialProcessExpanded: !hasCompleteFinalAnswer,
   };
 }
 
@@ -95,14 +92,8 @@ function turnDurationMs(turn: ChatTurnState): number | null {
   if (typeof turn.durationMs === "number" && Number.isFinite(turn.durationMs) && turn.durationMs >= 0) {
     return turn.durationMs;
   }
-  if (
-    turn.status !== "streaming"
-    && typeof turn.completedAt === "number"
-    && Number.isFinite(turn.completedAt)
-    && Number.isFinite(turn.startedAt)
-  ) {
-    return Math.max(0, turn.completedAt - turn.startedAt);
-  }
+  // Source's worked-for end is original start + the authoritative duration.
+  // A viewer's observation/commit time cannot supply a missing execution end.
   return null;
 }
 

@@ -19,7 +19,7 @@ from backend.skills.manager import SkillManager
 from backend.tools.registry import ToolRegistry
 from backend.tools.base import PermissionLevel
 from backend.tools.schema import code_mode_parameters
-from backend.tools.tool_search import ToolSearchTool, build_deferred_tools_prompt_block
+from backend.tools.tool_search import DeferredToolCatalog, ToolSearchTool
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolAvailabilityFilter, ToolsetPolicy
 from backend.llm.base import ToolCallEvent
 
@@ -84,7 +84,7 @@ def test_empty_skill_catalog_is_a_completed_discovery(tmp_path, monkeypatch):
     assert roots.call_count == 2
 
 
-def test_deferred_directory_reuses_one_projection_without_building_a_search_index(monkeypatch):
+def test_schema_derivation_omits_synthetic_directory_without_building_a_search_index(monkeypatch):
     import backend.tools.tool_search as search
 
     registry = ToolRegistry()
@@ -95,8 +95,12 @@ def test_deferred_directory_reuses_one_projection_without_building_a_search_inde
     monkeypatch.setattr(registry, "build_schema_views", views)
     tokenize = Mock(side_effect=AssertionError("Names-only discovery should not tokenize descriptions"))
     monkeypatch.setattr(search, "_tokenize", tokenize)
-    state = derive_turn_tool_schema_state(base_tool_schemas=registry.get_schemas(), mcp_instructions={}, tool_registry=registry)
-    assert 'total="200"' in state.deferred_tools_prompt_block
+    policy = ToolsetPolicy(supports_search_tool=True)
+    schemas = registry.get_schemas(toolset_policy=policy)
+    views.reset_mock()
+    state = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry, toolset_policy=policy)
+    assert state.deferred_tools_prompt_block == ""
+    assert "available-deferred-tools" not in state.runtime_guidance
     assert views.call_count == 1
     assert tokenize.call_count == 0
 
@@ -108,32 +112,36 @@ def test_direct_schema_build_does_not_materialize_deferred_metadata(monkeypatch)
     monkeypatch.setattr(deferred, "model_description", Mock(side_effect=AssertionError("Deferred description touched")))
     monkeypatch.setattr(deferred, "to_runtime_metadata", Mock(side_effect=AssertionError("Deferred metadata touched")))
     registry.register(deferred)
-    assert [item["function"]["name"] for item in registry.get_schemas()] == ["tool_search"]
+    assert [item["function"]["name"] for item in registry.get_schemas(toolset_policy=ToolsetPolicy(supports_search_tool=True))] == ["tool_search"]
 
 
-def test_approval_policy_and_mutated_checker_policy_invalidate_deferred_visibility(tmp_path):
+def test_approval_policy_and_mutated_checker_policy_invalidate_schema_derivation(tmp_path):
     registry = ToolRegistry()
     registry.register(ToolSearchTool(registry))
     registry.register(MCPToolProxy("fixture", MCPToolDef("act", "Write data"), None))
     checker = PermissionChecker(PermissionSettings(), tmp_path)
     permission = PermissionContext(mode="confirm", workspace_root=tmp_path)
-    schemas = registry.get_schemas(permission_checker=checker, permission_context=permission)
+    policy = ToolsetPolicy(supports_search_tool=True)
+    schemas = registry.get_schemas(permission_checker=checker, permission_context=permission, toolset_policy=policy)
     first = derive_turn_tool_schema_state(
         base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry,
-        permission_checker=checker, permission_context=permission,
+        permission_checker=checker, permission_context=permission, toolset_policy=policy,
     )
-    assert "mcp__fixture__act" in first.deferred_tools_prompt_block
+    assert {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=policy,
+        permission_checker=checker, permission_context=permission).entries()} == {"mcp__fixture__act"}
     never = derive_turn_tool_schema_state(
         base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry,
-        permission_checker=checker, permission_context=replace(permission, approval_policy="never"), previous=first,
+        permission_checker=checker, permission_context=replace(permission, approval_policy="never"), toolset_policy=policy, previous=first,
     )
-    assert never.deferred_tools_prompt_block == ""
+    assert never is not first and never.permission_key != first.permission_key
     checker._settings.always_deny.append("mcp__fixture__act")
     denied = derive_turn_tool_schema_state(
         base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry,
-        permission_checker=checker, permission_context=permission, previous=first,
+        permission_checker=checker, permission_context=permission, toolset_policy=policy, previous=first,
     )
-    assert denied.deferred_tools_prompt_block == ""
+    assert denied is not first and denied.derivation_key != first.derivation_key
+    assert DeferredToolCatalog(registry, toolset_policy=policy,
+        permission_checker=checker, permission_context=permission).entries() == []
 
 
 def test_long_mcp_description_instructions_and_empty_argument_schema_survive_discovery():
@@ -146,7 +154,7 @@ def test_long_mcp_description_instructions_and_empty_argument_schema_survive_dis
     registry.register(ToolSearchTool(registry))
     bridge = MCPToolRegistry(registry)
     bridge.register_server_tools("fixture", [MCPToolDef("act", description, {"type": "object"})], client)
-    schema = registry.get_tool_schema("mcp__fixture__act", require_deferred=True)
+    schema = registry.get_tool_schema("mcp__fixture__act", require_deferred=True, toolset_policy=ToolsetPolicy(supports_search_tool=True))
     assert schema["function"]["description"] == description
     assert schema["function"]["parameters"] == {"type": "object", "properties": {}}
     state = derive_turn_tool_schema_state(base_tool_schemas=registry.get_schemas(), mcp_instructions={"fixture": client.instructions}, tool_registry=registry)
@@ -174,8 +182,8 @@ async def test_mcp_name_collisions_and_long_names_remain_discoverable_and_route_
     assert len(model_names) == len(set(model_names)) == 4
     assert all(len(name) <= 128 for name in model_names)
     assert all(fork.get_tool(name).name == name for name in fork_names)
-    block = build_deferred_tools_prompt_block(registry)
-    assert all(name in block for name in model_names)
+    catalog = DeferredToolCatalog(registry, toolset_policy=ToolsetPolicy(supports_search_tool=True))
+    assert set(model_names) == {entry.name for entry in catalog.entries()}
     for name in bridge.get_all_mcp_tools()["fixture.one"]:
         assert not (await registry.get_tool(name).execute({})).is_error
     assert set(calls) == set(names)
@@ -223,13 +231,18 @@ def test_mcp_hash_names_preserve_raw_and_normalized_permission_denials(tmp_path,
 
 
 @pytest.mark.parametrize("alias", ["mcp__fixture.one__read.name", "mcp__fixture_one__read_name"])
-def test_mcp_policy_aliases_share_toolset_schema_and_execution_gates(tmp_path, alias):
+def test_mcp_legacy_aliases_restrict_without_enabling_schema_or_execution(tmp_path, alias):
     registry, tool = _renamed_mcp_tool()
     spec = registry.get_tool_spec(tool.name)
-    only = ToolsetPolicy(enabled_toolsets=frozenset(), enabled_tools=frozenset({alias}))
+    legacy = ToolsetPolicy(enabled_toolsets=frozenset(), enabled_tools=frozenset({alias}))
+    assert not legacy.is_available(spec)
+    with pytest.raises(ValueError, match="Unknown tool name"):
+        legacy.validate_against([spec])
+    assert not ToolAvailabilityFilter(tools=frozenset({alias})).allows(spec)
+    only = replace(legacy, enabled_tools=frozenset({tool.policy_identity}))
     assert only.is_directly_visible(spec)
     only.validate_against([spec])
-    assert ToolAvailabilityFilter(tools=frozenset({alias})).allows(spec)
+    assert ToolAvailabilityFilter(tools=frozenset({tool.policy_identity})).allows(spec)
     visible = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=only)}
     assert tool.name in visible
     disabled = replace(only, disabled_tools=frozenset({alias}))
@@ -251,20 +264,21 @@ def test_mcp_content_rules_and_hook_conditions_keep_original_policy_identity(tmp
 
     registry, tool = _renamed_mcp_tool()
     event = getattr(HookEvent, event_name)
-    raw_alias, normalized_alias = tool.policy_aliases[:2]
+    raw_alias, normalized_alias = tool.policy_deny_aliases[:2]
     permission = PermissionContext(mode="bypass", workspace_root=tmp_path)
     for alias in (raw_alias, normalized_alias):
         rule = parse_content_rule(alias)
-        assert rule_matches_call(rule, tool.name, {}, policy_aliases=tool.policy_aliases)
+        assert rule_matches_call(rule, tool.name, {}, effect="deny", policy_aliases=tool.policy_deny_aliases)
         checker = PermissionChecker(PermissionSettings(content_deny_rules=[alias]), tmp_path)
         assert checker.evaluate(tool.name, {}, context=permission, tool=tool).decision == "deny"
         entry = SimpleNamespace(condition="" if event == HookEvent.PERMISSION_DENIED else alias,
                                 raw_matcher=alias, matcher=compile_hook_matcher(alias))
-        matcher, policy_aliases = _prepare_hook_condition_matcher(
+        matcher, policy_aliases, grant_matches = _prepare_hook_condition_matcher(
             event=event, match_target=tool.name,
             env_extras={"TOOL_NAME": tool.name, "TOOL_ARGS_JSON": json.dumps({})}, tool_registry=registry,
         )
         assert matcher(entry)
+        assert not grant_matches(entry)
         assert select_handlers([entry], event=event, match_target=tool.name,
                                condition_matches=matcher, match_aliases=policy_aliases) == [entry]
     wire_checker = PermissionChecker(PermissionSettings(always_deny=[tool.name]), tmp_path)
@@ -293,7 +307,8 @@ def test_mcp_refresh_preserves_historical_hashed_policy_name_after_collision_rem
     bridge.sync()
     current = registry.get_tool("mcp__fixture_one__read_name")
     assert current is not None and current.name != historical
-    assert historical in current.policy_aliases
+    assert historical in current.policy_deny_aliases
+    assert historical not in current.get_spec().policy_names
     assert registry.get_tool(historical) is None
     checker = PermissionChecker(PermissionSettings(always_deny=[historical]), tmp_path)
     assert checker.evaluate(current.name, {}, context=PermissionContext(mode="bypass"), tool=current).decision == "deny"

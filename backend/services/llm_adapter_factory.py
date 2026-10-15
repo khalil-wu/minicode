@@ -18,6 +18,7 @@ from backend.config import (
 )
 from backend.llm.base import LLMAdapter
 from backend.llm.openai_adapter import OpenAIAdapter
+from backend.llm.model_request_policy import resolve_model_request_policy
 
 if TYPE_CHECKING:
     from backend.config import AppConfig
@@ -169,9 +170,14 @@ def _openai_compatible_settings(
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
         supports_custom_tools=metadata["supports_custom_tools"],
+        supports_experimental_context=metadata["supports_experimental_context"],
+        model_messages=metadata["model_messages"],
+        truncation_policy=metadata["truncation_policy"],
+        supports_image_detail_original=metadata["supports_image_detail_original"],
         supports_hosted_web_search=metadata["supports_hosted_web_search"],
         responses_websocket=metadata["responses_websocket"],
         native_compaction=metadata["native_compaction"],
+        comp_hash=metadata["comp_hash"],
         model_instructions=metadata["model_instructions"],
         parallel_tool_calls=metadata["parallel_tool_calls"],
         input_modalities=metadata["input_modalities"],
@@ -380,8 +386,13 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             supports_hosted_web_search=spec.supports_hosted_web_search,
             responses_websocket=spec.responses_websocket,
             native_compaction=spec.native_compaction,
+            comp_hash=spec.comp_hash,
             model_instructions=spec.model_instructions,
             parallel_tool_calls=spec.parallel_tool_calls,
+            supports_experimental_context=spec.model.supports_experimental_context if spec.model is not None else False,
+            model_messages=spec.model.model_messages if spec.model is not None else None,
+            truncation_policy=spec.model.truncation_policy if spec.model is not None else None,
+            supports_image_detail_original=spec.model.supports_image_detail_original if spec.model is not None else False,
             input_modalities=spec.model.input if spec.model is not None else (),
             tool_mode=spec.tool_mode,
             default_headers=tuple(
@@ -394,6 +405,15 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
     # ModelRuntime validates this before publication. Keep the construction
     # boundary fail-closed if a future runtime accidentally passes a new API.
     raise RuntimeError(f"Unsupported registered provider API: {spec.api}")
+
+
+def _bind_config_model_request_policy(adapter: LLMAdapter, config: "AppConfig", model: str) -> LLMAdapter:
+    effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    definition = adapter.provider_adapter_spec.model if adapter.provider_adapter_spec is not None else None
+    policy = config.model_request_policy or resolve_model_request_policy(config, model=model, definition=definition,
+        root_service_tier=effective.get("service_tier"))
+    adapter.apply_model_request_policy(policy)
+    return adapter
 
 
 def create_session_llm(
@@ -417,12 +437,13 @@ def create_session_llm(
         if selected_model == config.llm.model or config.config_layer_stack is None:
             model_settings = (
                 config.llm if selected_model == config.llm.model
-                else replace(config.llm, model=selected_model, supports_custom_tools=False, responses_websocket=False, native_compaction=None, model_instructions="")
+                else replace(config.llm, model=selected_model, supports_custom_tools=False, responses_websocket=False, native_compaction=None, comp_hash=None, model_instructions="", input_modalities=(), model_messages=None, supports_experimental_context=False, truncation_policy=None, supports_image_detail_original=False)
             )
-            return build_wire_adapter(
+            adapter = build_wire_adapter(
                 model_settings,
                 cache_editing_beta_header=os.getenv("MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""),
             )
+            return _bind_config_model_request_policy(adapter, config, selected_model)
     settings_snapshot = (
         config.config_layer_stack.effective_config()
         if config.config_layer_stack is not None else None
@@ -432,9 +453,10 @@ def create_session_llm(
         or primary_provider not in settings_snapshot.get("llm", {})
     ):
         raise ValueError(f"Provider '{primary_provider}' is not configured in this session")
-    return build_provider_adapter(
+    adapter = build_provider_adapter(
         primary_provider,
         model_override=model_override,
         model_runtime=model_runtime,
         settings_snapshot=settings_snapshot,
     )
+    return _bind_config_model_request_policy(adapter, config, str(model_override or config.llm.model))

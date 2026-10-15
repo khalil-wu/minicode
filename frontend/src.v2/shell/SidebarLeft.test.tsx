@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -40,6 +40,7 @@ const chooseMode = (name: "代码" | "聊天") => {
   fireEvent.click(choice);
   return choice;
 };
+const initialWindowWidth = window.innerWidth;
 
 vi.mock("../protocol/ws-outbox", () => ({
   createClientCommandId: vi.fn(() => "test-client-command-id"),
@@ -68,7 +69,10 @@ vi.mock("../workspace/openWorkspaceFolder", () => ({
 
 describe("SidebarLeft session status", () => {
   beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
     localStorage.removeItem("minicode.sidebar.conversations.state");
+    localStorage.removeItem("minicode.layout.left-width");
+    localStorage.removeItem("minicode.layout.left-expanded-width");
     vi.mocked(sendClientCommand).mockClear();
     vi.mocked(sendClientCommandAwaitResult).mockClear();
     vi.mocked(openWorkspaceFolder).mockClear();
@@ -80,6 +84,7 @@ describe("SidebarLeft session status", () => {
       appMode: "cowork",
       themeMode: "dark",
       leftSidebarWidth: 280,
+      leftSidebarExpandedWidth: 280,
       conversationId: "conv-restored",
       conversations: [
         {
@@ -105,6 +110,7 @@ describe("SidebarLeft session status", () => {
 
   afterEach(() => {
     cleanup();
+    window.innerWidth = initialWindowWidth;
   });
 
   it("keeps an already open extensions page open when its navigation item is clicked", () => {
@@ -147,6 +153,8 @@ describe("SidebarLeft session status", () => {
 
   it("drags without transition lag and retains folder content when collapsed", () => {
     useAppStore.setState({ leftSidebarWidth: 300, leftSidebarExpandedWidth: 300 });
+    localStorage.setItem("minicode.layout.left-width", "300");
+    localStorage.setItem("minicode.layout.left-expanded-width", "300");
     const { container } = render(<SidebarLeft />);
     const content = container.querySelector(".mc-sidebar-mode-content");
     const handle = screen.getByRole("separator", { name: "调整左侧栏宽度" });
@@ -154,9 +162,14 @@ describe("SidebarLeft session status", () => {
     fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 300 }));
     fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 348 }));
     expect(useAppStore.getState().leftSidebarWidth).toBe(348);
+    expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(300);
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("300");
+    expect(localStorage.getItem("minicode.layout.left-expanded-width")).toBe("300");
     expect(document.body.classList.contains("layout-dragging")).toBe(true);
-    fireEvent.pointerUp(handle);
+    fireEvent(handle, new MouseEvent("pointerup", { bubbles: true, clientX: 348 }));
     expect(document.body.classList.contains("layout-dragging")).toBe(false);
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("348");
+    expect(localStorage.getItem("minicode.layout.left-expanded-width")).toBe("348");
     fireEvent.keyDown(handle, { key: "ArrowRight" });
     expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(358);
     useAppStore.getState().setLeftSidebarWidth(0);
@@ -164,7 +177,60 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(358);
   });
 
-  it("keeps the sidebar brand a title and search in the heading", () => {
+  it("collapses below half the minimum and retains the saved expanded width and draft", () => {
+    useAppStore.getState().setLeftSidebarWidth(300);
+    useAppStore.setState({ draft: "unfinished resize draft" });
+    const { container } = render(<SidebarLeft />);
+    const content = container.querySelector(".mc-sidebar-mode-content");
+    const handle = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    handle.setPointerCapture = vi.fn();
+    fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 300 }));
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 120 }));
+    expect(useAppStore.getState().leftSidebarWidth).toBe(240);
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 119 }));
+    expect(useAppStore.getState()).toMatchObject({ leftSidebarWidth: 0, leftSidebarExpandedWidth: 300 });
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("300");
+    fireEvent(handle, new MouseEvent("pointerup", { bubbles: true, clientX: 119 }));
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("0");
+    expect(localStorage.getItem("minicode.layout.left-expanded-width")).toBe("300");
+    expect(content!.isConnected).toBe(true);
+    expect(useAppStore.getState().draft).toBe("unfinished resize draft");
+    expect(document.body.classList.contains("layout-dragging")).toBe(false);
+  });
+
+  it("limits the rendered width to leave 240 for the main content without overwriting the saved width", () => {
+    useAppStore.getState().setLeftSidebarWidth(520);
+    const { container } = render(<SidebarLeft />);
+    const aside = container.querySelector<HTMLElement>(".mc-sidebar-left")!;
+    window.innerWidth = 600;
+    fireEvent(window, new Event("resize"));
+    expect(aside.style.width).toBe("360px");
+    expect(useAppStore.getState()).toMatchObject({ leftSidebarWidth: 520, leftSidebarExpandedWidth: 520 });
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("520");
+    window.innerWidth = 1280;
+    fireEvent(window, new Event("resize"));
+    expect(aside.style.width).toBe("520px");
+  });
+
+  it("uses the actual workspace width when the navigation rail occupies part of the window", () => {
+    let measured: ResizeObserverCallback;
+    const observe = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { measured = callback; }
+      observe = observe;
+      disconnect() {}
+    });
+    useAppStore.getState().setLeftSidebarWidth(520);
+    const { container } = render(<div className="mc-desktop-workspace"><SidebarLeft /></div>);
+    const workspace = container.querySelector(".mc-desktop-workspace")!;
+    expect(observe).toHaveBeenCalledWith(workspace);
+    act(() => measured([{ target: workspace, contentRect: { width: 580 } } as ResizeObserverEntry], {} as ResizeObserver));
+    expect(container.querySelector<HTMLElement>(".mc-sidebar-left")!.style.width).toBe("340px");
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("520");
+  });
+
+  it("opens the brand mode menu and retains the conversation and draft", () => {
+    useAppStore.setState({ draft: "unfinished brand draft" });
     render(<SidebarLeft />);
     const navigation = screen.getByRole("navigation", { name: "工作区导航" });
     expect(within(navigation).getByRole("button", { name: "新聊天" })).toBeTruthy();
@@ -172,9 +238,33 @@ describe("SidebarLeft session status", () => {
     expect(screen.getByRole("button", { name: "搜索" }).closest(".mc-sidebar-heading")).toBeTruthy();
     expect(screen.getByRole("button", { name: "添加项目" }).closest(".mc-sidebar-project-heading")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "切换项目" })).toBeNull();
-    expect(screen.getByText("MiniCode").closest("button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "代码" }));
+    expect(useAppStore.getState()).toMatchObject({ appMode: "code", conversationId: "conv-restored", draft: "unfinished brand draft" });
     expect(screen.queryByRole("tablist", { name: "工作模式" })).toBeNull();
     expect(screen.queryByLabelText("MiniCode · 切换工作模式")).toBeNull();
+  });
+
+  it("moves the brand menu focus in the actual arrow direction without changing the draft", () => {
+    useAppStore.setState({ draft: "Unsent keyboard navigation draft", appMode: "cowork" });
+    render(<SidebarLeft />);
+    fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+    const menu = screen.getByRole("menu", { name: "工作模式" });
+    const chat = within(menu).getByRole("menuitem", { name: "协作", exact: true });
+    const code = within(menu).getByRole("menuitem", { name: "代码", exact: true });
+    expect(document.activeElement).toBe(chat);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(code);
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(chat);
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(document.activeElement).toBe(code);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(document.activeElement).toBe(chat);
+    expect(useAppStore.getState().draft).toBe("Unsent keyboard navigation draft");
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "工作模式" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "切换工作模式" }));
   });
 
   it("switches the bell to real activity groups while retaining main task, models, MCP, and draft", () => {

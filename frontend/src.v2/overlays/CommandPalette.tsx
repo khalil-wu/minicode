@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { Fragment, useEffect, useState } from "react";
 import { useAppStore } from "../stores";
 import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
@@ -62,6 +63,7 @@ const hasPendingUserAction = (): boolean => {
 };
 
 export const CommandPalette = () => {
+  const { t: tr } = useI18n();
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const themeMode = useAppStore((s) => s.themeMode);
   const panelSlots = useAppStore((s) => s.panelSlots);
@@ -118,9 +120,9 @@ export const CommandPalette = () => {
       confirmClear: async () => {
         const { showConfirm } = await import("./DialogService");
         return showConfirm({
-          title: "清空会话",
-          message: "清空当前会话视图中的所有消息？此操作无法撤销。",
-          confirmLabel: "清空",
+          title: tr("清空会话"),
+          message: tr("清空当前会话视图中的所有消息？此操作无法撤销。"),
+          confirmLabel: tr("清空"),
           danger: true,
         });
       },
@@ -130,8 +132,8 @@ export const CommandPalette = () => {
     exclude: ["clear", "skills", "compact", "new"],
   }).map((command) => ({
     id: command.id,
-    label: `运行 ${command.name}`,
-    hint: command.description || "斜杠命令",
+    label: tr("运行 {v0}", { v0: command.name }),
+    hint: command.description || tr("斜杠命令"),
     group: "命令",
     run: () => runRuntimeSlashCommand(command.commandLine),
   }));
@@ -156,7 +158,7 @@ export const CommandPalette = () => {
       ? `${goalStart ? "…" : ""}${goal.slice(goalStart, goalStart + 80)}` : "";
     return {
       id: `conversation.switch.${c.id}`,
-      label: c.title || "未命名会话",
+      label: c.title || tr("未命名会话"),
       hint: goalHint || shortcut,
       group: "最近会话",
       run: () => useAppStore.getState().requestConversationSwitch(c.id),
@@ -167,7 +169,7 @@ export const CommandPalette = () => {
     ...recentConversationActions,
     {
       id: "conversation.new",
-      label: "新建会话",
+      label: tr("新建会话"),
       hint: "Ctrl+N",
       group: "导航",
       run: () => {
@@ -177,8 +179,8 @@ export const CommandPalette = () => {
     },
     {
       id: "conversation.new.isolated",
-      label: "新建隔离会话",
-      hint: "独立分支",
+      label: tr("新建隔离会话"),
+      hint: tr("独立分支"),
       group: "导航",
       run: () => {
         const state = useAppStore.getState();
@@ -193,8 +195,8 @@ export const CommandPalette = () => {
     },
     {
       id: "theme.cycle",
-      label: "切换主题",
-      hint: `当前：${themeMode}`,
+      label: tr("切换主题"),
+      hint: tr("当前：{v0}", { v0: themeMode }),
       group: "导航",
       run: () => {
         const next = themeMode === "dark" ? "light" : themeMode === "light" ? "system" : "dark";
@@ -203,51 +205,51 @@ export const CommandPalette = () => {
     },
     {
       id: "settings",
-      label: "打开设置",
+      label: tr("打开设置"),
       hint: "Ctrl+,",
       group: "导航",
       run: () => openSettings(),
     },
     {
       id: "panel.editor",
-      label: "打开编辑器",
-      hint: "工作区文件",
+      label: tr("打开编辑器"),
+      hint: tr("工作区文件"),
       group: "工作区",
       run: () =>
         addPanel({ id: `editor-${Date.now()}`, kind: "editor", label: "Editor" }),
     },
     ...(globalSearchEnabled ? [{
       id: "workspace.search.content",
-      label: "搜索项目内容",
-      hint: "Ctrl+Shift+F · 正文与替换",
+      label: tr("搜索项目内容"),
+      hint: tr("Ctrl+Shift+F · 正文与替换"),
       group: "工作区" as const,
       run: () => useAppStore.getState().openWorkspaceSearch(),
     }] : []),
     {
       id: "workspace.problems",
-      label: "查看代码问题",
-      hint: "诊断与修复",
+      label: tr("查看代码问题"),
+      hint: tr("诊断与修复"),
       group: "工作区",
       run: () => openBottomTab("problems"),
     },
     {
       id: "preview.servers",
-      label: "管理预览服务",
-      hint: "启动、停止、日志与配置",
+      label: tr("管理预览服务"),
+      hint: tr("启动、停止、日志与配置"),
       group: "工作区",
       run: openPreviewServiceManager,
     },
     {
       id: "preview.open",
-      label: "打开预览",
-      hint: "右侧面板",
+      label: tr("打开预览"),
+      hint: tr("右侧面板"),
       group: "工作区",
       run: () => openRightStack("preview"),
     },
     {
       id: "preview.detect",
-      label: "检测开发服务器",
-      hint: "预览面板",
+      label: tr("检测开发服务器"),
+      hint: tr("预览面板"),
       group: "工作区",
       run: () => {
         useAppStore.getState().setPreviewServers([]);
@@ -257,8 +259,8 @@ export const CommandPalette = () => {
     },
     {
       id: "preview.open.current",
-      label: "打开当前应用预览",
-      hint: useAppStore.getState().livePreviewUrl ?? "暂无地址",
+      label: tr("打开当前应用预览"),
+      hint: useAppStore.getState().livePreviewUrl ?? tr("暂无地址"),
       group: "工作区",
       run: () => {
         const url = useAppStore.getState().livePreviewUrl;
@@ -268,49 +270,49 @@ export const CommandPalette = () => {
     },
     {
       id: "panel.diff",
-      label: "打开差异面板",
-      hint: "审阅改动",
+      label: tr("打开差异面板"),
+      hint: tr("审阅改动"),
       group: "工作区",
       run: () => addPanel({ id: `diff-${Date.now()}`, kind: "diff", label: "Diff" }),
     },
     {
       id: "output.open",
-      label: "打开上下文",
-      hint: "来源与产物",
+      label: tr("打开上下文"),
+      hint: tr("来源与产物"),
       group: "工作区",
       run: () => openRightStack("tasks"),
     },
     {
       id: "panel.subagents",
-      label: "打开子智能体",
+      label: tr("打开子智能体"),
       hint: "/agents",
       group: "工作区",
       run: () => openRightStack("subagents"),
     },
     {
       id: "panel.inspector",
-      label: "打开检查器",
+      label: tr("打开检查器"),
       group: "工作区",
       run: () => openRightStack("inspector"),
     },
     {
       id: "diagnostics.open",
-      label: "打开运行状态",
-      hint: "诊断",
+      label: tr("打开运行状态"),
+      hint: tr("诊断"),
       group: "工作区",
       run: () => openRightStack("diagnostics"),
     },
     {
       id: "doctor.run",
-      label: "运行诊断",
+      label: tr("运行诊断"),
       hint: "/api/doctor",
       group: "命令",
       run: () => openRightStack("diagnostics"),
     },
     {
       id: "pane.focus.chat",
-      label: "聚焦对话",
-      hint: "工作区",
+      label: tr("聚焦对话"),
+      hint: tr("工作区"),
       group: "工作区",
       run: () => {
         const slot = useAppStore.getState().panelSlots.find((p) => p.kind === "chat");
@@ -319,8 +321,8 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.focus.editor",
-      label: "聚焦编辑器",
-      hint: "工作区",
+      label: tr("聚焦编辑器"),
+      hint: tr("工作区"),
       group: "工作区",
       run: () => {
         const slot = useAppStore.getState().panelSlots.find((p) => p.kind === "editor");
@@ -330,7 +332,7 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.maximize",
-      label: focusedPane?.maximized ? "还原当前面板" : "最大化当前面板",
+      label: focusedPane?.maximized ? tr("还原当前面板") : tr("最大化当前面板"),
       hint: focusedPane?.label ?? focusedPane?.kind,
       group: "工作区",
       run: () => {
@@ -340,7 +342,7 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.close",
-      label: "关闭当前面板",
+      label: tr("关闭当前面板"),
       hint: "Ctrl+\\",
       group: "工作区",
       run: () => {
@@ -351,35 +353,35 @@ export const CommandPalette = () => {
     },
     {
       id: "layout.reset",
-      label: "重置工作区布局",
-      hint: "对话 + 编辑器 + 面板",
+      label: tr("重置工作区布局"),
+      hint: tr("对话 + 编辑器 + 面板"),
       group: "工作区",
       run: () => resetPanelLayout(),
     },
     {
       id: "dock.git",
-      label: "打开 Git",
-      hint: "代码改动",
+      label: tr("打开 Git"),
+      hint: tr("代码改动"),
       group: "工作区",
       run: () => openDockTab("git"),
     },
     {
       id: "dock.terminal",
-      label: "打开终端",
-      hint: "终端与进程",
+      label: tr("打开终端"),
+      hint: tr("终端与进程"),
       group: "工作区",
       run: () => openDockTab("terminal"),
     },
     ...(globalSearchEnabled ? [{
       id: "quick.open",
-      label: "快速打开文件",
+      label: tr("快速打开文件"),
       hint: "Ctrl+P",
       group: "导航" as const,
       run: () => useAppStore.getState().toggleQuickOpen(),
     }] : []),
     {
       id: "sidebar.toggle",
-      label: "切换左侧栏",
+      label: tr("切换左侧栏"),
       hint: "Ctrl+B",
       group: "导航",
       run: () => {
@@ -389,7 +391,7 @@ export const CommandPalette = () => {
     },
     {
       id: "interrupt",
-      label: "停止当前任务",
+      label: tr("停止当前任务"),
       hint: "Esc",
       group: "命令",
       run: () => {
@@ -400,29 +402,29 @@ export const CommandPalette = () => {
     },
     {
       id: "clear",
-      label: "清空会话",
+      label: tr("清空会话"),
       hint: "/clear",
       group: "命令",
       run: () => runRuntimeSlashCommand("/clear"),
     },
     {
       id: "compact",
-      label: "压缩上下文",
+      label: tr("压缩上下文"),
       hint: "/compact",
       group: "命令",
       run: () => runRuntimeSlashCommand("/compact"),
     },
     {
       id: "skills.marketplace",
-      label: "技能市场",
-      hint: "浏览与安装",
+      label: tr("技能市场"),
+      hint: tr("浏览与安装"),
       group: "导航",
       run: () => runRuntimeSlashCommand("/skills"),
     },
     ...(agentEditorEnabled ? [{
       id: "agents.editor",
-      label: "智能体编辑器",
-      hint: "管理子智能体角色",
+      label: tr("智能体编辑器"),
+      hint: tr("管理子智能体角色"),
       group: "导航" as const,
       run: () => useAppStore.getState().toggleAgentEditor(),
     }] : []),
@@ -467,7 +469,7 @@ export const CommandPalette = () => {
         className="modal-content command-palette-surface"
         role="dialog"
         aria-modal="true"
-        aria-label="命令面板"
+        aria-label={tr("命令面板")}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
@@ -510,7 +512,7 @@ export const CommandPalette = () => {
               runAction(activeIdx);
             }
           }}
-          placeholder="搜索命令或会话…"
+          placeholder={tr("搜索命令或会话…")}
           style={{
             background: "transparent",
             border: 0,
@@ -524,7 +526,7 @@ export const CommandPalette = () => {
           id="command-palette-listbox"
           className="command-palette-listbox"
           role="listbox"
-          aria-label="命令与会话"
+          aria-label={tr("命令与会话")}
           style={{
             borderTop: "1px solid var(--border-subtle)",
             maxHeight: 360,
@@ -539,8 +541,7 @@ export const CommandPalette = () => {
                 fontSize: "var(--text-sm)",
               }}
             >
-              没有匹配结果 — 试试其他关键词，或按 Esc 关闭
-            </div>
+              {tr("没有匹配结果 — 试试其他关键词，或按 Esc 关闭")}</div>
           ) : (
             filtered.map((a, i) => (
               <Fragment key={a.id}>
@@ -556,7 +557,7 @@ export const CommandPalette = () => {
                       fontWeight: "var(--fw-semibold)",
                     }}
                   >
-                    {a.group}
+                    {tr(a.group)}
                   </div>
                 )}
                 <button
@@ -608,9 +609,9 @@ export const CommandPalette = () => {
             fontSize: "var(--text-2xs)",
           }}
         >
-          <span><kbd className="mc-kbd">↑↓</kbd> 导航</span>
-          <span><kbd className="mc-kbd">↵</kbd> 选择</span>
-          <span><kbd className="mc-kbd">Esc</kbd> 关闭</span>
+          <span><kbd className="mc-kbd">↑↓</kbd> {tr("导航")}</span>
+          <span><kbd className="mc-kbd">↵</kbd> {tr("选择")}</span>
+          <span><kbd className="mc-kbd">Esc</kbd> {tr("关闭")}</span>
         </div>
       </div>
     </div>

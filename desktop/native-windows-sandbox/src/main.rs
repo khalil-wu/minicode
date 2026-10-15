@@ -24,6 +24,9 @@ mod tests;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--run-as-pty") {
+        return run_pty(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "--run-as-windows-sandbox") {
         run_windows_sandbox_wrapper_main();
     }
@@ -87,4 +90,22 @@ fn main() -> Result<()> {
              sandbox cleanup --elevated --current-user --codex-home PATH"
         ),
     }
+}
+
+fn run_pty(args: &[String]) -> Result<()> {
+    let [cwd_flag, cwd, separator, program, arguments @ ..] = args else {
+        bail!("usage: --run-as-pty --command-cwd PATH -- PROGRAM [ARGS...]");
+    };
+    if cwd_flag != "--command-cwd" || separator != "--" {
+        bail!("usage: --run-as-pty --command-cwd PATH -- PROGRAM [ARGS...]");
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let exit_code = runtime.block_on(async {
+        let spawned = codex_utils_pty::spawn_pty_process(
+            program, arguments, Path::new(cwd), &std::env::vars().collect(),
+            &None, codex_utils_pty::TerminalSize::default(), &[],
+        ).await?;
+        Ok::<_, anyhow::Error>(codex_windows_sandbox::forward_sandbox_session_stdio(spawned).await)
+    })?;
+    std::process::exit(exit_code);
 }

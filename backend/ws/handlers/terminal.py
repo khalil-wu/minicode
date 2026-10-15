@@ -50,9 +50,13 @@ async def _resolve_terminal_scope(
     command: str,
 ) -> CommandScope | None:
     try:
-        return resolve_command_scope(
-            session, data, require_workspace=command in {"terminal.create", "terminal.exec"},
-        )
+        scope = resolve_command_scope(session, data)
+        if command in {"terminal.create", "terminal.exec"}:
+            if not scope.workspace_root:
+                conversation = session.conversation_repo.get_conversation(scope.conversation_id)
+                session.session_lifecycle.bind_execution_for_operation(conversation)
+            scope = resolve_command_scope(session, data, require_workspace=True)
+        return scope
     except ValueError as exc:
         await emit_command_error(session, command, exc)
         return None
@@ -72,6 +76,7 @@ async def handle_terminal_create(session: "WebSocketSession", data: dict[str, An
         cwd_path = session.resolve_workspace_cwd(cwd)
         terminal_session = await session.terminal_manager.create_session(
             cwd=str(cwd_path),
+            shell=str(data.get("shell") or ""),
             on_output=lambda sid, chunk, start, end: session.session_lifecycle.on_terminal_output(
                 sid, chunk, start, end, conversation_id
             ),
@@ -190,7 +195,8 @@ async def handle_terminal_restart(session: "WebSocketSession", data: dict[str, A
         await emit_command_error(session, "terminal.restart", f"Terminal session '{session_id}' not found")
         return True
 
-    cwd = str(getattr(terminal_session, "cwd", "") or "").strip() or None
+    cwd = terminal_session._initial_cwd
+    shell = str(data.get("shell") or getattr(terminal_session, "_requested_shell", "") or "")
     try:
         destroyed = await session.terminal_manager.destroy_session(
             session_id,
@@ -209,6 +215,7 @@ async def handle_terminal_restart(session: "WebSocketSession", data: dict[str, A
 
         replacement = await session.terminal_manager.create_session(
             cwd=cwd,
+            shell=shell,
             on_output=lambda sid, chunk, start, end: session.session_lifecycle.on_terminal_output(
                 sid, chunk, start, end, conversation_id
             ),

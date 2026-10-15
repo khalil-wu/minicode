@@ -118,6 +118,7 @@ async def _run_git(workspace_root: str, *args: str) -> str:
         "git", *args,
         cwd=workspace_root,
         env=sanitized_git_env(workspace_root),
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -136,7 +137,7 @@ async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None 
         "git", "--literal-pathspecs", *args,
         cwd=workspace_root,
         env=sanitized_git_env(workspace_root),
-        stdin=asyncio.subprocess.PIPE if input_data is not None else None,
+        stdin=asyncio.subprocess.PIPE if input_data is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

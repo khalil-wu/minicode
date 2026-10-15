@@ -377,7 +377,9 @@ async def test_priority_control_can_release_saturated_normal_command_slots():
     dispatcher._user_message_admissions = {}
     dispatcher._session = SimpleNamespace(
         active_conversation_id="owner",
-        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: None),
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: None,
+            admit_foreground_navigation=lambda _command: None,
+            bind_foreground_navigation=lambda _receipt: nullcontext(), finish_foreground_navigation=lambda: None),
         event_outbox=SimpleNamespace(bind_client_command=lambda *args, **kwargs: nullcontext()),
     )
     lifecycle, approved = asyncio.Lock(), asyncio.Event()
@@ -410,6 +412,7 @@ async def test_start_boundary_assigns_identity_for_non_transport_prompts():
     def create(name, coroutine):
         return SimpleNamespace(id="task1", task=asyncio.create_task(coroutine))
     host = SimpleNamespace(run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True),
+        _window_binding_token="", window_instance_id="", window_owner_id="",
         _conversation_streams={},
         event_outbox=SimpleNamespace(bind_connection_generation=lambda value: nullcontext()), task_manager=SimpleNamespace(create=create),
         _run_agent=run, _register_agent_run=lambda **kwargs: None, _cleanup_agent_run=lambda **kwargs: None,

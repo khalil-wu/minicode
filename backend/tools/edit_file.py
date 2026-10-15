@@ -559,7 +559,7 @@ class EditFileTool(BaseTool):
                     atomic_write_bytes(path, updated.encode("utf-8"))
                     record_file_hash(context, path, content_hash(updated))
                     get_global_file_cache().invalidate(path)
-                    invalidate_workspace_file_caches(file_tree_changed=path.name == ".gitignore")
+                    invalidate_workspace_file_caches(changed_paths=(path,), file_tree_changed=path.name == ".gitignore")
                     return previous, updated, count
 
             content, new_content, replaced_count = await run_blocking_io(commit_edit)

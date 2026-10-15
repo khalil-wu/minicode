@@ -23,6 +23,7 @@ vi.mock("../protocol/api", async (importOriginal) => ({
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: downloadMocks.toast }));
 
 import { useAppStore } from "../stores";
+import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import { PreviewPanel } from "./PreviewPanel";
 
 const resetPreviewState = () => {
@@ -47,6 +48,18 @@ const resetPreviewState = () => {
 };
 
 describe("PreviewPanel", () => {
+  it("switches Markdown between rendered document and source without reloading or replacing its text", () => {
+    const content = "# 真实文档\n\n保留 **所有正文**。";
+    useAppStore.setState({ conversationId: "source-owner", previewOwnerConversationId: null, conversationWorkbenchStates: {}, previewArtifact: { artifactId: "markdown-doc", name: "design.md", content, mediaType: "text/markdown", source: "artifact", loadedAt: 1 } });
+    const view = render(<PreviewPanel />);
+    expect(screen.getByRole("heading", { name: "真实文档" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看源代码" }));
+    expect(view.container.querySelector("pre")?.textContent).toBe(content);
+    expect(screen.queryByRole("heading", { name: "真实文档" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看预览" }));
+    expect(screen.getByRole("heading", { name: "真实文档" })).toBeTruthy();
+    expect(useAppStore.getState().previewArtifact?.content).toBe(content);
+  });
   it("plays owner-scoped audio without base64 and rebuilds its URL after reconnect", () => {
     useAppStore.setState({ conversationId: "conv-audio", isConnected: true,
       previewArtifact: { artifactId: "art-audio", name: "voice.wav", content: "", mediaType: "audio/wav", source: "artifact" } });
@@ -189,8 +202,8 @@ describe("PreviewPanel", () => {
 
   it.each(["artifact", "attachment"] as const)("rebuilds a restored %s PDF with its actual preview owner after reconnect", async (source) => {
     useAppStore.setState({ previewOwnerConversationId: "pdf-owner", conversationWorkbenchStates: {
-      "pdf-owner": { previewArtifact: { artifactId: "pdf-one", name: "report.pdf", mediaType: "application/pdf", content: "", source, hasNative: true,
-        url: "http://old-host/api/attachments/raw?session_id=old-session", error: "Old transport failed" } } as never,
+      "pdf-owner": { ...emptyConversationWorkbenchState(), previewArtifact: { artifactId: "pdf-one", name: "report.pdf", mediaType: "application/pdf", content: "", source, hasNative: true,
+        url: "http://old-host/api/attachments/raw?session_id=old-session", error: "Old transport failed" } },
     } });
     render(<PreviewPanel />);
     expect(screen.getByText("连接恢复并关联会话后可预览 PDF。")).toBeTruthy();
@@ -330,8 +343,9 @@ describe("PreviewPanel", () => {
       previewOwnerConversationId: "conv-preview-owner",
       conversationWorkbenchStates: {
         "conv-preview-owner": {
+          ...emptyConversationWorkbenchState(),
           previewArtifact: { artifactId: "document", name: "report.docx", content: "Extracted text", source: "attachment", hasNative: true, loadedAt: 1 },
-        } as never,
+        },
       },
     });
     render(<PreviewPanel />);
@@ -344,7 +358,9 @@ describe("PreviewPanel", () => {
 
     expect(createObjectURL).toHaveBeenCalledWith(original);
     expect(clicks).toEqual(["report.docx"]);
-    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:original-document"));
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:original-document");
     expect(button.disabled).toBe(false);
   });
 

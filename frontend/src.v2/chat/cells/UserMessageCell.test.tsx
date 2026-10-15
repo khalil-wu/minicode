@@ -164,8 +164,8 @@ describe("UserMessageCell", () => {
     expect(screen.queryByRole("button", { name: "展开消息" })).toBeNull();
   });
 
-  it("shows when a queued message was injected into the active turn", () => {
-    render(
+  it("keeps admitted steer content without an extra delivery status", () => {
+    const { container } = render(
       <UserMessageCell
         cell={{
           kind: "user_message",
@@ -177,7 +177,8 @@ describe("UserMessageCell", () => {
       />,
     );
 
-    expect(screen.getByText("已引导当前任务")).toBeTruthy();
+    expect(screen.getByText("change direction")).toBeTruthy();
+    expect(container.querySelector(".user-cell-queue-status")).toBeNull();
   });
 
   it("does not render an empty text row for attachment-only prompts", () => {
@@ -188,6 +189,7 @@ describe("UserMessageCell", () => {
           id: "user-attachment-only",
           content: "   ",
           createdAt: 1,
+          steeredIntoMessageId: "assistant-current",
           attachments: [
             { id: "att-doc", artifactId: "artifact-doc", name: "brief.md", type: "text/markdown" },
           ],

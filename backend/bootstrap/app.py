@@ -206,6 +206,7 @@ class AppBootstrap:
                     "workspace_root": workspace_root,
                 }
                 await session.send_payload(payload, log_context="scheduler.list")
+                await session.send_conversation_list()
             except Exception:
                 logger.debug("Failed to broadcast scheduler update", exc_info=True)
 
@@ -724,19 +725,62 @@ class AppBootstrap:
         if not session:
             return {"action": "cancel", "error": "MCP elicitation has no active owning session"}
 
+        from backend.permissions.approval_policy import ApprovalPolicy
+
+        permission_provider = owner.get("permission_context_provider")
+        permission = permission_provider() if permission_provider is not None else session.permission_context_for_conversation(
+            session.conversation_repo.get_conversation(owner["conversation_id"]), source="mcp.elicitation")
+        policy = ApprovalPolicy.from_context(permission)
+        if not policy.permits("mcp_elicitations"):
+            from backend.sandbox.policy import SandboxEnforcement
+
+            # Source accepts an empty form under Never only for a published
+            # Disabled/External/full-disk-write profile. Granular's disabled
+            # elicitation category always declines, including empty forms.
+            profile = owner.get("mcp_permission_profile")
+            preapproved = profile is not None and (
+                profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}
+                or profile.full_disk_write
+            )
+            if policy.kind == "never" and preapproved and params.get("mode", "form") == "form" and isinstance(params.get("schema"), dict) and params["schema"].get("properties") == {}:
+                return {"action": "accept", "content": {}}
+            return {"action": "decline"}
+
         request_id = f"elicit_{uuid.uuid4().hex}"
-        prompt = str(params.get("prompt") or "").strip()
-        if not prompt:
-            prompt = "MCP server requests additional input."
-        raw_schema = params.get("schema")
-        schema = dict(raw_schema) if isinstance(raw_schema, dict) else {}
+        prompt = str(params.get("prompt") or params.get("message") or "")
+        from backend.mcp.elicitation import ElicitationFormSchema
+        from backend.agent.message import AgentEvent
+        from pydantic import ValidationError
+
+        mode = str(params.get("mode") or "form")
         conversation_id = str(owner.get("conversation_id") or "").strip()
+        server_name = str(params.get("_mcp_server_name") or "")
+
+        async def reject_form(message: str, *, details: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            event = AgentEvent.command_result(
+                "mcp.elicitation", message, level="error", title="MCP input failed",
+                data={"request_id": request_id, "server_name": server_name, "schema_errors": details or []},
+            )
+            event.data["conversation_id"] = conversation_id
+            event.data.update({key: owner[key] for key in ("message_id", "turn_id", "task_id") if key in owner})
+            await session.send_event(event)
+            return {"action": "cancel"}
+
+        try:
+            schema = (
+                ElicitationFormSchema.model_validate(params.get("schema")).model_dump(by_alias=True, exclude_none=True)
+                if mode == "form" else {}
+            )
+        except ValidationError as exc:
+            logger.warning("MCP server %s sent an invalid form schema", server_name, exc_info=True)
+            return await reject_form(
+                f"MCP server {server_name} sent an unsupported form schema.",
+                details=exc.errors(include_input=False, include_url=False),
+            )
 
         # cc runs Elicitation hooks and validates the requested schema
         # before prompting (elicitationHandler.ts); a blocked hook cancels.
         hook_mgr = owner.get("hook_manager")
-        server_name = str(params.get("_mcp_server_name") or "")
-        mode = str(params.get("mode") or "")
 
         async def finish(response: dict[str, Any]) -> dict[str, Any]:
             if hook_mgr is not None and hook_mgr.has_hooks(HookEvent.ELICITATION_RESULT):
@@ -753,10 +797,10 @@ class AppBootstrap:
                 import jsonschema
 
                 try:
-                    jsonschema.validate(response.get("content"), schema)
+                    jsonschema.Draft202012Validator(schema).validate(response.get("content"))
                 except jsonschema.ValidationError as exc:
-                    return {"action": "cancel", "error": f"MCP elicitation response is invalid: {exc.message}"}
-            if response["action"] != "accept":
+                    return await reject_form(f"Input for MCP server {server_name} failed validation: {exc.message}")
+            if mode == "url" or response["action"] != "accept":
                 response.pop("content", None)
             return response
 
@@ -788,9 +832,16 @@ class AppBootstrap:
                 "tool_use_id": request_id,
                 "prompt": prompt,
                 "question": prompt,
-                "schema": schema,
+                "mode": mode,
+                "mcp_server_name": server_name,
+                **({"schema": schema} if mode == "form" else {
+                    "url": params["url"],
+                    "elicitation_id": params["elicitationId"],
+                }),
+                **({"_meta": params["_meta"]} if "_meta" in params else {}),
             }
         }
+        payload.update({key: owner[key] for key in ("message_id", "turn_id", "task_id") if key in owner})
 
         # Register the future in the owning session's typed wait lane.  The
         # shared approval payload index remains the replay/ownership source so
@@ -827,7 +878,11 @@ class AppBootstrap:
                 )
                 response = ({"action": "decline" if action == "decline" else "cancel",
                     "error": "User cancelled the elicitation"} if rejected
-                    else {"action": "accept", "content": result.get("content")})
+                    else {"action": "accept", "content": result.get("content")}
+                    if action in {"accept", "submit"}
+                    else {"action": "cancel", "error": "MCP elicitation response requires an explicit action"})
+                if "_meta" in result:
+                    response["_meta"] = result["_meta"]
         except TimeoutError:
             await session.emit_approval_cancelled_once(
                 [request_id],

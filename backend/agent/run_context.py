@@ -16,9 +16,11 @@ from backend.async_cleanup import cancel_and_drain_receipt, retain_cleanup_task
 from backend.llm.errors import sanitize_llm_error_message
 
 if TYPE_CHECKING:
+    from backend.agent.context import ContextBuilder
     from backend.agent.extension_actions import ExtensionExecutionActions
     from backend.agent.message import UserCommand
     from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.agent.model_activation import ModelActivationState
     from backend.agent.code_execution_store import CodeExecutionStore
     from backend.agent.code_execution import CodeExecutionRuntime
     from backend.agent.tool_execution_gate import ToolExecutionGate
@@ -31,10 +33,14 @@ if TYPE_CHECKING:
     from backend.hooks.manager import HookManager
     from backend.llm.base import LLMTurnContext
     from backend.mcp.manager import MCPServerManager
+    from backend.mcp.approval import MCPApprovalStore
     from backend.tools.toolsets import ToolsetPolicy
     from backend.tools.registry import ToolRegistry
     from backend.workspace.context import WorkspaceContext
     from backend.agent.turn_diff_tracker import TurnDiffTracker
+    from backend.agent.guardian.service import GuardianReviewService
+    from backend.agent.guardian.async_service import GuardianAsyncService
+    from backend.agent.guardian.retained import GuardianEvidenceSnapshot
 
 
 @dataclass(slots=True)
@@ -42,6 +48,7 @@ class RunContext:
     """Mutable, turn-owned runtime capabilities shared by one agent run."""
 
     lifecycle_runtime: ProviderLifecycleRuntime | None = None
+    context_builder: ContextBuilder | None = None
     extension_actions: ExtensionExecutionActions | None = None
     enqueue_extension_followup: Callable[[UserCommand], Any] | None = None
     extension_name_setter: Callable[[str], Any] | None = None
@@ -54,17 +61,27 @@ class RunContext:
     model_owner_task: asyncio.Task | None = None
     execution_journal: ExecutionJournal | None = None
     mcp_manager: MCPServerManager | None = None
+    mcp_tool_approvals: MCPApprovalStore | None = None
     skill_manager: Any | None = None
     mcp_owner_session_id: str = ""
     # Selection for the next provider step. Existing calls retain their own
     # ModelExecutionSnapshot when a host publishes a replacement here.
     model_execution: ModelExecutionSnapshot | None = None
     active_model_execution: ModelExecutionSnapshot | None = None
+    model_activation: ModelActivationState | None = None
     agent_runtime: AgentRuntime | None = None
     llm_turn_context: LLMTurnContext | None = None
     hook_manager: HookManager | None = None
+    guardian_review_service: GuardianReviewService | None = None
+    guardian_async_service: GuardianAsyncService | None = None
+    guardian_evidence_source: Callable[[], GuardianEvidenceSnapshot] | None = None
+    guardian_root_evidence_source: Callable[[], GuardianEvidenceSnapshot] | None = None
+    node_repl_review_evidence: Any | None = None
     workspace_context: WorkspaceContext | None = None
     cost_session_id: str = ""
+    # Canonical model-protocol rollout identity, independent of a WS window
+    # or one run incarnation. The request metadata producer owns this value.
+    responses_session_id: str = ""
     requires_explicit_workspace: bool = False
     connected_mcp_servers: tuple[str, ...] = ()
     permission_mode_setter: Callable[..., Any] | None = None
@@ -87,6 +104,14 @@ class RunContext:
     publish_nested_event: Callable[[AgentEvent], Awaitable[None]] | None = None
     code_store: CodeExecutionStore | None = None
     turn_diff_tracker: TurnDiffTracker | None = None
+    window_binding_token: str = field(default="", repr=False)
+    cancel_reason: str = ""
+    record_user_cancelled: Callable[[str], None] | None = None
+    user_cancel_persistence: asyncio.Task[None] | None = None
+    user_input_command: Callable[[], Any | None] | None = None
+    user_stop_receipt: dict[str, Any] | None = None
+    user_stop_acceptance: asyncio.Future[None] | None = None
+    exec_policy_owner: Any | None = None
 
     def retain_lifecycle_task(
         self, task: asyncio.Task, *, label: str, llm: Any = None,

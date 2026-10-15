@@ -10,8 +10,17 @@ export interface TurnDiffSummary {
 }
 
 const DIFF_HEADER = /^diff --git a\/(.+) b\/(.+)$/;
+const summaries = new WeakMap<TurnDiffState, TurnDiffSummary | null>();
 
 export function summarizeTurnDiff(state: TurnDiffState | null | undefined): TurnDiffSummary | null {
+  if (!state) return null;
+  if (summaries.has(state)) return summaries.get(state)!;
+  const summary = parseTurnDiff(state);
+  summaries.set(state, summary);
+  return summary;
+}
+
+function parseTurnDiff(state: TurnDiffState): TurnDiffSummary | null {
   if (state?.deferred && state.files?.length) return {
     files: state.files,
     additions: state.files.reduce((sum, file) => sum + file.additions, 0),
@@ -103,7 +112,7 @@ export const applyAuthoritativeTurnDiff = (
     },
     toolCallCount: fallback?.toolCallCount,
     collapsed: false,
-    createdAt: fallback?.createdAt ?? turn.startedAt,
+    createdAt: fallback?.createdAt ?? turnDiff.updatedAt,
   };
   const next = turns.slice();
   next[index] = {

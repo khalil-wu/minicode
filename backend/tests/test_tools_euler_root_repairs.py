@@ -9,6 +9,7 @@ import websockets
 
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.browser_control_tool import BrowserControlTool
+from backend.tools.browser_support import BROWSER_OPERATION_SECONDS
 from backend.tools.preview_tool import PreviewServerTool
 from backend.tools.registry import ToolRegistry
 
@@ -134,10 +135,12 @@ def test_navigation_error_survives_real_http_and_cdp_wire():
                 owner.metadata["preview_origin"] = "http://127.0.0.1:9876"
                 registry = ToolRegistry()
                 registry.register(BrowserControlTool())
+                # Let the actual browser operation own its 30-second budget;
+                # the test timeout also allows its real socket cleanup.
                 result = await asyncio.wait_for(registry.execute("browser_control", {
                     "action": "navigate", "url": "http://127.0.0.1:9876/",
                     "cdp_endpoint": f"http://127.0.0.1:{port}", "target_id": "fixture-page", "wait_ms": 5000,
-                }, context=owner), 2)
+                }, context=owner), BROWSER_OPERATION_SECONDS + 5)
                 await asyncio.wait_for(wire_closed.wait(), .5)
             assert result.is_error
             assert result.content == "Error: net::ERR_CONNECTION_REFUSED"

@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import {
   ChevronRight,
   SquarePlus,
@@ -6,6 +7,7 @@ import {
   MoreHorizontal,
   ListChecks,
   PanelRightOpen,
+  Plus,
   Terminal,
 } from "../lib/icons";
 import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
@@ -180,9 +182,12 @@ export const collectAttachments = (
       for (const file of record.outputFiles ?? []) addWorkspaceFile(message.id, file);
     }
   }
+  // Classify after merging both sources: a sparse execution record can point
+  // to an actual image or PDF described by the message artifact.
+  const visibleItems = items.filter((item) => !item.executionResult);
   const groupCounts = new Map<string, number>();
-  for (const item of items) groupCounts.set(item.messageId, (groupCounts.get(item.messageId) ?? 0) + 1);
-  return items.slice(-8).reverse().map((item) => ({
+  for (const item of visibleItems) groupCounts.set(item.messageId, (groupCounts.get(item.messageId) ?? 0) + 1);
+  return visibleItems.slice(-8).reverse().map((item) => ({
     ...item,
     relatedCount: groupCounts.get(item.messageId) ?? 1,
   }));
@@ -244,6 +249,7 @@ const artifactDomTarget = (
 };
 
 function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachment }) {
+  const { t: tr } = useI18n();
   const isConnected = useAppStore((state) => state.isConnected);
   const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
   const artifactId = String(attachment.artifactId || "").trim();
@@ -293,12 +299,12 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
 
   if (!imageUrl || loadState === "error") {
     const unavailableLabel = !ownerConversationId && ownerScoped
-      ? "未关联会话"
+      ? tr("未关联会话")
       : ownerScoped && (!isConnected || !sessionId)
-        ? "重连后载入"
+        ? tr("重连后载入")
         : loadState === "error"
-          ? "加载失败"
-          : "暂无预览";
+          ? tr("加载失败")
+          : tr("暂无预览");
     return (
       <span className="mc-chat-context-image-fallback" role={loadState === "error" ? "status" : undefined}>
         <FileImage size={15} aria-hidden="true" />
@@ -309,12 +315,11 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
               className="mc-chat-context-image-retry"
               role="button"
               tabIndex={0}
-              aria-label="重试图片"
+              aria-label={tr("重试图片")}
               onClick={retry}
               onKeyDown={retryWithKeyboard}
             >
-              重试
-            </span>
+              {tr("重试")}</span>
           </>
         )}
       </span>
@@ -334,6 +339,7 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
 }
 
 export const ChatContextCard = () => {
+  const { t: tr } = useI18n();
   const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
     message.id, message.isStreaming ? "" : markdownSourceLabelKey(message.content), message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
     ...getToolCallsFromMessage(message),
@@ -408,6 +414,9 @@ export const ChatContextCard = () => {
   }, [conversationId, collapsed]);
 
   const agentSummary = agentStatusSummary(agentViews);
+  const activeAgentViews = agentViews.filter(agent => !["done", "partial", "cancelled", "error"].includes(agent.effectiveStatus));
+  const terminalAgentViews = agentViews.filter(agent => ["done", "partial", "cancelled", "error"].includes(agent.effectiveStatus));
+  const avatarViews = [...activeAgentViews, ...terminalAgentViews];
   const scopedBackgroundTasks = backgroundTasks.filter((task) =>
     Boolean(conversationId) && task.conversationId === conversationId
   );
@@ -416,14 +425,14 @@ export const ChatContextCard = () => {
   const failedBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "failed").length;
   const cancelledBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "cancelled").length;
   const backgroundTaskSummary = stalledBackgroundTasks > 0
-    ? `${stalledBackgroundTasks} 个等待输入`
+    ? tr("{v0} 个等待输入", { v0: stalledBackgroundTasks })
     : runningBackgroundTasks > 0
-      ? `${runningBackgroundTasks} 个运行中`
+      ? tr("{v0} 个运行中", { v0: runningBackgroundTasks })
       : failedBackgroundTasks > 0
-        ? `${failedBackgroundTasks} 个失败`
+        ? tr("{v0} 个失败", { v0: failedBackgroundTasks })
         : cancelledBackgroundTasks > 0
-          ? "已取消"
-          : "已完成";
+          ? tr("已取消")
+          : tr("已完成");
   const hasBackgroundTasks = scopedBackgroundTasks.length > 0;
   const hasWorkspace = Boolean(conversationId && workingDirectory);
   const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0) + (hasWorkspace ? 1 : 0) + (changes ? 1 : 0);
@@ -505,12 +514,12 @@ export const ChatContextCard = () => {
       className="mc-chat-context-card"
       data-state="visible"
       data-collapsed={collapsed ? "true" : "false"}
-      aria-label="工作区上下文摘要"
+      aria-label={tr("工作区上下文摘要")}
     >
       <header className="mc-chat-context-card-header" hidden={collapsed}>
-        <span>{hasWorkspace ? shortPath(workingDirectory) : "上下文"}</span>
+        <span>{hasWorkspace ? shortPath(workingDirectory) : tr("上下文")}</span>
         <span className="mc-chat-context-card-header-actions">
-          <button type="button" aria-label="摘要操作" title="摘要操作" aria-haspopup="menu" aria-expanded={Boolean(summaryMenu)} onClick={(event) => {
+          <button type="button" aria-label={tr("摘要操作")} title={tr("摘要操作")} aria-haspopup="menu" aria-expanded={Boolean(summaryMenu)} onClick={(event) => {
             const rect = event.currentTarget.getBoundingClientRect();
             setSummaryMenu(summaryMenu ? null : { x: rect.right - 220, y: rect.bottom + 4 });
           }}>
@@ -520,47 +529,48 @@ export const ChatContextCard = () => {
       </header>
 
       <div className="mc-chat-context-card-body" hidden={collapsed}>
-        {(hasWorkspace || changes) && <section className="mc-chat-context-card-section" aria-label="环境信息">
-          {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title="审阅本轮文件更改">
+        {(hasWorkspace || changes) && <section className="mc-chat-context-card-section" aria-label={tr("环境信息")}>
+          {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title={tr("审阅本轮文件更改")}>
             <SquarePlus size={16} aria-hidden="true" />
-            <span>变更</span>
+            <span>{tr("变更")}</span>
             <span className="mc-chat-context-change-stats"><RollingNumber className="chat-change-added" prefix="+" value={changes.additions} /><RollingNumber className="chat-change-deleted" prefix="-" value={changes.deletions} /></span>
           </button>}
           {hasWorkspace && <button type="button" className="mc-chat-context-environment-row mc-chat-context-workspace"
-            aria-label={`查看工作区：${shortPath(workingDirectory)}`} title={`${workingDirectory}${workspaceGit?.branch ? `\n${workspaceGit.branch}` : ""}`}
+            aria-label={tr("查看工作区：{v0}", { v0: shortPath(workingDirectory) })} title={`${workingDirectory}${workspaceGit?.branch ? `\n${workspaceGit.branch}` : ""}`}
             onClick={() => useAppStore.getState().requestFileTreeReveal(workingDirectory, "folder")}>
             <span>{shortPath(workingDirectory)}</span><ChevronRight size={14} aria-hidden="true" />
           </button>}
         </section>}
-        {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label="子智能体摘要">
+        {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label={tr("子智能体摘要")}>
           <button type="button" className="mc-chat-context-section-title" onClick={() => openAgent()}>
-            <span>子智能体</span>
+            <span>{tr("子智能体")}</span>
           </button>
-          <div className="mc-chat-context-agents" aria-label="最近的子智能体">
-            {agentViews.slice(0, 4).map((agent) => (
+          <div className="mc-chat-context-agents" aria-label={tr("最近的子智能体")}>
+            {avatarViews.slice(0, 4).map((agent) => (
               <button
                 key={agent.id}
                 type="button"
                 className="mc-chat-context-agent"
-                aria-label={`打开子智能体：${agent.title}`}
+                aria-label={tr("打开子智能体：{v0}", { v0: agent.title })}
                 title={`${agent.teammateName ? `${agent.teammateName} · ` : ""}${agent.title}\n${agent.statusLabel}${agent.summary && agent.summary !== agent.title ? ` · ${agent.summary}` : ""}`}
                 onClick={() => openAgent(agent.id)}
               >
-                <AgentAvatar identityKey={agent.identityKey} status={agent.status} size="small" />
+                <AgentAvatar identityKey={agent.identityKey} status={agent.status} showStatus={false} size="small" />
               </button>
             ))}
             <button type="button" className="mc-chat-context-agent-summary" aria-label={agentSummary} title={agentSummary} onClick={() => openAgent()}>
-              {agentSummary.split(" · ").map((part, index) => <span key={part}>{index > 0 ? " · " : ""}{part}</span>)}
+              {activeAgentViews.length > 0 && <span>{agentStatusSummary(activeAgentViews)}</span>}
+              {terminalAgentViews.length > 0 && <span className="mc-chat-context-agent-finished">{agentStatusSummary(terminalAgentViews)}</span>}
             </button>
           </div>
         </section>}
 
-        {(attachments.length > 0 || sources.length > 0) && <section className="mc-chat-context-card-section" aria-label="来源摘要">
-            <button type="button" className="mc-chat-context-section-title" onClick={() => setShowAllSources((value) => !value)} aria-expanded={showAllSources}>
-              <span>来源</span><ChevronRight size={14} aria-hidden="true" className="mc-chat-context-source-disclosure" data-expanded={showAllSources} />
-            </button>
+        {(attachments.length > 0 || sources.length > 0) && <section className="mc-chat-context-card-section" aria-label={tr("来源摘要")}>
+            <div className="mc-chat-context-sources-heading"><button type="button" className="mc-chat-context-section-title" onClick={() => setShowAllSources((value) => !value)} aria-expanded={showAllSources}>
+              <span>{tr("来源")}</span><ChevronRight size={14} aria-hidden="true" className="mc-chat-context-source-disclosure" data-expanded={showAllSources} />
+            </button><button type="button" className="mc-chat-context-source-add" aria-label={tr("添加来源")} title={tr("添加来源")} onClick={() => window.dispatchEvent(new Event("composer:open-add-menu"))}><Plus size={16} /></button></div>
             {(showAllSources ? attachments : attachments.slice(0, 3)).map((attachment) => {
-              const label = attachment.executionResult ? "执行结果" : attachment.source === "attachment" ? "附件" : "生成文件";
+              const label = attachment.executionResult ? tr("执行结果") : attachment.source === "attachment" ? tr("附件") : tr("生成文件");
               const executionTime = attachment.executionResult && attachment.occurredAt
                 ? new Date(attachment.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
                 : "";
@@ -569,7 +579,7 @@ export const ChatContextCard = () => {
                   key={attachment.id}
                   type="button"
                   className="mc-chat-context-source"
-                  aria-label={`查看${label}：${attachment.label}${executionTime ? ` · ${executionTime}` : ""}`}
+                  aria-label={tr("查看{v0}：{v1}{v2}", { v0: label, v1: attachment.label, v2: executionTime ? ` · ${executionTime}` : "" })}
                   title={attachment.path || (attachment.occurredAt ? `${attachment.label} · ${new Date(attachment.occurredAt).toLocaleString()}` : attachment.label)}
                   onClick={() => openAttachment(attachment)}
                 >
@@ -581,14 +591,14 @@ export const ChatContextCard = () => {
                   </span>
                   <span className="mc-chat-context-source-content">
                     <span>{attachment.label}</span>
-                    <small>
+                    {(showAllSources || attachment.executionResult) && <small>
                       {attachment.executionResult
-                        ? executionTime || "执行输出"
+                        ? executionTime || tr("执行输出")
                         : attachment.path ? attachment.path
                         : attachment.relatedCount > 1
-                        ? `同组 ${attachment.relatedCount} 项`
-                        : attachment.source === "attachment" ? "用户提供" : "生成的文件"}
-                    </small>
+                        ? tr("同组 {v0} 项", { v0: attachment.relatedCount })
+                        : attachment.source === "attachment" ? tr("用户提供") : tr("生成的文件")}
+                    </small>}
                   </span>
                 </button>
               );
@@ -598,7 +608,7 @@ export const ChatContextCard = () => {
               key={source.id}
               type="button"
               className="mc-chat-context-source"
-              aria-label={`打开来源：${source.label}`}
+              aria-label={tr("打开来源：{v0}", { v0: source.label })}
               title={source.url}
               onClick={() => openWebTarget(source.url!)}
             >
@@ -612,7 +622,7 @@ export const ChatContextCard = () => {
               </span>
               <span className="mc-chat-context-source-content">
                 <span>{source.label}</span>
-                <small>{source.detail}</small>
+                {showAllSources && <small>{source.detail}</small>}
               </span>
             </button>
           ) : (
@@ -631,19 +641,19 @@ export const ChatContextCard = () => {
           ))}
           {attachments.length + sources.length > 3 && (
             <button type="button" className="mc-chat-context-more" onClick={() => setShowAllSources((value) => !value)}>
-              {showAllSources ? "收起" : "查看全部"}<ChevronRight size={14} />
+              {showAllSources ? tr("收起") : tr("查看全部")}<ChevronRight size={14} />
             </button>
           )}
         </section>}
 
         {browserTargets.length > 0 && (
-          <section className="mc-chat-context-card-section" aria-label="浏览器摘要">
+          <section className="mc-chat-context-card-section" aria-label={tr("浏览器摘要")}>
             <button
               type="button"
               className="mc-chat-context-section-title"
               onClick={() => openBrowserTarget(browserTargets.find((target) => target.active) ?? browserTargets[0])}
             >
-              <span>浏览器</span>
+              <span>{tr("浏览器")}</span>
               <small>{browserTargets.length}</small>
             </button>
             {browserTargets.slice(0, 2).map((target) => (
@@ -673,22 +683,21 @@ export const ChatContextCard = () => {
         )}
 
         {hasBackgroundTasks && (
-          <section className="mc-chat-context-card-section" aria-label="后台任务摘要">
+          <section className="mc-chat-context-card-section" aria-label={tr("后台任务摘要")}>
             <button type="button" className="mc-chat-context-section-title" onClick={openBackgroundTasks}>
-              <span>后台任务</span>
+              <span>{tr("后台任务")}</span>
               <small>{backgroundTaskSummary}</small>
             </button>
             <button type="button" className="mc-chat-context-task-row" onClick={openBackgroundTasks}>
-              <ListChecks size={16} /> 查看后台任务
-            </button>
+              <ListChecks size={16} /> {tr("查看后台任务")}</button>
           </section>
         )}
       </div>
       {summaryMenu && <ContextMenu position={summaryMenu} onClose={() => setSummaryMenu(null)} items={[
-        { label: "打开上下文详情", icon: <PanelRightOpen size={15} />, onClick: () => openPanel("tasks") },
-        ...(sources.length ? [{ label: "查看全部来源", icon: <FileText size={15} />, onClick: openSources }] : []),
-        ...(workspaceGit?.branch ? [{ label: `分支：${workspaceGit.branch}`, onClick: () => openPanel("diff") }] : []),
-        { label: "收起上下文卡片", onClick: () => setCollapsed(true) },
+        { label: tr("打开上下文详情"), icon: <PanelRightOpen size={15} />, onClick: () => openPanel("tasks") },
+        ...(sources.length ? [{ label: tr("查看全部来源"), icon: <FileText size={15} />, onClick: openSources }] : []),
+        ...(workspaceGit?.branch ? [{ label: tr("分支：{v0}", { v0: workspaceGit.branch }), onClick: () => openPanel("diff") }] : []),
+        { label: tr("收起上下文卡片"), onClick: () => setCollapsed(true) },
       ]} />}
     </aside>
   );

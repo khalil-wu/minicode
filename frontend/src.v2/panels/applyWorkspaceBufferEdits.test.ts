@@ -44,7 +44,7 @@ describe("project replacements in real editor buffers", () => {
   it("previews only selected UTF-16 matches and preserves regex groups, literal dollars and CRLF", () => {
     const source = "😀 foo\r\nfoo\r\n";
     const matches = [3, 8].map((offset, index) => ({ id: `m${index}`, offset, length: 3, line: index + 1, column: index ? 1 : 4, end_line: index + 1, end_column: index ? 4 : 7,
-      text: "foo", snippet: "foo", groups: ["foo"], named_groups: {} }));
+      snippet: "foo", groups: [{ offset, length: 3 }], named_groups: {} }));
     const selected = selectedReplacementFiles([{ path: "main.ts", content: source, original: source, content_hash: "hash", size_bytes: 18, read_only: false, from_buffer: true, matches }], new Set(["m0"]), "$1!\\n$$", true);
     expect(selected[0].after).toBe("😀 foo!\r\n$\r\nfoo\r\n");
     expect(selected[0].edits).toHaveLength(1);

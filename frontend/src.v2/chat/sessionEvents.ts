@@ -1,4 +1,6 @@
 import { useAppStore } from "../stores";
+import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft } from "../stores/composer-drafts";
+import { capturePendingUserMessageQueueUpdate } from "./sendChatMessage";
 import { subagentModelPatch } from "../lib/subagent-model";
 import type {
   ConversationListEvent,
@@ -19,6 +21,7 @@ import type {
   SessionSyncedEvent,
 } from "../protocol/events";
 import { isReplayedEvent } from "../protocol/events";
+import { isSupersededCommandProjection } from "../protocol/command-projection";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { pushToast } from "../overlays/ToastContainer";
 import {
@@ -45,10 +48,9 @@ import { mergeCapabilities } from "../protocol/capabilities";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import {
   conversationResetPayload,
-  isInFlightProjection,
   LS,
+  readLS,
   removeConversationOwnedPrompts,
-  resumedFromInFlightProjection,
   visibleDiffReviewForConversation,
   writeLS,
 } from "../stores/shared-helpers";
@@ -130,6 +132,7 @@ const setAvailableModelsForCurrentProvider = (
 };
 
 export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent) => {
+  capturePendingUserMessageQueueUpdate(event);
   const conversationId = event.conversation_id;
   const steeredCurrentTurn = event.status === "dequeued" && (
     event.turn_mode === "steer" || event.reason === "steered_current_turn"
@@ -190,7 +193,6 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           ...(isUser && steeredCurrentTurn
             ? { steeredIntoMessageId: steerTargetMessageId }
             : {}),
-          ...(isAssistant && !steeredCurrentTurn ? { isStreaming: true } : {}),
         };
       }
       return {
@@ -199,25 +201,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
         queuePosition: undefined,
       };
     });
-    if (!steeredCurrentTurn || !steerTargetMessageId) return updated;
-    const steeredUserIndex = updated.findIndex((message) => (
-      message.role === "user"
-      && (message.id === event.user_message_id || message.queueMessageId === event.message_id)
-    ));
-    const targetAssistantIndex = updated.findIndex((message) => (
-      message.role === "assistant" && message.id === steerTargetMessageId
-    ));
-    if (steeredUserIndex < 0 || targetAssistantIndex < 0 || steeredUserIndex < targetAssistantIndex) {
-      return updated;
-    }
-    const reordered = [...updated];
-    const [steeredUser] = reordered.splice(steeredUserIndex, 1);
-    const insertBefore = reordered.findIndex((message) => (
-      message.role === "assistant" && message.id === steerTargetMessageId
-    ));
-    if (!steeredUser || insertBefore < 0) return updated;
-    reordered.splice(insertBefore, 0, steeredUser);
-    return reordered;
+    return updated;
   };
 
   useAppStore.setState((state) => {
@@ -229,7 +213,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           [conversationId]: {
             ...thread,
             messages: updateMessages(thread.messages),
-            isStreaming: event.status === "dequeued" && !steeredCurrentTurn ? true : thread.isStreaming,
+            isStreaming: thread.isStreaming,
           },
         },
       };
@@ -238,20 +222,11 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
     const isActive = conversationId === state.conversationId;
     const source = isActive ? state.messages : state.conversationMessages[conversationId] ?? [];
     const messages = updateMessages(source);
-    const streaming = event.status === "dequeued" && !steeredCurrentTurn
-      ? true
-      : messages.some((message) => message.isStreaming || message.isThinkingStreaming);
-    const resetRunState = {
-      plan: null,
-      todos: [],
-      subagents: [],
-      agentProgress: [],
-    };
+    const streaming = messages.some((message) => message.isStreaming || message.isThinkingStreaming);
     return {
       ...(isActive ? {
         messages,
         isStreaming: streaming,
-        ...(event.status === "dequeued" && !steeredCurrentTurn ? resetRunState : {}),
       } : {}),
       conversationMessages: {
         ...state.conversationMessages,
@@ -261,12 +236,6 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
         ...state.conversationStreaming,
         [conversationId]: streaming,
       },
-      ...(event.status === "dequeued" && !steeredCurrentTurn ? {
-        conversationAgentStates: {
-          ...state.conversationAgentStates,
-          [conversationId]: resetRunState,
-        },
-      } : {}),
     };
   });
 };
@@ -281,16 +250,25 @@ const toConversationMeta = (conversation: ConversationSummary) => ({
   summary: maybeString(conversation.summary),
   compactionState: maybeString(conversation.compaction_state),
   conversationType: conversation.conversation_type === "side_chat" ? "side_chat" as const : "main" as const,
+  threadSource: conversation.thread_source,
   archived: conversation.archived,
+  pinned: conversation.pinned,
+  pinnedAt: conversation.pinned_at,
+  hasUnreadTurn: conversation.has_unread_turn,
+  projectId: conversation.project_id,
   memoryMode: maybeString(conversation.memory_mode),
   memoryPolluted: conversation.memory_polluted === true,
   memoryPollutionSources: Array.isArray(conversation.memory_pollution_sources)
     ? conversation.memory_pollution_sources.filter((source): source is string => typeof source === "string" && Boolean(source.trim()))
     : [],
   workspaceRoot: maybeString(conversation.workspace_root),
+  executionCwd: maybeString(conversation.execution_cwd),
+  projectlessOutputDir: maybeString(conversation.projectless_output_dir),
+  projectlessBrowserRoot: maybeString(conversation.projectless_browser_root),
   gitBranch: maybeString(conversation.git_branch),
   worktreePath: maybeString(conversation.worktree_path),
   gitIsolated: conversation.git_isolated,
+  agentMode: conversation.agent_mode,
   goal: toConversationGoal(conversation.goal),
   parentConversationId: maybeString(conversation.parent_conversation_id),
   parentMessageIndex: typeof conversation.parent_message_index === "number" ? conversation.parent_message_index : undefined,
@@ -391,6 +369,9 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
       };
       const currentTool = subagent.currentTool ?? subagent.current_tool ?? subagent.tool_name;
       const lastProgressAt = subagent.lastProgressAt ?? subagent.last_progress_at;
+      const acceptedAt = subagent.acceptedAt ?? subagent.accepted_at;
+      const startedAt = subagent.startedAt ?? subagent.started_at;
+      const completedAt = subagent.completedAt ?? subagent.completed_at;
       return {
         id: String(subagent.id ?? subagent.subagent_id ?? "").trim(),
         ...subagentModelPatch(subagent),
@@ -414,6 +395,9 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
             : undefined,
         currentTool: typeof currentTool === "string" ? currentTool : undefined,
         lastProgressAt: typeof lastProgressAt === "number" ? lastProgressAt : undefined,
+        acceptedAt: typeof acceptedAt === "number" ? acceptedAt : undefined,
+        startedAt: typeof startedAt === "number" ? startedAt : undefined,
+        completedAt: typeof completedAt === "number" ? completedAt : undefined,
         detail: normalizeDelegatedText(subagent.detail),
         nodeId: maybeString((subagent.nodeId ?? subagent.node_id) as string | null | undefined),
         taskId: maybeString((subagent.taskId ?? subagent.task_id) as string | null | undefined),
@@ -425,6 +409,8 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
         needsInput: typeof (subagent.needsInput ?? subagent.needs_input) === "boolean"
           ? Boolean(subagent.needsInput ?? subagent.needs_input) : undefined,
         teammateName: maybeString((subagent.teammateName ?? subagent.teammate_name) as string | null | undefined),
+        displayName: maybeString((subagent.displayName ?? subagent.display_name) as string | null | undefined),
+        workspaceRoot: maybeString((subagent.workspaceRoot ?? subagent.workspace_root) as string | null | undefined),
         teamName: maybeString((subagent.teamName ?? subagent.team_name) as string | null | undefined),
         awaitingPlanApproval: typeof (subagent.awaitingPlanApproval ?? subagent.awaiting_plan_approval) === "boolean"
           ? Boolean(subagent.awaitingPlanApproval ?? subagent.awaiting_plan_approval) : undefined,
@@ -614,7 +600,7 @@ const upsertConversationMeta = (
   });
 };
 
-const applyQueuedUserMessageSnapshot = (
+export const applyQueuedUserMessageSnapshot = (
   entries: RuntimeSessionSnapshot["queued_user_messages"],
 ) => {
   if (!Array.isArray(entries) || entries.length === 0) return;
@@ -697,7 +683,7 @@ const applyQueuedUserMessageSnapshot = (
   });
 };
 
-const applyPendingTurnInputSnapshot = (
+export const applyPendingTurnInputSnapshot = (
   entries: RuntimeSessionSnapshot["pending_turn_inputs"],
 ) => {
   if (!Array.isArray(entries) || entries.length === 0) return;
@@ -752,11 +738,7 @@ const applyPendingTurnInputSnapshot = (
             queueMessageId: messageId,
             steeredIntoMessageId: targetMessageId || undefined,
           };
-      if (existingUserIndex >= 0) withoutPlaceholder.splice(existingUserIndex, 1);
-      const targetIndex = targetMessageId
-        ? withoutPlaceholder.findIndex((message) => message.role === "assistant" && message.id === targetMessageId)
-        : -1;
-      if (targetIndex >= 0) withoutPlaceholder.splice(targetIndex, 0, restoredUser);
+      if (existingUserIndex >= 0) withoutPlaceholder[existingUserIndex] = restoredUser;
       else withoutPlaceholder.push(restoredUser);
       conversationMessages[conversationId] = withoutPlaceholder;
       if (state.conversationId === conversationId) activeMessages = withoutPlaceholder;
@@ -808,26 +790,30 @@ export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
       ));
     }
     const targets = steerTargets.get(conversationId);
-    let fallbackIndex = -1;
-    let liveIndex = -1;
+    let latestUserIndex = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user" && !messages[index].queueState && !messages[index].steeredIntoMessageId) {
+        latestUserIndex = index;
+        break;
+      }
+    }
+    let liveIndex = -1;
+    // A conversation-level running flag cannot revive a checkpoint from a
+    // previous user turn. Its exact current assistant arrives in run-start or
+    // stream_resume; retain earlier partial evidence while waiting for it.
+    for (let index = messages.length - 1; index > latestUserIndex; index -= 1) {
       const message = messages[index];
-      if (message.role !== "assistant" || message.queueState === "queued") continue;
+      if (message.role !== "assistant" || message.queueState) continue;
       if (message.isStreaming || message.isThinkingStreaming) {
         liveIndex = index;
         break;
       }
-      if (
-        fallbackIndex < 0
-        && ((!message.terminalStatus && message.completedAt == null) || isInFlightProjection(message))
-      ) fallbackIndex = index;
     }
-    const activeIndex = liveIndex >= 0 ? liveIndex : fallbackIndex;
     return messages.map((message, index) => {
       const ownsActiveStream = message.role === "assistant"
-        && message.queueState !== "queued"
-        && ((targets?.has(message.id) ?? false) || (!targets?.size && index === activeIndex));
-      if (ownsActiveStream) return { ...resumedFromInFlightProjection(message), isStreaming: true };
+        && !message.queueState
+        && ((targets?.has(message.id) ?? false) || (!targets?.size && index === liveIndex));
+      if (ownsActiveStream) return { ...message, isStreaming: true };
       return message.isStreaming || message.isThinkingStreaming
         ? { ...message, isStreaming: false, isThinkingStreaming: false }
         : message;
@@ -902,6 +888,8 @@ const hydrateActiveConversation = (
     });
   }
   useAppStore.getState().applyConversationSwitched({ conversationId });
+  const modeMeta = useAppStore.getState().conversations.find(item => item.id === conversationId);
+  if (modeMeta?.agentMode !== undefined) useAppStore.getState().syncConversationAgentMode(modeMeta.agentMode, conversationId, undefined, modeMeta.revision);
   if (!workspaceRootsEqual(previousWorkspace, useAppStore.getState().workingDirectory)) {
     useAppStore.setState({ availableSkills: [], slashCommands: [], runtimeCapabilities: null, scheduledTasks: [], scheduledTaskRuns: [] });
   }
@@ -959,12 +947,10 @@ const hydrateActiveConversation = (
   // the merge above and still block stale agent-state replacement.
   if (!staleSnapshot) hydrateConversationAgentState(conversationId, conversation);
 
-  const workspaceRoot = maybeString(conversation?.worktree_path) || maybeString(conversation?.workspace_root);
+  const workspaceRoot = maybeString(conversation?.execution_cwd) || maybeString(conversation?.worktree_path) || maybeString(conversation?.workspace_root);
   if (conversation && !staleSnapshot) {
-    // "" is faithful, not a missing field: the backend's own
-    // `_switch_workspace_for_conversation` calls `_clear_workspace_runtime()`
-    // when a conversation has no workspace_root/worktree_path, so mirroring the
-    // empty value is what keeps the renderer's workspace equal to the session's.
+    // Project membership stays in workspace_root. File operations, attachments
+    // and terminals follow the conversation's persisted execution directory.
     useAppStore.getState().setWorkingDirectory(workspaceRoot || "");
   }
 };
@@ -1058,11 +1044,15 @@ const mergeHydratedWithStreamingAssistants = (
 const activeConversationWorkspace = (): string => {
   const state = useAppStore.getState();
   const active = state.conversations.find((conversation) => conversation.id === state.conversationId);
-  return active?.worktreePath || active?.workspaceRoot || "";
+  return active?.executionCwd || active?.worktreePath || active?.workspaceRoot || "";
 };
 
-const clearActiveConversationView = () => {
+const clearActiveConversationView = (options: { preserveMode?: boolean } = {}) => {
   const state = useAppStore.getState();
+  state.snapshotWorkbenchState();
+  const composer = state.conversationId
+    ? state.workspaceComposerDrafts[composerWorkspaceKey(state.workingDirectory)] ?? emptyComposerDraft()
+    : composerDraftOf(state);
   const hasCodeContext = Boolean(
     state.workingDirectory
     || state.editorTabs.length > 0
@@ -1077,12 +1067,7 @@ const clearActiveConversationView = () => {
     messages: [],
     isStreaming: false,
     toolCallCount: 0,
-    draft: "",
-    attachments: [],
-    quotedMessage: null,
-    selectedMentions: [],
-    selectedSkills: [],
-    allowedRemoteImageDomains: [],
+    ...composer,
     actionChip: null,
     mentionResults: [],
     slashPanelOpen: false,
@@ -1091,11 +1076,11 @@ const clearActiveConversationView = () => {
     prStatusIssue: null,
     prStatus: null,
     ciChecks: [],
-    ...(hasCodeContext ? { appMode: "code" as const } : {}),
+    ...(hasCodeContext && state.conversationId && !options.preserveMode ? { appMode: "code" as const } : {}),
   });
 };
 
-const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null, eventOwner: string | null) => {
+const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null, eventOwner: string | null, event?: ServerEvent) => {
   if (!session) return;
   const state = useAppStore.getState();
   state.setRuntimeSession(session);
@@ -1107,6 +1092,11 @@ const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined
   applyPendingTurnInputSnapshot(session.pending_turn_inputs);
   applyActiveStreamSnapshot(session);
   const permissionOwner = session.active_conversation_id === undefined ? eventOwner : session.active_conversation_id;
+  if (session.agent_mode && permissionOwner && permissionOwner === state.conversationId) {
+    state.syncConversationAgentMode(session.agent_mode, permissionOwner,
+      event?.client_command_type === "conversation.agent_mode.set" ? event.client_command_id : undefined,
+      session.agent_mode_revision);
+  }
   if (session.permission_mode && (permissionOwner || null) === (state.conversationId || null)
     && (session.workspace_root === undefined || workspaceRootsEqual(session.workspace_root ?? "", useAppStore.getState().workingDirectory))) {
     useAppStore.setState({ permissionMode: fromBackendPermissionMode(session.permission_mode) });
@@ -1227,6 +1217,8 @@ export const handleSessionEvent = (
         useAppStore.setState({
           conversationInventoryInstanceId: null,
           conversationInventoryRevision: 0,
+          pinnedConversationIds: [],
+          pinnedConversationSortMode: "manual",
         });
       }
       const model = stringValue(ev.current_model)
@@ -1251,7 +1243,9 @@ export const handleSessionEvent = (
       );
       const switchEventWillHydrate = ev.type === "session.restored" && ev.conversation_switched_follows === true;
       if (ev.type === "session.restored") {
-        useAppStore.setState({ pendingConversationSwitchId: null });
+        if (switchEventWillHydrate && activeConversationId) {
+          useAppStore.setState({ pendingConversationSwitchId: activeConversationId });
+        }
         pendingAuthoritativeConversationResets.clear();
         if (switchEventWillHydrate && activeConversationId) {
           // session.restore is followed immediately by a canonical
@@ -1316,7 +1310,7 @@ export const handleSessionEvent = (
       } else {
         clearActiveConversationView();
       }
-      applyRuntimeSessionSnapshot(ev.session, activeConversationId);
+      applyRuntimeSessionSnapshot(ev.session, activeConversationId, e);
       if (ev.type === "session.restored" && ev.error) {
       pushToast(`恢复会话时出现警告：${ev.error}`, "warning", 5000);
       }
@@ -1406,7 +1400,9 @@ export const handleSessionEvent = (
         const activationNeedsBackendSync = Boolean(
           fallbackActiveConversationId
           && !currentEffectiveActiveConversationId
-          && !requestedEffectiveActiveConversationId,
+          && !requestedEffectiveActiveConversationId
+          && Boolean(storeState.conversationId || readLS(LS.conversation.activeId) !== "")
+          && !((ev as unknown as { archive_navigation?: string }).archive_navigation === "home" && ev.active_conversation_id === null),
         );
         const effectiveActiveConversationId = currentEffectiveActiveConversationId
           ?? requestedEffectiveActiveConversationId;
@@ -1452,6 +1448,12 @@ export const handleSessionEvent = (
               ?? state.conversationInventoryInstanceId,
             conversationInventoryRevision: incomingInventoryRevision
               ?? (inventoryEpochChanged ? 0 : state.conversationInventoryRevision),
+            pinnedConversationIds: ev.pinned_conversation_ids
+              ?? (inventoryEpochChanged ? [] : state.pinnedConversationIds),
+            pinnedConversationSortMode: ev.pinned_sort_mode
+              ?? (inventoryEpochChanged ? "manual" : state.pinnedConversationSortMode),
+            sidebarOrder: ev.sidebar_order && (inventoryEpochChanged || !state.sidebarOrder || ev.sidebar_order.revision >= state.sidebarOrder.revision)
+              ? ev.sidebar_order : inventoryEpochChanged ? null : state.sidebarOrder,
             conversationMessages: Object.fromEntries(
               Object.entries(state.conversationMessages).filter(([id]) => knownConversationIds.has(id)),
             ),
@@ -1464,9 +1466,7 @@ export const handleSessionEvent = (
             conversationAgentStates: Object.fromEntries(
               Object.entries(state.conversationAgentStates ?? {}).filter(([id]) => knownConversationIds.has(id)),
             ),
-            conversationWorkbenchStates: Object.fromEntries(
-              Object.entries(state.conversationWorkbenchStates ?? {}).filter(([id]) => knownConversationIds.has(id)),
-            ),
+            conversationWorkbenchStates: state.conversationWorkbenchStates,
             conversationRecallTruncations: Object.fromEntries(
               Object.entries(state.conversationRecallTruncations ?? {}).filter(([id]) => knownConversationIds.has(id)),
             ),
@@ -1485,6 +1485,12 @@ export const handleSessionEvent = (
               : null),
           };
         });
+        // Each inventory mode belongs to its conversation, including hidden
+        // composers. Otherwise a later background send would reuse their old
+        // workbench selection after another window changed the durable mode.
+        for (const meta of conversationMetas) {
+          if (meta.agentMode !== undefined) useAppStore.getState().syncConversationAgentMode(meta.agentMode, meta.id, undefined, meta.revision);
+        }
         // A create/switch request already owns navigation. An inventory reply
         // received during that request may refresh the sidebar, but must not
         // restore an older owner or send a competing fallback switch.
@@ -1514,12 +1520,12 @@ export const handleSessionEvent = (
             hydrateActiveConversation(activeConversation, effectiveActiveConversationId, undefined, { upsertMeta: false });
           }
         } else {
-          clearActiveConversationView();
+          clearActiveConversationView({ preserveMode: (ev as unknown as { archive_navigation?: string }).archive_navigation === "home" });
           if (activationNeedsBackendSync && fallbackActiveConversationId) {
             sendClientCommand({ type: "conversation.switch", conversation_id: fallbackActiveConversationId });
           }
         }
-        applyRuntimeSessionSnapshot(ev.session, requestedActiveConversationId ?? null);
+        applyRuntimeSessionSnapshot(ev.session, requestedActiveConversationId ?? null, e);
       }
       return true;
     }
@@ -1560,6 +1566,7 @@ export const handleSessionEvent = (
       return true;
     }
     case "conversation.switched": {
+      if (isSupersededCommandProjection(e)) return true;
       const ev = e as ConversationSwitchedEvent;
       const switchedConversationId = maybeString(ev.conversation_id) ?? ev.conversation?.id;
       const pendingNavigation = useAppStore.getState();
@@ -1576,7 +1583,9 @@ export const handleSessionEvent = (
           Date.now(),
         );
       }
-      if (ev.conversation?.archived || ev.conversation?.conversation_type === "side_chat") {
+      if (ev.conversation_id === null && ev.conversation === null) {
+        clearActiveConversationView({ preserveMode: (ev as unknown as { archive_navigation?: string }).archive_navigation === "home" });
+      } else if (ev.conversation?.archived || ev.conversation?.conversation_type === "side_chat") {
         clearActiveConversationView();
       } else if (ev.conversation) {
         const nextConversationId = switchedConversationId ?? ev.conversation.id;
@@ -1590,7 +1599,7 @@ export const handleSessionEvent = (
           forceAuthoritative,
         });
       }
-      applyRuntimeSessionSnapshot(ev.session, switchedConversationId ?? null);
+      applyRuntimeSessionSnapshot(ev.session, switchedConversationId ?? null, e);
       if (!isReplayedEvent(e) && !ev.context_pending) {
         // Extension/project commands are conversation-scoped. A switch must
         // replace the palette even when the transport itself did not reconnect.

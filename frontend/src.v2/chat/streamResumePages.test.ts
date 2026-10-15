@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ServerEvent, StreamResumeEvent } from "../protocol/events";
 import { useAppStore } from "../stores";

@@ -20,6 +20,7 @@ from backend.agent.compaction import (
     parse_compaction_output,
     retain_user_inputs,
 )
+from backend.agent.context_window import CONTEXT_TOOL_NAMES, ContextWindowConfig, ContextWindowState
 from backend.agent.context_ledger import (
     ContextLedger,
     ContextLedgerCategory,
@@ -69,7 +70,7 @@ from backend.agent.tool_result_persistence import (
 )
 from backend.tools.base import ToolResult
 from backend.tools.untrusted import wrap_untrusted_content
-from backend.agent.codex_prompts import codex_multi_agent_mode
+from backend.agent.codex_prompts import codex_collaboration_mode, codex_multi_agent_mode, codex_side_chat_instructions
 from backend.llm.reasoning_effort import reasoning_effort_wire_map
 
 if TYPE_CHECKING:
@@ -131,11 +132,19 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
         "_tool_result_budget_replacements",
         "_invoked_skill_payloads",
         "_consecutive_autocompact_failures",
+        "_context_window_state",
+        "_inactive_context_windows",
+        "_skill_role_config",
+        "_skill_role_features",
+        "_skill_config_stack",
+        "_history_notes_hint",
+        "_context_window_input_preferences",
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
     # History accounting is independent; the shared estimator is stateless.
     cloned._history_store = builder._history_store.clone()
+    cloned.guardian_evidence = deepcopy(builder.guardian_evidence)
     cloned._withheld_media_timestamps = set()
     cloned._tool_execution_context = None
     cloned._git_status_authority = None
@@ -268,6 +277,7 @@ def _sanitize_provider_items(raw_items: Any) -> list[dict[str, Any]]:
         if item_type not in {
             "reasoning",
             "function_call",
+            "tool_search_call",
             "custom_tool_call",
             "chat_reasoning",
             "reasoning_content",
@@ -597,17 +607,35 @@ class ContextBuilder:
         skill_manager: Any | None = None,
         conversation_id: str = "",
         workspace_root: Path | str | None = None,
+        developer_instructions: str | None = None,
+        include_skill_instructions: bool = True,
+        personality: str | None = None,
+        skill_config: dict[str, Any] | None = None,
+        skill_config_stack: Any | None = None,
+        role_features: dict[str, bool] | None = None,
+        source_agent_role: bool = False,
     ) -> None:
         self._budget = token_budget or TokenBudget()
         self._agent_settings = agent_settings or AgentSettings()
         # Ordered transcript lives in ConversationHistory; the builder reaches
         # it through the _history/_history_* property delegates below.
         self._history_store = ConversationHistory(estimator=estimate_llm_message_tokens)
+        from backend.agent.guardian.retained import GuardianEvidenceOwner
+        self.guardian_evidence = GuardianEvidenceOwner()
+        self._guardian_reviewer_compaction_hash: str | None = None
         self._pending_runtime_context_update = ""
         self._persistent_notes: list[dict[str, str]] = []
+        self.prompted_mcp_dependencies: set[str] = set()
         self._compaction_count = 0
         self._skill_executor = skill_executor
         self._skill_manager = skill_manager
+        self._developer_instructions = developer_instructions
+        self._include_skill_instructions = include_skill_instructions
+        self._role_personality = personality
+        self._skill_role_config = skill_config or {}
+        self._skill_config_stack = skill_config_stack
+        self._skill_role_features = role_features or {}
+        self._source_agent_role = source_agent_role
         self._skill_snapshot_source: tuple[int, str] | None = None
         if isinstance(skill_manager, SkillManager):
             self.bind_skill_manager(skill_manager, workspace_root)
@@ -653,6 +681,7 @@ class ContextBuilder:
         self._git_status_workspace: str = ""
         self._git_status_authority: tuple[Any, ...] | None = None
         self._tool_execution_context: ToolExecutionContext | None = None
+        self._exec_policy_owner: Any | None = None
         self._guideline_load_reason = "session_start"
         self._project_root_markers: tuple[str, ...] | None = None
         self._project_doc_fallback_filenames: tuple[str, ...] = ()
@@ -668,6 +697,14 @@ class ContextBuilder:
         # Keep exact invoked-skill content outside ordinary
         # transcript compaction and restores it after resume/compaction.
         self._invoked_skill_payloads: dict[str, dict[str, str]] = {}
+        self._context_window_config: ContextWindowConfig | None = None
+        self._context_window_source_config: Any = None
+        self._context_window_input_preferences = None
+        self._context_window_model_info: Any = None
+        self._context_window_state: ContextWindowState | None = None
+        self._inactive_context_windows: list[dict[str, Any]] = []
+        self._history_notes_backend = None
+        self._history_notes_hint: dict[str, Any] = {}
         self._consecutive_autocompact_failures = 0
         # Keep a stable timezone default; explicit host context takes precedence.
         # The runtime date is projected at request time for long-lived sessions.
@@ -681,26 +718,177 @@ class ContextBuilder:
             self._last_actual_prompt_tokens = 0
             self._last_estimated_prompt_tokens = 0
         self._llm = llm
+        if self._context_window_source_config is not None and self._tool_execution_context is not None:
+            snapshot = self._tool_execution_context.model_execution
+            if snapshot is not None:
+                self.bind_context_window_model(snapshot)
 
     @property
     def skill_manager(self) -> Any | None:
         return self._skill_manager
 
     def bind_skill_manager(
-        self, manager: SkillManager, workspace_root: Path | str | None, *, refresh: bool = False,
+        self, manager: SkillManager, workspace_root: Path | str | None, *, refresh: bool = False, config_stack: Any = None,
     ) -> None:
         # The builder can be reused across user turns. The query boundary asks
         # for a fresh snapshot; repeated binds within that turn use this one.
-        source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))))
+        if config_stack is not None:
+            self._skill_config_stack = config_stack
+        source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))),
+            self._skill_config_stack.fingerprint if self._skill_config_stack is not None else None)
         if not refresh and source == self._skill_snapshot_source:
             return
-        self._skill_manager = manager.snapshot(workspace_root)
+        self._skill_manager = manager.snapshot(workspace_root, role_config=self._skill_role_config, role_features=self._skill_role_features, config_stack=self._skill_config_stack)
         self._skill_snapshot_source = source
         self._skill_executor = SkillExecutor(self._skill_manager)
+
+    def configure_skill_stack(self, stack: Any) -> None:
+        self._skill_config_stack = stack
 
     def bind_budget(self, token_budget: TokenBudget) -> None:
         """Bind the active turn budget used by prompt and compaction paths."""
         self._budget = token_budget
+
+    def configure_context_window(self, config: ContextWindowConfig | None) -> None:
+        """The admitted registry owns feature exposure for this turn."""
+        if self._context_window_config != config:
+            self._prepared_prompt_parts = None
+            self._prepared_prompt_state = None
+        self._context_window_config = config
+        if config is not None and self._context_window_state is None:
+            self._context_window_state = ContextWindowState()
+
+    def bind_context_window_model(self, snapshot: Any, *, startup: bool = False,
+                                  inherit_activation: bool = False) -> Any:
+        self.bind_guardian_model(snapshot, restored=startup)
+        from backend.agent.token_budget_activation import (
+            config_for_model_switch, prepare_snapshot_token_budget, resolve_context_window_config,
+        )
+
+        settings = snapshot.config.config_layer_stack.effective_config() if snapshot.config.config_layer_stack is not None else {}
+        features = settings.get("feature_flags", settings.get("features", {}))
+        preferences = (
+            snapshot.config.context_window_config,
+            snapshot.config.feature_flags.enabled("token_budget"),
+            snapshot.config.feature_flags.enabled("context_management"),
+            deepcopy(features.get("token_budget")),
+        )
+        config_changed = self._context_window_input_preferences is not None and preferences != self._context_window_input_preferences
+        if config_changed:
+            snapshot = replace(snapshot, config=replace(snapshot.config, token_budget_startup_config=None))
+        if startup or self._context_window_source_config is None or config_changed:
+            prepared = prepare_snapshot_token_budget(snapshot, inherit_activation=inherit_activation)
+        else:
+            prepared = replace(snapshot, config=config_for_model_switch(self._context_window_source_config, snapshot.config))
+        self._context_window_source_config = prepared.config
+        self._context_window_input_preferences = preferences
+        self._context_window_model_info = prepared.model_info
+        self.configure_context_window(resolve_context_window_config(prepared.config, prepared.model_info))
+        return prepared
+
+    @property
+    def token_budget_enabled(self) -> bool:
+        return self._context_window_config is not None
+
+    def bind_history_notes(self, registry, snapshot, *, session_id: str, agent_name: str) -> None:
+        from backend.agent.history_notes import register_history_notes_tools
+
+        self._history_notes_backend = register_history_notes_tools(
+            registry, self._context_window_config,
+            snapshot.model_runtime if snapshot is not None else None,
+            snapshot.model_info if snapshot is not None else None,
+            session_id=session_id, agent_name=agent_name,
+        )
+        source = "native" if self._history_notes_backend is not None else "legacy" if (
+            self._context_window_config is not None
+            and not self._context_window_config.use_history_notes_extension
+        ) else ""
+        if source != self._history_notes_hint.get("source", source):
+            self._history_notes_hint = {}
+        if not source:
+            self._history_notes_hint = {}
+
+    async def prepare_history_notes_thread_context(self, *, state: AgentState, session_id: str, agent_name: str) -> None:
+        native = self._history_notes_backend is not None
+        legacy = self._context_window_config is not None and not self._context_window_config.use_history_notes_extension
+        if not native and not legacy:
+            return
+        if self._context_window_config.limits(self._llm)[1] is None:
+            return
+        owner = {"window_id": self._context_window_state.window_id,
+            "session_id": session_id, "agent_name": agent_name,
+            "source": "native" if native else "legacy"}
+        if all(self._history_notes_hint.get(key) == value for key, value in owner.items()):
+            return
+        if native:
+            from backend.agent.history_notes import contribute_history_notes_thread_context
+
+            text = await contribute_history_notes_thread_context(
+                self._history_notes_backend, session_id=session_id, agent_name=agent_name,
+            )
+        else:
+            from backend.agent.history_notes import contribute_legacy_notes_thread_context
+
+            context = self._tool_execution_context
+            manager = context.run_context.mcp_manager if context is not None else None
+            thread_id = context.conversation_id or session_id if context is not None else session_id
+            text = await contribute_legacy_notes_thread_context(
+                manager, thread_id=thread_id,
+                owner_session_id=(context.run_context.mcp_owner_session_id or session_id) if context is not None else session_id,
+                conversation_id=context.conversation_id if context is not None else "",
+            )
+        self._history_notes_hint = {**owner, "text": text}
+        self._prepared_prompt_parts = None
+        self._prepared_prompt_state = None
+        window = self._context_window_state
+        if window.prefill_input_tokens is not None and not window.prefill_server_observed:
+            prefix_tokens = estimate_llm_context_tokens(
+                self._render_prompt_messages(state, self._workspace_root_for_state(state))) + self._request_tool_schema_tokens
+            window.prefill_input_tokens = prefix_tokens
+            window.last_response_total_tokens = prefix_tokens
+
+    def request_new_context_window(self) -> None:
+        self._context_window_state.new_context_requested = True
+
+    @property
+    def new_context_window_requested(self) -> bool:
+        return self._context_window_state is not None and self._context_window_state.new_context_requested
+
+    def context_window_status(self) -> dict[str, Any]:
+        window = self._context_window_state
+        # Source counts the completed response's input + output, plus local
+        # items after the last model-produced item. UI reserves are unrelated.
+        model_index = next((index for index in range(len(self._history) - 1, -1, -1)
+                            if self._history[index].role == "assistant"), len(self._history) - 1)
+        added = sum(self._window_item_tokens(message) for message in self._history[model_index + 1:])
+        used = (window.last_response_total_tokens or 0) + added
+        return window.status(self._context_window_config, self._llm, used)
+
+    @staticmethod
+    def _window_item_tokens(message: LLMMessage) -> int:
+        if message.history_notes_output is not None:
+            from backend.mcp.result_projection import mcp_output_visible_bytes
+
+            return (mcp_output_visible_bytes(message.history_notes_output) + 3) // 4
+        if message.code_mode_output is not None:
+            from backend.mcp.result_projection import mcp_output_visible_bytes
+
+            return (mcp_output_visible_bytes(message.code_mode_output) + 3) // 4
+        if message.mcp_output is not None:
+            from backend.mcp.result_projection import mcp_output_visible_bytes
+
+            return (mcp_output_visible_bytes(message.mcp_output) + 3) // 4
+        # context_manager/history.rs counts visible UTF-8 bytes, not transport
+        # JSON, with ceiling division. A normal resized image costs 7373 bytes.
+        visible = len(str(message.content).encode("utf-8"))
+        if message.role == "tool":
+            visible += len(message.tool_call_id.encode("utf-8"))
+        visible += 7_373 * len(message.images)
+        # PDFs use the adapter's existing native-document estimate; Source
+        # has no same PDF item. Keep this boundary explicit in the audit.
+        if message.documents:
+            return estimate_llm_message_tokens(message)
+        return (visible + 3) // 4
 
     def bind_llm_turn_context(self, turn_context: Any) -> None:
         self._llm_turn_context = turn_context
@@ -714,12 +902,29 @@ class ContextBuilder:
     def bind_tool_context(self, context: ToolExecutionContext | None) -> None:
         """Use this turn's captured execution authority for repository probes."""
         self._tool_execution_context = context
+        if context is not None and context.model_execution is not None:
+            self.bind_guardian_model(context.model_execution)
         if context is None:
             self._git_status_context = None
             self._git_status_workspace = ""
             self._git_status_authority = None
             self._prepared_prompt_parts = None
             self._prepared_prompt_state = None
+
+    def bind_guardian_model(self, snapshot: Any, *, restored: bool = False) -> None:
+        from backend.agent.guardian.config import review_model_for_execution
+
+        self.guardian_evidence.configure_review_context(
+            reuse_parent_compaction=snapshot.config.feature_flags.enabled("guardian_reuse_parent_compaction"))
+        self._guardian_reviewer_compaction_hash = review_model_for_execution(snapshot).compaction_hash
+        if restored:
+            from backend.agent.guardian.host import parent_window_transcript, restore_parent_compaction_from_window, restore_requires_parent_context
+
+            restore_parent_compaction_from_window(self.guardian_evidence, self)
+            self.guardian_evidence.restore_review_context(
+                reviewer_compaction_hash=self._guardian_reviewer_compaction_hash,
+                requires_parent_context=restore_requires_parent_context(self.guardian_evidence, self),
+                current_parent_transcript=parent_window_transcript(self))
 
     def record_turn_admission(self, message_id: str, boundary: dict[str, Any]) -> None:
         self._turn_admissions[message_id] = dict(boundary)
@@ -919,20 +1124,17 @@ class ContextBuilder:
         return selected
 
     def _build_skill_catalog(self) -> str:
+        if not self._include_skill_instructions:
+            return ""
         executor = self._skill_executor
         if executor is None and self._skill_manager is not None:
             from backend.skills.executor import SkillExecutor
 
             executor = SkillExecutor(self._skill_manager)
         build_catalog = getattr(executor, "build_layer1_summary", None)
-        configured_tokens = max(0, int(getattr(self._budget, "active_skills", 0) or 0))
-        if configured_tokens == 0:
-            return ""
-        max_chars = configured_tokens * 4
         return (
             str(
                 build_catalog(
-                    max_chars=max_chars,
                     context_window_tokens=self._budget.total,
                 )
                 or ""
@@ -940,6 +1142,14 @@ class ContextBuilder:
             if callable(build_catalog)
             else ""
         )
+
+    def _captured_prompt_model_messages(self) -> tuple[Any, bool]:
+        context = self._tool_execution_context
+        if context is not None and context.model_execution is not None and context.model_execution.model_info is not None:
+            return context.model_execution.model_info.model_messages, True
+        settings = getattr(self._llm, "_settings", None)
+        messages = getattr(settings, "model_messages", None)
+        return messages, messages is not None
 
     def _build_memory_context(self) -> str:
         if not self._memory_manager:
@@ -967,7 +1177,7 @@ class ContextBuilder:
         return "## Inherited Memory\n" + "\n\n".join(note_blocks)
 
 
-    async def start_turn(self, user_message: str, state: AgentState) -> None:
+    async def start_turn(self, user_message: str, state: AgentState) -> LLMMessage:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
@@ -1019,23 +1229,22 @@ class ContextBuilder:
                 ),
                 raw_content=rendered_retrieval,
             )
-        self._history_store.append(
-            LLMMessage(
-                role="user",
-                content=user_turn_content,
-                images=attachment_plan.images,
-                documents=attachment_plan.documents,
-                attachment_refs=self._snapshot_attachment_refs(state.attachments),
-                runtime_context=runtime_context,
-                is_user_input=True,
-            ),
-            raw_content=user_turn_content,
+        admitted_message = LLMMessage(
+            role="user",
+            content=user_turn_content,
+            images=attachment_plan.images,
+            documents=attachment_plan.documents,
+            attachment_refs=self._snapshot_attachment_refs(state.attachments),
+            runtime_context=runtime_context,
+            is_user_input=True,
         )
+        self._history_store.append(admitted_message, raw_content=user_turn_content)
         self._compact_old_user_runtime_context_for_cache(
             keep_recent_user_turns=RUNTIME_CONTEXT_STRIP_KEEP_RECENT_USER_TURNS,
         )
         self._prepared_prompt_parts = prompt_parts
         self._prepared_prompt_state = state
+        return admitted_message
 
     @staticmethod
     def _snapshot_attachment_refs(
@@ -1151,6 +1360,34 @@ class ContextBuilder:
         # explicit tool results instead of an implicit per-turn injection.
 
         messages.append(LLMMessage(role="system", content=system_content))
+        if self._developer_instructions is not None:
+            messages.append(LLMMessage(role="developer", content=self._developer_instructions))
+        projectless = state.prompt_context.get("projectless_context")
+        if isinstance(projectless, dict) and projectless.get("output_directory") and projectless.get("browser_root"):
+            from backend.services.projectless_directory_service import projectless_developer_instructions
+
+            messages.append(LLMMessage(role="developer", content=projectless_developer_instructions(projectless)))
+        skill_instructions = prompt_parts.render_skill_instructions()
+        if skill_instructions and self._include_skill_instructions:
+            messages.append(LLMMessage(role="developer", content=skill_instructions))
+        if self.token_budget_enabled and self._context_window_config.limits(self._llm)[1] is not None:
+            context = self._tool_execution_context
+            agent_path = context.metadata.get("agent_path") if context is not None else None
+            if context is not None and context.run_context.agent_runtime is not None:
+                record = context.run_context.agent_runtime.get_run(context.metadata.get("run_id", ""))
+                if record is not None:
+                    agent_path = record.agent_path
+            from backend.agent.agent_identity import AgentPath
+
+            logical_agent_name = AgentPath.parse(agent_path).logical_name if agent_path else "/root"
+            messages.append(LLMMessage(role="developer", content=self._context_window_state.render(
+                logical_agent_name, self._history_notes_hint.get("text"))))
+            guidance = self._context_window_config.guidance_message
+            if guidance:
+                messages.append(LLMMessage(role="developer", content=f"<context_window_guidance>\n{guidance}\n</context_window_guidance>"))
+        messages.append(LLMMessage(role="developer", content=self._build_collaboration_mode_block(state)))
+        if state.prompt_context.get("conversation_type") == "side_chat":
+            messages.append(LLMMessage(role="developer", content=codex_side_chat_instructions()))
         if isinstance(self._llm, LLMAdapter) and reasoning_effort_wire_map(self._llm.model_id()):
             multi_agent_mode = codex_multi_agent_mode(self._llm.model_id(), self._llm.current_reasoning_effort() == "ultra")
             if multi_agent_mode:
@@ -1392,6 +1629,7 @@ class ContextBuilder:
                         tool_calls=message.tool_calls,
                         is_error=message.is_error,
                         phase=message.phase,
+                        answer_source=message.answer_source,
                         provider_items=list(message.provider_items),
                         # The marker replaces the complete old tool-result
                         # body. Do not retain native media or attachment refs
@@ -1528,6 +1766,8 @@ class ContextBuilder:
         workspace_root: Path | None,
     ) -> PromptParts:
         self._workspace_root = workspace_root
+        if self._source_agent_role:
+            state.prompt_context["source_agent_role"] = True
         matched_rules = ""
         self._project_instruction_directories = ()
         if workspace_root is not None:
@@ -1548,6 +1788,7 @@ class ContextBuilder:
             )
         project_guidelines = self._get_project_guidelines(workspace_root)
         builder = PromptBuilderV2()
+        model_messages, has_model = self._captured_prompt_model_messages()
         sections = builder.build_sections(
             state=state,
             workspace_root=workspace_root,
@@ -1558,7 +1799,15 @@ class ContextBuilder:
             persistent_context=self._build_persistent_context(),
             git_status_context=self._git_status_context,
             model_slug=self._llm.model_id() if isinstance(self._llm, LLMAdapter) else "",
+            personality=self._role_personality,
+            captured_model_messages=model_messages,
+            has_captured_model=has_model,
         )
+        if self._tool_execution_context is not None and self._tool_execution_context.run_context.exec_policy_owner is not None:
+            from backend.permissions.prompt import permission_instructions
+            from backend.agent.prompting import system_prompt_section
+            permissions = permission_instructions(self._tool_execution_context)
+            sections.insert(1, system_prompt_section("permissions", lambda: permissions, layer="context", cache_key=permissions))
         self._last_prompt_section_summary = summarize_prompt_sections(sections)
         state.prompt_context["prompt_section_summary"] = (
             self._last_prompt_section_summary
@@ -1809,7 +2058,6 @@ class ContextBuilder:
     def _build_runtime_context_prefix(self, state: AgentState) -> str:
         blocks = [
             self._build_environment_context_xml(state),
-            ContextBuilder._build_collaboration_mode_block(state),
             ContextBuilder._build_agent_mode_block(state),
             ContextBuilder._build_turn_aborted_block(state),
         ]
@@ -2041,55 +2289,10 @@ class ContextBuilder:
             "</environment_context>"
         )
 
-    @staticmethod
-    def _build_collaboration_mode_block(state: AgentState) -> str:
-        prompt_context = ContextBuilder._prompt_context(state)
-        environment = prompt_context.get("environment")
-        permission: dict[str, Any] = {}
-        if isinstance(environment, dict) and isinstance(
-            environment.get("permission"), dict
-        ):
-            permission = environment["permission"]
-        elif isinstance(prompt_context.get("permission"), dict):
-            permission = prompt_context["permission"]
-        raw_mode = (
-            str(
-                prompt_context.get("collaboration_mode")
-                or permission.get("mode")
-                or prompt_context.get("permission_mode")
-                or "confirm"
-            )
-            .strip()
-            .lower()
-        )
-        active_mode = "plan" if raw_mode == "plan" else "confirm"
-        if active_mode == "plan":
-            plan_file_path = str(prompt_context.get("plan_file_path") or "").strip()
-            plan_exists = bool(prompt_context.get("plan_file_exists"))
-            lines = [
-                "# Collaboration Mode: Plan",
-                "Workspace changes are disabled except for the exact session Plan file.",
-                *(
-                    [
-                        (
-                            f"A Plan file already exists at {plan_file_path}. Read it and make incremental edits "
-                            "with read_file/edit_file when needed."
-                            if plan_exists
-                            else f"No Plan file exists yet. Create it at {plan_file_path} with write_file."
-                        ),
-                        "Only that exact Plan file may be written; the rest of the workspace remains read-only.",
-                        "When the Markdown Plan is ready, call exit_plan_mode to request approval.",
-                    ]
-                    if plan_file_path
-                    else ["Use read-only tools until the host binds the session Plan file." ]
-                ),
-            ]
-        else:
-            lines = [
-                "# Collaboration Mode: Default",
-                "Follow the user's requested task and interaction mode.",
-            ]
-        return "<collaboration_mode>\n" + "\n".join(lines) + "\n</collaboration_mode>"
+    def _build_collaboration_mode_block(self, state: AgentState) -> str:
+        mode = "plan" if ContextBuilder._prompt_context(state).get("collaboration_mode") == "plan" else "default"
+        model_messages, _ = self._captured_prompt_model_messages()
+        return codex_collaboration_mode(mode, model_messages)
 
     @staticmethod
     def _build_agent_mode_block(state: AgentState) -> str:
@@ -2098,15 +2301,9 @@ class ContextBuilder:
         mode = (
             raw_mode if raw_mode in {"build", "plan", "review", "explore"} else "build"
         )
+        if mode in {"build", "plan"}:
+            return ""
         guidance = {
-            "build": [
-                "# Agent Mode: Build",
-                "Workspace changes are allowed when the user requests them.",
-            ],
-            "plan": [
-                "# Agent Mode: Plan",
-                "Inspect and produce an implementation plan without editing the workspace.",
-            ],
             "review": [
                 "# Agent Mode: Review",
                 "Review first: prioritize bugs, regressions, risks, and missing verification. Lead with findings; avoid unrelated refactors unless fixes are requested.",
@@ -2179,16 +2376,42 @@ class ContextBuilder:
         *,
         phase: str = "",
         provider_items: list[dict[str, Any]] | None = None,
+        answer_source: str = "",
     ) -> None:
         self._history_store.append(
             LLMMessage(
                 role="assistant",
                 content=str(content),
                 phase=str(phase or ""),
+                answer_source=answer_source,
                 provider_items=list(provider_items or []),
             ),
             raw_content=content,
         )
+        if answer_source in {"model_final", "model_commentary", "retained"}:
+            self._record_guardian_assistant(content, phase=phase, provider_items=provider_items)
+
+    def _record_guardian_assistant(self, content: str, *, phase: str,
+        provider_items: list[dict[str, Any]] | None, fallback_id: str | None = None) -> None:
+        turn_id = self._tool_execution_context.turn_id if self._tool_execution_context is not None else ""
+        originals = [item for item in provider_items or () if item.get("type") in {"message", "agent_message"}]
+        if originals:
+            for item in originals:
+                parts = item["content"]
+                text = parts if isinstance(parts, str) else "\n".join(part["text"] for part in parts if part.get("type") in {"output_text", "text"})
+                message_id = str(item.get("id") or fallback_id or f"assistant:{turn_id}:{self.history_length}")
+                self.guardian_evidence.record_accepted_message("assistant", text,
+                    turn_id=turn_id, message_id=message_id, phase=item.get("phase") or phase,
+                    acceptance_order=self.guardian_evidence.take_assistant_order(message_id))
+        elif content:
+            message_id = fallback_id or f"assistant:{turn_id}:{self.history_length}"
+            self.guardian_evidence.record_accepted_message("assistant", str(content),
+                turn_id=turn_id, message_id=message_id, phase=phase,
+                acceptance_order=self.guardian_evidence.take_assistant_order(message_id))
+
+    def append_guardian_approval(self, receipt) -> None:
+        self._history_store.append(LLMMessage(role="developer", content=receipt.developer_body), raw_content=receipt.developer_body)
+        self.guardian_evidence.record_manual_approval(receipt.developer_body, turn_id=receipt.turn_id)
 
     def append_generated_image_context(
         self,
@@ -2277,6 +2500,7 @@ class ContextBuilder:
                 tool_calls=list(tool_calls),
                 phase=str(phase or ""),
                 provider_items=list(provider_items or []),
+                answer_source="retained",
             )
             self._history_store.append(message)
         else:
@@ -2286,6 +2510,8 @@ class ContextBuilder:
             if provider_items:
                 message.provider_items = list(provider_items)
             self._history_store.refresh_message_estimate(message)
+        self._record_guardian_assistant(content, phase=phase, provider_items=provider_items,
+            fallback_id=f"assistant-tool:{tool_calls[0].id}" if tool_calls else None)
         return message
 
     def settle_streamed_tool_message(self, message: LLMMessage) -> None:
@@ -2326,15 +2552,41 @@ class ContextBuilder:
         conversation_id: str = "",
         workspace_root: Path | str | None = None,
     ) -> None:
-        content = result.to_context_string()
+        is_user_input_result = tool_name == "request_user_input" or tool_name in CONTEXT_TOOL_NAMES
+        content = result.content if is_user_input_result else result.to_context_string()
+        from backend.agent.guardian.retained import GuardianTranscriptEntry
+
+        turn_id = self._tool_execution_context.turn_id if self._tool_execution_context is not None else ""
+        self.guardian_evidence.record_transcript(GuardianTranscriptEntry(f"tool {tool_name}", content,
+            turn_id=turn_id, message_id=tool_call_id))
         owner_conversation_id = str(conversation_id or self._conversation_id or "").strip()
         owner_workspace_root = workspace_root or self._workspace_root
+        mcp_output = None
+        code_mode_output = deepcopy(result.code_mode_output)
+        history_notes_output = deepcopy(result.history_notes_output)
+        if history_notes_output is not None:
+            content = result.content
+        if code_mode_output is not None:
+            content = result.content
+        if result.mcp_result is not None:
+            from backend.mcp.result_projection import budget_mcp_output, mcp_output_log_text
+
+            issuing = self._tool_execution_context.model_execution if self._tool_execution_context is not None else None
+            model_info = issuing.model_info if issuing is not None else self._context_window_model_info
+            settings = issuing.config.llm if issuing is not None else getattr(self._llm, "_settings", None)
+            policy = model_info.truncation_policy if model_info is not None else settings.truncation_policy if settings is not None else None
+            original = model_info.supports_image_detail_original if model_info is not None else settings.supports_image_detail_original if settings is not None else False
+            mcp_output = budget_mcp_output(result.mcp_result,
+                wall_time=result.runtime_metadata.get("mcp_wall_time_seconds", 0.0), policy=policy,
+                output_token_limit=result.runtime_metadata.get("mcp_output_token_limit"),
+                original_image_detail_supported=original)
+            content = mcp_output_log_text(mcp_output)
         # Artifact-backed results already preserve the full output and carry a
         # bounded, readable preview. Persisting that pointer-plus-preview a
         # second time would hide the result contract behind another
         # unrelated preview file and leave two recovery mechanisms for one
         # result.
-        if not result.artifact_id:
+        if mcp_output is None and code_mode_output is None and history_notes_output is None and not result.artifact_id and not is_user_input_result:
             content = try_persist_tool_result(
                 content,
                 tool_call_id,
@@ -2345,7 +2597,7 @@ class ContextBuilder:
 
         # Add a structured status prefix matching the tool-result format.
         status = "error" if result.is_error else "completed"
-        if not content.startswith("<persisted-output>"):
+        if mcp_output is None and code_mode_output is None and history_notes_output is None and not is_user_input_result and not content.startswith("<persisted-output>"):
             content = (
                 f'<function_call_result status="{status}" call_id="{tool_call_id}">\n'
                 f"{content}\n"
@@ -2359,7 +2611,12 @@ class ContextBuilder:
                 name=tool_name,
                 tool_call_id=tool_call_id,
                 is_error=bool(result.is_error),
-                images=list(result.images),
+                mcp_output=mcp_output,
+                code_mode_output=code_mode_output,
+                history_notes_output=history_notes_output,
+                private_model_only=result.runtime_metadata.get("_private_model_only") is True,
+                tool_search_output=deepcopy(result.tool_search_output),
+                images=list(result.images) if mcp_output is None and code_mode_output is None and history_notes_output is None else [],
             ),
             raw_content=content,
         )
@@ -2482,6 +2739,8 @@ class ContextBuilder:
 
         def candidate(index: int) -> _ToolResultBudgetCandidate | None:
             message = self._history[index]
+            if message.name == "request_user_input" or message.mcp_output is not None or message.code_mode_output is not None or message.history_notes_output is not None:
+                return None
             tool_call_id = str(message.tool_call_id or "").strip()
             if not tool_call_id:
                 return None
@@ -2510,6 +2769,7 @@ class ContextBuilder:
                 images=list(message.images),
                 documents=list(message.documents),
                 phase=message.phase,
+                answer_source=message.answer_source,
                 provider_items=list(message.provider_items),
                 attachment_refs=list(message.attachment_refs),
                 runtime_context=message.runtime_context,
@@ -2741,6 +3001,12 @@ class ContextBuilder:
         """Capture the admitted input before streamed tool items change history."""
         self._request_prompt_estimate = estimate_llm_context_tokens(messages, tools)
         self._request_history_estimate = self._history_tokens_total
+        if self.token_budget_enabled:
+            window = self._context_window_state
+            if window.last_response_total_tokens is None:
+                window.last_response_total_tokens = self._request_prompt_estimate
+            if window.prefill_input_tokens is None:
+                window.prefill_input_tokens = self._request_prompt_estimate
 
     def record_actual_usage(
         self, usage: UsageInfo | None, provider_raw: dict[str, Any] | None = None
@@ -2752,6 +3018,12 @@ class ContextBuilder:
         """
         if usage is None:
             return
+        if self.token_budget_enabled:
+            window = self._context_window_state
+            window.last_response_total_tokens = usage.total_tokens
+            if not window.prefill_server_observed:
+                window.prefill_input_tokens = usage.input_tokens
+                window.prefill_server_observed = True
         stats = prompt_cache_usage_stats(usage, provider_raw)
         observed = int(stats.get("prompt_cache_total_tokens") or 0)
         cache_hit_pct = float(stats.get("prompt_cache_hit_rate") or 0.0)
@@ -2843,6 +3115,7 @@ class ContextBuilder:
                 tool_call_id=message.tool_call_id,
                 tool_calls=message.tool_calls,
                 phase=message.phase,
+                answer_source=message.answer_source,
                 provider_items=list(message.provider_items),
                 images=list(message.images),
                 documents=list(message.documents),
@@ -2870,7 +3143,6 @@ class ContextBuilder:
     ) -> dict[str, Any]:
         if messages is None:
             workspace_root = self._workspace_root_for_state(state)
-            self._rehydrate_attachment_refs(state, workspace_root)
             messages = self._render_prompt_messages(state, workspace_root)
         system_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "system")
         developer_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "developer")
@@ -2919,6 +3191,8 @@ class ContextBuilder:
         tool_schemas: list[dict[str, Any]] | None = None,
         messages: list[LLMMessage] | None = None,
     ) -> bool:
+        if self.token_budget_enabled:
+            return self.new_context_window_requested or self.context_window_status()["token_limit_reached"]
         # The compaction boundary is the request that can actually be sent:
         # rendered prompt tokens plus the provider response reserve.  Keep the
         # snapshot and trigger on that single contract; a second fixed buffer
@@ -3205,6 +3479,11 @@ class ContextBuilder:
         )
         cloned.extension_cursor = {}
         cloned._history = cloned._history[: max(0, message_index + 1)]
+        removed_admissions = sorted(((key, boundary) for key, boundary in cloned._turn_admissions.items()
+            if boundary["history_end"] > len(cloned._history)), key=lambda item: item[1]["history_start"])
+        if removed_admissions:
+            cloned.guardian_evidence.rollback_before(removed_admissions[0][0],
+                removed_turns={str(boundary["run_id"]) for _, boundary in removed_admissions})
         cloned._turn_admissions = {
             key: boundary for key, boundary in cloned._turn_admissions.items()
             if boundary["history_end"] <= len(cloned._history)
@@ -3285,13 +3564,24 @@ class ContextBuilder:
 
         return cut_index
 
+    def _compaction_inflight_start(self) -> int:
+        completed = {message.tool_call_id for message in self._history if message.role == "tool"}
+        return next((index for index, message in enumerate(self._history)
+            if any(call.id not in completed for call in message.tool_calls or ())), len(self._history))
+
 
     async def compact(
         self, focus: str = "", restore_state: AgentState | None = None,
         *, replacement_budget: TokenBudget | None = None,
         replacement_llm: LLMAdapter | None = None,
+        manual: bool = False,
     ) -> str:
-        """Summarize older entries while preserving a token-bounded recent tail."""
+        """Compact the explicit model window or the automatic older prefix."""
+        if self.token_budget_enabled:
+            return self.start_new_context_window(
+                restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root),
+                replacement_budget=replacement_budget, replacement_llm=replacement_llm,
+            )
         if replacement_llm is not None:
             require_native_context_origin(
                 self._history, replacement_llm.native_context_origin,
@@ -3321,7 +3611,8 @@ class ContextBuilder:
             self._llm.validate_context(self._history)
         budget = replacement_budget if replacement_budget is not None else self._budget
         keep_recent = min(self._agent_settings.compaction_keep_recent_tokens, max(0, budget.history_budget // 2))
-        recent_start = self._compaction_cut(keep_recent)
+        recent_start = min(len(self._history) if manual else self._compaction_cut(keep_recent),
+            self._compaction_inflight_start())
 
         if recent_start <= pinned_end:
             raise CompactionNoopError()
@@ -3349,6 +3640,10 @@ class ContextBuilder:
         compressed_summary = await self._summarize_early(
             early_messages, focus=focus, max_tokens=summary_limit,
         )
+        # Tool execution can append its real results while an extension's
+        # compaction request is in flight. The live call message and every
+        # result added after it remain owned by the execution/settlement path.
+        recent = self._history[recent_start:]
         summary_message = LLMMessage(
             role="user",
             content=(
@@ -3381,13 +3676,86 @@ class ContextBuilder:
         )
         return compressed_summary
 
+    def start_new_context_window(
+        self, state: AgentState, *, replacement_budget: TokenBudget | None = None,
+        replacement_llm: LLMAdapter | None = None,
+    ) -> str:
+        """Install initial context, keeping the old window as durable evidence."""
+        previous = self.export_snapshot()
+        previous.pop("inactive_context_windows", None)
+        self._inactive_context_windows.append(previous)
+        self._context_window_state.advance()
+        self._history_notes_hint = {}
+        if replacement_budget is not None:
+            self.bind_budget(replacement_budget)
+        if replacement_llm is not None:
+            self.bind_llm(replacement_llm)
+        self._guideline_load_reason = "compact"
+        self._compaction_count += 1
+        self._consecutive_autocompact_failures = 0
+        clear_system_prompt_sections()
+        # Source replaces active items with a new initial context. Skills are
+        # still selected host context; user turns and tool evidence stay only
+        # in the durable prior-window checkpoint and the execution journal.
+        self._history = [
+            LLMMessage(role="user", content=self._render_skill_payload(payload))
+            for payload in self._invoked_skill_payloads.values()
+        ]
+        self._history_store.append(LLMMessage(role="user", content=self._build_environment_context_xml(state)))
+        self._history_frozen_count = 0
+        self._pending_hydration_frozen_prefix_count = 0
+        self._turn_admissions.clear()
+        # This is provider read provenance, not filesystem/environment state.
+        # Never authorize a later guarded write from discarded active items.
+        self._read_file_hashes.clear()
+        from backend.agent.extension_history import rebase_extension_history
+        rebase_extension_history(self.extension_state, removed_prefix=len(previous["history"]), inserted_prefix=len(self._history))
+        self._extension_history_floor = len(self._history)
+        self._withheld_media_timestamps.clear()
+        self._tool_result_budget_seen_ids.clear()
+        self._tool_result_budget_replacements.clear()
+        self._pending_runtime_context_update = ""
+        self._prepared_prompt_parts = None
+        self._prepared_prompt_state = None
+        self._last_actual_prompt_tokens = 0
+        self._last_estimated_prompt_tokens = 0
+        self._history_store.ensure_timestamps()
+        self._history_store.rebuild_token_cache()
+        initial_tokens = estimate_llm_context_tokens(self._render_prompt_messages(state, self._workspace_root_for_state(state))) + self._request_tool_schema_tokens
+        self._context_window_state.last_response_total_tokens = initial_tokens
+        self._context_window_state.prefill_input_tokens = initial_tokens
+        # No summarizer, synthetic handoff, or restoration of old tool output.
+        return ""
+
+    def record_context_window_reminders(self, *, allow_fallback: bool) -> None:
+        if not self.token_budget_enabled:
+            return
+        tokens_left = self.context_window_status()["tokens_left"]
+        if tokens_left is None:
+            return
+        config, window = self._context_window_config, self._context_window_state
+        if config.reminder_threshold_tokens is not None and tokens_left <= config.reminder_threshold_tokens and not window.reminder_delivered:
+            window.reminder_delivered = True
+            self._history_store.append(LLMMessage(role="developer", content=config.reminder_message_template.replace("{n_remaining}", str(tokens_left))))
+        if allow_fallback and tokens_left == 0 and config.auto_compact_fallback_prompt is not None and not window.fallback_delivered:
+            window.fallback_delivered = True
+            self._history_store.append(LLMMessage(role="developer", content=config.auto_compact_fallback_prompt))
+
     async def _compact_native_context(
         self, focus: str, restore_state: AgentState | None, *,
         replacement_budget: TokenBudget | None = None,
         replacement_llm: LLMAdapter | None = None,
     ) -> str:
         state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
-        messages = self._render_prompt_messages(state, self._workspace_root_for_state(state))
+        recent_start = self._compaction_inflight_start()
+        if recent_start == 0:
+            raise CompactionNoopError()
+        compact_builder = self
+        if recent_start < len(self._history):
+            compact_builder = clone_context_builder(self)
+            compact_builder._history = compact_builder._history[:recent_start]
+            compact_builder._history_store.rebuild_token_cache()
+        messages = compact_builder._render_prompt_messages(state, self._workspace_root_for_state(state))
         if focus:
             messages.insert(0, LLMMessage(role="system", content=f"Compaction focus requested by the user: {focus}"))
         replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
@@ -3395,11 +3763,12 @@ class ContextBuilder:
             replacement_llm.validate_context([replacement])
         # References preserve access to originals without duplicating the
         # provider's returned media or trying to interpret encrypted content.
-        refs = {ref["artifact_id"]: ref for message in self._history for ref in message.attachment_refs}
+        refs = {ref["artifact_id"]: ref for message in self._history[:recent_start] for ref in message.attachment_refs}
         replacement.attachment_refs = list(refs.values())
         if replacement_budget is not None:
             self.bind_budget(replacement_budget)
-        self._install_compacted_history([replacement], removed_prefix=len(self._history), recent_count=0, restore_state=restore_state)
+        recent = self._history[recent_start:]
+        self._install_compacted_history([replacement, *recent], removed_prefix=recent_start, recent_count=len(recent), restore_state=restore_state)
         return "Provider-native context compaction completed."
 
     def _install_compacted_history(
@@ -3410,6 +3779,14 @@ class ContextBuilder:
         self._compaction_count += 1
         self._consecutive_autocompact_failures = 0
         self._history = history
+        window = next((window for message in reversed(history)
+            for window in reversed(native_compaction_windows(message))), None)
+        checkpoint = next((item for item in reversed(window["output"])
+            if item["type"] in {"compaction", "context_compaction"}), None) if window is not None else None
+        self.guardian_evidence.capture_parent_compaction(checkpoint,
+            origin=window["origin"] if window is not None else "",
+            model_hash=window.get("compaction_model_hash") if window is not None else None,
+            reviewer_compaction_hash=self._guardian_reviewer_compaction_hash)
         # Compaction intentionally rewrites the prefix; a provider must create
         # a new cache segment from the compacted summary.
         self._history_frozen_count = 0
@@ -3571,10 +3948,14 @@ class ContextBuilder:
         return parse_compaction_output(output).summary
 
     def _get_history_within_budget(self) -> list[LLMMessage]:
+        prefix_end = 0
+        while prefix_end < len(self._history) and _is_prompt_instruction_role(self._history[prefix_end].role):
+            prefix_end += 1
         selected = [
             self._history[index]
             for index in self._get_history_within_budget_indices()
-            if not _is_prompt_instruction_role(self._history[index].role)
+            if self._history[index].role != "system"
+            and not (self._history[index].role == "developer" and index < prefix_end)
         ]
         return repair_tool_messages(selected)[0]
 
@@ -3582,9 +3963,11 @@ class ContextBuilder:
     def history_length(self) -> int:
         return len(self._history)
 
-    def clear(self) -> None:
+    def clear(self, *, reset_guardian: bool = True) -> None:
         clear_system_prompt_sections()
         self._history_store.clear()
+        if reset_guardian:
+            self.guardian_evidence.reset_history()
         self._withheld_media_timestamps.clear()
         self._pending_runtime_context_update = ""
         self._persistent_notes.clear()
@@ -3604,9 +3987,17 @@ class ContextBuilder:
         self._git_status_workspace = ""
         self._git_status_authority = None
         self._tool_execution_context = None
+        self._guardian_reviewer_compaction_hash = None
         self._tool_result_budget_seen_ids.clear()
         self._tool_result_budget_replacements.clear()
         self._invoked_skill_payloads.clear()
+        self._context_window_state = ContextWindowState() if self.token_budget_enabled else None
+        self._context_window_source_config = None
+        self._context_window_model_info = None
+        self._context_window_input_preferences = None
+        self._inactive_context_windows.clear()
+        self._history_notes_backend = None
+        self._history_notes_hint = {}
         self._consecutive_autocompact_failures = 0
         # Provider-observed measurements describe the conversation being
         # discarded. A ContextBuilder is reused across conversation switches
@@ -3663,7 +4054,14 @@ class ContextBuilder:
                 "tool_call_id": message.tool_call_id,
                 "is_error": bool(message.is_error),
                 "phase": message.phase,
+                "input_origin": message.input_origin,
+                "answer_source": message.answer_source,
                 "provider_items": _sanitize_provider_items(message.provider_items),
+                **({"mcp_output": deepcopy(message.mcp_output)} if message.mcp_output is not None else {}),
+                **({"code_mode_output": deepcopy(message.code_mode_output)} if message.code_mode_output is not None else {}),
+                **({"tool_search_output": deepcopy(message.tool_search_output)} if message.tool_search_output is not None else {}),
+                **({"history_notes_output": deepcopy(message.history_notes_output)} if message.history_notes_output is not None else {}),
+                **({"private_model_only": True} if message.private_model_only else {}),
                 "attachment_refs": attachment_refs,
                 # Provenance is part of the durable projection used to decide
                 # whether an unsent user wrapper can be refreshed.  Truncating
@@ -3681,6 +4079,9 @@ class ContextBuilder:
                         "id": tool_call.id,
                         "name": tool_call.name,
                         "arguments": tool_call.arguments,
+                        "native_type": tool_call.native_type,
+                        "native_namespace": tool_call.native_namespace,
+                        "native_name": tool_call.native_name,
                     }
                     for tool_call in (message.tool_calls or [])
                 ],
@@ -3761,6 +4162,7 @@ class ContextBuilder:
             rebase_extension_history(extension_state, removed_prefix=omitted_prefix_count, inserted_prefix=0)
         return {
             "context_schema_version": CONTEXT_SNAPSHOT_SCHEMA_VERSION,
+            "guardian_evidence": self.guardian_evidence.checkpoint(),
             "history": sanitized_history,
             "history_frozen_count": frozen_count,
             **({"turn_admissions": admissions} if admissions else {}),
@@ -3774,12 +4176,16 @@ class ContextBuilder:
             "compaction_count": self._compaction_count,
             "git_status_context": self._git_status_context,
             "git_status_workspace": self._git_status_workspace,
+            "execution_cwd": str(self._workspace_root or ""),
             "invoked_skills": [
                 dict(payload)
                 for payload in self._invoked_skill_payloads.values()
             ],
             "consecutive_autocompact_failures": self._consecutive_autocompact_failures,
             "context_ledger": self.context_ledger(),
+            **({"context_window_state": asdict(self._context_window_state)} if self._context_window_state is not None else {}),
+            **({"inactive_context_windows": deepcopy(self._inactive_context_windows)} if self._inactive_context_windows else {}),
+            **({"history_notes_hint": deepcopy(self._history_notes_hint)} if self._history_notes_hint else {}),
         }
 
     def export_snapshot_delta(
@@ -3804,11 +4210,13 @@ class ContextBuilder:
         return delta, revision
 
     def load_snapshot(self, snapshot: dict[str, Any] | None) -> None:
-        self.clear()
+        guardian_history_reset = bool(self._history or self.guardian_evidence.transcript)
+        self.clear(reset_guardian=False)
         if not snapshot:
+            self.guardian_evidence.reset_history()
             return
 
-        self._load_snapshot_metadata(snapshot)
+        self._load_snapshot_metadata(snapshot, guardian_history_reset=guardian_history_reset)
         self._history = self.deserialize_snapshot_history(
             self._snapshot_history_with_admissions(snapshot)
         )
@@ -3832,11 +4240,13 @@ class ContextBuilder:
         *,
         recent_history_count: int = 20,
     ) -> list[dict[str, Any]]:
-        self.clear()
+        guardian_history_reset = bool(self._history or self.guardian_evidence.transcript)
+        self.clear(reset_guardian=False)
         if not snapshot:
+            self.guardian_evidence.reset_history()
             return []
 
-        self._load_snapshot_metadata(snapshot)
+        self._load_snapshot_metadata(snapshot, guardian_history_reset=guardian_history_reset)
         raw_history = self._snapshot_history_with_admissions(snapshot)
         if recent_history_count <= 0:
             recent_history: list[dict[str, Any]] = []
@@ -3945,13 +4355,15 @@ class ContextBuilder:
         raw_history: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         sanitized: list[dict[str, Any]] = []
+        history_started = False
         for raw in raw_history:
             if not isinstance(raw, dict):
                 continue
             role = _normalize_message_role(raw.get("role", "user"))
             content = _message_content_text(raw.get("content", ""))
-            if _is_prompt_instruction_role(role):
+            if role == "system" or (role == "developer" and not history_started):
                 continue
+            history_started = True
             raw = {**raw, "role": role, "content": content}
             raw["provider_items"] = _sanitize_provider_items(raw.get("provider_items"))
             raw["attachment_refs"] = _sanitize_attachment_refs(
@@ -3964,6 +4376,8 @@ class ContextBuilder:
             )
             raw["is_error"] = bool(raw.get("is_error", False))
             raw["phase"] = str(raw.get("phase") or "")[:40]
+            raw["input_origin"] = str(raw.get("input_origin") or "")
+            raw["answer_source"] = str(raw.get("answer_source") or "")[:40]
             # Content is data, including repeated prompts and literal internal
             # marker examples. Only explicit provenance may identify runtime
             # context; importing history must not guess from text spelling.
@@ -4014,6 +4428,9 @@ class ContextBuilder:
                             id=call_id,
                             name=call_name,
                             arguments=dict(raw_arguments) if isinstance(raw_arguments, dict) else {},
+                            native_type=str(tool_call.get("native_type") or ""),
+                            native_namespace=str(tool_call.get("native_namespace") or ""),
+                            native_name=str(tool_call.get("native_name") or ""),
                         )
                     )
                 if not parsed_tool_calls:
@@ -4027,7 +4444,14 @@ class ContextBuilder:
                     tool_calls=parsed_tool_calls,
                     is_error=bool(raw.get("is_error", False)),
                     phase=str(raw.get("phase") or "")[:40],
+                    input_origin=raw["input_origin"],
+                    answer_source=str(raw.get("answer_source") or "")[:40],
                     provider_items=_sanitize_provider_items(raw.get("provider_items")),
+                    mcp_output=deepcopy(raw.get("mcp_output")),
+                    code_mode_output=deepcopy(raw.get("code_mode_output")),
+                    tool_search_output=deepcopy(raw.get("tool_search_output")),
+                    history_notes_output=deepcopy(raw.get("history_notes_output")),
+                    private_model_only=raw.get("private_model_only") is True,
                     images=_sanitize_media_items(raw.get("images")),
                     documents=_sanitize_media_items(
                         raw.get("documents"),
@@ -4051,7 +4475,25 @@ class ContextBuilder:
                 )
         return parsed_history
 
-    def _load_snapshot_metadata(self, snapshot: dict[str, Any]) -> None:
+    def _load_snapshot_metadata(self, snapshot: dict[str, Any], *, guardian_history_reset: bool = False) -> None:
+        from backend.agent.guardian.retained import GuardianEvidenceOwner
+
+        if "guardian_evidence" in snapshot:
+            if guardian_history_reset:
+                self.guardian_evidence.reset_history(snapshot["guardian_evidence"])
+            else:
+                self.guardian_evidence = GuardianEvidenceOwner.from_checkpoint(snapshot["guardian_evidence"])
+        else:
+            self.guardian_evidence.reset_history()
+            self.guardian_evidence.has_transcript_backup = False
+        if "guardian_evidence" not in snapshot and snapshot.get("history"):
+            # Legacy snapshots did not retain original host acceptance or
+            # verified questions. Their model transcript cannot recreate it.
+            self.guardian_evidence.retained.user_messages_incomplete = True
+            self.guardian_evidence.retained.verified_answers_incomplete = True
+        if "context_window_state" in snapshot:
+            self._context_window_state = ContextWindowState(**snapshot["context_window_state"])
+        self._inactive_context_windows = deepcopy(snapshot.get("inactive_context_windows", []))
         from backend.agent.checkpoint import CONTEXT_SNAPSHOT_SCHEMA_VERSION
         if int(snapshot.get("context_schema_version") or 1) not in (1, 2, 3, CONTEXT_SNAPSHOT_SCHEMA_VERSION):
             raise ValueError("Unsupported context snapshot schema version")
@@ -4082,6 +4524,7 @@ class ContextBuilder:
             str(raw_git_status) if isinstance(raw_git_status, str) else None
         )
         self._git_status_workspace = str(snapshot.get("git_status_workspace") or "")
+        self._history_notes_hint = deepcopy(snapshot.get("history_notes_hint", {}))
         # A durable projection is not proof of its original execution authority.
         self._git_status_authority = None
         self._invoked_skill_payloads = {}

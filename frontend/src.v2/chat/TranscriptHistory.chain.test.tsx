@@ -87,9 +87,10 @@ describe("history ownership, commit and reading position", () => {
       clientHeight: { configurable: true, value: 100 },
     });
     scroll.scrollTop = 70;
-    fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
+    fireEvent.wheel(scroll, { deltaY: -120 });
     scroll.scrollTop = 90;
     fireEvent.scroll(scroll);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
     await act(async () => { pending.resolve(pageResponse()); });
     await waitFor(() => expect(document.querySelector('[data-turn="assistant-earlier"]')).not.toBeNull());
     expect(scroll.scrollTop).toBe(490);
@@ -101,15 +102,58 @@ describe("history ownership, commit and reading position", () => {
     const pending = deferred<Response>();
     mocks.fetch.mockReturnValueOnce(pending.promise);
     render(<MessageList />);
-    fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
+    fireEvent.wheel(screen.getByTestId("message-list-scroll"), { deltaY: -120 });
     act(() => useAppStore.setState({ conversationId: "B", workingDirectory: "C:/B",
       messages: Array.from({ length: 45 }, (_, index) => pair("B-" + index)).flat(),
       conversationMessages: { A: pair("current") }, conversationStreaming: { A: false, B: false } }));
     await act(async () => { pending.resolve(pageResponse()); });
-    expect(screen.getByText("显示更早的消息（5）")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /显示更早的消息/ })).toBeNull();
     expect(document.querySelector('[data-turn="assistant-B-0"]')).toBeNull();
     expect(useAppStore.getState().conversationMessages.A[0].id).toBe("user-earlier");
     expect(useAppStore.getState().messages[0].id).toBe("user-B-0");
+  });
+
+  it("loads the next real cursor only when the reader scrolls back to the top", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      transcript: backendPair("older"),
+      transcript_page: { before_message_id: "user-older", has_more: true },
+    }), { status: 200 }));
+    mocks.fetch.mockResolvedValueOnce(pageResponse(backendPair("oldest")));
+    render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, get: () => useAppStore.getState().messages.length * 200 },
+      clientHeight: { configurable: true, value: 100 },
+    });
+    scroll.scrollTop = 300;
+    fireEvent.wheel(scroll, { deltaY: -120 });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    scroll.scrollTop = 80;
+    fireEvent.scroll(scroll);
+    await waitFor(() => expect(useAppStore.getState().messages[0].id).toBe("user-older"));
+    expect(scroll.scrollTop).toBe(480);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    scroll.scrollTop = 0;
+    fireEvent.wheel(scroll, { deltaY: -120 });
+    await waitFor(() => expect(useAppStore.getState().messages[0].id).toBe("user-oldest"));
+    expect(mocks.fetch.mock.calls[1][0].searchParams.get("before_message_id")).toBe("user-older");
+    expect(useAppStore.getState().conversationHistoryPages.A.hasMore).toBe(false);
+    expect(screen.queryByRole("button", { name: /更早的消息/ })).toBeNull();
+  });
+
+  it("reports a real paging failure and retries through the next deliberate upward scroll", async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ detail: "history unavailable" }), { status: 503 }));
+    mocks.fetch.mockResolvedValueOnce(pageResponse());
+    render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    fireEvent.wheel(scroll, { deltaY: -120 });
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("history unavailable", "error"));
+    expect(useAppStore.getState().conversationHistoryPages.A.loading).toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().messages[0].id).toBe("user-current");
+    fireEvent.wheel(scroll, { deltaY: -120 });
+    await waitFor(() => expect(useAppStore.getState().messages[0].id).toBe("user-earlier"));
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("never projects deferred A messages with B's owner or workspace", () => {

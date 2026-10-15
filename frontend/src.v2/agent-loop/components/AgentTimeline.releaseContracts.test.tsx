@@ -4,6 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { AgentTimeline } from "./AgentTimeline";
 import type { ExecCellState, StatusNoticeCellState } from "../../chat/cells/cellTypes";
+import { StatusNoticeCell } from "../../chat/cells/StatusNoticeCell";
 
 afterEach(cleanup);
 
@@ -15,7 +16,9 @@ it("shows a terminal tool failure without requiring another disclosure click", (
 
 it("preserves compaction failure wording instead of projecting success", () => {
   const cell: StatusNoticeCellState = { kind: "status_notice", id: "compact-failure", tone: "danger", title: "上下文压缩失败", message: "Provider unavailable", createdAt: 1 };
-  render(<AgentTimeline cells={[cell]} renderCell={({ cell: item }) => <div>{item.id}</div>} />);
-  expect(screen.getByRole("region", { name: "上下文压缩失败" })).toBeTruthy();
+  render(<AgentTimeline cells={[cell]} renderCell={({ cell: item }) => item.kind === "status_notice"
+    ? <StatusNoticeCell cell={item} /> : <div>{item.id}</div>} />);
+  expect(screen.getByText("上下文压缩失败")).toBeTruthy();
+  expect(screen.getByText("Provider unavailable")).toBeTruthy();
   expect(screen.queryByText("上下文已自动压缩")).toBeNull();
 });

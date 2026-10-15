@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import {
   ArrowLeft,
   ArrowRight,
@@ -8,6 +9,7 @@ import {
   PanelRight,
   Search,
   Square,
+  Copy,
   SquareTerminal,
   Wifi,
   WifiOff,
@@ -44,6 +46,7 @@ export const HeaderBar = ({
   onToggleLeftPanel,
   onToggleRightPanel,
 }: HeaderBarProps) => {
+  const { t: tr } = useI18n();
   const isConnected = useAppStore((s) => s.isConnected);
   const connectionPhase = useAppStore((s) => s.connectionPhase);
   const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
@@ -71,7 +74,7 @@ export const HeaderBar = ({
     reconnectAttempt,
     reconnectMaxAttempts,
     connectionError,
-  });
+  }, tr);
   const projectName = workingDirectory.split(/[\\/]/).filter(Boolean).pop() || "MiniCode";
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingSwitch = useAppStore((state) => state.pendingConversationSwitchId);
@@ -94,6 +97,14 @@ export const HeaderBar = ({
     useAppStore.getState().requestConversationSwitch(id);
   };
   const [menu, setMenu] = useState<{ key: DesktopMenuKey; x: number; y: number } | null>(null);
+  const [windowMaximized, setWindowMaximized] = useState(false);
+  useEffect(() => {
+    if (!isDesktop()) return;
+    const controls = desktop()!.windowControls;
+    const unsubscribe = controls.onStateChanged(state => setWindowMaximized(state.isMaximized));
+    void controls.getState().then(state => setWindowMaximized(state.isMaximized));
+    return unsubscribe;
+  }, []);
   const browserEditTarget = useRef<HTMLElement | null>(null);
   const editSelection = (command: string) => {
     browserEditTarget.current?.focus({ preventScroll: true });
@@ -102,32 +113,32 @@ export const HeaderBar = ({
   const browserMenuItems = (key: DesktopMenuKey): ContextMenuItem[] => {
     const state = useAppStore.getState();
     if (key === "file") return [
-      { label: "新聊天", onClick: () => state.createConversation({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) }) },
-      { label: "打开文件夹…", onClick: () => { void openWorkspaceFolder(); } },
-      { label: "设置…", onClick: () => { if (!state.settingsOpen) state.toggleSettings(); } },
+      { label: tr("新聊天"), onClick: () => state.createConversation({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) }) },
+      { label: tr("打开文件夹…"), onClick: () => { void openWorkspaceFolder(); } },
+      { label: tr("设置…"), onClick: () => { if (!state.settingsOpen) state.toggleSettings(); } },
     ];
     if (key === "edit") return [
-      { label: "撤销", onClick: () => editSelection("undo") },
-      { label: "重做", onClick: () => editSelection("redo") },
-      { label: "复制", onClick: () => editSelection("copy") },
-      { label: "全选", onClick: () => editSelection("selectAll") },
+      { label: tr("撤销"), onClick: () => editSelection("undo") },
+      { label: tr("重做"), onClick: () => editSelection("redo") },
+      { label: tr("复制"), onClick: () => editSelection("copy") },
+      { label: tr("全选"), onClick: () => editSelection("selectAll") },
     ];
     if (key === "view") return [
-      { label: leftPanelOpen ? "收起左侧栏" : "打开左侧栏", onClick: onToggleLeftPanel },
-      { label: rightPanelOpen ? "关闭右侧栏" : "打开右侧栏", onClick: onToggleRightPanel },
-      { label: "打开终端", onClick: () => state.openBottomTab("terminal") },
+      { label: leftPanelOpen ? tr("收起左侧栏") : tr("打开左侧栏"), onClick: onToggleLeftPanel },
+      { label: rightPanelOpen ? tr("关闭右侧栏") : tr("打开右侧栏"), onClick: onToggleRightPanel },
+      { label: tr("打开终端"), onClick: () => state.openBottomTab("terminal") },
     ];
-    return [{ label: "键盘快捷键", onClick: () => { state.setSettingsTab("shortcuts"); if (!state.settingsOpen) state.toggleSettings(); } }];
+    return [{ label: tr("键盘快捷键"), onClick: () => { state.setSettingsTab("shortcuts"); if (!state.settingsOpen) state.toggleSettings(); } }];
   };
 
   return (
     <header className="header-bar mc-header">
       <div className="mc-header-start">
-        <button type="button" className="mc-titlebar-navigation" aria-label="上一条访问的对话" title="后退" disabled={Boolean(pendingSwitch) || history.index <= 0} onClick={() => navigateHistory(history.index - 1)}><ArrowLeft size={17} /></button>
-        <button type="button" className="mc-titlebar-navigation" aria-label="下一条访问的对话" title="前进" disabled={Boolean(pendingSwitch) || history.index >= history.ids.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={17} /></button>
+        <button type="button" className="mc-titlebar-navigation" aria-label={tr("上一条访问的对话")} title={tr("后退")} disabled={Boolean(pendingSwitch) || history.index <= 0} onClick={() => navigateHistory(history.index - 1)}><ArrowLeft size={17} /></button>
+        <button type="button" className="mc-titlebar-navigation" aria-label={tr("下一条访问的对话")} title={tr("前进")} disabled={Boolean(pendingSwitch) || history.index >= history.ids.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={17} /></button>
         {leftPanelAvailable && (
           <IconButton
-            label={leftPanelOpen ? "收起左侧栏" : "打开左侧栏"}
+            label={leftPanelOpen ? tr("收起左侧栏") : tr("打开左侧栏")}
             onClick={onToggleLeftPanel}
             active={leftPanelOpen}
             ariaControls={leftPanelControls}
@@ -139,8 +150,8 @@ export const HeaderBar = ({
       </div>
 
       <div className="mc-header-center">
-        <nav className="mc-titlebar-menus" aria-label="应用菜单">
-          {([['file', '文件'], ['edit', '编辑'], ['view', '视图'], ['help', '帮助']] as const).map(([key, label]) => <button key={key} type="button" aria-haspopup="menu" aria-expanded={menu?.key === key} onMouseDown={(event) => event.preventDefault()} onClick={(event) => {
+        <nav className="mc-titlebar-menus" aria-label={tr("应用菜单")}>
+          {([['file', tr("文件")], ['edit', tr("编辑")], ['view', tr("视图")], ['help', tr("帮助")]] as const).map(([key, label]) => <button key={key} type="button" aria-haspopup="menu" aria-expanded={menu?.key === key} onMouseDown={(event) => event.preventDefault()} onClick={(event) => {
             const native = desktop();
             if (native) {
               setMenu(null);
@@ -157,13 +168,13 @@ export const HeaderBar = ({
       </div>
 
       <div className="mc-header-end">
-        <IconButton label="命令面板" onClick={() => toggleCommandPalette()} buttonRef={sideChatFallbackButtonRef}>
+        <IconButton label={tr("命令面板")} onClick={() => toggleCommandPalette()} buttonRef={sideChatFallbackButtonRef}>
           <Search />
         </IconButton>
         {rightPanelAvailable && (
           <>
             <IconButton
-              label={terminalVisible ? "关闭终端" : "打开终端"}
+              label={terminalVisible ? tr("关闭终端") : tr("打开终端")}
               onClick={() => {
                 if (terminalVisible) closeBottomDock();
                 else openBottomTab("terminal");
@@ -174,7 +185,7 @@ export const HeaderBar = ({
               <SquareTerminal />
             </IconButton>
             <IconButton
-              label={rightPanelOpen ? "关闭右侧栏" : "打开右侧栏"}
+              label={rightPanelOpen ? tr("关闭右侧栏") : tr("打开右侧栏")}
               onClick={onToggleRightPanel}
               active={rightPanelOpen}
               ariaControls={rightPanelControls}
@@ -201,13 +212,13 @@ export const HeaderBar = ({
 
         {isDesktop() && (
           <div className="mc-window-controls">
-            <WindowControlButton label="最小化" onClick={() => desktop()?.windowControls.minimize()}>
+            <WindowControlButton label={tr("最小化")} onClick={() => desktop()?.windowControls.minimize()}>
               <Minus size={14} />
             </WindowControlButton>
-            <WindowControlButton label="最大化" onClick={() => desktop()?.windowControls.maximize()}>
-              <Square size={14} />
+            <WindowControlButton label={windowMaximized ? tr("还原窗口") : tr("最大化")} onClick={() => desktop()?.windowControls.maximize()}>
+              {windowMaximized ? <Copy size={14} /> : <Square size={14} />}
             </WindowControlButton>
-            <WindowControlButton label="关闭" onClick={() => desktop()?.windowControls.close()} danger>
+            <WindowControlButton label={tr("关闭")} onClick={() => desktop()?.windowControls.close()} danger>
               <X size={14} />
             </WindowControlButton>
           </div>

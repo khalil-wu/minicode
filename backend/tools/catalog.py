@@ -77,6 +77,8 @@ def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSp
         ),
         required_args=required,
         policy_aliases=tool.policy_aliases,
+        policy_identity=tool.policy_identity,
+        policy_deny_aliases=tool.policy_deny_aliases,
     )
 
 

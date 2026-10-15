@@ -121,20 +121,6 @@ export const resolveWebsiteBrandIcon = (value?: string): ReturnType<typeof resol
   return brand ? resolveBrandIcon(brand[1]) : null;
 };
 
-export const resolveWebsiteIconCandidates = (iconUrl?: string, websiteUrl?: string): string[] => {
-  const candidates: string[] = [];
-  const explicitIcon = safeWebIconUrl(iconUrl);
-  if (explicitIcon) candidates.push(explicitIcon.toString());
-  const website = safeWebIconUrl(websiteUrl);
-  if (website) {
-    candidates.push(new URL("/favicon.ico", website.origin).toString());
-  }
-  return [...new Set(candidates)];
-};
-
-export const resolveWebsiteIcon = (iconUrl?: string, websiteUrl?: string): string =>
-  resolveWebsiteIconCandidates(iconUrl, websiteUrl)[0] ?? "";
-
 export const BrandIcon = ({
   value,
   size = 20,
@@ -157,22 +143,22 @@ export const BrandIcon = ({
   inferBrand?: boolean;
 }) => {
   const brand = inferBrand ? websiteUrl ? resolveWebsiteBrandIcon(websiteUrl) : resolveBrandIcon(value) : null;
-  const remoteCandidates = fallback === "web" && brand ? [] : resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
-  const remoteCandidateKey = remoteCandidates.join("\n");
-  const [failedRemoteIcons, setFailedRemoteIcons] = useState<{ scope: string; urls: string[] }>({ scope: remoteCandidateKey, urls: [] });
-  const failures = failedRemoteIcons.scope === remoteCandidateKey ? failedRemoteIcons.urls : [];
-  const remoteIcon = remoteCandidates.find((candidate) => !failures.includes(candidate)) ?? "";
-  const [remoteImage, setRemoteImage] = useState({ url: remoteIcon, loaded: false });
-  if (remoteImage.url !== remoteIcon) setRemoteImage({ url: remoteIcon, loaded: false });
-  // Known websites use their bundled identity. Declared extension logos and
-  // unknown sites replace the local icon only after the image really loads.
-  const showRemoteIcon = Boolean(remoteIcon) && remoteImage.url === remoteIcon && remoteImage.loaded;
+  const website = fallback === "web" ? webUrl(websiteUrl) : null;
+  const websiteIcon = website && !["localhost", "127.0.0.1", "[::1]"].includes(website.hostname)
+    ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(website.hostname)}&sz=32` : "";
+  const remoteIcon = fallback === "web" && brand ? "" : safeWebIconUrl(iconUrl)?.toString() ?? websiteIcon;
+  const [remoteImage, setRemoteImage] = useState<{ url: string; status: "pending" | "loaded" | "failed" }>({ url: remoteIcon, status: "pending" });
+  if (remoteImage.url !== remoteIcon) setRemoteImage({ url: remoteIcon, status: "pending" });
+  // Known websites use their bundled identity. Other public websites resolve
+  // their favicon by hostname; declared icons keep their original priority.
+  const showRemoteIcon = Boolean(remoteIcon) && remoteImage.url === remoteIcon && remoteImage.status === "loaded";
+  const failedRemoteIcon = remoteImage.url === remoteIcon && remoteImage.status === "failed";
   const style = { width: size, height: size } satisfies CSSProperties;
   const accessibleTitle = title ?? brand?.label ?? value;
 
   return (
     <span className={`brand-icon${className ? ` ${className}` : ""}`} style={style} title={accessibleTitle} aria-hidden="true" data-brand={showRemoteIcon ? "website" : brand?.label.toLowerCase() ?? "generic"}>
-      {remoteIcon && (
+      {remoteIcon && !failedRemoteIcon && (
         <img
           key={remoteIcon}
           src={remoteIcon}
@@ -182,9 +168,8 @@ export const BrandIcon = ({
           referrerPolicy="no-referrer"
           className="brand-icon-remote"
           hidden={!showRemoteIcon}
-          onLoad={() => setRemoteImage({ url: remoteIcon, loaded: true })}
-          onError={() => setFailedRemoteIcons((failed) => ({ scope: remoteCandidateKey,
-            urls: [...(failed.scope === remoteCandidateKey ? failed.urls : []), remoteIcon] }))}
+          onLoad={() => setRemoteImage({ url: remoteIcon, status: "loaded" })}
+          onError={() => setRemoteImage({ url: remoteIcon, status: "failed" })}
         />
       )}
       {!showRemoteIcon && (brand && "asset" in brand ? (

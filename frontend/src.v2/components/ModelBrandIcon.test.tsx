@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render } from "@testing-library/react";
+import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ModelBrandIcon, resolveModelBrand } from "./ModelBrandIcon";
 
@@ -58,14 +58,9 @@ describe("ModelBrandIcon", () => {
     expect(icon?.getAttribute("title")).toBeNull();
   });
 
-  it("uses the provider website icon for unknown custom providers", () => {
+  it("keeps the custom model icon without guessing a provider favicon URL", () => {
     const { container } = render(<ModelBrandIcon model="private-model" provider="Private AI" websiteUrl="https://models.example.com/v1" size={24} />);
-    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
-    expect(icon.src).toBe("https://models.example.com/favicon.ico");
-    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('.brand-icon-remote')).toBeNull();
     expect(container.querySelector('[data-model-brand="custom"] svg')).toBeTruthy();
-    fireEvent.load(icon);
-    expect(container.querySelector('[data-model-brand="custom"] [data-brand="website"] img')).toBe(icon);
-    expect(icon.hidden).toBe(false);
   });
 });

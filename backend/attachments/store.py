@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -31,6 +32,7 @@ MAX_ATTACHMENT_CONTENT_CHARS = 50 * 1024 * 1024
 MAX_ATTACHMENT_METADATA_CHARS = 256 * 1024
 MAX_ATTACHMENT_NATIVE_DATA_CHARS = ((MAX_ATTACHMENT_CONTENT_CHARS + 2) // 3) * 4
 OWNER_SCOPE_VERSION = 1
+logger = logging.getLogger(__name__)
 
 
 def _metadata_owner_scopes(metadata: dict[str, Any]) -> tuple[OwnerScope, ...]:
@@ -163,10 +165,7 @@ class AttachmentStore:
             return None
         if not path.exists():
             return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return None
         metadata = payload.get("metadata")
@@ -194,17 +193,30 @@ class AttachmentStore:
         metadata = payload.get("metadata") if payload else None
         return dict(metadata) if isinstance(metadata, dict) else {}
 
-    def list_metadata(self, *, conversation_id: str, workspace_root: str) -> list[tuple[str, dict[str, Any]]]:
-        """List upload metadata using the same composite owner grants as reads."""
-        with self._lock:
+    def list_metadata(
+        self, *, conversation_id: str, workspace_root: str,
+        read_errors: list[tuple[str, Exception]] | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Return healthy owned records and explicitly report an incomplete inventory."""
+        failures: list[tuple[str, Exception]] = []
+        with self._lock, file_mutation_locks([self._index_path]):
+            self._index = self._load_index()
             if not self._index_ready:
-                self._rebuild_index()
+                self._rebuild_index(read_errors=failures)
             artifact_ids = {artifact_id for ids in self._index.values() for artifact_id in ids}
         items = []
         for artifact_id in artifact_ids:
-            metadata = self.get_metadata(artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            try:
+                metadata = self.get_metadata(artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            except (OSError, ValueError, UnicodeError) as exc:
+                failures.append((artifact_id, exc))
+                continue
             if metadata:
                 items.append((artifact_id, metadata))
+        if read_errors is None:
+            self._raise_read_errors(failures)
+        else:
+            read_errors.extend(failures)
         return items
 
     def update_extraction(
@@ -271,13 +283,17 @@ class AttachmentStore:
 
         with self._lock, file_mutation_locks([self._index_path]):
             self._index = self._load_index()
+            failures: list[tuple[str, Exception]] = []
             if not self._index_ready:
-                self._rebuild_index()
+                self._rebuild_index(read_errors=failures)
             candidates = self._index.get(needle.casefold(), [])
+        for identifier, error in failures:
+            logger.error("Attachment alias rebuild failed for %s: %s", identifier, error)
         for indexed_id in candidates:
             payload = self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root)
             if payload is not None:
                 return payload
+        self._raise_read_errors(failures)
         return None
 
     def _load_index(self) -> dict[str, list[str]]:
@@ -330,20 +346,47 @@ class AttachmentStore:
             ),
         )
 
-    def _rebuild_index(self) -> None:
+    def _rebuild_index(self, *, read_errors: list[tuple[str, Exception]] | None = None) -> None:
         self._index = {}
-        for path in sorted(self._base_dir.glob("*.json"), key=lambda path: (path.stat().st_mtime_ns, path.name)):
+        self._index_ready = False
+        failures: list[tuple[str, Exception]] = []
+        candidates: list[tuple[int, Path]] = []
+        for path in self._base_dir.glob("*.json"):
             if path == self._index_path:
                 continue
             try:
+                candidates.append((path.stat().st_mtime_ns, path))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                failures.append((path.stem, exc))
+        for _, path in sorted(candidates, key=lambda item: (item[0], item[1].name)):
+            try:
                 candidate = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                if not isinstance(candidate, dict):
+                    raise ValueError("Stored attachment must be an object")
+                self._index_payload(candidate)
+            except FileNotFoundError:
                 continue
-            if not isinstance(candidate, dict):
-                continue
-            self._index_payload(candidate)
-        self._persist_index()
-        self._index_ready = True
+            except (OSError, ValueError, UnicodeError) as exc:
+                failures.append((path.stem, exc))
+        # The aliases are derived. Publishing a partial rebuild would hide a
+        # corrupt original permanently, so only complete rebuilds replace it.
+        if not failures:
+            self._persist_index()
+            self._index_ready = True
+        if read_errors is None:
+            self._raise_read_errors(failures)
+        else:
+            read_errors.extend(failures)
+
+    @staticmethod
+    def _raise_read_errors(failures: list[tuple[str, Exception]]) -> None:
+        errors = list(dict(failures).values())
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Some attachment records could not be processed", errors)
 
     def resolve_content(
         self,
@@ -389,48 +432,50 @@ class AttachmentStore:
         return preview
 
     def delete_for_conversation(self, conversation_id: str) -> int:
-        """Delete uploaded attachment payloads owned by one conversation."""
+        """Process all readable owned uploads before reporting partial cleanup."""
         owner = str(conversation_id or "").strip()
         if not owner:
             return 0
         removed = 0
+        failures: list[tuple[str, Exception]] = []
         candidate_paths = [path for path in self._base_dir.glob("*.json") if path != self._index_path]
         with self._lock, file_mutation_locks([self._index_path, *candidate_paths]):
-            self._index = self._load_index()
-            if not self._index_ready:
-                self._rebuild_index()
-            for path in self._base_dir.glob("*.json"):
-                if path == self._index_path:
-                    continue
+            try:
+                self._index = self._load_index()
+            except (OSError, UnicodeError) as exc:
+                self._index = {}
+                failures.append(("index", exc))
+            for path in candidate_paths:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                metadata = payload.get("metadata")
-                if not isinstance(metadata, dict):
-                    continue
-                try:
+                    if not isinstance(payload, dict):
+                        raise ValueError("Stored attachment must be an object")
+                    metadata = payload.get("metadata")
+                    if not isinstance(metadata, dict):
+                        raise ValueError("Stored attachment metadata must be an object")
                     scopes = _metadata_owner_scopes(metadata)
-                except (TypeError, ValueError):
-                    continue
-                if not any(scope.conversation_id == owner for scope in scopes):
-                    continue
-                remaining_scopes = remove_conversation_scopes(scopes, owner)
-                if remaining_scopes:
-                    _write_owner_scopes(metadata, remaining_scopes)
-                    payload["metadata"] = metadata
-                    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
-                    continue
-                try:
+                    if not any(scope.conversation_id == owner for scope in scopes):
+                        continue
+                    remaining_scopes = remove_conversation_scopes(scopes, owner)
+                    if remaining_scopes:
+                        _write_owner_scopes(metadata, remaining_scopes)
+                        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+                        continue
                     path.unlink()
+                    removed += 1
+                    self._remove_index_id(path.stem)
                 except FileNotFoundError:
                     continue
-                removed += 1
-                self._remove_index_id(path.stem)
-            if removed:
-                self._persist_index()
+                except (OSError, ValueError, UnicodeError) as exc:
+                    failures.append((path.stem, exc))
+            try:
+                if not self._index_ready:
+                    self._rebuild_index(read_errors=failures)
+                elif removed:
+                    self._persist_index()
+            except (OSError, UnicodeError) as exc:
+                failures.append(("index", exc))
+        self._raise_read_errors(failures)
         return removed
 
     def share_for_conversation(
@@ -438,44 +483,45 @@ class AttachmentStore:
         source_conversation_id: str,
         target_conversation_id: str,
         workspace_root: str | Path | None = None,
+        *,
+        artifact_ids: set[str] | None = None,
+        source_workspace_root: str | Path | None = None,
     ) -> int:
-        """Grant a cloned/forked transcript access to immutable source uploads."""
-
+        """Grant explicitly owned immutable uploads to a cloned/imported transcript."""
         source = str(source_conversation_id or "").strip()
         target = str(target_conversation_id or "").strip()
         if not source or not target:
             return 0
         shared = 0
-        candidate_paths = [path for path in self._base_dir.glob("*.json") if path != self._index_path]
+        failures: list[tuple[str, Exception]] = []
+        candidate_paths = [path for path in self._base_dir.glob("*.json")
+                           if path != self._index_path and (artifact_ids is None or path.stem in artifact_ids)]
         with self._lock, file_mutation_locks([self._index_path, *candidate_paths]):
-            for path in self._base_dir.glob("*.json"):
-                if path == self._index_path:
-                    continue
+            for path in candidate_paths:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                metadata = payload.get("metadata")
-                if not isinstance(metadata, dict):
-                    continue
-                try:
+                    if not isinstance(payload, dict):
+                        raise ValueError("Stored attachment must be an object")
+                    metadata = payload.get("metadata")
+                    if not isinstance(metadata, dict):
+                        raise ValueError("Stored attachment metadata must be an object")
                     scopes = _metadata_owner_scopes(metadata)
-                except (TypeError, ValueError):
+                    if source_workspace_root is not None and not _attachment_owner_matches(scopes, source, str(source_workspace_root)):
+                        continue
+                    updated_scopes = grant_owner_scope(
+                        scopes, source_conversation_id=source, target_conversation_id=target,
+                        target_workspace_root=workspace_root,
+                    )
+                    if updated_scopes == scopes:
+                        continue
+                    _write_owner_scopes(metadata, updated_scopes)
+                    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+                    shared += 1
+                except FileNotFoundError:
                     continue
-                updated_scopes = grant_owner_scope(
-                    scopes,
-                    source_conversation_id=source,
-                    target_conversation_id=target,
-                    target_workspace_root=workspace_root,
-                )
-                if updated_scopes == scopes:
-                    continue
-                _write_owner_scopes(metadata, updated_scopes)
-                payload["metadata"] = metadata
-                atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
-                shared += 1
+                except (OSError, ValueError, UnicodeError) as exc:
+                    failures.append((path.stem, exc))
+        self._raise_read_errors(failures)
         return shared
 
     def _path_for(self, artifact_id: str) -> Path:

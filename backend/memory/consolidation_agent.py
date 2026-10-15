@@ -95,7 +95,6 @@ async def run_memory_consolidation_agent(
     budget = TokenBudget(total=token_budget) if token_budget > 0 else TokenBudget()
     settings = AgentSettings(live_text_streaming=False)
     state = AgentState(user_message=prompt)
-    state.prompt_context["internal_session_source"] = "memory_consolidation"
     session_id = f"memory-consolidation-{uuid4().hex}"
     task_id = f"{session_id}:turn"
     owner_token = artifact_store.bind_owner(session_id, str(root))
@@ -111,6 +110,12 @@ async def run_memory_consolidation_agent(
                 "cwd": str(root),
                 "agent_mode": "internal",
                 "agent_role": "memory_consolidation",
+                "query_source": "background",
+                "internal_session_source": "memory_consolidation",
+                "_source_responses_metadata": {
+                    "thread_source": "memory_consolidation",
+                    "turn_trigger": "memory_consolidation",
+                },
                 "memory_generation_disabled": True,
                 "memory_use_disabled": True,
             },

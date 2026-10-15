@@ -279,8 +279,17 @@ def test_model_runtime_factory_requires_explicit_model_selection() -> None:
 
 def test_session_factory_builds_only_the_explicit_provider(monkeypatch) -> None:
     from backend.config import AppConfig
+    from backend.llm.base import LLMAdapter
 
-    selected = object()
+    class FactoryAdapter(LLMAdapter):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            for event in ():
+                yield event
+
+        async def simple_chat(self, messages):
+            return ""
+
+    selected = FactoryAdapter()
     calls: list[LLMSettings] = []
 
     def build(settings, **_kwargs):

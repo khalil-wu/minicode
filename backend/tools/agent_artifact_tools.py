@@ -309,13 +309,8 @@ class ReadArtifactTool(BaseTool):
                     audios=[{"media_type": meta.media_type, "data": content}] if context is not None and context.result_sink is not None else [])
 
         sliced, window = self._slice_lines(content, args)
-        # A preview of the artifact head would be appended to the model-visible
-        # result alongside the slice, re-adding the very content offset/limit
-        # was used to skip. Only an unpaged read gets the head preview.
-        preview = artifact_content_preview(content) if not window else None
         return ToolResult(
             content=sliced,
-            content_preview=preview,
             display_summary=f"Read artifact {artifact_id}{window}",
         )
 

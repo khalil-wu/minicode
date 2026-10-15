@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Set, Optional
+from typing import Any, Callable, Coroutine, Set, Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
@@ -70,6 +70,7 @@ class WorkspaceFileWatcher:
         on_change: Callable[[Path, str], None],
         ignore_patterns: Optional[Set[str]] = None,
         stability_threshold: float = 0.5,  # 500ms 稳定期
+        on_index_invalidated: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
     ):
         """
         初始化文件监控器。
@@ -83,6 +84,7 @@ class WorkspaceFileWatcher:
         self.workspace_root = workspace_root.resolve()
         self.on_change = on_change
         self.stability_threshold = stability_threshold
+        self.on_index_invalidated = on_index_invalidated
 
         # 合并忽略模式
         self.ignore_patterns = self.DEFAULT_IGNORE_PATTERNS.copy()
@@ -95,6 +97,10 @@ class WorkspaceFileWatcher:
         self._running = False
         self._closed = False
         self._loop = asyncio.get_running_loop()
+        self._unsubscribe_index: Callable[[], None] | None = None
+        self._index_tasks: set[asyncio.Task] = set()
+        self._dependency_roots: set[Path] = set()
+        self._dependency_refresh_task: asyncio.Task | None = None
 
         logger.info(
             f"Initialized file watcher for {workspace_root} "
@@ -161,14 +167,58 @@ class WorkspaceFileWatcher:
 
                 for path, event_type in changes:
                     if self.watcher._should_ignore(path):
-                        continue
-                    coro = self.watcher._debounced_change(path, event_type)
+                        dependency_root = self.watcher._dependency_root(path, event.is_directory)
+                        if dependency_root is None:
+                            continue
+                        coro = self.watcher._debounced_dependency_change(dependency_root)
+                    else:
+                        coro = self.watcher._debounced_change(path, event_type)
                     try:
                         asyncio.run_coroutine_threadsafe(coro, loop)
                     except RuntimeError:
                         coro.close()
 
         return Handler(self)
+
+    def _dependency_root(self, path: Path, is_directory: bool) -> Path | None:
+        if path.is_relative_to(DATA_ROOT) or not path.is_relative_to(self.workspace_root):
+            return None
+        parts = path.relative_to(self.workspace_root).parts
+        for index, part in enumerate(parts):
+            if part.casefold() != "node_modules":
+                continue
+            from backend.workspace.project_index import _file_kind
+
+            if is_directory or _file_kind(path, dependency=True) is not None:
+                return self.workspace_root.joinpath(*parts[:index + 1])
+        return None
+
+    async def _debounced_dependency_change(self, root: Path) -> None:
+        if self._closed:
+            return
+        self._dependency_roots.add(root)
+        if self._dependency_refresh_task is not None:
+            self._dependency_refresh_task.cancel()
+
+        async def notify() -> None:
+            await asyncio.sleep(self.stability_threshold)
+            from backend.workspace.project_index_runtime import project_index_runtime
+
+            roots, self._dependency_roots = self._dependency_roots, set()
+            for dependency_root in roots:
+                project_index_runtime.invalidate_all(dependency_root)
+
+        self._dependency_refresh_task = asyncio.create_task(notify())
+
+    def _index_invalidated(self, instance_id: str, revision: int) -> None:
+        self._loop.call_soon_threadsafe(self._deliver_index_invalidation, instance_id, revision)
+
+    def _deliver_index_invalidation(self, instance_id: str, revision: int) -> None:
+        if self._closed:
+            return
+        task = asyncio.create_task(self.on_index_invalidated(instance_id, revision))
+        self._index_tasks.add(task)
+        task.add_done_callback(self._index_tasks.discard)
 
     async def _debounced_change(self, path: Path, event_type: str):
         """
@@ -251,6 +301,8 @@ class WorkspaceFileWatcher:
         from backend.workspace.project_index_runtime import project_index_runtime
 
         project_index_runtime.retain_workspace(self.workspace_root)
+        if self.on_index_invalidated is not None:
+            self._unsubscribe_index = project_index_runtime.subscribe_invalidation(self.workspace_root, self._index_invalidated)
         self._running = True
         self._closed = False
 
@@ -264,7 +316,16 @@ class WorkspaceFileWatcher:
         self._closed = True
         from backend.workspace.project_index_runtime import project_index_runtime
 
+        if self._unsubscribe_index is not None:
+            self._unsubscribe_index()
+            self._unsubscribe_index = None
         project_index_runtime.release_workspace(self.workspace_root)
+        if self._dependency_refresh_task is not None:
+            self._dependency_refresh_task.cancel()
+        self._dependency_roots.clear()
+        for task in self._index_tasks:
+            task.cancel()
+        self._index_tasks.clear()
 
         # 取消所有防抖任务
         for task in self._debounce_tasks.values():

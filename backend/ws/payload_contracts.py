@@ -295,7 +295,7 @@ def _runtime_snapshot(value: Any, field: str = "session") -> dict[str, Any]:
                 raise ValueError(f"{field}.{name} is too large")
             for item in values:
                 _text(item, f"{field}.{name}[]", 4_096, required=True)
-    for name in ("pending_approvals", "queued_user_messages", "pending_turn_inputs", "forks", "running_tasks"):
+    for name in ("pending_approvals", "queued_user_messages", "pending_turn_inputs", "forks", "running_tasks", "active_subagents"):
         if name in record and record[name] is not None:
             values = record[name]
             if not isinstance(values, list) or len(values) > MAX_CONVERSATIONS:
@@ -520,6 +520,12 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
                 raise ValueError("conversation.list contains duplicate conversation ids")
             ids.add(identifier)
         active_id = payload.get("active_conversation_id")
+        if "pinned_conversation_ids" in payload:
+            pinned_ids = payload["pinned_conversation_ids"]
+            if not isinstance(pinned_ids, list) or len(pinned_ids) != len(set(pinned_ids)) or not set(pinned_ids).issubset(ids):
+                raise ValueError("conversation.list pinned order must contain unique known conversations")
+            if payload["pinned_sort_mode"] not in {"manual", "updated_at"}:
+                raise ValueError("conversation.list pinned sort mode is invalid")
         if active_id is not None:
             _text(active_id, "active_conversation_id", MAX_ID_CHARS, required=True)
             if str(active_id).strip() not in ids:
@@ -538,7 +544,7 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
     if event_type == "conversation.switched":
         identifier = payload.get("conversation_id")
         conversation = payload.get("conversation")
-        if identifier is None and conversation is None:
+        if identifier is None and conversation is None and ("conversation_id" not in payload or "conversation" not in payload):
             raise ValueError("conversation.switched requires an owner or conversation")
         if identifier is not None:
             _text(identifier, "conversation_id", MAX_ID_CHARS, required=True)

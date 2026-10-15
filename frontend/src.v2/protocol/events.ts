@@ -76,6 +76,7 @@ export type {
   SubagentTranscriptCommand,
   SubagentPlanReviewCommand,
   SendMessageCommand,
+  FollowupTaskCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -129,10 +130,20 @@ export type {
   ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
+  ConversationPinSetCommand,
+  ConversationPinReorderCommand,
+  SidebarOrderPayload,
+  SidebarSortSetCommand,
+  SidebarProjectReorderCommand,
+  SidebarThreadReorderCommand,
+  ConversationReadStateSetCommand,
+  ConversationProjectSetCommand,
   ConversationMemoryModeSetCommand,
+  ConversationAgentModeSetCommand,
   MemoryResetCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
+  TurnSettingsUpdateCommand,
   LlmConfigSetCommand,
 } from "./conversation-types";
 
@@ -196,6 +207,7 @@ export type {
   WorkspaceServerEventType,
   WorkspaceClientCommandType,
   FileChangedEvent,
+  WorkspaceProjectIndexInvalidatedEvent,
   CommandResultEvent,
   ArtifactContentEvent,
   EnvListEvent,
@@ -258,6 +270,8 @@ export type {
   ProviderOAuthInfoEvent,
   ProviderOAuthProgressEvent,
   ControlCanUseToolRequest,
+  ControlRequestUserInputRequest,
+  RequestUserInputQuestion,
   ControlElicitationRequest,
   ControlProviderAuthPromptRequest,
   ControlRequestPayload,
@@ -296,6 +310,9 @@ import type { TerminalServerEventType } from "./terminal-types";
 import type { WorkspaceServerEventType } from "./workspace-types";
 import type { CommonServerEventType } from "./common-types";
 
+export type { GuardianAssessment, GuardianAssessmentEvent, GuardianWarningEvent, GuardianAction, GuardianStatus } from "./guardian-types";
+import type { GuardianAssessmentEvent, GuardianWarningEvent, ApproveGuardianDeniedActionCommand } from "./guardian-types";
+
 export type ServerEventType =
   | StreamingServerEventType
   | ConversationServerEventType
@@ -316,7 +333,11 @@ import type { TerminalClientCommandType } from "./terminal-types";
 import type { WorkspaceClientCommandType } from "./workspace-types";
 import type { CommonClientCommandType } from "./common-types";
 
+import type { CodeReviewCommand } from "./code-review-types";
+
 export type ClientCommandType =
+  | ApproveGuardianDeniedActionCommand["type"]
+  | CodeReviewCommand["type"]
   | StreamingClientCommandType
   | ConversationClientCommandType
   | PreviewClientCommandType
@@ -346,6 +367,8 @@ export interface UntypedServerEvent {
     | "agent.run.completed"
     | "user_message.queue.updated"
     | "agent.item"
+    | "guardian_assessment"
+    | "guardian_warning"
     | "agent.progress"
     | "runtime.span"
       | "permission.decision"
@@ -399,6 +422,7 @@ export interface UntypedServerEvent {
     | "permission.mode.updated"
     | "permission.rules.updated"
     | "file.changed"
+    | "workspace.project_index.invalidated"
     | "terminal.output"
     | "terminal.exit"
     | "terminal.created"
@@ -454,6 +478,7 @@ export interface UntypedServerEvent {
 export interface UntypedClientCommand {
   type: Exclude<
     ClientCommandType,
+    | "thread/approveGuardianDeniedAction"
     | "user_message"
     | "user_message.queue.cancel"
     | "user_message.queue.steer"
@@ -467,6 +492,7 @@ export interface UntypedClientCommand {
     | "subagent.transcript"
     | "subagent.plan_review"
     | "send_message"
+    | "followup_task"
     | "inspector.focus"
     | "terminal.create"
     | "terminal.list"
@@ -481,6 +507,7 @@ export interface UntypedClientCommand {
     | "terminal.mirror.exit"
     | "terminal.exec"
     | "llm.model.set"
+    | "turn.settings.update"
     | "llm.config.set"
     | "runtime.capabilities.inspect"
     | "skills.list"
@@ -519,9 +546,18 @@ export interface UntypedClientCommand {
     | "conversation.archive"
     | "conversation.unarchive"
     | "conversation.rename"
+    | "conversation.pin.set"
+    | "conversation.pin.reorder"
+    | "sidebar.sort.set"
+    | "sidebar.project.reorder"
+    | "sidebar.project.thread.reorder"
+    | "sidebar.recent.reorder"
+    | "conversation.read_state.set"
+    | "conversation.project.set"
     | "conversation.memory_mode.set"
     | "memory.reset"
     | "conversation.goal.set"
+    | "conversation.agent_mode.set"
     | "preview.detect"
     | "preview.navigate"
     | "preview.refresh"
@@ -638,6 +674,7 @@ import type {
 
 import type {
   FileChangedEvent,
+  WorkspaceProjectIndexInvalidatedEvent,
   CommandResultEvent,
   ArtifactContentEvent,
   EnvListEvent,
@@ -694,6 +731,8 @@ export interface ServerEventEnvelope {
 }
 
 type ServerEventPayload =
+  | GuardianAssessmentEvent
+  | GuardianWarningEvent
   | ItemStartedEvent
   | AgentMessageDeltaEvent
   | ItemCompletedEvent
@@ -759,6 +798,7 @@ type ServerEventPayload =
   | PermissionRulesUpdatedEvent
   | SchedulerListEvent
   | FileChangedEvent
+  | WorkspaceProjectIndexInvalidatedEvent
   | TerminalOutputEvent
   | TerminalExitEvent
   | TerminalCreatedEvent
@@ -837,10 +877,19 @@ import type {
   ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
+  ConversationPinSetCommand,
+  ConversationPinReorderCommand,
+  SidebarSortSetCommand,
+  SidebarProjectReorderCommand,
+  SidebarThreadReorderCommand,
+  ConversationReadStateSetCommand,
+  ConversationProjectSetCommand,
   ConversationMemoryModeSetCommand,
+  ConversationAgentModeSetCommand,
   MemoryResetCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
+  TurnSettingsUpdateCommand,
   LlmConfigSetCommand,
 } from "./conversation-types";
 
@@ -851,6 +900,7 @@ import type {
   SubagentTranscriptCommand,
   SubagentPlanReviewCommand,
   SendMessageCommand,
+  FollowupTaskCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -917,6 +967,8 @@ export interface ClientCommandEnvelope {
 }
 
 type ClientCommandPayload =
+  | ApproveGuardianDeniedActionCommand
+  | CodeReviewCommand
   | UserMessageCommand
   | UserMessageQueueCancelCommand
   | UserMessageQueueSteerCommand
@@ -930,6 +982,7 @@ type ClientCommandPayload =
   | SubagentTranscriptCommand
   | SubagentPlanReviewCommand
   | SendMessageCommand
+  | FollowupTaskCommand
   | InspectorFocusCommand
   | TerminalCreateCommand
   | TerminalListCommand
@@ -944,6 +997,7 @@ type ClientCommandPayload =
   | TerminalMirrorExitCommand
   | TerminalExecCommand
   | LlmModelSetCommand
+  | TurnSettingsUpdateCommand
   | LlmConfigSetCommand
   | SkillsListCommand
   | SkillsMarketplaceListCommand
@@ -985,7 +1039,15 @@ type ClientCommandPayload =
   | ConversationWorktreeHandoffExecuteCommand
   | ConversationArchiveCommand
   | ConversationRenameCommand
+  | ConversationPinSetCommand
+  | ConversationPinReorderCommand
+  | SidebarSortSetCommand
+  | SidebarProjectReorderCommand
+  | SidebarThreadReorderCommand
+  | ConversationReadStateSetCommand
+  | ConversationProjectSetCommand
   | ConversationMemoryModeSetCommand
+  | ConversationAgentModeSetCommand
   | MemoryResetCommand
   | ConversationGoalSetCommand
   | ProviderOAuthCommand
@@ -1021,6 +1083,8 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "agent.run.completed",
   "user_message.queue.updated",
   "agent.item",
+  "guardian_assessment",
+  "guardian_warning",
   "agent.progress",
   "runtime.span",
   "task.update",
@@ -1089,6 +1153,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "background.completed",
   // Workspace / file watcher
   "file.changed",
+  "workspace.project_index.invalidated",
   "command.result",
   "command_output_chunk",
   "artifact_content",
@@ -1140,6 +1205,9 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "user_message",
   "user_message.queue.cancel",
   "user_message.queue.steer",
+  "review.options",
+  "review.prepare",
+  "thread/approveGuardianDeniedAction",
   "interrupt",
   "ping",
   // Control plane
@@ -1161,10 +1229,19 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.archive",
   "conversation.unarchive",
   "conversation.rename",
+  "conversation.pin.set",
+  "conversation.pin.reorder",
+  "sidebar.sort.set",
+  "sidebar.project.reorder",
+  "sidebar.project.thread.reorder",
+  "sidebar.recent.reorder",
+  "conversation.read_state.set",
+  "conversation.project.set",
   "conversation.memory_mode.set",
   "memory.reset",
   "conversation.permission_mode.set",
   "conversation.goal.set",
+  "conversation.agent_mode.set",
   "conversation.worktree.cleanup",
   "conversation.worktree.handoff.preflight",
   "conversation.worktree.handoff.execute",
@@ -1184,6 +1261,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "runtime.capabilities.inspect",
   // LLM
   "llm.model.set",
+  "turn.settings.update",
   "llm.provider.oauth.login",
   "llm.provider.oauth.logout",
   "llm.provider.oauth.status",
@@ -1222,6 +1300,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "subagent.transcript",
   "subagent.plan_review",
   "send_message",
+  "followup_task",
   "inspector.focus",
   // Skills / commands catalog
   "skills.list",

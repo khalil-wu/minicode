@@ -25,15 +25,17 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_tools import TaskTool
 from backend.tools.registry import ToolRegistry
-from backend.tools.swarm_tools import SendMessageTool
+from backend.tools.swarm_tools import FollowupTaskTool, SendMessageTool
 
 
 class _TeammateLLM(LLMAdapter):
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.full_messages: list[list[str]] = []
 
     async def stream_chat(self, messages, tools=None):
         self.prompts.append(str(messages[-1].content))
+        self.full_messages.append([str(message.content) for message in messages])
         yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=f"answer {len(self.prompts)}")
         yield StreamEvent(type=StreamEventType.DONE)
 
@@ -158,3 +160,58 @@ def test_shutdown_to_named_teammate_derives_team_without_an_explicit_argument(tm
     )
     assert finished is True and status == "completed" and replied is True
     assert not any("shutdown_request" in prompt for prompt in prompts)
+
+
+def test_real_idle_teammate_queue_does_not_start_turn_followup_delivers_both_once(tmp_path, monkeypatch):
+    async def verify():
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+        runtime.start_run(run_id="leader", conversation_id="conv")
+        runtime.create_swarm_team(team_name="audit", conversation_id="conv", created_by="leader")
+        hooks = _IdleHooks()
+        monkeypatch.setattr(hook_manager_module, "load_hook_manager_for_workspace", lambda *args, **kwargs: hooks)
+        monkeypatch.setattr(hook_manager_module, "register_hook_manager_for_session", lambda *args, **kwargs: None)
+        registry = ToolRegistry()
+        checker = PermissionChecker(PermissionSettings(), workspace_root=tmp_path)
+        llm = _TeammateLLM()
+        task = TaskTool(llm_provider=llm, tool_registry_provider=registry,
+            artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"), permission_checker_provider=checker,
+            agent_settings_provider=AgentSettings(max_iterations=2), token_budget_provider=TokenBudget())
+        registry.register(task)
+        context = ToolExecutionContext(permission=checker.build_context(mode="bypass"), workspace_root=tmp_path,
+            conversation_id="conv", session_id="session", task_id="leader-task", metadata={"run_id": "leader", "_tool_registry": registry},
+            run_context=RunContext(agent_runtime=runtime, hook_manager=hooks))
+
+        async def idle_after(call_count):
+            while not (len(llm.prompts) == call_count and runtime.get_subagent("alice@audit").is_idle):
+                await asyncio.sleep(0.01)
+
+        try:
+            launched = await task.execute({"description": "audit", "prompt": "Do step one.", "agent_type": "general-purpose",
+                                           "name": "alice", "team_name": "audit"}, context=context)
+            assert launched.status == "teammate_spawned"
+            await asyncio.wait_for(idle_after(1), timeout=10)
+            initial = runtime.get_subagent("alice@audit")
+            queued = await SendMessageTool().execute({"recipient": "alice@audit", "message": "Keep this queued source detail."}, context=context)
+            assert not queued.is_error
+            await asyncio.sleep(0.7)
+            assert len(llm.prompts) == 1
+            unchanged = runtime.get_subagent("alice@audit")
+            assert unchanged.is_idle and unchanged.mailbox_epoch == initial.mailbox_epoch
+            sent = await FollowupTaskTool().execute({"target": "alice@audit", "message": "Do step two."}, context=context)
+            assert not sent.is_error
+            assert sent.runtime_metadata["recipient"] == "alice@audit"
+            await asyncio.wait_for(idle_after(2), timeout=10)
+            second = llm.full_messages[1]
+            assert sum("Do step two." in message for message in second) == 1
+            assert sum("Keep this queued source detail." in message for message in second) == 1
+            assert runtime.get_subagent("alice@audit").agent_path == initial.agent_path
+            runtime.cancel_subagent_task("alice@audit")
+            assert await runtime.wait_for_subagent("alice@audit", timeout=5)
+            assert len(llm.prompts) == 2
+        finally:
+            for live in list(runtime._subagent_tasks.values()):
+                live.cancel()
+            await asyncio.gather(*runtime._subagent_tasks.values(), return_exceptions=True)
+            runtime.close(release_lease=True)
+
+    asyncio.run(verify())

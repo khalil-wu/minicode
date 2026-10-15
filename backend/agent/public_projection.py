@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from backend.secret_redaction import redact_secrets
@@ -128,6 +129,7 @@ _AGENT_RUN_PUBLIC_FIELDS = (
     "status",
     "started_at",
     "completed_at",
+    "duration_ms",
     "cleanup_pending",
     "cleanup_reason",
     "cleanup_requested_at",
@@ -144,6 +146,7 @@ _AGENT_RUN_PUBLIC_FIELDS = (
 _SUBAGENT_RUN_PUBLIC_FIELDS = (
     "subagent_id",
     "parent_run_id",
+    "parent_tool_call_id",
     "agent_type",
     "role",
     "write_scope_strategy",
@@ -167,7 +170,9 @@ _SUBAGENT_RUN_PUBLIC_FIELDS = (
     "tool_count",
     "result_summary",
     "checkpoint_id",
+    "accepted_at",
     "started_at",
+    "execution_started_at",
     "completed_at",
     "cleanup_pending",
     "cleanup_reason",
@@ -176,6 +181,7 @@ _SUBAGENT_RUN_PUBLIC_FIELDS = (
     "agent_path",
     "mailbox_epoch",
     "teammate_name",
+    "display_name",
     "team_name",
     "permission_mode",
     "plan_mode_required",
@@ -189,6 +195,7 @@ _SUBAGENT_RUN_PUBLIC_FIELDS = (
     "model",
     "provider",
     "reasoning_effort",
+    "workspace_root",
 )
 
 _PUBLIC_LONG_TEXT_FIELDS = frozenset(
@@ -220,8 +227,11 @@ _PUBLIC_BOOLEAN_FIELDS = frozenset(
 
 _PUBLIC_INTEGER_FIELDS = frozenset(
     {
+        "accepted_at",
         "started_at",
+        "execution_started_at",
         "completed_at",
+        "duration_ms",
         "mailbox_epoch",
         "tool_count",
         "iteration",
@@ -273,6 +283,34 @@ def project_public_agent_run(value: Any) -> dict[str, Any]:
     return _allowlisted_mapping(value, _AGENT_RUN_PUBLIC_FIELDS)
 
 
+def subagent_execution_started_at(source: Mapping[str, Any]) -> int:
+    """Separate acquired resources from the admitted child execution.
+
+    Older records only prove execution through retained progress or a result;
+    accepting a task or allocating its incarnation is not that proof.
+    """
+    if "execution_started_at" in source:
+        return int(source["execution_started_at"])
+    resume = source.get("resume_config") or {}
+    if "execution_started_at" in resume:
+        return int(resume["execution_started_at"])
+    if source.get("iteration") or source.get("tool_count") or (
+        source.get("status") in {"completed", "partial"} and source.get("result_summary")
+    ):
+        return int(source.get("started_at") or 0)
+    return 0
+
+
+def subagent_workspace_root(source: Mapping[str, Any]) -> str:
+    resume = source.get("resume_config") or {}
+    if "execution_workspace_root" in resume:
+        return str(resume["execution_workspace_root"])
+    directory = str(resume.get("worktree_path") or resume.get("cwd") or "")
+    # Legacy relative paths do not identify an execution workspace. Resolving
+    # them against the parent would invent ownership for a different file.
+    return directory if PurePosixPath(directory).is_absolute() or PureWindowsPath(directory).is_absolute() else ""
+
+
 def project_public_subagent_run(value: Any) -> dict[str, Any]:
     source = dict(value) if isinstance(value, Mapping) else {}
     resume = source.get("resume_config")
@@ -283,6 +321,9 @@ def project_public_subagent_run(value: Any) -> dict[str, Any]:
         for key in ("model", "provider", "reasoning_effort"):
             if key not in source and key in resume:
                 source[key] = resume[key]
+        if "execution_workspace_root" in resume or "workspace_root" not in source:
+            source["workspace_root"] = subagent_workspace_root(source)
+    source["execution_started_at"] = source["started_at"] = subagent_execution_started_at(source)
     return _allowlisted_mapping(source, _SUBAGENT_RUN_PUBLIC_FIELDS)
 
 

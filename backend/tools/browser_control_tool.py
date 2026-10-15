@@ -545,9 +545,20 @@ class BrowserControlTool(BaseTool):
         conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
         if not conversation_id:
             return self._error_result("Embedded browser commands require a conversation owner")
-        payload = {key: value for key, value in args.items() if key not in {"cdp_endpoint", "navigation_authorization"}}
+        metadata = context.metadata if context is not None else {}
+        window_instance_id = str(metadata.get("window_instance_id") or "").strip()
+        window_binding_token = context.window_binding_token if context is not None else ""
+        if not window_instance_id or not window_binding_token:
+            return self._error_result("Embedded browser commands require an originating desktop window")
+        payload = {key: value for key, value in args.items() if key not in {
+            "cdp_endpoint", "navigation_authorization", "window_owner_id", "window_instance_id", "window_binding_token",
+        }}
         payload["action"] = action
         payload["conversation_id"] = conversation_id
+        payload["window_instance_id"] = window_instance_id
+        payload["window_binding_token"] = window_binding_token
+        if "window_owner_id" in metadata:
+            payload["window_owner_id"] = metadata["window_owner_id"]
         operation_id = "browser_" + uuid4().hex
         payload["operation_id"] = operation_id
         if action == "navigate":
@@ -561,7 +572,7 @@ class BrowserControlTool(BaseTool):
                 response = await client.post(f"{endpoint.rstrip('/')}/v1/command", headers=headers, json=payload)
             except (asyncio.CancelledError, httpx.TimeoutException) as exc:
                 reason = "timeout" if asyncio.get_running_loop().time() >= browser_deadline.get() else "cancelled"
-                receipt = await self._cancel_embedded_operation(endpoint, headers, operation_id, conversation_id, context, reason)
+                receipt = await self._cancel_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason)
                 if isinstance(exc, asyncio.CancelledError):
                     exc.cleanup_receipt = receipt
                     raise
@@ -573,7 +584,7 @@ class BrowserControlTool(BaseTool):
         if response.status_code >= 400 or result.get("ok") is False:
             receipt = result.get("cleanup_receipt") or {}
             if receipt.get("pending"):
-                self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, receipt, context)
+                self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context)
             return ToolResult(
                 content=str(result.get("error") or f"Embedded browser command failed: HTTP {response.status_code}"),
                 is_error=True, status=result.get("status") or "failed", result_kind=self.result_kind,
@@ -663,12 +674,13 @@ class BrowserControlTool(BaseTool):
             display_summary=labels.get(action, "浏览器操作完成"),
         )
 
-    async def _cancel_embedded_operation(self, endpoint, headers, operation_id, conversation_id, context, reason):
+    async def _cancel_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason):
         receipt = self._uncertain_receipt(operation_id, reason)
         try:
             async with asyncio.timeout(1), httpx.AsyncClient(timeout=1, follow_redirects=False, trust_env=False) as client:
                 response = await client.post(f"{endpoint.rstrip('/')}/v1/operation", headers=headers,
-                    json={"action": "cancel", "operation_id": operation_id, "conversation_id": conversation_id, "reason": reason})
+                    json={"action": "cancel", "operation_id": operation_id, "conversation_id": conversation_id,
+                          "window_instance_id": window_instance_id, "window_binding_token": window_binding_token, "reason": reason})
                 response.raise_for_status()
                 receipt = response.json()["cleanup_receipt"]
         except (httpx.HTTPError, TimeoutError):
@@ -676,10 +688,10 @@ class BrowserControlTool(BaseTool):
             # exchange cannot establish that the browser stopped executing it.
             pass
         if receipt.get("pending"):
-            self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, receipt, context)
+            self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context)
         return receipt
 
-    def _retain_embedded_operation(self, endpoint, headers, operation_id, conversation_id, receipt, context):
+    def _retain_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context):
         if context is None:
             return
         call_id = context.tool_call_id or self.name
@@ -691,7 +703,8 @@ class BrowserControlTool(BaseTool):
             try:
                 async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
                     response = await client.post(f"{endpoint.rstrip('/')}/v1/operation", headers=headers,
-                        json={"action": "wait", "operation_id": operation_id, "conversation_id": conversation_id})
+                        json={"action": "wait", "operation_id": operation_id, "conversation_id": conversation_id,
+                              "window_instance_id": window_instance_id, "window_binding_token": window_binding_token})
                     response.raise_for_status()
                     observed = response.json()["cleanup_receipt"]
             except httpx.HTTPError:

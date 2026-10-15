@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from backend.tools.base import PermissionLevel
 from backend.permissions.profiles import WorkspaceScope
 from backend.agent.run_context import RunContext
+from backend.permissions.grants import PermissionGrantStore
+from backend.sandbox.policy import AdditionalPermissionProfile
+from backend.permissions.approval_policy import ApprovalPolicy, GranularApprovalConfig
 
 if TYPE_CHECKING:
     from backend.agent.model_execution import ModelExecutionSnapshot
@@ -17,7 +20,9 @@ if TYPE_CHECKING:
     from backend.tools.base import ToolResult
     from backend.agent.turn_diff_tracker import TurnDiffTracker
     from backend.sandbox.policy import SandboxPolicy
+    from backend.sandbox.policy import ResolvedSandboxPolicy
     from backend.tasks.manager import TaskManager
+    from backend.mcp.approval import MCPApprovalStore
     from backend.terminal.manager import BackgroundCommandManager
     from backend.permissions.checker import PermissionChecker
 
@@ -53,7 +58,7 @@ class PermissionDecision:
     risk: Literal["low", "medium", "high", "critical"]
     scope: dict[str, Any]
     expiry: Literal["call", "session", "policy"]
-    # SHA-256 over the provider-neutral final tool name + canonical args.
+    # SHA-256 over the captured authorization identity + canonical args.
     # Every approval and execution boundary binds to this exact request.
     request_digest: str = ""
 
@@ -88,6 +93,14 @@ class PermissionContext:
     conversation_id: str = ""
     workspace_root: Path | None = None
     protected_state_roots: tuple[Path, ...] = ()
+    additional_permissions: AdditionalPermissionProfile | None = None
+    strict_auto_review: bool = False
+    granular_approval: dict[str, bool] | None = None
+    # Filled only by the issuing execution boundary from its actual sandbox.
+    # Catalog exposure cannot derive full access from a UI mode or tool name.
+    captured_mcp_permission_profile: ResolvedSandboxPolicy | None = field(default=None, repr=False)
+    captured_mcp_approval_store: MCPApprovalStore | None = field(default=None, repr=False)
+    captured_exec_policy: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         # frozen=True prevents field replacement but does not protect nested
@@ -97,6 +110,12 @@ class PermissionContext:
         object.__setattr__(self, "session_overrides", deepcopy(self.session_overrides))
         object.__setattr__(self, "tool_deny_rules", deepcopy(self.tool_deny_rules))
         object.__setattr__(self, "filesystem_constraints", deepcopy(self.filesystem_constraints))
+        object.__setattr__(self, "granular_approval", deepcopy(self.granular_approval))
+        if self.approval_policy == "granular":
+            object.__setattr__(self, "granular_approval", GranularApprovalConfig.parse(self.granular_approval).to_dict())
+
+    def approval_policy_value(self) -> str | dict[str, dict[str, bool]]:
+        return ApprovalPolicy.from_context(self).to_wire()
 
 
 @dataclass
@@ -157,6 +176,13 @@ class ToolExecutionContext:
     call_sources: dict[str, ToolCallSource] = field(default_factory=dict, repr=False)
     iteration_id: str = ""
     result_sink: Callable[[ToolCallEvent, ToolResult], None] | None = field(default=None, repr=False)
+    window_binding_token: str = field(default="", repr=False)
+    permission_grants: PermissionGrantStore = field(default_factory=PermissionGrantStore, repr=False)
+    turn_id: str = ""
+    environment_id: str = "local"
+    authorization_digest: str = ""
+    authorization_policy_identity: str = ""
+    exec_policy_decision: Any | None = field(default=None, repr=False)
 
     def source_for_call(self, call_id: str) -> ToolCallSource:
         return self.call_sources.get(call_id, DIRECT_TOOL_SOURCE)

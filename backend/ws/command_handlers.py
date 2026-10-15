@@ -11,13 +11,6 @@ from backend.agent.model_execution import ModelExecutionSnapshot
 class SessionCommandHandlersMixin:
     """Shared session utilities used by flat websocket handlers."""
 
-    def publish_live_model_execution(self, conversation_id: str, snapshot: ModelExecutionSnapshot) -> None:
-        from backend.ws.agent_runner import _lease_session_llm_for_task
-
-        task = self.run_manager.publish_model_execution(conversation_id, snapshot)
-        if task is not None:
-            _lease_session_llm_for_task(self, snapshot.llm, task)
-
     def _register_command_handlers(self) -> None:
         from backend.commands.slash_commands import register_all_slash_commands
         from backend.ws.handlers import register_domain_handlers
@@ -172,6 +165,59 @@ class SessionCommandHandlersMixin:
 
     # ── LLM model selection ──────────────────────────────
 
+    async def update_turn_model_settings(self, conversation_id: str, turn_id: str, *, model: str | None = None,
+                                         effort: str | None = None) -> bool:
+        from backend.agent.model_activation import ModelActivationRejected, ModelActivationTargetUnavailable
+        from backend.config import load_config
+        from backend.llm.model_selection import default_model_thinking_level, model_thinking_levels
+        from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm, _lease_session_llm_for_task
+
+        original_task = self.run_manager.running_task_for(conversation_id)
+        owner = self.run_manager.context_for(conversation_id)
+        state = owner.model_activation if owner is not None else None
+        if original_task is None or state is None or state.turn_id != turn_id:
+            return False
+        async with state.updates:
+            try:
+                ticket = state.capture()
+                if not state.admitted.config.feature_flags.enabled("step_model_switching"):
+                    raise ModelActivationRejected("turn settings updates require the step_model_switching feature")
+                current = ticket.current
+                provider, selected_model = current.provider, model or current.model
+                runtime = current.model_runtime
+                if runtime is not None:
+                    await runtime.refresh_oauth_credentials(provider)
+                    await runtime.refresh_provider_auth(provider)
+                definition = (current.model_info if selected_model == current.model
+                    else runtime.get_model(provider, selected_model) if runtime is not None else None)
+                if definition is None:
+                    raise ModelActivationRejected(f"The requested model '{selected_model}' is unavailable for this turn")
+                levels = model_thinking_levels(definition)
+                if effort is not None and effort not in levels:
+                    raise ModelActivationRejected(f"Reasoning effort '{effort}' is not supported for '{selected_model}'")
+                selected_effort = effort if effort is not None else current.thinking_level
+                if selected_effort not in levels:
+                    selected_effort = default_model_thinking_level(definition, levels) or "off"
+                config = _config_with_runtime_model_budget(replace(current.config,
+                    llm=replace(current.config.llm, model=selected_model, reasoning_effort=selected_effort)),
+                    model_runtime=runtime, provider=provider, model=selected_model)
+                adapter = _get_or_create_session_llm(self, config=config, provider=provider,
+                    model=selected_model, model_runtime=runtime)
+                effective = _apply_thinking_level(adapter, definition, selected_effort)
+                config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
+                destination = ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=selected_model,
+                    thinking_level=effective, model_runtime=runtime, available_models=current.available_models,
+                    models_source=current.models_source, model_info=definition)
+                workspace = owner.context_builder._tool_execution_context.workspace_root
+                live_config = load_config(cwd=workspace, resolve_credentials=False)
+                state.commit(ticket, destination, live_config=live_config, is_current=lambda:
+                    self.run_manager.running_task_for(conversation_id) is original_task
+                    and self.run_manager.context_for(conversation_id) is owner)
+                _lease_session_llm_for_task(self, adapter, state.task)
+                return True
+            except ModelActivationTargetUnavailable:
+                return False
+
     async def _set_selected_provider_model(
         self,
         provider: str,
@@ -182,8 +228,8 @@ class SessionCommandHandlersMixin:
         emit_unavailable: bool = True,
         conversation_id: str | None = None,
         reasoning_effort: str | None = None,
+        selection_mode: str = "model",
         config_override: Any | None = None,
-        refresh_auth: bool = True,
     ) -> bool:
         from backend.config import load_config
         from backend.ws.agent_runner import _resolver_accepts_positional_arguments
@@ -197,11 +243,9 @@ class SessionCommandHandlersMixin:
         workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         if owner_id and conversation is None:
             raise ValueError("The conversation selected for this model change no longer exists")
-        live_execution = (
-            self.run_manager.running_task_for(owner_id or "") is not None
-            and self.run_manager.context_for(owner_id or "") is not None
-        )
-        scoped_config = config_override or load_config(cwd=workspace_root, resolve_credentials=live_execution)
+        # Source desktop updates thread/settings/update for model/effort.
+        # A preference selected while busy belongs to the next turn.
+        scoped_config = config_override or load_config(cwd=workspace_root, resolve_credentials=False)
         scoped_settings = (
             scoped_config.config_layer_stack.effective_config()
             if scoped_config.config_layer_stack is not None
@@ -239,9 +283,6 @@ class SessionCommandHandlersMixin:
         if model_runtime is not None:
             if config_override is not None:
                 model_runtime.refresh(settings_snapshot=scoped_settings)
-            if live_execution and refresh_auth:
-                await model_runtime.refresh_oauth_credentials(normalized_provider)
-                await model_runtime.refresh_provider_auth(normalized_provider)
             runtime_models = model_runtime.get_models(normalized_provider)
             available_models = [item.id for item in runtime_models]
             selected_runtime_model = model_runtime.get_model(
@@ -271,11 +312,8 @@ class SessionCommandHandlersMixin:
             self.refresh_llm_selection(prefer_config=True)
             return False
         from backend.agent.model_execution import ModelExecutionSnapshot
-        from backend.llm.model_selection import clamp_model_thinking_level, model_thinking_levels
-        from backend.ws.agent_runner import (
-            _apply_thinking_level, _config_with_runtime_model_budget,
-            _get_or_create_session_llm,
-        )
+        from backend.llm.model_selection import clamp_model_thinking_level, default_model_thinking_level, model_thinking_levels
+        from backend.ws.agent_runner import _config_with_runtime_model_budget
 
         effort = reasoning_effort
         if effort is None:
@@ -286,12 +324,7 @@ class SessionCommandHandlersMixin:
                 model=normalized_model, reasoning_effort=effort)),
             model_runtime=model_runtime, provider=normalized_provider, model=normalized_model,
         )
-        adapter = None
-        if live_execution:
-            adapter = _get_or_create_session_llm(self, config=config,
-                provider=normalized_provider, model=normalized_model, model_runtime=model_runtime)
-            supported = model_thinking_levels(selected_runtime_model, adapter)
-        elif selected_runtime_model is not None:
+        if selected_runtime_model is not None:
             provider_metadata = model_runtime.provider_payload(normalized_provider, normalized_model)
             supported = model_thinking_levels(selected_runtime_model,
                 configured_reasoning_effort=provider_metadata["configured_reasoning_effort"])
@@ -299,11 +332,12 @@ class SessionCommandHandlersMixin:
             from backend.llm.capabilities import capabilities_from_settings
 
             supported = capabilities_from_settings(config.llm,
-                provider=normalized_provider).reasoning_effort_levels
+                provider=normalized_provider).reasoning_effort_levels or ("off",)
         if reasoning_effort is not None and reasoning_effort not in supported:
             raise ValueError(f"Reasoning effort '{reasoning_effort}' is not supported for '{normalized_provider}/{normalized_model}'. Supported: {', '.join(supported) or 'none'}.")
-        effective = (_apply_thinking_level(adapter, selected_runtime_model, effort)
-                     if live_execution else clamp_model_thinking_level(effort, supported) or "off")
+        if reasoning_effort is None and effort not in supported:
+            effort = default_model_thinking_level(selected_runtime_model or config.llm, supported) or "off"
+        effective = clamp_model_thinking_level(effort, supported) or "off"
         config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
         models_source = (
             "extension" if model_runtime is not None
@@ -312,13 +346,8 @@ class SessionCommandHandlersMixin:
         )
         if conversation is not None and manual_override:
             self.conversation_repo.update_model_selection(conversation.id,
-                provider=normalized_provider, model=normalized_model, reasoning_effort=effective)
-        if live_execution:
-            snapshot = ModelExecutionSnapshot(config=config, llm=adapter,
-                provider=normalized_provider, model=normalized_model, thinking_level=effective,
-                model_runtime=model_runtime, available_models=tuple(available_models),
-                models_source=models_source, model_info=selected_runtime_model)
-            self.publish_live_model_execution(owner_id or "", snapshot)
+                provider=normalized_provider, model=normalized_model, reasoning_effort=effective,
+                selection_mode=selection_mode)
         if owner_id == self.active_conversation_id:
             self.config = config
             self.provider = normalized_provider
@@ -327,14 +356,11 @@ class SessionCommandHandlersMixin:
             self.models_source = models_source
             self._model_override_active = manual_override
             self._provider_override_active = bool(manual_override and normalized_provider != resolve_provider())
-            if live_execution:
-                self.llm = adapter
-                self.context_builder.bind_llm(adapter)
-                self.context_builder.bind_budget(config.token_budget)
         return True
 
     async def set_selected_model(self, model: str, *, manual_override: bool,
-                                 conversation_id: str | None = None, reasoning_effort: str | None = None) -> bool:
+                                 conversation_id: str | None = None, reasoning_effort: str | None = None,
+                                 selection_mode: str = "model") -> bool:
         from backend.config import load_config
 
         owner_id = conversation_id or self.active_conversation_id
@@ -352,10 +378,42 @@ class SessionCommandHandlersMixin:
         return await self._set_selected_provider_model(
             provider, model or current_model, manual_override=manual_override,
             conversation_id=owner_id, reasoning_effort=reasoning_effort,
-            # Effort-only edits use the selected model's resolved capabilities.
-            # Request-time auth refresh still owns actual provider calls.
-            refresh_auth=bool(model) or reasoning_effort is None,
+            selection_mode=selection_mode,
         )
+
+    def default_model_selection(self, conversation_id: str | None = None) -> tuple[Any, dict[str, str] | None]:
+        """Resolve the project's configured model and effort as one selection."""
+        from backend.config import load_config
+        from backend.llm.capabilities import capabilities_from_settings
+        from backend.llm.model_selection import default_model_thinking_level, model_thinking_levels
+
+        owner_id = conversation_id or self.active_conversation_id
+        conversation = self.conversation_repo.get_conversation_summary(owner_id) if owner_id else None
+        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        config = load_config(cwd=workspace_root, resolve_credentials=False)
+        provider, model = config.llm.provider, config.llm.model
+        if not model:
+            return config, None
+        runtime = self._model_runtime_for_conversation(owner_id)
+        definition = runtime.get_model(provider, model) if runtime is not None else None
+        if runtime is not None and definition is None:
+            return config, None
+        supported = (model_thinking_levels(definition, configured_reasoning_effort=config.llm.reasoning_effort)
+            if definition is not None else capabilities_from_settings(config.llm, provider=provider).reasoning_effort_levels or ("off",))
+        effort = config.llm.reasoning_effort
+        if effort not in supported:
+            effort = default_model_thinking_level(definition or config.llm, supported) or "off"
+        return config, {"provider": provider, "model": model, "reasoning_effort": effort,
+            "conversation_id": owner_id or "", "working_directory": str(workspace_root or "")}
+
+    async def restore_default_model_selection(self, conversation_id: str | None = None) -> bool:
+        config, selection = self.default_model_selection(conversation_id)
+        if selection is None:
+            raise ValueError("The project's configured default model is unavailable")
+        return await self._set_selected_provider_model(selection["provider"], selection["model"],
+            manual_override=bool(conversation_id or self.active_conversation_id),
+            conversation_id=conversation_id, reasoning_effort=selection["reasoning_effort"],
+            selection_mode="default", config_override=config)
 
     async def send_llm_state(self, *, force: bool = False) -> None:
         """Publish the effective model projection once for each state change.
@@ -411,6 +469,19 @@ class SessionCommandHandlersMixin:
             configured_reasoning_effort=self.config.llm.reasoning_effort,
         )
         payload["conversation_id"] = self.active_conversation_id
+        from backend.llm.model_selection import default_model_thinking_level, model_thinking_levels
+
+        payload["available_model_options"] = []
+        if model_runtime is not None:
+            for definition in model_runtime.get_models(self.provider):
+                levels = model_thinking_levels(definition, configured_reasoning_effort=self.config.llm.reasoning_effort)
+                payload["available_model_options"].append({"model": definition.id,
+                    "reasoning_effort_levels": list(levels),
+                    "default_reasoning_effort": default_model_thinking_level(definition, levels) or "off"})
+        _, payload["default_model_selection"] = self.default_model_selection(self.active_conversation_id)
+        conversation = self.conversation_repo.get_conversation_summary(self.active_conversation_id) if self.active_conversation_id else None
+        payload["model_selection_mode"] = (conversation.model_selection.get("selection_mode", "model")
+            if conversation is not None and conversation.model_selection else "model" if self._model_override_active else "default")
         return payload
 
     async def _report_model_catalog_error(self, model_runtime: Any) -> None:
@@ -466,6 +537,7 @@ class SessionCommandHandlersMixin:
         wait_for_initialize: bool = False,
         error_command: str | None = "workspace.activate",
         conversation_id: str | None = None,
+        project_root: str = "",
     ) -> bool:
         return await self.session_lifecycle.activate_workspace_path(
             path_str,
@@ -473,6 +545,7 @@ class SessionCommandHandlersMixin:
             wait_for_initialize=wait_for_initialize,
             error_command=error_command,
             conversation_id=conversation_id,
+            project_root=project_root,
         )
 
 

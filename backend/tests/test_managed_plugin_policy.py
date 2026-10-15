@@ -371,14 +371,10 @@ def test_invalid_managed_file_keeps_source_location_and_blocks_lower_layers(
     assert result.invalid is True
     assert result.source_location == str(managed_file)
 
-    stack = load_config_layer_stack(
-        managed_settings_result=result,
-        cwd=tmp_path,
-    )
-    assert stack.managed_policy_errors
-    policy = plugin_service._plugin_policy_from_stack(stack)
-    with pytest.raises(PluginSettingsError, match="policy is invalid"):
-        policy.assert_policy_valid()
+    from backend.config_requirements import ConfigRequirementsError
+
+    with pytest.raises(ConfigRequirementsError, match="Failed to load managed policy"):
+        load_config_layer_stack(managed_settings_result=result, cwd=tmp_path)
 
 
 def test_user_plugin_enablement_persists_only_canonical_minicode_schema() -> None:

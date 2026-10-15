@@ -62,6 +62,17 @@ def test_envelope_does_not_override_existing_turn_id() -> None:
     assert tool_event.data.get("turn_id") == "custom_turn"
 
 
+def test_explicit_host_turn_binds_plain_events_and_keeps_runtime_incarnation() -> None:
+    envelope = EventEnvelope(task_id="task", conversation_id="conversation")
+    started = AgentEvent.agent_run_started({"run_id": "runtime-incarnation"})
+    started.data["turn_id"] = "host-turn"
+    envelope.stamp(started)
+    message = AgentEvent.agent_message_completed("Actual model output")
+    envelope.stamp(message)
+    assert started.data["run_id"] == "runtime-incarnation"
+    assert message.data["turn_id"] == envelope.turn_id == "host-turn"
+
+
 def test_envelope_skips_adapter_internal_events() -> None:
     envelope = EventEnvelope(task_id="task_abc", conversation_id="conv_123")
     internal = AgentEvent(type="tool_call_start", data={"id": "tc_1"})

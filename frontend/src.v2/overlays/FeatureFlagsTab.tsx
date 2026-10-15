@@ -1,3 +1,4 @@
+import { useI18n, type Translate, type TranslationKey } from "../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
 import { pushToast } from "./ToastContainer";
@@ -29,7 +30,7 @@ type FeatureFlagPayload = {
 
 type DraftOverride = "default" | "on" | "off";
 
-const flagLabels: Record<string, { title: string; description: string; group: "Runtime" | "Plugins" | "MCP" | "UI" | "SDK" }> = {
+const flagLabels: Record<string, { title: TranslationKey; description: TranslationKey; group: "Runtime" | "Plugins" | "MCP" | "UI" | "SDK" }> = {
   reactive_compact: { title: "响应式上下文压缩", description: "在提示词预算耗尽前允许运行时压缩上下文。", group: "Runtime" },
   plugin_lifecycle_api: { title: "插件生命周期 API", description: "启用本地插件列表和启停管理接口。", group: "Plugins" },
   plugin_skills: { title: "插件技能", description: "发现本地插件中包含的 SKILL.md。", group: "Plugins" },
@@ -45,7 +46,7 @@ const flagLabels: Record<string, { title: string; description: string; group: "R
 export const FEATURE_FLAG_LABELS = flagLabels;
 
 const GROUPS = ["Runtime", "Plugins", "MCP", "UI", "SDK"] as const;
-const GROUP_LABELS: Record<typeof GROUPS[number], string> = {
+const GROUP_LABELS: Record<typeof GROUPS[number], TranslationKey | "MCP" | "SDK"> = {
   Runtime: "运行时",
   Plugins: "插件",
   MCP: "MCP",
@@ -65,10 +66,11 @@ const draftToOverride = (value: DraftOverride): boolean | null => {
   return null;
 };
 
-const flagTitle = (flag: FeatureFlagEntry): string => flagLabels[flag.name]?.title ?? flag.name.replace(/_/g, " ");
+const flagTitle = (flag: FeatureFlagEntry, tr: Translate): string => flagLabels[flag.name] ? tr(flagLabels[flag.name].title) : flag.name.replace(/_/g, " ");
 const flagGroup = (flag: FeatureFlagEntry): typeof GROUPS[number] => flagLabels[flag.name]?.group ?? "Runtime";
 
 export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: boolean; searchTarget?: string }) => {
+  const { t: tr } = useI18n();
   const [flags, setFlags] = useState<FeatureFlagEntry[]>([]);
   const [drafts, setDrafts] = useState<Record<string, DraftOverride>>({});
   const [loading, setLoading] = useState(false);
@@ -102,12 +104,12 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
       if (loadSeqRef.current !== seq) return;
       const message = formatSettingsLoadError(error);
       setLoadError(message);
-      if (options.showToast) pushToast(`功能开关加载失败：${message}`, "error");
+      if (options.showToast) pushToast(tr("功能开关加载失败：{v0}", { v0: message }), "error");
     } finally {
       if (loadSeqRef.current === seq) setLoading(false);
       if (operationRef.current === "refresh") operationRef.current = "";
     }
-  }, []);
+  }, [tr]);
 
   useEffect(() => {
     if (active) void refresh();
@@ -132,7 +134,7 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
         method: "PUT",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ flags: { [flag.name]: draftToOverride(nextDraft) } }),
-      }, { timeoutMessage: "保存功能开关超时，请重试。" });
+      }, { timeoutMessage: tr("保存功能开关超时，请重试。") });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText));
@@ -142,11 +144,11 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
       setFlags(nextFlags);
       setDrafts(Object.fromEntries(nextFlags.map((item) => [item.name, overrideToDraft(item.override)])));
       sendClientCommand({ type: "runtime.capabilities.inspect", source: "settings.feature_flags" }, { silent: true });
-      pushToast(`功能开关已保存：${flagTitle(flag)}`, "success");
+      pushToast(tr("功能开关已保存：{v0}", { v0: flagTitle(flag, tr) }), "success");
     } catch (error) {
       setDrafts((current) => ({ ...current, [flag.name]: overrideToDraft(flag.override) }));
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`功能开关保存失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      pushToast(tr("功能开关保存失败：{v0}", { v0: message }), "error");
     } finally {
       setSavingName("");
       if (operationRef.current === "save") operationRef.current = "";
@@ -160,7 +162,7 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
       <div className="feature-flag-groups" style={subTabBarStyle}>
         {GROUPS.map((item) => (
           <button key={item} type="button" onClick={() => setGroup(item)} style={subTabStyle(group === item)}>
-            {GROUP_LABELS[item]}
+            {GROUP_LABELS[item] === "MCP" || GROUP_LABELS[item] === "SDK" ? GROUP_LABELS[item] : tr(GROUP_LABELS[item] as TranslationKey)}
             <span style={subTabCountStyle}>{counts[item]}</span>
           </button>
         ))}
@@ -168,9 +170,9 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
 
       {loadError && (
         <div style={loadErrorStyle}>
-          <span>功能开关加载失败。</span>
+          <span>{tr("功能开关加载失败。")}</span>
           <code style={loadErrorCodeStyle}>{loadError}</code>
-          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={busy} style={retryButtonStyle}>重试</button>
+          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={busy} style={retryButtonStyle}>{tr("重试")}</button>
         </div>
       )}
 
@@ -179,42 +181,42 @@ export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: bool
           const draft = drafts[flag.name] ?? overrideToDraft(flag.override);
           const lockedByEnv = flag.source === "env";
           return (
-            <div key={flag.name} className="feature-flag-row" style={flagRowStyle} title={flagLabels[flag.name]?.description}>
+            <div key={flag.name} className="feature-flag-row" style={flagRowStyle} title={flagLabels[flag.name] ? tr(flagLabels[flag.name].description) : undefined}>
               <div style={{ minWidth: 0 }}>
-                <span style={flagNameStyle}>{flagTitle(flag)}</span>
+                <span style={flagNameStyle}>{flagTitle(flag, tr)}</span>
               </div>
 
               <div className="feature-flag-control" style={controlWrapStyle}>
                 <SelectMenu
-                  ariaLabel={`覆盖 ${flagTitle(flag)}`}
-                  title={lockedByEnv && flag.env_var ? `由 ${flag.env_var} 管理` : `${flag.name} · 默认${flag.default ? "开启" : "关闭"}`}
+                  className="settings-select"
+                  align="end"
+                  ariaLabel={tr("覆盖 {v0}", { v0: flagTitle(flag, tr) })}
+                  title={lockedByEnv && flag.env_var ? tr("由 {v0} 管理", { v0: flag.env_var }) : tr("{v0} · 默认{v1}", { v0: flag.name, v1: flag.default ? tr("开启") : tr("关闭") })}
                   value={lockedByEnv ? "default" : draft}
                   disabled={lockedByEnv || busy}
                   onValueChange={(value) => void saveFlag(flag, value as DraftOverride)}
-                  style={{ width: 120 }}
                 >
-                  <option value="default">{lockedByEnv ? `环境变量 · ${flag.enabled ? "开启" : "关闭"}` : `默认 · ${flag.default ? "开启" : "关闭"}`}</option>
-                  <option value="on">开启</option>
-                  <option value="off">关闭</option>
+                  <option value="default">{lockedByEnv ? tr("环境变量 · {v0}", { v0: flag.enabled ? tr("开启") : tr("关闭") }) : tr("默认 · {v0}", { v0: flag.default ? tr("开启") : tr("关闭") })}</option>
+                  <option value="on">{tr("开启")}</option>
+                  <option value="off">{tr("关闭")}</option>
                 </SelectMenu>
-                {savingName === flag.name && <RotateCw size={14} className="animate-spin" aria-label="正在保存" style={savingStyle} />}
+                {savingName === flag.name && <RotateCw size={14} className="animate-spin" aria-label={tr("正在保存")} style={savingStyle} />}
               </div>
             </div>
           );
         })}
         {loading && visibleFlags.length === 0 && (
-          <div style={emptyInlineStyle}>正在加载功能开关…</div>
+          <div style={emptyInlineStyle}>{tr("正在加载功能开关…")}</div>
         )}
         {!loading && visibleFlags.length === 0 && !loadError && (
-          <div style={emptyInlineStyle}>这个分组中没有功能开关。</div>
+          <div style={emptyInlineStyle}>{tr("这个分组中没有功能开关。")}</div>
         )}
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <button className="feature-flag-refresh" aria-label="刷新功能开关" onClick={() => void refresh({ showToast: true })} disabled={busy} style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}>
+        <button className="feature-flag-refresh" aria-label={tr("刷新功能开关")} onClick={() => void refresh({ showToast: true })} disabled={busy} style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}>
           <RotateCw size={14} className={loading ? "animate-spin" : undefined} />
-          刷新
-        </button>
+          {tr("刷新")}</button>
       </div>
     </>
   );

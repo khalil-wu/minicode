@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import {
   Bot,
   FileDiff,
@@ -21,11 +22,13 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { rightPanelDefaultWidth, rightPanelMaximumWidth, rightPanelWidthFromRatio } from "./right-panel-width";
 import type { RightStackTab } from "../stores/types";
 import { ContextMenu } from "../components/ContextMenu";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { projectAgentViews } from "../lib/agent-view-model";
+import { mcpServerNeedsAttention } from "../lib/mcp-status";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
@@ -75,33 +78,16 @@ const LazyDiagnosticsTab = lazy(() =>
   import("./tabs/DiagnosticsTab").then((module) => ({ default: module.DiagnosticsTab })),
 );
 
-const preferredManualSidebarWidth = (tab: StackTab): number => {
-  switch (tab) {
-    case "browser":
-      return 720;
-    case "diff":
-      return 640;
-    case "preview":
-      return 560;
-    case "artifacts":
-    case "inspector":
-    case "plan":
-    case "subagents":
-    case "diagnostics":
-    case "tasks":
-    default:
-      return RIGHT_SIDEBAR_DEFAULT_WIDTH;
-  }
-};
-
 export const SidebarRight = ({ embedded = false, visible = true, initialTab }: SidebarRightProps) => {
-  const messages = useAppStore((s) => s.messages);
-  const mainConversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title || "主聊天");
+  const { t: tr } = useI18n();
+  const mainConversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title || tr("主聊天"));
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
   const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
   const rightSidebarWidth = useAppStore((s) => s.rightSidebarWidth);
+  const rightSidebarWidthRatio = useAppStore((s) => s.rightSidebarWidthRatio);
+  const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const setRightSidebarWidth = useAppStore((s) => s.setRightSidebarWidth);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
@@ -117,7 +103,23 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const [launcherPosition, setLauncherPosition] = useState<{ x: number; y: number } | null>(null);
   const [openedPanelPosition, setOpenedPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
+  const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
+  const [measuredMainContentWidth, setMeasuredMainContentWidth] = useState<number | null>(null);
+  useEffect(() => {
+    const resized = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", resized);
+    return () => window.removeEventListener("resize", resized);
+  }, []);
   const sidebarRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const stage = sidebarRef.current!.closest<HTMLElement>(".workbench-stage");
+    if (!stage) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) setMeasuredMainContentWidth(entry.contentRect.width);
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => resizeCleanupRef.current?.(), []);
   const tabListRef = useRef<HTMLDivElement | null>(null);
@@ -140,19 +142,19 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const gitChanges = useAppStore((s) => s.gitChanges);
   const mcpServers = useAppStore((s) => s.mcpServers);
   const runningSubagents = useMemo(() => projectAgentViews(subagents).filter((agent) => agent.status === "running").length, [subagents]);
-  const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
+  const mcpErrors = mcpServers.filter(mcpServerNeedsAttention).length;
   const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
-    { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
-    { id: "diff", label: "变更", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
-    { id: "preview", label: "预览", badge: previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
-    { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
-    { id: "sidechat", label: "侧边聊天", icon: <MessageCirclePlus {...sidebarIconProps} /> },
-    { id: "artifacts", label: "产物", badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
-    { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
-    { id: "inspector", label: "运行详情", icon: <FileSearch {...sidebarIconProps} /> },
-    { id: "diagnostics", label: "运行状态", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
+    { id: "tasks", label: tr("上下文"), icon: <PanelRightOpen {...sidebarIconProps} /> },
+    { id: "diff", label: tr("变更"), badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
+    { id: "preview", label: tr("预览"), badge: previewSurfaceArtifact ? tr("开") : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
+    { id: "browser", label: tr("浏览器"), icon: <Globe2 {...sidebarIconProps} /> },
+    { id: "sidechat", label: tr("侧边聊天"), icon: <MessageCirclePlus {...sidebarIconProps} /> },
+    { id: "artifacts", label: tr("产物"), badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
+    { id: "subagents", label: tr("子智能体"), badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
+    { id: "inspector", label: tr("运行详情"), icon: <FileSearch {...sidebarIconProps} /> },
+    { id: "diagnostics", label: tr("运行状态"), badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
   ];
   const tabById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
   const openedTabs = openTabIds
@@ -163,7 +165,6 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   }, []);
   const openRightTab = (tab: StackTab) => {
     activateTab(tab);
-    setRightSidebarWidth(preferredManualSidebarWidth(tab));
   };
   const closeOpenTab = useCallback((tab: StackTab) => {
     const tabIndex = openTabIds.indexOf(tab);
@@ -179,11 +180,10 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (activeTab !== tab) return;
     const fallbackTab = nextTabs[Math.min(tabIndex, nextTabs.length - 1)] ?? "tasks";
     setActiveTab(fallbackTab);
-    setRightSidebarWidth(preferredManualSidebarWidth(fallbackTab));
     window.requestAnimationFrame(() => {
       tabListRef.current?.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${fallbackTab}"]`)?.focus();
     });
-  }, [activeTab, setActiveTab, openTabIds, setRightSidebarWidth, closeSideChat, rightPanelOpen, toggleRightPanel]);
+  }, [activeTab, setActiveTab, openTabIds, closeSideChat, rightPanelOpen, toggleRightPanel]);
   useEffect(() => {
     if (rightPanelOpen && (activeTab !== "sidechat" || sideChatOpen)) addOpenTab(activeTab);
   }, [activeTab, addOpenTab, rightPanelOpen, sideChatOpen]);
@@ -219,15 +219,18 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (previewSurfaceArtifact) addOpenTab("preview");
   }, [addOpenTab, previewSurfaceArtifact]);
 
-  const compactPanel = ["tasks", "inspector", "subagents", "artifacts", "diagnostics"].includes(activeTab);
-  const minSidebarWidth = embedded ? 0 : compactPanel ? 360 : 420;
-  const effectiveResizeMin = embedded ? 0 : minSidebarWidth;
-  const sidebarWidth = compactPanel
-    ? Math.min(420, Math.max(minSidebarWidth, rightSidebarWidth))
-    : Math.max(minSidebarWidth, rightSidebarWidth);
+  const mainContentWidth = measuredMainContentWidth ?? viewport.width - leftSidebarWidth;
+  const minSidebarWidth = embedded ? 0 : 320;
+  const effectiveResizeMin = minSidebarWidth;
+  const effectiveResizeMax = rightPanelMaximumWidth(mainContentWidth);
+  const defaultSidebarWidth = rightPanelDefaultWidth(mainContentWidth, viewport.height);
+  const boundWidth = (width: number) => Math.min(effectiveResizeMax, Math.max(effectiveResizeMin, width));
+  const sidebarWidth = boundWidth(rightSidebarWidthRatio === null
+    ? rightSidebarWidth === RIGHT_SIDEBAR_DEFAULT_WIDTH ? defaultSidebarWidth : rightSidebarWidth
+    : rightPanelWidthFromRatio(rightSidebarWidthRatio, mainContentWidth));
   const sidebarWidthStyle = expanded || embedded ? "100%" : rightPanelOpen ? `${sidebarWidth}px` : "0px";
   const sidebarMinWidth = expanded || embedded ? 0 : rightPanelOpen ? minSidebarWidth : 0;
-  const sidebarMaxWidth = expanded || embedded ? "none" : rightPanelOpen ? "min(1040px, calc(100vw - 720px))" : "0px";
+  const sidebarMaxWidth = expanded || embedded ? "none" : rightPanelOpen ? `${effectiveResizeMax}px` : "0px";
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
     setActiveTab(tab);
@@ -291,22 +294,26 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     const startWidth = sidebarWidth;
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
-      setRightSidebarWidth(startWidth + startX - moveEvent.clientX);
+      setRightSidebarWidth(boundWidth(startWidth + startX - moveEvent.clientX), { mainContentWidth, persist: false });
     };
     const cleanup = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
-      handle.removeEventListener("lostpointercapture", cleanup);
+      handle.removeEventListener("lostpointercapture", finishResize);
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
       if (!previouslyDragging) document.body.classList.remove("layout-dragging");
       resizeCleanupRef.current = null;
     };
+    const finishResize = () => {
+      setRightSidebarWidth(useAppStore.getState().rightSidebarWidth, { mainContentWidth });
+      cleanup();
+    };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId) return;
-      cleanup();
+      finishResize();
     };
     resizeCleanupRef.current = cleanup;
     document.body.style.cursor = "col-resize";
@@ -316,12 +323,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
-    handle.addEventListener("lostpointercapture", cleanup);
+    handle.addEventListener("lostpointercapture", finishResize);
   };
 
   const resetSidebarWidth = () => {
     if (embedded) return;
-    setRightSidebarWidth(preferredManualSidebarWidth(activeTab));
+    setRightSidebarWidth(defaultSidebarWidth, { mainContentWidth });
   };
   const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 48 : 16;
@@ -329,11 +336,11 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (event.key === "ArrowLeft") nextWidth = sidebarWidth + step;
     else if (event.key === "ArrowRight") nextWidth = sidebarWidth - step;
     else if (event.key === "Home") nextWidth = effectiveResizeMin;
-    else if (event.key === "End") nextWidth = 1040;
-    else if (event.key === "Enter") nextWidth = preferredManualSidebarWidth(activeTab);
+    else if (event.key === "End") nextWidth = effectiveResizeMax;
+    else if (event.key === "Enter") nextWidth = defaultSidebarWidth;
     if (nextWidth == null) return;
     event.preventDefault();
-    setRightSidebarWidth(nextWidth);
+    setRightSidebarWidth(boundWidth(nextWidth), { mainContentWidth });
   };
 
   return (
@@ -375,13 +382,13 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           className="mc-sidebar-right-resize-handle"
           role="separator"
           aria-orientation="vertical"
-          aria-label="调整右侧栏宽度"
+          aria-label={tr("调整右侧栏宽度")}
            aria-valuemin={effectiveResizeMin}
-          aria-valuemax={1040}
+          aria-valuemax={effectiveResizeMax}
            aria-valuenow={Math.round(sidebarWidth)}
-           aria-valuetext={`${Math.round(sidebarWidth)} pixels`}
+           aria-valuetext={tr("{count} 像素", { count: Math.round(sidebarWidth) })}
            tabIndex={0}
-          title="调整侧栏宽度"
+          title={tr("调整侧栏宽度")}
           onPointerDown={startResize}
            onDoubleClick={resetSidebarWidth}
            onKeyDown={handleResizeKeyDown}
@@ -389,9 +396,9 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         />
       )}
       <div className="mc-sidebar-right-header">
-        {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label="返回主聊天" title="返回主聊天"
+        {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label={tr("返回主聊天")} title={tr("返回主聊天")}
           onClick={() => setRightPanelExpanded(false)}><MessageCircle size={15} /><span>{mainConversationTitle}</span></button>}
-        <div ref={tabListRef} className="mc-sidebar-right-tabs" role="tablist" aria-label="右侧栏面板">
+        <div ref={tabListRef} className="mc-sidebar-right-tabs" role="tablist" aria-label={tr("右侧栏面板")}>
         {openedTabs.map((t, index) => (
           <div
             key={t.id}
@@ -410,7 +417,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
               onClick={() => activateTab(t.id)}
               onKeyDown={(event) => handlePrimaryTabKeyDown(event, index)}
               title={t.label}
-              aria-label={`打开${t.label}`}
+              aria-label={tr("打开{label}", { label: t.label })}
               className="mc-sidebar-right-tab"
             >
               <span className="mc-sidebar-tab-icon">{t.icon}</span>
@@ -420,8 +427,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             {(
               <button
                 type="button"
-                title={`关闭${t.label}标签页`}
-                aria-label={`关闭${t.label}标签页`}
+                title={tr("关闭{label}标签页", { label: t.label })}
+                aria-label={tr("关闭{label}标签页", { label: t.label })}
                 onClick={(event) => {
                   event.stopPropagation();
                   closeOpenTab(t.id);
@@ -438,8 +445,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {tabsOverflow && <button
             type="button"
             className="mc-sidebar-right-action mc-icon-button"
-            aria-label="已打开的面板"
-            title="已打开的面板"
+            aria-label={tr("已打开的面板")}
+            title={tr("已打开的面板")}
             aria-haspopup="menu"
             aria-expanded={openedPanelPosition !== null}
             onClick={(event) => {
@@ -451,8 +458,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {canExpand && <button
             type="button"
             className="mc-sidebar-right-action mc-icon-button"
-            aria-label={expanded ? "还原到侧栏" : "扩大到主工作区"}
-            title={expanded ? "还原到侧栏" : "扩大到主工作区"}
+            aria-label={expanded ? tr("还原到侧栏") : tr("扩大到主工作区")}
+            title={expanded ? tr("还原到侧栏") : tr("扩大到主工作区")}
             aria-pressed={expanded}
             onClick={() => setRightPanelExpanded(!expanded)}
           >{expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
@@ -464,8 +471,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
               const rect = launcherButtonRef.current!.getBoundingClientRect();
               setLauncherPosition((position) => position ? null : { x: Math.max(8, rect.right - 260), y: rect.bottom + 6 });
             }}
-            title="添加面板"
-            aria-label="添加面板"
+            title={tr("添加面板")}
+            aria-label={tr("添加面板")}
             aria-haspopup="menu"
             aria-expanded={launcherPosition !== null}
             className="mc-sidebar-right-action mc-sidebar-right-action-add mc-icon-button"
@@ -477,8 +484,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             <button
             type="button"
             onClick={closeRightPanel}
-            title="关闭面板"
-            aria-label="关闭右侧栏"
+            title={tr("关闭面板")}
+            aria-label={tr("关闭右侧栏")}
             className="mc-sidebar-right-action mc-icon-button"
           >
               <PanelRightClose size={16} strokeWidth={1.8} />
@@ -490,7 +497,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         position={openedPanelPosition}
         onClose={() => setOpenedPanelPosition(null)}
         items={openedTabs.map((tab) => ({
-          label: `${tab.label}${activeTab === tab.id ? " · 当前" : ""}`,
+          label: `${tab.label}${activeTab === tab.id ? tr(" · 当前") : ""}`,
           icon: tab.icon,
           onClick: () => openRightTab(tab.id),
         }))}
@@ -499,12 +506,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         position={launcherPosition}
         onClose={closeLauncher}
         items={[
-          { label: "终端", icon: <TerminalSquare {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.terminal), onClick: () => openBottomTab("terminal") },
-          { label: "侧边聊天", icon: <MessageCirclePlus {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.sideChat), onClick: () => openRightTab("sidechat") },
-          { label: "浏览器", icon: <Globe2 {...sidebarIconProps} />, onClick: () => openRightTab("browser") },
-          { label: "文件", icon: <FolderOpen {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.globalSearch), onClick: toggleQuickOpen },
+          { label: tr("终端"), icon: <TerminalSquare {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.terminal), onClick: () => openBottomTab("terminal") },
+          { label: tr("侧边聊天"), icon: <MessageCirclePlus {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.sideChat), onClick: () => openRightTab("sidechat") },
+          { label: tr("浏览器"), icon: <Globe2 {...sidebarIconProps} />, onClick: () => openRightTab("browser") },
+          { label: tr("文件"), icon: <FolderOpen {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.globalSearch), onClick: toggleQuickOpen },
           { label: "", separator: true },
-          ...tabs.filter((tab) => tab.id !== "sidechat" && tab.id !== "browser").map((tab) => ({
+          ...tabs.filter((tab) => !["sidechat", "browser", "inspector", "diagnostics"].includes(tab.id)).map((tab) => ({
             label: tab.label, icon: tab.icon, onClick: () => openRightTab(tab.id),
           })),
         ]}
@@ -523,7 +530,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {panelTab === "preview" && (
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="preview" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="预览" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName={tr("预览")} />}>
                   <LazyPreviewPanel />
                 </SafeBoundary>
               </Suspense>
@@ -531,8 +538,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           )}
           {panelTab === "browser" && (
             <ChunkErrorBoundary>
-              <Suspense fallback={<PanelSkeleton kind="preview" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="浏览器" />}>
+              <Suspense fallback={<PanelSkeleton kind="browser" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName={tr("浏览器")} />}>
                   <LazyBrowserPanel />
                 </SafeBoundary>
               </Suspense>
@@ -542,7 +549,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {panelTab === "diff" && (
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="diff" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="变更" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName={tr("变更")} />}>
                   <LazyDiffPanel />
                 </SafeBoundary>
               </Suspense>
@@ -557,7 +564,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           )}
           {panelTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
           {panelTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
-          {panelTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
+          {panelTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="diagnostics" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
         </div>
       </div>)}
     </aside>

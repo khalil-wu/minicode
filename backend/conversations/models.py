@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
+import html
+import re
 from typing import Any, Literal
 
 from backend.config_requirements import normalize_string_array
@@ -12,12 +14,39 @@ from backend.permissions.patterns import normalize_tool_patterns as normalize_pe
 ConversationMemoryMode = Literal["enabled", "disabled", "polluted"]
 ConversationCompactionState = Literal["clean", "compacted", "retrieved"]
 ConversationType = Literal["main", "side_chat"]
+ConversationAgentMode = Literal["build", "plan", "review", "explore"]
 ConversationPermissionMode = Literal[
     "plan", "confirm", "bypass", "auto"
 ]
 ConversationPermissionRuleLevel = Literal["auto", "confirm", "diff", "deny"]
 DEFAULT_CONVERSATION_PERMISSION_MODE: ConversationPermissionMode = "confirm"
 DEFAULT_CONVERSATION_TYPE: ConversationType = "main"
+
+
+def inherited_execution_cwd(payload: dict[str, Any]) -> str:
+    """Recover a recorded execution directory without changing project membership."""
+    directory = str(payload.get("execution_cwd") or payload.get("worktree_path") or payload.get("workspace_root") or "").strip()
+    if directory:
+        return directory
+    snapshot = payload.get("context_snapshot") or {}
+    if snapshot.get("execution_cwd"):
+        return str(snapshot["execution_cwd"])
+    # runtime_context is the provider history's trusted provenance field. A
+    # user-written <cwd> in ordinary content is not execution ownership.
+    for message in reversed(snapshot.get("history", [])):
+        context = str(message.get("runtime_context") or "")
+        environment = re.search(r"<environment_context>([\s\S]*?)</environment_context>", context)
+        if environment is not None:
+            cwd = re.search(r"<cwd>([\s\S]*?)</cwd>", environment[1])
+            if cwd is not None and cwd[1].strip():
+                return html.unescape(cwd[1]).strip()
+    return ""
+
+
+def normalize_conversation_agent_mode(value: Any) -> ConversationAgentMode:
+    if value not in {"build", "plan", "review", "explore"}:
+        raise ValueError("Invalid agent mode. Use build, plan, review, or explore.")
+    return value
 
 
 def normalize_conversation_type(value: Any) -> ConversationType:
@@ -124,7 +153,10 @@ class ConversationSummary:
     content_revision: int = 0
     content_updated_at: str = ""
     model_selection: dict[str, str] = field(default_factory=dict)
+    agent_mode: ConversationAgentMode = "build"
+    agent_mode_revision: int = 0
     conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
+    thread_source: str = "user"
     memory_mode: ConversationMemoryMode = "enabled"
     memory_polluted: bool = False
     memory_pollution_sources: list[str] = field(default_factory=list)
@@ -134,7 +166,14 @@ class ConversationSummary:
     message_count: int = 0
     archived: bool = False
     archived_at: str = ""
+    pinned: bool = False
+    pinned_at: str = ""
+    has_unread_turn: bool = False
+    project_id: str | None = None
     workspace_root: str = ""
+    execution_cwd: str = ""
+    projectless_output_dir: str = ""
+    projectless_browser_root: str = ""
     git_branch: str = ""
     worktree_path: str = ""
     git_isolated: bool = False
@@ -165,8 +204,11 @@ class ConversationSummary:
             revision=_normalize_revision(payload.get("revision")),
             content_revision=_normalize_revision(payload.get("content_revision", payload.get("revision"))),
             content_updated_at=str(payload.get("content_updated_at") or payload.get("updated_at") or ""),
-            model_selection={key: str(value) for key, value in (payload.get("model_selection") or {}).items() if key in {"provider", "model", "reasoning_effort"}},
+            model_selection={key: str(value) for key, value in (payload.get("model_selection") or {}).items() if key in {"provider", "model", "reasoning_effort", "selection_mode"}},
+            agent_mode=normalize_conversation_agent_mode(payload.get("agent_mode", "build")),
+            agent_mode_revision=_normalize_revision(payload.get("agent_mode_revision")),
             conversation_type=conversation_type,
+            thread_source=payload.get("thread_source", "user"),
             memory_mode=normalize_memory_mode(
                 payload.get("memory_generation_mode", payload.get("memory_mode")),
                 conversation_type=conversation_type,
@@ -184,7 +226,14 @@ class ConversationSummary:
             message_count=int(payload.get("message_count") or 0),
             archived=bool(payload.get("archived") or False),
             archived_at=str(payload.get("archived_at") or ""),
+            pinned=bool(payload.get("pinned", False)),
+            pinned_at=str(payload.get("pinned_at") or ""),
+            has_unread_turn=bool(payload.get("has_unread_turn", False)),
+            project_id=payload.get("project_id"),
             workspace_root=str(payload.get("workspace_root") or ""),
+            execution_cwd=inherited_execution_cwd(payload),
+            projectless_output_dir=str(payload.get("projectless_output_dir") or ""),
+            projectless_browser_root=str(payload.get("projectless_browser_root") or ""),
             git_branch=str(payload.get("git_branch") or ""),
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),
@@ -212,8 +261,11 @@ class ConversationRecord:
     content_revision: int = 0
     content_updated_at: str = ""
     model_selection: dict[str, str] = field(default_factory=dict)
+    agent_mode: ConversationAgentMode = "build"
+    agent_mode_revision: int = 0
     creation_command_id: str = ""
     conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
+    thread_source: str = "user"
     memory_mode: ConversationMemoryMode = "enabled"
     memory_polluted: bool = False
     memory_pollution_sources: list[str] = field(default_factory=list)
@@ -230,7 +282,14 @@ class ConversationRecord:
     worktree_registrations: list[dict[str, str]] = field(default_factory=list)
     archived: bool = False
     archived_at: str = ""
+    pinned: bool = False
+    pinned_at: str = ""
+    has_unread_turn: bool = False
+    project_id: str | None = None
     workspace_root: str = ""
+    execution_cwd: str = ""
+    projectless_output_dir: str = ""
+    projectless_browser_root: str = ""
     git_branch: str = ""
     worktree_path: str = ""
     git_isolated: bool = False
@@ -252,7 +311,10 @@ class ConversationRecord:
             content_revision=self.content_revision,
             content_updated_at=self.content_updated_at,
             model_selection=dict(self.model_selection),
+            agent_mode=self.agent_mode,
+            agent_mode_revision=self.agent_mode_revision,
             conversation_type=self.conversation_type,
+            thread_source=self.thread_source,
             memory_mode=self.memory_mode,
             memory_polluted=self.memory_polluted,
             memory_pollution_sources=list(self.memory_pollution_sources),
@@ -262,7 +324,14 @@ class ConversationRecord:
             message_count=self.message_count or len(self.transcript),
             archived=self.archived,
             archived_at=self.archived_at,
+            pinned=self.pinned,
+            pinned_at=self.pinned_at,
+            has_unread_turn=self.has_unread_turn,
+            project_id=self.project_id,
             workspace_root=self.workspace_root,
+            execution_cwd=self.execution_cwd,
+            projectless_output_dir=self.projectless_output_dir,
+            projectless_browser_root=self.projectless_browser_root,
             git_branch=self.git_branch,
             worktree_path=self.worktree_path,
             git_isolated=self.git_isolated,
@@ -310,9 +379,12 @@ class ConversationRecord:
             model_selection={
                 key: str(value)
                 for key, value in (payload.get("model_selection") or {}).items()
-                if key in {"provider", "model", "reasoning_effort"}
+                if key in {"provider", "model", "reasoning_effort", "selection_mode"}
             },
+            agent_mode=normalize_conversation_agent_mode(payload.get("agent_mode", "build")),
+            agent_mode_revision=_normalize_revision(payload.get("agent_mode_revision")),
             conversation_type=conversation_type,
+            thread_source=payload.get("thread_source", "user"),
             memory_mode=normalize_memory_mode(
                 payload.get("memory_generation_mode", payload.get("memory_mode")),
                 conversation_type=conversation_type,
@@ -337,7 +409,14 @@ class ConversationRecord:
             worktree_registrations=[dict(entry) for entry in payload.get("worktree_registrations", [])],
             archived=bool(payload.get("archived") or False),
             archived_at=str(payload.get("archived_at") or ""),
+            pinned=bool(payload.get("pinned", False)),
+            pinned_at=str(payload.get("pinned_at") or ""),
+            has_unread_turn=bool(payload.get("has_unread_turn", False)),
+            project_id=payload.get("project_id"),
             workspace_root=str(payload.get("workspace_root") or ""),
+            execution_cwd=inherited_execution_cwd(payload),
+            projectless_output_dir=str(payload.get("projectless_output_dir") or ""),
+            projectless_browser_root=str(payload.get("projectless_browser_root") or ""),
             git_branch=str(payload.get("git_branch") or ""),
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),

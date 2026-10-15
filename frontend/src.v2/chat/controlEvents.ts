@@ -4,12 +4,13 @@ import type {
   ControlRequestEvent,
   ServerEvent,
 } from "../protocol/events";
-import type { DiffReviewState, PendingAskUserOption, PendingDiffReview } from "../stores/types";
+import type { DiffReviewState, PendingApproval, PendingAskUserOption, PendingDiffReview } from "../stores/types";
 import { diffFilePathsEqual } from "./diffReviewState";
 import { dirtyEditorFiles } from "../stores/shared-helpers";
-import { embeddedBrowserCloseConversation, embeddedBrowserList, isDesktop, ptyKillConversation, ptyList } from "../desktop/runtime";
+import { desktop, desktopNotificationConversationVisible, embeddedBrowserCloseConversation, embeddedBrowserList, isDesktop, ptyKillConversation, ptyList } from "../desktop/runtime";
 import { sendPromptResponseCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
+import { isReplayedEvent } from "../protocol/events";
 
 const respondToResourceCleanup = async (event: ControlRequestEvent): Promise<void> => {
   if (event.request.subtype !== "conversation_resources_cleanup") return;
@@ -50,6 +51,12 @@ const eventConversationId = (e: ServerEvent): string | undefined => {
   const conversationId = (e as unknown as { conversation_id?: unknown }).conversation_id;
   if (typeof conversationId === "string" && conversationId.trim()) return conversationId.trim();
   return undefined;
+};
+
+const notifyControlRequest = (event: ControlRequestEvent, conversationId: string, kind: "permission" | "question", title: string, body: string) => {
+  const state = useAppStore.getState();
+  void desktop()?.notify({ kind, title, body, requestId: event.request_id, turnId: event.turn_id, messageId: event.message_id, taskId: event.task_id, target: { kind: "conversation", conversationId },
+    conversationVisible: desktopNotificationConversationVisible(conversationId, state.conversationId, state.settingsOpen, state.pendingConversationSwitchId) });
 };
 
 type ApprovalDiffData =
@@ -155,6 +162,13 @@ const applyApprovalRequest = (
     turnId?: string;
     messageId?: string;
     toolName: string;
+    requestDigest?: string;
+    command?: string[];
+    displayCommand?: string;
+    cwd?: string;
+    approvalReason?: string | null;
+    proposedExecpolicyAmendment?: string[] | null;
+    availableDecisions?: PendingApproval["availableDecisions"];
     args: Record<string, unknown>;
     sourceAgent?: string;
     sourceThread?: string;
@@ -162,6 +176,9 @@ const applyApprovalRequest = (
     networkUnisolated?: boolean;
     diff?: unknown;
     expiresAt?: number;
+    permissionRequest?: PendingApproval["permissionRequest"];
+    stdinAction?: PendingApproval["stdinAction"];
+    mcpApproval?: PendingApproval["mcpApproval"];
   },
 ) => {
   const s = useAppStore.getState();
@@ -173,12 +190,22 @@ const applyApprovalRequest = (
       turnId: request.turnId,
       messageId: request.messageId,
       toolName: request.toolName,
+      requestDigest: request.requestDigest,
+      command: request.command,
+      displayCommand: request.displayCommand,
+      cwd: request.cwd,
+      approvalReason: request.approvalReason,
+      proposedExecpolicyAmendment: request.proposedExecpolicyAmendment,
+      availableDecisions: request.availableDecisions,
       args: request.args,
       sourceAgent: request.sourceAgent,
       sourceThread: request.sourceThread,
       sourceTool: request.sourceTool,
       networkUnisolated: request.networkUnisolated,
       expiresAt: request.expiresAt,
+      permissionRequest: request.permissionRequest,
+      stdinAction: request.stdinAction,
+      mcpApproval: request.mcpApproval,
     });
     return;
   }
@@ -270,7 +297,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
         });
         return true;
       }
-      if (request.subtype === "can_use_tool") {
+      if (request.subtype === "can_use_tool" || request.subtype === "request_permissions" || request.subtype === "write_stdin") {
         applyApprovalRequest({
           requestId,
           conversationId,
@@ -284,7 +311,19 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           networkUnisolated: request.network_unisolated,
           expiresAt: ev.expires_at,
           diff: request.diff,
+          ...(request.subtype === "request_permissions" ? { permissionRequest: {
+            permissions: request.permissions, reason: request.reason, cwd: request.cwd, environmentId: request.environment_id,
+          } } : {}),
+          ...(request.subtype === "write_stdin" ? { stdinAction: request.stdin_action } : {}),
+          ...(request.subtype === "can_use_tool" ? { mcpApproval: request.mcp_approval,
+            command: request.command, displayCommand: request.display_command, cwd: request.cwd, approvalReason: request.reason,
+            requestDigest: request.request_digest, proposedExecpolicyAmendment: request.proposed_execpolicy_amendment,
+            availableDecisions: request.available_decisions } : {}),
         });
+        if (!isReplayedEvent(e) && isDesktop()) {
+          notifyControlRequest(ev, conversationId, "permission", "MiniCode 请求权限",
+            s.conversations.find(conversation => conversation.id === conversationId)?.title || request.tool_name);
+        }
         return true;
       }
       if (request.subtype === "elicitation") {
@@ -293,11 +332,26 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           conversationId,
           turnId: ev.turn_id,
           messageId: ev.message_id,
+          taskId: ev.task_id,
           prompt: request.prompt,
           question: request.question,
           inputSchema: request.schema,
           options: extractChoiceOptions(request.options ?? request.choices ?? request.allowed_values),
+          elicitation: { mode: request.mode ?? "form", url: request.url, elicitationId: request.elicitation_id,
+            serverName: request.mcp_server_name, meta: request._meta },
         });
+        if (!isReplayedEvent(e) && isDesktop()) {
+          notifyControlRequest(ev, conversationId, "question", "MiniCode 等待回复", request.question || request.prompt || "请回复当前问题。");
+        }
+        return true;
+      }
+      if (request.subtype === "request_user_input") {
+        s.setAskUser({ requestId, conversationId, turnId: ev.turn_id, messageId: ev.message_id, taskId: ev.task_id,
+          question: request.questions[0].question,
+          requestUserInput: { toolCallId: request.tool_use_id, questions: request.questions, isBlocking: request.isBlocking } });
+        if (!isReplayedEvent(e) && isDesktop()) {
+          notifyControlRequest(ev, conversationId, "question", "MiniCode 等待回复", request.questions[0].question);
+        }
         return true;
       }
       if (request.subtype === "provider_auth_prompt") {
@@ -316,6 +370,9 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           expiresAt: ev.expires_at,
           options: extractChoiceOptions(request.options),
         });
+        if (!isReplayedEvent(e) && isDesktop()) {
+          notifyControlRequest(ev, conversationId, "question", "MiniCode 等待登录信息", request.provider);
+        }
         return true;
       }
       return true;
@@ -343,6 +400,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       if (!conversationId) return true;
       const requestIds = Array.isArray(ev.request_ids) ? ev.request_ids.filter(Boolean) : [];
       if (requestIds.length === 0) return true;
+      if (isDesktop()) for (const requestId of requestIds) void desktop()?.hideNotifications({ conversationId, requestId });
       const requested = new Set(requestIds);
       const owns = (prompt: { requestId?: string; conversationId?: string } | null | undefined) =>
         Boolean(prompt)
@@ -360,7 +418,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
         .map((prompt) => prompt!.requestId);
       if (approvalIds.length > 0) s.clearApprovals(approvalIds);
       if (diffIds.length > 0) s.clearDiffReviews(diffIds);
-      if (askIds.length > 0) s.clearAskUsers(askIds);
+      if (askIds.length > 0) s.clearAskUsers(askIds, conversationId);
       useAppStore.setState((current) => ({
         diffReview: owns(current.diffReview) ? null : current.diffReview,
       }));

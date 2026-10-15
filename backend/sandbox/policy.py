@@ -11,7 +11,6 @@ import os
 import sys
 import tempfile
 import glob as glob_module
-from fnmatch import fnmatchcase
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -180,6 +179,15 @@ class AdditionalPermissionProfile:
         ) and (
             self.network is None or self.network.enabled is None
         )
+
+
+def merge_glob_scan_max_depth(
+    left_entries: tuple[FileSystemSandboxEntry, ...], left_depth: int | None,
+    right_entries: tuple[FileSystemSandboxEntry, ...], right_depth: int | None,
+) -> int | None:
+    depths = [depth for entries, depth in ((left_entries, left_depth), (right_entries, right_depth))
+              if any(entry.path.kind == "glob_pattern" and entry.access is FileSystemAccessMode.DENY for entry in entries)]
+    return max(depths) if depths and None not in depths else None
 
 
 DEFAULT_PROTECTED_METADATA_NAMES: tuple[str, ...] = (
@@ -447,9 +455,11 @@ class SandboxPolicy:
         entries = list(profile.file_system.entries)
         glob_depth = profile.file_system.glob_scan_max_depth
         if additional.file_system is not None:
-            entries.extend(additional.file_system.entries)
-            if additional.file_system.glob_scan_max_depth is not None:
-                glob_depth = additional.file_system.glob_scan_max_depth
+            entries.extend(entry for entry in additional.file_system.entries if entry not in entries)
+            glob_depth = merge_glob_scan_max_depth(
+                profile.file_system.entries, profile.file_system.glob_scan_max_depth,
+                additional.file_system.entries, additional.file_system.glob_scan_max_depth,
+            )
         network = profile.network
         # codex's network merge is grant-only (policy_transforms
         # effective_network_sandbox_policy): additional permissions may enable
@@ -525,6 +535,7 @@ def sandbox_policy_for_permission_context(
     resolved_mode, _violation = requirements.resolve_permission_mode(
         getattr(effective_permission, "mode", "confirm"),
         sandbox_mode=effective_permission.sandbox_mode,
+        approval_policy=effective_permission.approval_policy_value(),
     )
     if _violation is not None:
         raise _violation
@@ -546,7 +557,8 @@ def sandbox_policy_for_permission_context(
     effective_permission = replace(
         effective_permission,
         mode=resolved_mode,
-        approval_policy=requirements.approval_policy_for_mode(resolved_mode),
+        approval_policy=effective_permission.approval_policy,
+        granular_approval=effective_permission.granular_approval,
         sandbox_mode=requirements.sandbox_mode_for_permission_mode(
             resolved_mode, sandbox_mode=effective_permission.sandbox_mode,
         ),
@@ -1366,9 +1378,16 @@ def _has_explicit_metadata_write(
 
 
 def _glob_matches_path(pattern: str, path: Path) -> bool:
-    normalized_pattern = os.path.normcase(str(Path(pattern).expanduser().absolute()))
-    normalized_path = os.path.normcase(str(path))
-    return fnmatchcase(normalized_path, normalized_pattern)
+    from backend.sandbox.permission_glob import permission_glob_matches
+
+    normalized_pattern = str(Path(pattern).expanduser().absolute())
+    normalized_path = str(path)
+    try:
+        return permission_glob_matches(normalized_pattern, normalized_path, windows=os.name == "nt")
+    except ValueError:
+        # Source ReadDenyMatcher's InvalidDenyReadGlobBehavior::FailClosed:
+        # an invalid configured deny glob denies every candidate.
+        return True
 
 
 def _ordered_paths(paths: object) -> list[Path]:

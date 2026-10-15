@@ -58,10 +58,14 @@ async def test_normal_command_projects_failed_container_cleanup(monkeypatch):
 
 class PendingRunner:
     def __init__(self, policy):
+        self.policy = policy
         self.process = SimpleNamespace(pid=123456, returncode=None)
         self._container_name = ""
         self.container_ownership = {}
         self.cleanup = AsyncMock(side_effect=[False, True])
+
+    def capability(self, *, cwd=None):
+        return runner_module.SandboxRunner(self.policy).capability(cwd=cwd)
 
     async def run(self, *args, **kwargs):
         if "process_ready_callback" in kwargs:

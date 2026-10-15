@@ -159,7 +159,8 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().contextCardCollapsed).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "聊天操作" }));
     expect(screen.getByRole("menuitem", { name: "重命名" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "导出会话树" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "复制" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "导出会话树" })).toBeNull();
     expect(useAppStore.getState().commandPaletteOpen).toBe(false);
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
     expect(chat.getAttribute("data-conversation-owner")).toBe("owner-A");

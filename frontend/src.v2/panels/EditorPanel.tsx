@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
 import { ArrowLeft, ArrowRight, Braces, ChevronRight, Circle, FileCode2, FileWarning, FolderTree, GitCompare, Image, LockKeyhole, MessageSquare, RefreshCw, Sparkles, X } from "lucide-react";
@@ -101,7 +102,7 @@ const editorLanguages = [
   ["html", "HTML"], ["css", "CSS"], ["scss", "SCSS"], ["less", "Less"],
   ["json", "JSON"], ["yaml", "YAML"],
 ] as const;
-const editorLanguageName = (language: string) => editorLanguages.find(([id]) => id === language)?.[1] ?? language;
+const editorLanguageName = (language: string, tr: Translate) => language === "plaintext" ? tr("纯文本") : editorLanguages.find(([id]) => id === language)?.[1] ?? language;
 
 const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 const dirname = (path: string) => {
@@ -255,8 +256,8 @@ interface FileSnapshot {
   readOnly?: boolean;
 }
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error || "无法读取文件。");
+const errorMessage = (tr: Translate, error: unknown): string =>
+  error instanceof Error ? error.message : String(error || tr("无法读取文件。"));
 
 const isLargeFileError = (message: string): boolean =>
   /too large|max supported size|above the .*limit|413/i.test(message);
@@ -410,6 +411,7 @@ const readFileSnapshot = async (path: string, workingDirectory: string): Promise
 };
 
 export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" } = {}) => {
+  const { t: tr } = useI18n();
   const explorerId = useId();
   const editorExplorerOpen = useAppStore((s) => s.editorExplorerOpen);
   const setEditorExplorerOpen = useAppStore((s) => s.setEditorExplorerOpen);
@@ -625,7 +627,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       }).catch((error: unknown) => {
         if (!useAppStore.getState().editorOpenRequests.includes(request)) return;
         consumeEditorOpenRequest(request.id);
-        pushToast(`无法定位文件：${errorMessage(error)}`, "error", 5000);
+        pushToast(tr("无法定位文件：{v0}", { v0: errorMessage(tr, error) }), "error", 5000);
       });
     }
   }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab, workingDirectory]);
@@ -681,7 +683,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         commit(() => markTabLoaded(path, "", `Could not read ${path}`));
       }
     } catch (error) {
-      const message = errorMessage(error);
+      const message = errorMessage(tr, error);
       if (isLargeFileError(message)) {
         commit(() => markTabLoaded(path, "", null, undefined, {
           largeFile: true,
@@ -800,17 +802,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           }
           if (saveIsVisible) {
             setSaveStatus("saved");
-            if (announce) pushToast(`已保存 ${basename(currentPath)}`, "success", 1600);
+            if (announce) pushToast(tr("已保存 {v0}", { v0: basename(currentPath) }), "success", 1600);
           }
           return { path: currentPath, status: "saved" };
         }
         if (saveIsVisible) setSaveStatus("error");
         if (result.conflict) {
           markTabExternalChanged(currentPath, { workspaceRoot: saveWorkspace });
-          if (announce && saveIsVisible) pushToast(`${basename(currentPath)} 已在磁盘上更改。为避免覆盖，已跳过保存。`, "warning", 4200);
+          if (announce && saveIsVisible) pushToast(tr("{v0} 已在磁盘上更改。为避免覆盖，已跳过保存。", { v0: basename(currentPath) }), "warning", 4200);
           return { path: currentPath, status: "conflict" };
         }
-        if (announce && saveIsVisible) pushToast(result.message || `保存失败：${basename(currentPath)}`, "error", 3500);
+        if (announce && saveIsVisible) pushToast(result.message || tr("保存失败：{v0}", { v0: basename(currentPath) }), "error", 3500);
         return { path: currentPath, status: "failed" };
       } catch (error) {
         const current = useAppStore.getState();
@@ -820,7 +822,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         if (workspaceRootsEqual(current.workingDirectory, saveWorkspace)
           && currentTab && editorPathsEqual(current.activeTabPath, currentTab.path, saveWorkspace)) {
           setSaveStatus("error");
-          if (announce) pushToast(`保存失败：${errorMessage(error)}`, "error", 3500);
+          if (announce) pushToast(tr("保存失败：{v0}", { v0: errorMessage(tr, error) }), "error", 3500);
         }
         return { path: currentTab?.path ?? savePath, status: "failed" };
       } finally {
@@ -833,20 +835,20 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   const save = async () => {
     if (!activeTab) {
-      pushToast("当前未打开文件。", "info", 1600);
+      pushToast(tr("当前未打开文件。"), "info", 1600);
       return;
     }
     if (activeTab.readOnly) {
-      pushToast("该文件由 MiniCode 生成，仅供只读查看。", "info", 2400);
+      pushToast(tr("该文件由 MiniCode 生成，仅供只读查看。"), "info", 2400);
       return;
     }
     if (activeTab.largeFile) {
-      pushToast(`${basename(activeTab.path)} 未加载到编辑器中。`, "warning", 2400);
+      pushToast(tr("{v0} 未加载到编辑器中。", { v0: basename(activeTab.path) }), "warning", 2400);
       return;
     }
     if (!dirty) {
       setSaveStatus("saved");
-      pushToast(`${basename(activeTab.path)} 已保存。`, "info", 1400);
+      pushToast(tr("{v0} 已保存。", { v0: basename(activeTab.path) }), "info", 1400);
       return;
     }
     await saveTab(activeTab, workingDirectory, true);
@@ -857,7 +859,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     const saveWorkspace = snapshot.workingDirectory;
     const dirtyTabs = snapshot.editorTabs.filter((tab) => !tab.readOnly && !tab.loading && !tab.error && !tab.largeFile && tab.content !== tab.original);
     if (!dirtyTabs.length) {
-      pushToast("所有文件均已保存。", "info", 1400);
+      pushToast(tr("所有文件均已保存。"), "info", 1400);
       return;
     }
     const results: SaveResult[] = [];
@@ -882,9 +884,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     const failures = results.filter((result) => result.status === "failed").map((result) => result.path);
     const scope = workspaceRootsEqual(useAppStore.getState().workingDirectory, saveWorkspace) ? "" : `${saveWorkspace}：`;
     const summary = [
-      `${scope}已保存 ${saved} 个文件`,
-      conflicts.length ? `磁盘冲突：${conflicts.join("、")}` : "",
-      failures.length ? `保存失败：${failures.join("、")}` : "",
+      tr("{v0}已保存 {v1} 个文件", { v0: scope, v1: saved }),
+      conflicts.length ? tr("磁盘冲突：{v0}", { v0: conflicts.join("、") }) : "",
+      failures.length ? tr("保存失败：{v0}", { v0: failures.join("、") }) : "",
     ].filter(Boolean).join("；");
     pushToast(summary, failures.length ? "error" : conflicts.length ? "warning" : saved ? "success" : "info", failures.length || conflicts.length ? 6000 : 1800);
   };
@@ -928,7 +930,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     };
     try {
       const snapshot = await readFileSnapshot(path, directory);
-      if (snapshot == null) throw new Error(`无法读取 ${path}`);
+      if (snapshot == null) throw new Error(tr("无法读取 {v0}", { v0: path }));
       if (!canCommit()) return;
       const currentTab = useAppStore.getState().editorTabs.find((tab) => editorPathsEqual(tab.path, path, directory))!;
       if (preserveEdits && currentTab.content !== currentTab.original) {
@@ -936,17 +938,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         return;
       }
       const warning = applyFileSnapshot(path, snapshot);
-      if (!silent) pushToast(warning || `已从磁盘重新加载 ${basename(path)}。`, warning ? "warning" : "success", warning ? 3500 : 1800);
+      if (!silent) pushToast(warning || tr("已从磁盘重新加载 {v0}。", { v0: basename(path) }), warning ? "warning" : "success", warning ? 3500 : 1800);
     } catch (error) {
       if (!canCommit()) return;
-      const message = errorMessage(error);
+      const message = errorMessage(tr, error);
       const currentTab = useAppStore.getState().editorTabs.find((tab) => editorPathsEqual(tab.path, path, directory))!;
       if (isLargeFileError(message) && (!preserveEdits || currentTab.content === currentTab.original)) {
         markTabLoaded(path, "", null, undefined, { largeFile: true, loadWarning: message });
       } else {
         markTabExternalChanged(path);
       }
-      if (!silent) pushToast(message || `无法重新加载 ${basename(path)}。`, "error", 3500);
+      if (!silent) pushToast(message || tr("无法重新加载 {v0}。", { v0: basename(path) }), "error", 3500);
     }
   };
 
@@ -996,7 +998,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (!activeTabPath || !activeGitChange?.patch) return;
     setDiffReviewState({
       requestId: `editor-diff-${activeTabPath}`,
-      toolName: "文件改动",
+      toolName: tr("文件改动"),
       diff: activeGitChange.patch,
       files: [{
         path: activeGitChange.path,
@@ -1027,9 +1029,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (tab && tab.content !== tab.original) {
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: "放弃更改",
-        message: `确定放弃对 ${basename(path)} 的更改吗？`,
-        confirmLabel: "放弃",
+        title: tr("放弃更改"),
+        message: tr("确定放弃对 {v0} 的更改吗？", { v0: basename(path) }),
+        confirmLabel: tr("放弃"),
         danger: true,
       });
       if (!ok) return false;
@@ -1051,7 +1053,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     const selection = editor.getSelection();
     const text = selection ? editor.getModel()!.getValueInRange(selection) : "";
     if (!text.trim()) {
-      pushToast("请先选择一些代码。", "warning");
+      pushToast(tr("请先选择一些代码。"), "warning");
       return;
     }
     const state = useAppStore.getState();
@@ -1071,7 +1073,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const button = document.createElement("button");
       button.type = "button";
       button.className = "mc-editor-selection-trigger";
-      button.textContent = "提问 · Ctrl+K";
+      button.textContent = tr("提问 · Ctrl+K");
       button.onclick = () => askAboutSelection(mountedEditor);
       const widget = {
         getId: () => "minicode.selection.question",
@@ -1167,7 +1169,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     syncSelection();
     mountedEditor.addAction?.({
       id: "minicode.ask-about-selection",
-      label: "在侧边对话中询问所选内容",
+      label: tr("在侧边对话中询问所选内容"),
       contextMenuGroupId: "navigation",
       contextMenuOrder: 1.5,
       run: askAboutSelection,
@@ -1227,7 +1229,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   return (
     <div className="mc-editor-panel flex-1 min-h-0 flex flex-col">
       <div className="mc-editor-workspace">
-        <aside id={explorerId} className="mc-editor-explorer" aria-label="项目文件" style={{ display: editorExplorerOpen ? "flex" : "none" }}>
+        <aside id={explorerId} className="mc-editor-explorer" aria-label={tr("项目文件")} style={{ display: editorExplorerOpen ? "flex" : "none" }}>
           <FileTree />
         </aside>
         <div className="mc-editor-document" onKeyDownCapture={(event) => {
@@ -1247,14 +1249,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           <button
             type="button"
             className="mc-editor-explorer-toggle"
-            aria-label={editorExplorerOpen ? "收起项目文件" : "展开项目文件"}
-            title={editorExplorerOpen ? "收起项目文件" : "展开项目文件"}
+            aria-label={editorExplorerOpen ? tr("收起项目文件") : tr("展开项目文件")}
+            title={editorExplorerOpen ? tr("收起项目文件") : tr("展开项目文件")}
             aria-expanded={editorExplorerOpen}
             aria-controls={explorerId}
             onClick={() => setEditorExplorerOpen(!editorExplorerOpen)}
           ><FolderTree size={16} aria-hidden="true" /></button>
       {showEditorTabs && tabs.length > 0 && (
-        <div ref={tabListRef} role="tablist" aria-label="打开的文件" className="mc-editor-tabs">
+        <div ref={tabListRef} role="tablist" aria-label={tr("打开的文件")} className="mc-editor-tabs">
           {tabs.map((tab, tabIndex) => {
             const tabDirty = tab.content !== tab.original;
             const active = editorPathsEqual(tab.path, activeTabPath, workingDirectory);
@@ -1283,7 +1285,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   role="tab"
                   aria-selected={active}
                   aria-label={basename(tab.path)}
-                  aria-description={tabDirty ? `${tab.path}，未保存` : tab.path}
+                  aria-description={tabDirty ? tr("{v0}，未保存", { v0: tab.path }) : tab.path}
                   tabIndex={active ? 0 : -1}
                   onClick={() => handleSetActive(tab.path)}
                   onKeyDown={(event) => {
@@ -1311,8 +1313,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   className="editor-tab-close"
                   data-dirty={tabDirty || undefined}
                   tabIndex={active ? 0 : -1}
-                  title={tabDirty ? "未保存 · 关闭标签页" : "关闭标签页"}
-                  aria-label={`关闭 ${basename(tab.path)}`}
+                  title={tabDirty ? tr("未保存 · 关闭标签页") : tr("关闭标签页")}
+                  aria-label={tr("关闭 {v0}", { v0: basename(tab.path) })}
                   onClick={(event) => {
                     event.stopPropagation();
                     handleCloseTab(tab.path);
@@ -1329,11 +1331,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         </div>
       {showEditorToolbar && (
         <div className="mc-editor-toolbar">
-          <div className="mc-editor-actions" role="toolbar" aria-label="代码导航">
-            <button type="button" aria-label="返回上一位置" title="返回 · Alt+←" disabled={navigation.index <= 0} onClick={() => navigateHistory(-1)}><ArrowLeft size={14} /></button>
-            <button type="button" aria-label="前进到下一位置" title="前进 · Alt+→" disabled={navigation.index >= navigation.entries.length - 1} onClick={() => navigateHistory(1)}><ArrowRight size={14} /></button>
+          <div className="mc-editor-actions" role="toolbar" aria-label={tr("代码导航")}>
+            <button type="button" aria-label={tr("返回上一位置")} title={tr("返回 · Alt+←")} disabled={navigation.index <= 0} onClick={() => navigateHistory(-1)}><ArrowLeft size={14} /></button>
+            <button type="button" aria-label={tr("前进到下一位置")} title={tr("前进 · Alt+→")} disabled={navigation.index >= navigation.entries.length - 1} onClick={() => navigateHistory(1)}><ArrowRight size={14} /></button>
           </div>
-          <nav aria-label="文件路径" title={activeDisplayPath} className="mc-editor-breadcrumbs">
+          <nav aria-label={tr("文件路径")} title={activeDisplayPath} className="mc-editor-breadcrumbs">
             <ol className="flex items-center gap-1 min-w-0 overflow-hidden">
               {activePathSegments.map((segment, index) => (
                 <li key={index} className="inline-flex items-center gap-1 min-w-0" style={{ color: index === activePathSegments.length - 1 ? "var(--text-secondary)" : undefined }}>
@@ -1347,12 +1349,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <button
               type="button"
               onClick={() => askAboutSelection(editorRef.current!)}
-              title="将当前所选代码带入侧边对话 · Ctrl+K"
+              title={tr("将当前所选代码带入侧边对话 · Ctrl+K")}
               className="mc-editor-selection-action"
             >
               <MessageSquare size={14} />
-              提问 · Ctrl+K
-            </button>
+              {tr("提问 · Ctrl+K")}</button>
           )}
           <EditorActions
             onAction={runEditorAction}
@@ -1366,7 +1367,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             showMinimap={!canRenderMarkdown}
             readOnly={Boolean(activeTab?.readOnly)}
           />
-          {!canRenderMarkdown && <button type="button" className="mc-editor-symbol-button" aria-label="文件大纲" title="文件大纲 · Ctrl+Shift+O（Shift 点击：项目符号）" onClick={(event) => setSymbolMode(event.shiftKey ? "project" : "file")}><Braces size={15} /></button>}
+          {!canRenderMarkdown && <button type="button" className="mc-editor-symbol-button" aria-label={tr("文件大纲")} title={tr("文件大纲 · Ctrl+Shift+O（Shift 点击：项目符号）")} onClick={(event) => setSymbolMode(event.shiftKey ? "project" : "file")}><Braces size={15} /></button>}
         </div>
       )}
 
@@ -1377,17 +1378,16 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           style={{ borderColor: "var(--state-warning)", background: "var(--surface-soft)", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}
         >
           <FileWarning size={15} style={{ color: "var(--state-warning)" }} />
-          <span className="flex-1 min-w-0">该文件已在磁盘上更改。</span>
+          <span className="flex-1 min-w-0">{tr("该文件已在磁盘上更改。")}</span>
           <button
             type="button"
             onClick={() => void reloadFileFromDisk(activeTab.path)}
             className="inline-flex items-center gap-1.5 px-2 py-1 border rounded-[4px] cursor-pointer"
             style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)" }}
-            title="放弃编辑器中的更改并从磁盘重新加载"
+            title={tr("放弃编辑器中的更改并从磁盘重新加载")}
           >
             <RefreshCw size={13} />
-            重新加载
-          </button>
+            {tr("重新加载")}</button>
         </div>
       )}
 
@@ -1395,8 +1395,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         {activeTab ? (
           activeTab.loading ? (
             <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)" }}>
-              正在加载文件...
-            </div>
+              {tr("正在加载文件...")}</div>
           ) : activeTab.error ? (
             <FileLoadErrorNotice path={activeTab.path} error={activeTab.error} onClose={() => closeEditorTab(activeTab.path)} onRetry={() => {
               useAppStore.setState((state) => ({
@@ -1470,7 +1469,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   mountTextSurface(editor as MonacoEditorInstance);
                   setPredictionReady(true);
                   editor.onDidDispose(() => setPredictionReady(false));
-                  editor.addAction({ id: "minicode.predict", label: "代码预测",
+                  editor.addAction({ id: "minicode.predict", label: tr("代码预测"),
                     keybindings: [monacoRef.current!.KeyMod.Alt | monacoRef.current!.KeyCode.Backslash],
                     run: (target) => {
                       const store = useAppStore.getState();
@@ -1540,48 +1539,46 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2.5 text-sm" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
             <span className="editor-empty-file-icon" aria-hidden="true"><FileCode2 size={28} strokeWidth={1.8} className="editor-empty-file-icon-svg" /></span>
-            <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>未打开文件</div>
+            <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>{tr("未打开文件")}</div>
             <div className="max-w-[420px] text-center">
-              从项目文件中选择文件，或按 Ctrl+P 快速打开。
-            </div>
+              {tr("从项目文件中选择文件，或按 Ctrl+P 快速打开。")}</div>
           </div>
         )}
       </div>
 
       <div title={activeTabPath ?? ""} className="mc-editor-status">
         <span className="mc-editor-status-file" data-dirty={dirty || undefined}>
-          {activeTabPath ? basename(activeTabPath) : "未打开文件"}{dirty ? " · 已修改" : ""}
+          {activeTabPath ? basename(activeTabPath) : tr("未打开文件")}{dirty ? tr(" · 已修改") : ""}
         </span>
         {activeTab?.sizeBytes != null && <span className="mc-editor-status-size">{formatBytes(activeTab.sizeBytes)}</span>}
-        {activeTab?.draftRestored && <span title={activeTab.loadWarning || "未保存正文已从本机草稿恢复"}>已恢复草稿</span>}
+        {activeTab?.draftRestored && <span title={activeTab.loadWarning || tr("未保存正文已从本机草稿恢复")}>{tr("已恢复草稿")}</span>}
         {activeTab?.readOnly && (
-          <span className="inline-flex items-center gap-1" title="MiniCode 生成的只读工具结果">
-            <LockKeyhole size={14} /> 只读
-          </span>
+          <span className="inline-flex items-center gap-1" title={tr("MiniCode 生成的只读工具结果")}>
+            <LockKeyhole size={14} /> {tr("只读")}</span>
         )}
         {activeTab && canAskAboutSelection && !canRenderMarkdown ? (
           <SelectMenu
             className="mc-editor-language-select"
-            ariaLabel="文件语言"
-            title="更改文件语言模式；纯文本不会显示语法颜色"
+            ariaLabel={tr("文件语言")}
+            title={tr("更改文件语言模式；纯文本不会显示语法颜色")}
             align="end"
             value={activeTab.language ?? "auto"}
             onValueChange={(value) => useAppStore.getState().setEditorTabLanguage(activeTab.path, value === "auto" ? undefined : value)}
           >
-            <option value="auto">自动 · {editorLanguageName(guessLanguage(activeTab.path))}</option>
-            {editorLanguages.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            <option value="auto">{tr("自动 ·") + " "}{editorLanguageName(guessLanguage(activeTab.path), tr)}</option>
+            {editorLanguages.map(([id, name]) => <option key={id} value={id}>{id === "plaintext" ? tr("纯文本") : name}</option>)}
           </SelectMenu>
-        ) : <span>{editorLanguageName(language)}</span>}
+        ) : <span>{editorLanguageName(language, tr)}</span>}
         {activeTab && !canRenderMarkdown && !isImagePath(activeTab.path) && !isPdfPath(activeTab.path) && !activeTab.readOnly && !activeTab.largeFile && <button
           type="button" className="mc-editor-prediction-status" data-error={Boolean(predictionUsage.lastError)}
-          aria-label={preferences.aiEnabled ? "触发代码预测" : "开启代码预测"}
-          title={predictionUsage.lastError || "暂停输入自动预测。Alt + \\ 手动触发，Tab 接受，Esc 取消。"}
+          aria-label={preferences.aiEnabled ? tr("触发代码预测") : tr("开启代码预测")}
+          title={predictionUsage.lastError || tr("暂停输入自动预测。Alt + \\ 手动触发，Tab 接受，Esc 取消。")}
           disabled={!predictionReady || predictionUsage.pending}
           onClick={() => {
             const target = editorRef.current as unknown as import("monaco-editor").editor.IStandaloneCodeEditor;
             target.focus();
             void target.getAction("minicode.predict")!.run();
-          }}><Sparkles size={12} /><span>{predictionUsage.pending ? "正在预测…" : predictionUsage.lastError ? "预测失败 · 重试" : preferences.aiEnabled ? "代码预测" : "开启预测"}</span></button>}
+          }}><Sparkles size={12} /><span>{predictionUsage.pending ? tr("正在预测…") : predictionUsage.lastError ? tr("预测失败 · 重试") : preferences.aiEnabled ? tr("代码预测") : tr("开启预测")}</span></button>}
         {activeGitChange?.patch && (
           <button
             type="button"
@@ -1594,8 +1591,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <span style={{ color: "var(--diff-removed-foreground)" }}>-{activeGitChange.deletions}</span>
           </button>
         )}
-        {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>已保存</span>}
-        {saveStatus === "error" && <span style={{ color: "var(--state-danger)" }}>保存失败</span>}
+        {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>{tr("已保存")}</span>}
+        {saveStatus === "error" && <span style={{ color: "var(--state-danger)" }}>{tr("保存失败")}</span>}
         {showEditorToolbar && projectIndex.status.phase !== "idle" && <button
           type="button"
           className="mc-editor-index-status"
@@ -1604,12 +1601,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           disabled={projectIndex.status.phase === "loading"}
           title={projectIndex.status.issues.length
             ? projectIndex.status.issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")
-            : "TS/JS 项目索引，编辑缓冲区优先；点击重新索引项目与依赖类型"}
-        >{projectIndex.status.phase === "loading" ? "正在索引…"
-          : projectIndex.status.phase === "error" ? "索引失败 · 重试"
-          : projectIndex.status.phase === "partial" ? `索引有缺项 · ${projectIndex.status.issues.length}`
-          : `项目索引 · ${projectIndex.status.sourceCount} 个源码`}</button>}
-        {showEditorToolbar && <span>{`第 ${cursor.line} 行，第 ${cursor.column} 列`}</span>}
+            : tr("TS/JS 项目索引，编辑缓冲区优先；点击重新索引项目与依赖类型")}
+        >{projectIndex.status.phase === "loading" ? tr("正在索引…")
+          : projectIndex.status.phase === "error" ? tr("索引失败 · 重试")
+          : projectIndex.status.phase === "partial" ? tr("索引有缺项 · {v0}", { v0: projectIndex.status.issues.length })
+          : tr("项目索引 · {v0} 个源码", { v0: projectIndex.status.sourceCount })}</button>}
+        {showEditorToolbar && <span>{tr("第 {v0} 行，第 {v1} 列", { v0: cursor.line, v1: cursor.column })}</span>}
       </div>
         </div>
       </div>
@@ -1619,20 +1616,20 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           position={{ x: ctxMenu.x, y: ctxMenu.y }}
           onClose={() => setCtxMenu(null)}
           items={[
-            { label: tabs.find((tab) => tab.path === ctxMenu.path)?.pinned ? "取消固定标签" : "固定标签",
+            { label: tabs.find((tab) => tab.path === ctxMenu.path)?.pinned ? tr("取消固定标签") : tr("固定标签"),
               onClick: () => useAppStore.getState().pinEditorTab(ctxMenu.path, !tabs.find((tab) => tab.path === ctxMenu.path)?.pinned) },
-            { label: "保留标签", onClick: () => useAppStore.getState().keepEditorTab(ctxMenu.path) },
-            { label: "关闭标签页", onClick: () => handleCloseTab(ctxMenu.path) },
+            { label: tr("保留标签"), onClick: () => useAppStore.getState().keepEditorTab(ctxMenu.path) },
+            { label: tr("关闭标签页"), onClick: () => handleCloseTab(ctxMenu.path) },
             {
-              label: "关闭其他标签页",
+              label: tr("关闭其他标签页"),
               onClick: () => {
                 const paths = tabs.filter((tab) => !tab.pinned && !editorPathsEqual(tab.path, ctxMenu.path, workingDirectory)).map((tab) => tab.path);
                 void handleCloseTabs(paths);
               },
             },
-            { label: "关闭所有标签页", onClick: () => { void handleCloseTabs(tabs.map((tab) => tab.path)); } },
+            { label: tr("关闭所有标签页"), onClick: () => { void handleCloseTabs(tabs.map((tab) => tab.path)); } },
             {
-              label: "关闭右侧标签页",
+              label: tr("关闭右侧标签页"),
               onClick: () => {
                 const idx = tabs.findIndex((t) => editorPathsEqual(t.path, ctxMenu.path, workingDirectory));
                 void handleCloseTabs(tabs.slice(idx + 1).filter((tab) => !tab.pinned).map((tab) => tab.path));
@@ -1640,19 +1637,19 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             },
             { separator: true, label: "" },
             {
-              label: "复制文件路径",
+              label: tr("复制文件路径"),
               onClick: () => {
                 const absolutePath = resolveDesktopFsPath(ctxMenu.path, workingDirectory);
                 void navigator.clipboard.writeText(absolutePath).then(
-                  () => pushToast("文件路径已复制。", "success", 1600),
-                  (error) => pushToast(`复制文件路径失败：${errorMessage(error)}`, "error", 3000),
+                  () => pushToast(tr("文件路径已复制。"), "success", 1600),
+                  (error) => pushToast(tr("复制文件路径失败：{v0}", { v0: errorMessage(tr, error) }), "error", 3000),
                 );
               },
             },
             // Revealing a path needs an OS shell; in browser mode the entry did
             // nothing at all, so it is not offered there.
             ...(isDesktop() ? [{
-              label: "在文件管理器中显示",
+              label: tr("在文件管理器中显示"),
               onClick: () => { void revealPath(resolveDesktopFsPath(ctxMenu.path, workingDirectory)); },
             }] : []),
           ]}
@@ -1662,43 +1659,49 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   );
 };
 
-const EditorLoading = () => (
+const EditorLoading = () => {
+  const { t: tr } = useI18n();
+  return (
   <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-    正在加载编辑器...
-  </div>
+    {tr("正在加载编辑器...")}</div>
 );
+};
 
-const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | null; sizeBytes?: number } }) => (
+const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | null; sizeBytes?: number } }) => {
+  const { t: tr } = useI18n();
+  return (
   <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
     <FileWarning size={28} style={{ color: "var(--state-warning)" }} />
-    <div className="font-bold" style={{ color: "var(--text-primary)" }}>文件未加载到编辑器</div>
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>{tr("文件未加载到编辑器")}</div>
     <div className="max-w-[520px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
-      {tab.loadWarning || "该文件过大，无法在编辑器中安全呈现。"}
+      {tab.loadWarning || tr("该文件过大，无法在编辑器中安全呈现。")}
     </div>
     <div className="max-w-[520px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
       {basename(tab.path)}{tab.sizeBytes != null ? ` - ${formatBytes(tab.sizeBytes)}` : ""}
     </div>
   </div>
 );
+};
 
 const FileLoadErrorNotice = ({ path, error, onRetry, onClose }: { path: string; error: string; onRetry: () => void; onClose: () => void }) => {
+  const { t: tr } = useI18n();
   const missing = /ENOENT|no such file or directory|not found/i.test(error);
   return (
     <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
       <FileWarning size={28} style={{ color: "var(--state-warning)" }} />
-      <div className="font-bold" style={{ color: "var(--text-primary)" }}>{missing ? "文件不存在或已移动" : "无法加载文件"}</div>
+      <div className="font-bold" style={{ color: "var(--text-primary)" }}>{missing ? tr("文件不存在或已移动") : tr("无法加载文件")}</div>
       <div className="max-w-[560px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
-        {missing ? "当前路径没有这个文件。请检查文件位置，或关闭这个标签。" : "读取失败。请重试，或查看技术详情。"}
+        {missing ? tr("当前路径没有这个文件。请检查文件位置，或关闭这个标签。") : tr("读取失败。请重试，或查看技术详情。")}
       </div>
       <div className="max-w-[560px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
         {path}
       </div>
       <div className="flex gap-2">
-        <button type="button" onClick={onRetry} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontSize: "var(--text-xs)" }}>重试</button>
-        <button type="button" onClick={onClose} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer" style={{ borderColor: "var(--border-subtle)", background: "transparent", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>关闭标签</button>
+        <button type="button" onClick={onRetry} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontSize: "var(--text-xs)" }}>{tr("重试")}</button>
+        <button type="button" onClick={onClose} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer" style={{ borderColor: "var(--border-subtle)", background: "transparent", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{tr("关闭标签")}</button>
       </div>
       <details className="max-w-[560px] text-left" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-        <summary className="cursor-pointer">技术详情</summary>
+        <summary className="cursor-pointer">{tr("技术详情")}</summary>
         <div className="mt-2 break-all" style={{ fontFamily: "var(--font-mono)" }}>{error}</div>
       </details>
     </div>
@@ -1706,6 +1709,7 @@ const FileLoadErrorNotice = ({ path, error, onRetry, onClose }: { path: string; 
 };
 
 const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirectory: string }) => {
+  const { t: tr } = useI18n();
   const [retryNonce, setRetryNonce] = useState(0);
   const imgSrc = useRawFileUrl(path, workingDirectory, retryNonce);
   const [failed, setFailed] = useState(false);
@@ -1717,9 +1721,9 @@ const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirector
       {failed ? (
         <div className="flex flex-col items-center gap-2" style={{ color: "var(--text-muted)" }}>
           <Image size={32} />
-          <span style={{ fontSize: "var(--text-sm)" }}>无法显示图片</span>
+          <span style={{ fontSize: "var(--text-sm)" }}>{tr("无法显示图片")}</span>
           <span style={{ fontSize: "var(--text-sm)", fontFamily: "var(--font-ui)" }}>{basename(path)}</span>
-          <button type="button" className="btn-secondary" onClick={() => setRetryNonce((value) => value + 1)}>重试图片预览</button>
+          <button type="button" className="btn-secondary" onClick={() => setRetryNonce((value) => value + 1)}>{tr("重试图片预览")}</button>
         </div>
       ) : (
         <img

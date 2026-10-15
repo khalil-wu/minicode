@@ -29,7 +29,7 @@ def validate_compaction_window(window: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Native compaction returned an empty or invalid context window")
     if any(not isinstance(item, dict) or not isinstance(item.get("type"), str) for item in output):
         raise ValueError("Native compaction contains an invalid context item")
-    compacted = [item for item in output if item["type"] == "compaction"]
+    compacted = [item for item in output if item["type"] in {"compaction", "context_compaction"}]
     if not compacted or any(not isinstance(item.get("encrypted_content"), str) or not item["encrypted_content"] for item in compacted):
         raise ValueError("Native compaction window is missing its encrypted state")
     return window

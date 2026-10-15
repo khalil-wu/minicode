@@ -3,7 +3,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const src = path.join(root, "src.v2");
-const distAssets = path.join(root, "dist", "assets");
+const distAssets = path.join(path.resolve(root, process.env.MINICODE_BUILD_OUTPUT || "dist"), "assets");
 const limits = {
   // Frozen after the 2026-07-17 workbench visual consolidation. New changes
   // must reduce or preserve this count; they must not silently raise it.

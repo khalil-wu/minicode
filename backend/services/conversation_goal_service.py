@@ -131,10 +131,15 @@ def prepare_goal_action(
             ),
         )
 
+    if len(text) > 4000:
+        return GoalAction(False, current_goal, "none", {}, CommandOutcome(
+            "goal", "Goal exceeds the 4000-character limit.", level="error",
+            data={"conversation_id": conversation_id, "goal": current_goal},
+        ))
     now = utc_now_iso()
     next_goal = {
         "id": str(current_goal.get("id") or f"goal_{conversation_id}"),
-        "text": text[:4000],
+        "text": text,
         "status": "active",
         "created_at": str(current_goal.get("created_at") or now),
         "updated_at": now,

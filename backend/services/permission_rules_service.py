@@ -7,6 +7,7 @@ from backend.services.runtime_control_service import CommandOutcome
 from backend.services.command_target import resolve_conversation_target as resolve_permission_rule_target
 from backend.tools.base import PermissionLevel
 from backend.tools.catalog import canonical_tool_policy_name
+from backend.permissions.patterns import legacy_mcp_allow_warning
 from backend.ws.utils import (
     normalize_permission_level,
     normalize_permission_overrides,
@@ -33,6 +34,13 @@ def build_permission_rules_list_outcome(conversation_id: str, rules: dict[str, A
         f"overrides {len(rules['session_overrides'])} | "
         f"system deny {len(rules['system_deny'])}"
     )
+    warnings = [
+        warning for rule in rules["session_overrides"]
+        if rule.get("level") == "auto"
+        and (warning := legacy_mcp_allow_warning(rule["pattern"]))
+    ]
+    if warnings:
+        message += "\n" + "\n".join(warnings)
     return CommandOutcome(
         "permissions.rules.list",
         message,
@@ -87,6 +95,9 @@ def prepare_permission_rule_add(
         if previous_level == level:
             result_level = "info"
             result_message = f"Override rule already present: {pattern} -> {permission_level_to_token(level)}"
+        if level == PermissionLevel.AUTO and (warning := legacy_mcp_allow_warning(pattern)):
+            result_level = "warning"
+            result_message += "\n" + warning
         payload = {
             "conversation_id": conversation_id,
             "rule_kind": "override",

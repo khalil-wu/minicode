@@ -1,0 +1,63 @@
+[package]
+name = "minicode-execpolicy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+license = "Apache-2.0"
+description = "MiniCode bridge to the pinned Codex Starlark execution policy engine"
+
+[workspace]
+resolver = "2"
+members = [".", "vendor/execpolicy", "vendor/absolute-path", "vendor/source-shell"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+
+[workspace.lints.clippy]
+
+[workspace.dependencies]
+anyhow = "=1.0.103"
+base64 = "=0.22.1"
+clap = "=4.5.58"
+codex-utils-absolute-path = { path = "vendor/absolute-path" }
+dirs = "=6.0.0"
+dunce = "=1.0.5"
+multimap = "=0.10.1"
+libc = "=0.2.186"
+once_cell = "=1.21.4"
+pretty_assertions = "=1.4.1"
+regex = "=1.12.3"
+schemars = "=0.8.22"
+serde = { version = "=1.0.228", features = ["rc"] }
+serde_json = "=1.0.149"
+shlex = "=1.3.0"
+starlark = { version = "=0.14.2", default-features = false }
+tempfile = "=3.27.0"
+thiserror = "=2.0.18"
+tokio = "=1.52.3"
+ts-rs = "=11.1.0"
+tree-sitter = "=0.25.10"
+tree-sitter-bash = "=0.25.1"
+tree-sitter-powershell = "=0.26.4"
+url = "=2.5.8"
+which = "=8.0.0"
+
+[dependencies]
+codex-execpolicy = { path = "vendor/execpolicy" }
+minicode-source-shell = { path = "vendor/source-shell" }
+multimap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+shlex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[profile.release]
+strip = "debuginfo"
+

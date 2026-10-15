@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClientCommand, ServerEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
@@ -358,7 +359,7 @@ describe("useWebSocket client command ids", () => {
   });
 
   it("keeps a critical user command pending until the durable ACK arrives", () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     const command = {
       type: "user_message",
       content: "hello",
@@ -373,7 +374,7 @@ describe("useWebSocket client command ids", () => {
   });
 
   it("does not warn for incidental background commands without acknowledgements", () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     const command = {
       type: "commands.list",
       client_command_id: "cmd_catalog",

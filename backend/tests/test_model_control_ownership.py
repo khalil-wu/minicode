@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -77,7 +78,7 @@ def controls(fixture, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_footer_changes_live_request_after_current_tools_and_persists_only_task(tmp_path, monkeypatch):
+async def test_footer_saves_next_turn_model_and_effort_without_changing_the_running_turn(tmp_path, monkeypatch):
     fixture, host, repo = None, None, None
     requests = 0
 
@@ -101,10 +102,10 @@ async def test_footer_changes_live_request_after_current_tools_and_persists_only
         await execute(fixture, tmp_path, conversation_id="conv_model_control")
         assert fixture.inspector.observations == [
             ("model-a", "model-a", "low", 96000),
-            ("model-b", "model-b", "low", 32768),
-            ("model-b", "model-b", "high", 32768),
+            ("model-a", "model-a", "low", 96000),
+            ("model-a", "model-a", "low", 96000),
         ]
-        assert repo.get_conversation_summary("conv_model_control").model_selection == {"provider": "custom", "model": "model-b", "reasoning_effort": "high"}
+        assert repo.get_conversation_summary("conv_model_control").model_selection == {"provider": "custom", "model": "model-b", "reasoning_effort": "high", "selection_mode": "model"}
         assert repo.get_conversation_summary("conv_other_control").model_selection["reasoning_effort"] == "low"
         assert fixture.config.llm.reasoning_effort == "low"
         assert all(call.args[0]["conversation_id"] == "conv_model_control" for call in host.send_payload.call_args_list)
@@ -124,7 +125,7 @@ async def test_other_window_targets_running_owner_without_changing_visible_task(
         if requests == 1:
             await handle_model_command(requesting, {"model": "model-b", "conversation_id": "conv_model_control"})
             return ToolCallEvent(id="old-model-call", name="inspect_model", arguments={})
-        assert model.model_id() == "model-b"
+        assert model.model_id() == "model-a"
         return None
 
     fixture = setup(tmp_path, monkeypatch, behavior)
@@ -140,7 +141,7 @@ async def test_other_window_targets_running_owner_without_changing_visible_task(
         assert repo.get_conversation_summary("conv_model_control").model_selection["model"] == "model-b"
         assert repo.get_conversation_summary("conv_other_control").model_selection["model"] == "model-a"
         assert requesting.send_payload.call_args.args[0]["conversation_id"] == "conv_other_control"
-        assert fixture.owner.model_execution.llm in fixture.created
+        assert fixture.owner.model_execution.llm is fixture.model
     finally:
         await executing.run_manager.shutdown_notification_wakes()
         await requesting.run_manager.shutdown_notification_wakes()
@@ -161,10 +162,11 @@ async def test_run_cleanup_cannot_remove_newer_model_owner(tmp_path, monkeypatch
         task_id="newer", cancel_event=cancel, active_conversation_id="conv_model_control", run_context=newer)
     try:
         host.run_manager.cleanup(conversation_id="conv_model_control", task=old_task, task_id="model-run", cancel_event=asyncio.Event())
-        assert host.run_manager.publish_model_execution("conv_model_control", fixture.owner.model_execution) is newer_task
-        assert newer.model_execution is fixture.owner.model_execution
+        assert host.run_manager.running_task_for("conv_model_control") is newer_task
+        assert host.run_manager.context_for("conv_model_control") is newer
+        assert newer.model_execution is None
         host.run_manager.cleanup(conversation_id="conv_model_control", task=newer_task, task_id="newer", cancel_event=cancel)
-        assert host.run_manager.publish_model_execution("conv_model_control", fixture.owner.model_execution) is None
+        assert host.run_manager.running_task_for("conv_model_control") is None
     finally:
         newer_task.cancel()
         await asyncio.gather(newer_task, return_exceptions=True)
@@ -193,8 +195,8 @@ async def test_effort_edit_uses_selected_capabilities_without_refreshing_auth(tm
         oauth.assert_not_awaited()
         auth.assert_not_awaited()
         await host.set_selected_model("model-b", manual_override=True)
-        oauth.assert_awaited_once()
-        auth.assert_awaited_once()
+        oauth.assert_not_awaited()
+        auth.assert_not_awaited()
     finally:
         await host.run_manager.shutdown_notification_wakes()
         fixture.runtime.close(release_lease=True)
@@ -219,7 +221,7 @@ async def test_idle_model_and_effort_changes_persist_without_auth_or_adapter_wor
         assert await host.set_selected_model("model-b", manual_override=True, conversation_id=owner_id)
         assert await host.set_selected_model("", manual_override=True, conversation_id=owner_id, reasoning_effort="high")
         assert repo.get_conversation_summary(owner_id).model_selection == {
-            "provider": "custom", "model": "model-b", "reasoning_effort": "high"}
+            "provider": "custom", "model": "model-b", "reasoning_effort": "high", "selection_mode": "model"}
         assert repo.get_conversation_summary("conv_other_control" if owner_id == "conv_model_control" else "conv_model_control").model_selection == {
             "provider": "custom", "model": "model-a", "reasoning_effort": "low"}
         assert host.selected_model == ("model-b" if owner_id == host.active_conversation_id else "model-a")
@@ -244,3 +246,36 @@ async def test_rejected_model_selection_does_not_acknowledge_effort_as_applied()
         set_selected_model=AsyncMock(return_value=False), emit_command_result=AsyncMock())
     await handle_llm_config_set(session, {"source": "frontend.footer", "reasoning_effort": "high"})
     session.emit_command_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous,default,expected", [("low", "high", "low"), ("medium", "low", "low")])
+async def test_model_switch_uses_supported_effort_or_the_new_model_default_and_reset_restores_pair(tmp_path, monkeypatch, previous, default, expected):
+    fixture = setup(tmp_path, monkeypatch, None)
+    host, repo = controls(fixture, tmp_path, monkeypatch)
+    host.run_manager.cleanup(conversation_id="conv_model_control", task=asyncio.current_task(),
+        task_id="model-run", cancel_event=host.run_manager.cancel_events["conv_model_control"])
+    original = host.catalog.get_model
+    def definition(provider, model):
+        value = original(provider, model)
+        return replace(value, default_reasoning_effort=default) if model == "model-b" else replace(value, reasoning_effort_levels=("low", "medium", "high"))
+    monkeypatch.setattr(host.catalog, "get_model", definition)
+    repo.update_model_selection("conv_model_control", provider="custom", model="model-a", reasoning_effort=previous)
+    try:
+        await handle_model_command(host, {"model": "model-b", "conversation_id": "conv_model_control"})
+        selected = repo.get_conversation_summary("conv_model_control").model_selection
+        assert selected == {"provider": "custom", "model": "model-b", "reasoning_effort": expected, "selection_mode": "model"}
+        host.emit_command_result.assert_awaited_with("model.set", "", level="success", data={"conversation_id": "conv_model_control", "selection_mode": "model"})
+        await handle_model_command(host, {"selection_mode": "default", "conversation_id": "conv_model_control"})
+        restored = {"provider": "custom", "model": "model-a", "reasoning_effort": "low", "selection_mode": "default"}
+        assert repo.get_conversation("conv_model_control").model_selection == restored
+        assert host.selected_model == "model-a" and host.config.llm.reasoning_effort == "low"
+        assert fixture.config.llm.model == "model-a" and fixture.config.llm.reasoning_effort == "low"
+        assert repo.get_conversation_summary("conv_other_control").model_selection == {"provider": "custom", "model": "model-a", "reasoning_effort": "low"}
+        projection = host.send_payload.call_args.args[0]
+        assert projection["default_model_selection"] == {"provider": "custom", "model": "model-a", "reasoning_effort": "low", "conversation_id": "conv_model_control", "working_directory": str(tmp_path)}
+        assert projection["model_selection_mode"] == "default"
+        assert next(option for option in projection["available_model_options"] if option["model"] == "model-b")["default_reasoning_effort"] == default
+    finally:
+        await host.run_manager.shutdown_notification_wakes()
+        fixture.runtime.close(release_lease=True)

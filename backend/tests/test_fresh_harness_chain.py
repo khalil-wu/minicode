@@ -5,7 +5,7 @@ import asyncio
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -153,7 +153,7 @@ def test_partial_response_keeps_the_failure_visible_and_durable():
     from backend.agent.state import AgentState
     from backend.llm.base import UsageInfo
     state = AgentState(user_message="fix code")
-    context = SimpleNamespace(append_assistant=lambda _: None)
+    context = SimpleNamespace(append_assistant=Mock())
     projection = object()
     controller = RecoveryController(state=state, ctx=context, dependencies=RecoveryDependencies(
         scrub_thinking_tags=lambda text: text, usage_terminal_projection=lambda *a, **k: projection,
@@ -172,6 +172,7 @@ def test_partial_response_keeps_the_failure_visible_and_durable():
     assert events[-1] is projection
     assert state.terminal_status == "partial"
     assert state.reply == "I will inspect the files."
+    context.append_assistant.assert_called_once_with("I will inspect the files.", answer_source="partial")
 
 
 def test_slash_resume_dispatches_the_canonical_control_command(monkeypatch):

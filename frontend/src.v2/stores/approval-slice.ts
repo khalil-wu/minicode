@@ -5,11 +5,11 @@ import { loadPromptDrafts, persistPromptDrafts, promptDraftKey, removePromptDraf
 
 export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> = (set, get) => ({
   promptDrafts: loadPromptDrafts(),
-  updatePromptDraft: ({ requestId, conversationId }, patch) => set((s) => {
-    const key = promptDraftKey({ requestId, conversationId });
+  updatePromptDraft: ({ requestId, conversationId, inputOwner }, patch) => set((s) => {
+    const key = promptDraftKey({ requestId, conversationId, inputOwner });
     return { promptDrafts: persistPromptDrafts({
       ...s.promptDrafts,
-      [key]: { ...s.promptDrafts[key], ...patch, requestId, conversationId },
+      [key]: { ...s.promptDrafts[key], ...patch, requestId, conversationId, ...(inputOwner ? { inputOwner } : {}) },
     }) };
   }),
   pendingApproval: null,
@@ -155,35 +155,42 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
   setAskUser: (a) =>
     set((s) => {
       if (
-        s.pendingAskUser?.requestId === a.requestId ||
-        s.askUserQueue.some((queued) => queued.requestId === a.requestId)
+        [s.pendingAskUser, ...s.askUserQueue].some(request => request?.requestId === a.requestId
+          && request.conversationId === a.conversationId && request.turnId === a.turnId
+          && request.messageId === a.messageId && request.taskId === a.taskId)
       ) {
         return s;
       }
       if (!s.pendingAskUser) return { pendingAskUser: a };
       return { askUserQueue: [...s.askUserQueue, a] };
     }),
-  clearAskUser: (requestId) =>
+  clearAskUser: (requestId, conversationId, inputOwner) =>
     set((s) => {
-      if (requestId && s.pendingAskUser?.requestId !== requestId) {
+      const matches = (request: typeof s.pendingAskUser) => request !== null && request.requestId === requestId
+        && (conversationId === undefined || request.conversationId === conversationId)
+        && (inputOwner === undefined || request.turnId === inputOwner.turnId
+          && request.messageId === inputOwner.messageId && request.taskId === inputOwner.taskId);
+      if (requestId && !matches(s.pendingAskUser)) {
         return {
-          promptDrafts: removePromptDrafts(s.promptDrafts, [requestId]),
-          askUserQueue: s.askUserQueue.filter((queued) => queued.requestId !== requestId),
+          promptDrafts: removePromptDrafts(s.promptDrafts, [requestId], conversationId, inputOwner),
+          askUserQueue: s.askUserQueue.filter((queued) => !matches(queued)),
         };
       }
       const [next, ...rest] = s.askUserQueue;
       return { pendingAskUser: next ?? null, askUserQueue: rest,
-        promptDrafts: removePromptDrafts(s.promptDrafts, [requestId ?? s.pendingAskUser?.requestId ?? ""]) };
+        promptDrafts: removePromptDrafts(s.promptDrafts, [requestId ?? s.pendingAskUser?.requestId ?? ""], conversationId, inputOwner) };
     }),
-  clearAskUsers: (requestIds) =>
+  clearAskUsers: (requestIds, conversationId) =>
     set((s) => {
       if (requestIds.length === 0) return s;
       const ids = new Set(requestIds);
-      const pending = s.pendingAskUser && ids.has(s.pendingAskUser.requestId)
+      const matches = (request: { requestId: string; conversationId?: string }) => ids.has(request.requestId)
+        && (conversationId === undefined || request.conversationId === conversationId);
+      const pending = s.pendingAskUser && matches(s.pendingAskUser)
         ? null
         : s.pendingAskUser;
-      const queue = s.askUserQueue.filter((queued) => !ids.has(queued.requestId));
-      const promptDrafts = removePromptDrafts(s.promptDrafts, requestIds);
+      const queue = s.askUserQueue.filter((queued) => !matches(queued));
+      const promptDrafts = removePromptDrafts(s.promptDrafts, requestIds, conversationId);
       if (pending) return { pendingAskUser: pending, askUserQueue: queue, promptDrafts };
       const [next, ...rest] = queue;
       return { pendingAskUser: next ?? null, askUserQueue: rest, promptDrafts };

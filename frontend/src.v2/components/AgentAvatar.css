@@ -1,31 +1,27 @@
-/* Match the desktop's stable, pastel identity art. Status stays in the task row. */
+/* Codex's original light/dark art keeps one identity across every surface. */
 .mc-agent-avatar {
   --agent-avatar-size: 30px;
-  --agent-avatar-color: var(--agent-identity-teal);
   position: relative;
   display: inline-grid;
   width: var(--agent-avatar-size);
   height: var(--agent-avatar-size);
   flex: 0 0 auto;
   place-items: center;
-  color: var(--agent-avatar-color);
 }
 
 .mc-agent-avatar[data-size="small"] { --agent-avatar-size: 24px; }
 .mc-agent-avatar[data-size="large"] { --agent-avatar-size: 38px; }
-.mc-agent-avatar[data-identity-color="teal"] { --agent-avatar-color: #82c6bc; }
-.mc-agent-avatar[data-identity-color="blue"] { --agent-avatar-color: #8ec6ce; }
-.mc-agent-avatar[data-identity-color="violet"] { --agent-avatar-color: #b58bed; }
-.mc-agent-avatar[data-identity-color="rose"] { --agent-avatar-color: #eca3c7; }
-.mc-agent-avatar[data-identity-color="amber"] { --agent-avatar-color: #edc58e; }
-.mc-agent-avatar[data-identity-color="green"] { --agent-avatar-color: #9dce86; }
 
 .mc-agent-avatar-art {
   display: block;
-  width: calc(100% - 4px);
-  height: calc(100% - 4px);
-  fill: currentColor;
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
 }
+
+.mc-agent-avatar-art-light { display: none; }
+[data-theme="light"] .mc-agent-avatar-art-light { display: block; }
+[data-theme="light"] .mc-agent-avatar-art-dark { display: none; }
 
 .mc-agent-avatar-status {
   position: absolute;

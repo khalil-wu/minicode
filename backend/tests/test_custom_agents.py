@@ -197,10 +197,11 @@ def test_task_tool_schema_exposes_discovered_custom_agent(monkeypatch):
     )
 
     assert agent_type_schema["enum"][:3] == [
-        "general-purpose",
-        "explore",
-        "plan",
+        "default",
+        "explorer",
+        "worker",
     ]
+    assert {"general-purpose", "explore", "plan"}.issubset(agent_type_schema["enum"])
     assert "reviewer" in agent_type_schema["enum"]
     assert "docs-writer" in parallel_agent_type_schema["enum"]
     assert "Available types:" in agent_type_schema["description"]

@@ -11,6 +11,7 @@ from typing import Any, Literal
 from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.message import AgentEvent
+from backend.agent.run_events import public_provider_trace
 from backend.agent.provider_event_projection import (
     ProviderProjectionResult,
     project_non_text_provider_event,
@@ -72,13 +73,26 @@ async def dispatch_provider_event(
 ) -> AsyncIterator[AgentEvent | ProviderDispatchResult]:
     """Observe, project and transition one provider event."""
 
+    if event.type == StreamEventType.TEXT_CHUNK and event.item_id and tool_context.run_context is not None:
+        builder = tool_context.run_context.context_builder
+        if builder is not None:
+            builder.guardian_evidence.reserve_assistant_order(event.item_id)
+
     await turn_kernel.observe_provider_first_event(
         provider_attempt,
         progress_origin_ms=provider_attempt.started_at,
         observed_at=epoch_ms(),
     )
     raw_event = getattr(event, "raw", None)
+    observed_calls = [*stream_state.tool_calls, *event.tool_calls]
+    if event.tool_call_start is not None:
+        observed_calls.append(event.tool_call_start)
+    stream_state.private_tool_call_ids.update(
+        call.id for call in observed_calls
+        if (tool := tool_registry.get_tool(call.name)) is not None and tool.private_model_only
+    )
     if raw_event and isinstance(raw_event, dict):
+        raw_event = public_provider_trace(raw_event, stream_state.private_tool_call_ids)
         provider_name = type(llm).__name__.replace("Adapter", "").lower()
         yield AgentEvent.stream_event(
             provider=provider_name,
@@ -104,7 +118,7 @@ async def dispatch_provider_event(
         return
 
     if event.type == StreamEventType.TEXT_CHUNK and (
-        event.content or event.lifecycle in {"start", "end"}
+        event.content or event.lifecycle in {"start", "end", "item_completed"}
     ):
         text_projection = None
         async for projected in project_provider_text_chunk(
@@ -121,6 +135,16 @@ async def dispatch_provider_event(
                 text_projection = projected
             else:
                 yield projected
+        if event.lifecycle == "item_completed":
+            async for projected in finish_provider_text_item(
+                stream_state=stream_state, stream_text=stream_text,
+                visible_text_sanitizer=visible_text_sanitizer,
+                live_text_streaming=settings.live_text_streaming,
+                awaiting_trailing_done=awaiting_trailing_tool_done,
+                process_event_factory=model_process_text_event,
+            ):
+                yield projected
+            turn_kernel.observe_completed_assistant_item(event.provider_items[0])
         steer_result = None
         async for steer_update in apply_provider_chunk_steer(
             steer_eligible=bool(
@@ -166,6 +190,10 @@ async def dispatch_provider_event(
         StreamEventType.TOOL_CALL_DELTA,
         StreamEventType.TOOL_CALL,
     }:
+        if event.type == StreamEventType.TOOL_CALL and event.tool_calls and (
+            event.tool_calls_committed or event.tool_calls_final
+        ):
+            turn_kernel.accept_mailbox_after_tool_item()
         if event.type in {StreamEventType.TOOL_CALL_START, StreamEventType.TOOL_CALL_DELTA, StreamEventType.TOOL_CALL}:
             async for projected in finish_provider_text_item(
                 stream_state=stream_state, stream_text=stream_text,

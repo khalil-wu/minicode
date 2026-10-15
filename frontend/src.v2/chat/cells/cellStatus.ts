@@ -20,7 +20,7 @@ export type CellStatus =
 /** Visual tone. Fewer tones than statuses: several failures share one look. */
 export type CellTone = "pending" | "running" | "success" | "partial" | "failed" | "cancelled";
 
-const STATUS_LABELS: Record<CellStatus, string> = {
+const STATUS_LABELS = {
   pending: "准备中",
   running: "运行中",
   success: "成功",
@@ -29,7 +29,7 @@ const STATUS_LABELS: Record<CellStatus, string> = {
   blocked: "已阻止",
   timeout: "超时",
   cancelled: "已取消",
-};
+} as const satisfies Record<CellStatus, string>;
 
 const STATUS_TONES: Record<CellStatus, CellTone> = {
   pending: "pending",
@@ -42,7 +42,7 @@ const STATUS_TONES: Record<CellStatus, CellTone> = {
   cancelled: "cancelled",
 };
 
-export const cellStatusLabel = (status: CellStatus): string => STATUS_LABELS[status];
+export const cellStatusLabel = (status: CellStatus) => STATUS_LABELS[status];
 
 export const cellStatusTone = (status: CellStatus): CellTone => STATUS_TONES[status];
 

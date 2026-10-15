@@ -1,12 +1,13 @@
 import type { ClientCommand, CommandResultEvent } from "./events";
 import { pushToast } from "../overlays/ToastContainer";
-import { isDesktop } from "../desktop/runtime";
+import { desktop, isDesktop } from "../desktop/runtime";
 
 type Sender = (command: ClientCommand) => boolean;
 type SendClientCommandOptions = { silent?: boolean };
 export type AwaitCommandResultOptions = {
   timeoutMs?: number;
   silent?: boolean;
+  onReceived?: () => void;
 };
 
 export const DEFAULT_COMMAND_RESULT_TIMEOUT_MS = 60_000;
@@ -19,7 +20,15 @@ const pendingCommandResults = new Map<string, {
   resolve: (event: CommandResultEvent) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onReceived?: () => void;
 }>();
+
+export const notifyClientCommandReceived = (id: string): void => {
+  const pending = pendingCommandResults.get(id);
+  const received = pending?.onReceived;
+  if (pending) pending.onReceived = undefined;
+  received?.();
+};
 
 export const createClientCommandId = (): string => {
   const randomPart = typeof globalThis.crypto?.randomUUID === "function"
@@ -116,6 +125,7 @@ export const sendClientCommandAwaitResult = (
       resolve,
       reject,
       timer,
+      onReceived: options.onReceived,
     });
     if (sendClientCommand(commandWithId, { silent: options.silent })) return;
     const pending = pendingCommandResults.get(clientCommandId);
@@ -134,7 +144,12 @@ export const sendClientCommandAwaitResult = (
 export const sendPromptResponseCommand = async (
   command: ClientCommand,
 ): Promise<CommandResultEvent> => {
-  return sendClientCommandAwaitResult(command, command.type);
+  const result = await sendClientCommandAwaitResult(command, command.type);
+  if (isDesktop() && result.level === "success" && (command.type === "control_response" || command.type === "control_cancel_request") && command.conversation_id) {
+    void desktop()?.hideNotifications({ requestId: command.request_id, conversationId: command.conversation_id, turnId: command.turn_id, messageId: command.message_id,
+      ...(command.type === "control_response" ? { taskId: command.task_id } : {}) });
+  }
+  return result;
 };
 
 /** A lost connection leaves control decisions unconfirmed, not completed.

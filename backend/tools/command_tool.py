@@ -1,15 +1,17 @@
 """Shell command execution tool.
 
 Foreground and background commands share the same shell and sandbox policy.
-On Windows, workspace-sandbox commands run in PowerShell inside the configured
-Linux container; bypass or approved escalated commands run in host
-PowerShell. Callers can select an explicit host shell only outside the sandbox.
+Shell/login and PTY selection travel through the same sandbox/process owner
+as plain pipe commands. The public command stays separate from execution argv.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from dataclasses import replace
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,10 +36,6 @@ from backend.tools.base import (
 from backend.tools.command_support import (
     _as_bool,
     _coerce_timeout,
-    _command_matches_excluded,
-    _command_matches_patterns,
-    _command_side_effect_kind,
-    _host_shell_command,
     _model_shell_description,
     _validated_env,
     _windows_command_portability_hint,
@@ -45,10 +43,13 @@ from backend.tools.command_support import (
     DEFAULT_TIMEOUT,
     MAX_TIMEOUT_SECONDS,
     command_wait_ms,
+    command_login_allowed,
+    command_shell_argv,
     command_sandbox_recovery_hint,
     MAX_COMMAND_YIELD_MS,
 )
 from backend.tools.path_resolution import _is_bypass_mode
+from backend.permissions.grants import current_granted_permissions, sandbox_policy_with_grants, permission_profile_allows_path
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
@@ -74,7 +75,7 @@ class RunCommandTool(BaseTool):
     permission = PermissionLevel.CONFIRM
 
     def is_capability_available(self, context=None) -> bool:
-        return context is None or context.mode != "plan"
+        return True
     # Pi-style tail truncation and durable full-output persistence are handled
     # by this tool, so the generic result layer must not truncate it again.
     max_result_chars = None
@@ -113,6 +114,9 @@ class RunCommandTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command in the host's shell syntax (PowerShell on Windows)."},
+                    "shell": {"type": "string", "description": "Shell binary to launch. Defaults to the user's default shell."},
+                    "login": {"type": "boolean", "description": "True uses shell startup profiles; false disables them. Defaults to true when allowed by config."},
+                    "tty": {"type": "boolean", "description": "True allocates a PTY for the command; false or omitted uses plain pipes."},
                     "max_chars": {
                         "type": "integer", "minimum": 1, "maximum": TASK_OUTPUT_MAX_CHARS,
                         "description": f"Output preview character budget, default {TASK_OUTPUT_DEFAULT_CHARS}. Preserves the beginning and end; full output remains readable with monitor. Use this instead of shell tail/grep filters.",
@@ -145,14 +149,15 @@ class RunCommandTool(BaseTool):
                         "type": "string",
                         "description": "Short label for a background command.",
                     },
-                    "with_escalated_permissions": {
-                        "type": "boolean",
-                        "description": "Request execution outside the workspace sandbox; explicit user approval is required unless already in bypass mode.",
-                    },
+                    "sandbox_permissions": {"type": "string", "enum": ["use_default", "require_escalated", "with_additional_permissions"],
+                        "description": "Use the configured sandbox, request escalation, or request sandboxed additional permissions for this command."},
+                    "additional_permissions": {"type": "object", "description": "Specific network or file_system permissions requested for this command when sandbox_permissions is with_additional_permissions."},
                     "justification": {
                         "type": "string",
                         "description": "Concise reason the sandbox cannot perform this command, shown in the approval request.",
                     },
+                    "prefix_rule": {"type": "array", "items": {"type": "string"},
+                        "description": "Reusable command-token prefix proposed for approval. The host verifies it against every parsed command."},
                 },
                 "required": ["command"],
             },
@@ -171,72 +176,20 @@ class RunCommandTool(BaseTool):
         }
 
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
-        # Shell text is not a trustworthy capability declaration. Use the
-        # dedicated typed read tools when an operation must be auto-permitted.
         return False
 
-    def validate_input(self, args: dict[str, Any] | None = None) -> str:
-        payload = args or {}
-        command = str(payload.get("command") or "").strip()
-        if not command:
-            return "Missing command argument"
-        try:
-            _coerce_timeout(payload.get("timeout"))
-        except ValueError as exc:
-            return str(exc)
-        # Dangerous-command policy is evaluated at the canonical permission
-        # boundary.  Validation must not reject before the user approval flow
-        # can produce exact request evidence.
-        return ""
-
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
-        return _command_side_effect_kind(args)
+        return TOOL_SIDE_EFFECT_EXTERNAL
 
     def is_idempotent(self, args: dict[str, Any] | None = None) -> bool:
         return False
 
     def check_permission(self, args=None, context=None):
-        """Force human approval whenever the model requests sandbox escalation.
-
-        Codex pattern: a model-initiated request to run outside the sandbox is
-        never silently granted. When ``with_escalated_permissions`` is set we
-        require a CONFIRM gate so the user sees the justification and approves
-        before the command runs in bypass execution. Otherwise defer to the
-        centralized policy (which may auto-allow read-only commands).
-        """
-        command = str((args or {}).get("command") or "").strip()
-        if command:
-            from backend.permissions.checker import check_catastrophic_command
-
-            allowed, _reason = check_catastrophic_command(command)
-            if not allowed:
-                # Dangerous-pattern checks ask rather than deny: the user may
-                # approve a blocked-but-legitimate command.
-                return PermissionLevel.CONFIRM
-        if args and _as_bool(args.get("with_escalated_permissions", False)):
-            if getattr(context, "allow_unsandboxed_commands", True) is False:
-                return PermissionLevel.ALWAYS_DENY
-            # context here is a PermissionContext (mode on it directly). In bypass
-            # mode the command already runs unsandboxed, so escalation is moot;
-            # in every other mode the escalation must be confirmed by the user.
-            mode = getattr(context, "mode", None)
-            if mode != "bypass":
-                return PermissionLevel.CONFIRM
-        excluded_patterns = tuple(
-            getattr(context, "sandbox_excluded_commands", ()) or ()
-        )
-        if command and _command_matches_patterns(command, excluded_patterns):
-            return (
-                PermissionLevel.AUTO
-                if getattr(context, "mode", None) == "bypass"
-                else PermissionLevel.CONFIRM
-            )
-        if (
-            command
-            and getattr(context, "sandbox_auto_allow_commands", False) is True
-            and getattr(context, "mode", None) != "bypass"
-        ):
-            return PermissionLevel.AUTO
+        """The final native requirement owns shell approval routing."""
+        native = context.captured_exec_policy if context is not None else None
+        if native is not None:
+            return {"skip": PermissionLevel.AUTO, "needs_approval": PermissionLevel.CONFIRM,
+                "forbidden": PermissionLevel.ALWAYS_DENY}[native.kind]
         return None
 
     def __init__(
@@ -263,6 +216,9 @@ class RunCommandTool(BaseTool):
                         "type": "string",
                         "description": "Shell command to execute.",
                     },
+                    "shell": {"type": "string", "description": "Shell binary to launch. Defaults to the user's default shell."},
+                    "login": {"type": "boolean", "description": "True loads shell startup profiles; false disables them."},
+                    "tty": {"type": "boolean", "description": "True allocates a PTY; false or omitted uses plain pipes."},
                     "yield_time_ms": {
                         "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
                         "description": "Wait up to this many milliseconds, then return the owned command id if it is still running. Default 10000; use monitor to continue.",
@@ -298,13 +254,13 @@ class RunCommandTool(BaseTool):
                         "type": "string",
                         "description": "Optional label for the background command.",
                     },
-                    "with_escalated_permissions": {
-                        "type": "boolean",
-                        "description": "Request bypass execution after a sandbox block; user approval is required. Provide justification.",
-                    },
+                    "sandbox_permissions": {"type": "string", "enum": ["use_default", "require_escalated", "with_additional_permissions"],
+                        "description": "Use the configured sandbox, request escalation, or request sandboxed additional permissions."},
+                    "additional_permissions": {"type": "object", "description": "Requested network and file_system permissions for this command."},
+                    "prefix_rule": {"type": "array", "items": {"type": "string"}, "description": "Proposed reusable command-token approval prefix."},
                     "justification": {
                         "type": "string",
-                        "description": "Concise reason shown to the user when with_escalated_permissions is true.",
+                        "description": "Concise reason shown to the user when sandbox_permissions is require_escalated.",
                     },
                 },
                 "required": ["command"],
@@ -325,6 +281,60 @@ class RunCommandTool(BaseTool):
             required_args=("command",),
         )
 
+    def capture_exec_policy(self, request, context: ToolExecutionContext, permission):
+        from backend.permissions.exec_policy import FrozenExecCommand
+        from backend.runtime_env import powershell_script
+        args = request.argument_values()
+        cwd = self._resolve_cwd(args.get("cwd"), context, allow_workspace_escape=True)
+        workspace = Path(context.workspace_root).resolve()
+        captured_context = replace(context, permission=permission)
+        env, error = _validated_env(args.get("env"))
+        if error:
+            raise ValueError(error)
+        timeout = _coerce_timeout(args.get("timeout"))
+        policy = sandbox_policy_with_grants(_workspace_sandbox_policy(workspace, captured_context,
+            timeout=timeout, env_overrides=env), captured_context)
+        from backend.permissions.approval_policy import rejected_approval_reason
+        from backend.permissions.grants import normalize_permission_profile, intersect_permission_profiles
+        requested_mode = args.get("sandbox_permissions", "use_default")
+        requested_profile = args.get("additional_permissions")
+        wanted = (normalize_permission_profile(requested_profile, cwd=Path(cwd), workspace_roots=(workspace,))
+            if requested_profile is not None else None)
+        granted = current_granted_permissions(captured_context)
+        preapproved = (wanted is not None and granted is not None and intersect_permission_profiles(granted, wanted,
+            cwd=Path(cwd), workspace_roots=(workspace,)) == wanted)
+        sandbox_permissions = "use_default" if requested_mode == "with_additional_permissions" and preapproved else requested_mode
+        if sandbox_permissions != "use_default" and not preapproved and rejected_approval_reason(permission, "sandbox_approval") is not None:
+            raise ValueError(f"approval policy is {permission.approval_policy}; reject command — you cannot ask for escalated permissions if the approval policy is {permission.approval_policy}")
+        if (not preapproved and not context.model_execution.config.feature_flags.enabled("exec_permission_approvals", default=False)
+                and (requested_mode == "with_additional_permissions" or requested_profile is not None)):
+            raise ValueError("additional permissions are disabled; enable `features.exec_permission_approvals` before using `with_additional_permissions`")
+        if requested_mode == "with_additional_permissions":
+            if not preapproved and permission.approval_policy != "on-request":
+                raise ValueError(f"approval policy is {permission.approval_policy}; reject command — you cannot request additional permissions unless the approval policy is OnRequest")
+            if wanted is None:
+                raise ValueError("missing `additional_permissions`; provide at least one of `network` or `file_system` when using `with_additional_permissions`")
+            if wanted.is_empty:
+                raise ValueError("`additional_permissions` must include at least one requested permission in `network` or `file_system`")
+            policy = policy.with_additional_permissions(wanted)
+        elif requested_profile is not None:
+            raise ValueError("`additional_permissions` requires `sandbox_permissions` set to `with_additional_permissions`")
+        raw = command_shell_argv(str(args["command"]), shell=args.get("shell"), login=args.get("login"),
+            allow_login_shell=context.run_context.exec_policy_owner.allow_login_shell,
+            native_windows_sandbox=sys.platform == "win32" and not policy.disable_os_sandbox,
+            wrap_powershell=False)
+        argv = list(raw)
+        if Path(raw[0]).stem.lower() in {"pwsh", "powershell"}:
+            argv[-1] = powershell_script(raw[-1])
+        capture = FrozenExecCommand.capture(request, argv=argv, policy_argv=raw, cwd=Path(cwd),
+            configured_shell=Path(raw[0]), permission=permission, profile=policy.permission_profile,
+            resolved_profile=policy.resolve(cwd=Path(cwd)),
+            windows_sandbox_level="elevated" if sys.platform == "win32" and not policy.disable_os_sandbox else "disabled",
+            sandbox_permissions=sandbox_permissions,
+            prefix_rule=args.get("prefix_rule"), environment_id=context.environment_id, policy=policy,
+            additional_permissions_present=(wanted is not None or (not granted.is_empty and requested_mode != "require_escalated")))
+        return context.run_context.exec_policy_owner.command_requirement(capture, model=context.model_execution)
+
     async def execute(
         self,
         args: dict[str, Any],
@@ -341,67 +351,36 @@ class RunCommandTool(BaseTool):
             return self._error_result(str(exc))
         if timeout is None and not run_in_background:
             timeout = DEFAULT_TIMEOUT
-        escalated = _as_bool(args.get("with_escalated_permissions", False))
+        escalated = args.get("sandbox_permissions") == "require_escalated"
         description = args.get("description", "")
+        shell = args.get("shell")
+        login = args.get("login")
+        tty = args.get("tty", False)
 
         if not command:
             return self._error_result("Missing command parameter")
         if env_error:
             return self._error_result(env_error)
-        permission = getattr(context, "permission", None)
-        if (
-            escalated
-            and getattr(permission, "allow_unsandboxed_commands", True) is False
-        ):
-            return self._error_result(
-                "Managed sandbox policy does not allow commands to run outside the sandbox."
-            )
-
-        from backend.permissions.checker import check_catastrophic_command
-
-        allowed, reason = check_catastrophic_command(command)
-        if not allowed:
-            from backend.agent.final_tool_request import canonical_tool_request_digest
-
-            request_digest = canonical_tool_request_digest(self.name, args)
-            approved = (
-                getattr(context, "metadata", {}).get(
-                    "_approved_request_digests", set()
-                )
-                if context
-                else set()
-            )
-            if request_digest not in approved:
-                return self._error_result(
-                    "This command requires explicit approval before execution. "
-                    f"{reason}"
-                )
-
-        # Catastrophic-command enforcement lives in check_permission as a
-        # CONFIRM gate; a redundant hard error here would block commands the
-        # user just approved.
-
-        try:
-            effective_cwd = self._resolve_cwd(
-                cwd,
-                context,
-                allow_workspace_escape=escalated,
-            )
-        except ValueError as exc:
-            return self._error_result(str(exc))
-
+        native = context.exec_policy_decision if context is not None else None
+        if native is None:
+            return self._error_result("The command has no frozen native execution-policy request.")
+        if context.authorization_digest != native.command.execution_digest:
+            return self._error_result("The command execution identity differs from its approved request.")
+        from backend.agent.final_tool_request import canonical_tool_request_digest
+        if canonical_tool_request_digest(self.policy_identity, args) != native.command.tool_request_digest:
+            return self._error_result("The command arguments differ from the frozen execution request.")
+        approved = context.authorization_digest in context.metadata.get("_approved_request_digests", set())
+        if native.kind == "forbidden":
+            return self._error_result(native.reason)
+        if native.kind == "needs_approval" and not approved:
+            return self._error_result("This captured command requires approval before execution.")
+        override = native.first_attempt_override(already_approved=approved)
+        escalated = override != "no_override"
+        effective_cwd = str(native.command.cwd)
+        base_policy = native.command.policy
+        if escalated and not base_policy.allow_unsandboxed_commands:
+            return self._error_result("Managed sandbox policy does not allow this command to run outside the sandbox.")
         background_manager = self._resolve_background_manager(context)
-        base_policy = _workspace_sandbox_policy(
-            Path(getattr(context, "workspace_root", None) or effective_cwd or Path.cwd()).expanduser().resolve(),
-            context,
-            timeout=timeout,
-            env_overrides=env_overrides,
-        )
-        excluded = _command_matches_excluded(command, base_policy)
-        if (escalated or excluded) and not base_policy.allow_unsandboxed_commands:
-            return self._error_result(
-                "Managed sandbox policy does not allow this command to run outside the sandbox."
-            )
 
         if run_in_background:
             return await self._execute_background(
@@ -411,15 +390,19 @@ class RunCommandTool(BaseTool):
                 description,
                 background_manager,
                 context,
-                escalated=escalated or excluded,
+                escalated=escalated,
                 env_overrides=env_overrides,
+                shell=shell, login=login, tty=tty,
+                original_tool_args=deepcopy(args),
             )
 
         if background_manager is not None and context is not None and context.command_scope_id:
             return await self._execute_background(
                 command, effective_cwd, timeout if args.get("timeout") is not None else None, description, background_manager, context,
-                escalated=escalated or excluded, env_overrides=env_overrides, wait_ms=yield_ms,
+                escalated=escalated, env_overrides=env_overrides, wait_ms=yield_ms,
                 max_chars=args.get("max_chars", TASK_OUTPUT_DEFAULT_CHARS),
+                shell=shell, login=login, tty=tty,
+                original_tool_args=deepcopy(args),
             )
         if "yield_time_ms" in args:
             return self._error_result("This session has no command manager for yielding a live process. Use the managed desktop session or omit yield_time_ms for a bounded foreground call.")
@@ -429,9 +412,10 @@ class RunCommandTool(BaseTool):
             effective_cwd,
             timeout,
             context,
-            escalated=escalated or excluded,
+            escalated=escalated,
             env_overrides=env_overrides,
             max_chars=args.get("max_chars"),
+            shell=shell, login=login, tty=tty,
         )
 
     def _resolve_cwd(
@@ -457,6 +441,11 @@ class RunCommandTool(BaseTool):
                 try:
                     resolved.relative_to(workspace_root)
                 except ValueError as exc:
+                    if context is not None and permission_profile_allows_path(
+                        current_granted_permissions(context), resolved,
+                        cwd=workspace_root, workspace_root=workspace_root,
+                    ):
+                        return str(resolved)
                     raise ValueError(f"cwd must stay inside workspace: {workspace_root}") from exc
             return str(resolved)
 
@@ -475,6 +464,10 @@ class RunCommandTool(BaseTool):
         env_overrides: dict[str, str] | None = None,
         wait_ms: int | None = None,
         max_chars: int = TASK_OUTPUT_DEFAULT_CHARS,
+        shell: str | None = None,
+        login: bool | None = None,
+        tty: bool = False,
+        original_tool_args: dict[str, Any] | None = None,
     ) -> ToolResult:
         """Start once under the process owner; wait or hand back its live handle."""
         if background_manager is None:
@@ -492,15 +485,22 @@ class RunCommandTool(BaseTool):
         # background task. The session-owned manager remains responsible for
         # cancellation, process-tree cleanup, output bounds, and completion.
         background_timeout_ms = int(timeout * 1000) if wait_ms is not None and timeout is not None else 0
-        base_policy = _workspace_sandbox_policy(
-            workspace,
-            context,
-            timeout=timeout if wait_ms is not None and timeout is not None else 0,
-            env_overrides=env_overrides,
-        )
+        native = context.exec_policy_decision if context is not None else None
+        if native is not None:
+            base_policy = replace(native.command.policy, timeout=timeout if wait_ms is not None and timeout is not None else 0)
+        else:
+            base_policy = _workspace_sandbox_policy(
+                workspace,
+                context,
+                timeout=timeout if wait_ms is not None and timeout is not None else 0,
+                env_overrides=env_overrides,
+            )
+        baseline_policy = base_policy.escalated_preserving_denied_reads() if native is None and _is_bypass_mode(context) else base_policy
+        if native is None:
+            base_policy = sandbox_policy_with_grants(base_policy, context)
         policy = (
             base_policy.escalated_preserving_denied_reads()
-            if _is_bypass_mode(context) or escalated
+            if escalated or (native is None and _is_bypass_mode(context))
             else base_policy
         )
         capability = SandboxRunner(policy).capability(cwd=cwd)
@@ -510,18 +510,41 @@ class RunCommandTool(BaseTool):
             )
 
         try:
-            shell_command = _host_shell_command(command, cwd=cwd)
+            if native is not None:
+                argv = list(native.command.argv)
+            else:
+                argv = command_shell_argv(
+                    command, shell=shell, login=login,
+                    allow_login_shell=command_login_allowed(workspace),
+                    native_windows_sandbox=capability.backend == "windows-elevated-wfp",
+                )
             background_kwargs: dict[str, Any] = {
                 # Preserve the model/user command for UI, persistence, and
                 # diagnostics while the manager executes the prepared shell
                 # form. Encoded PowerShell must never replace the public text.
                 "command": command,
-                "effective_command": shell_command,
+                "argv": argv,
+                "tty": tty,
                 "cwd": cwd,
                 "timeout_ms": background_timeout_ms,
                 "description": description or command[:60],
                 "sandbox_policy": policy,
             }
+            if context is not None:
+                from backend.terminal.stdin_authority import TerminalLaunchAuthority
+
+                override = escalated and not _is_bypass_mode(context)
+                background_kwargs.update(
+                    terminal_authority=TerminalLaunchAuthority.capture(
+                        baseline_policy=baseline_policy, effective_policy=policy,
+                        launch_permissions="require_escalated" if override and policy.disable_os_sandbox else "use_default",
+                        filesystem_escalated=override and not policy.disable_os_sandbox,
+                        additional_permissions=current_granted_permissions(context), internal_permissions=None,
+                        environment_id=context.environment_id,
+                    ),
+                    original_tool_call_id=context.tool_call_id,
+                    original_tool_args=deepcopy(original_tool_args or {}),
+                )
             conversation_id = context.command_scope_id if context is not None else ""
             if conversation_id:
                 background_kwargs["conversation_id"] = conversation_id
@@ -538,7 +561,7 @@ class RunCommandTool(BaseTool):
                 **({"backgrounded": False, "stream_callback": getattr(context, "stream_callback", None)}
                    if wait_ms is not None else {}),
             )
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             return self._error_result(str(exc))
 
         if wait_ms is not None:
@@ -557,7 +580,6 @@ class RunCommandTool(BaseTool):
                 background_manager, bg_cmd.command_id, {"output_mode": "head_tail", "max_chars": max_chars}, conversation_id=conversation_id,
             )
             result.result_kind = "command"
-            result.is_error = bg_cmd.status in {"failed", "cancelled"}
             if bg_cmd.lifecycle.error.get("kind") == "timeout":
                 result.status = "timeout"
             elif bg_cmd.status == "cancelled":
@@ -581,7 +603,8 @@ class RunCommandTool(BaseTool):
                         sandbox_active=capability.filesystem_isolated or capability.network_isolated,
                         escalated=escalated, allow_unsandboxed=policy.allow_unsandboxed_commands,
                     )
-                    hint = _windows_command_portability_hint(command, bg_cmd.output, bg_cmd.exit_code)
+                    hint = (_windows_command_portability_hint(command, bg_cmd.output, bg_cmd.exit_code)
+                            if Path(argv[0]).stem in {"pwsh", "powershell"} else "")
                     if hint:
                         result.content += "\n\n" + hint
             return result
@@ -604,7 +627,8 @@ class RunCommandTool(BaseTool):
             ),
             display_summary=f"Started in background: {self.display_label}",
             status="success",
-            runtime_metadata={"command_id": bg_cmd.command_id, "next_cursor": 0},
+            runtime_metadata={"command_id": bg_cmd.command_id, "next_cursor": 0, "stdout_preview": "", "stderr_preview": "",
+                              "terminal_hook": {"command_id": bg_cmd.command_id, "ready": False}},
         )
 
     async def _execute_foreground(
@@ -617,6 +641,9 @@ class RunCommandTool(BaseTool):
         escalated: bool = False,
         env_overrides: dict[str, str] | None = None,
         max_chars: int | None = None,
+        shell: str | None = None,
+        login: bool | None = None,
+        tty: bool = False,
     ) -> ToolResult:
         """Execute a foreground shell command via SandboxRunner.
 
@@ -630,15 +657,21 @@ class RunCommandTool(BaseTool):
             if context is not None and getattr(context, "workspace_root", None)
             else Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
         )
-        base_policy = _workspace_sandbox_policy(
-            workspace,
-            context,
-            timeout=timeout,
-            env_overrides=env_overrides,
-        )
+        native = context.exec_policy_decision if context is not None else None
+        if native is not None:
+            base_policy = replace(native.command.policy, timeout=timeout)
+        else:
+            base_policy = _workspace_sandbox_policy(
+                workspace,
+                context,
+                timeout=timeout,
+                env_overrides=env_overrides,
+            )
+        if native is None:
+            base_policy = sandbox_policy_with_grants(base_policy, context)
         policy = (
             base_policy.escalated_preserving_denied_reads()
-            if _is_bypass_mode(context) or escalated
+            if escalated or (native is None and _is_bypass_mode(context))
             else base_policy
         )
         runner = SandboxRunner(policy)
@@ -646,14 +679,25 @@ class RunCommandTool(BaseTool):
         cancel_event = getattr(context, "cancel_event", None) if context else None
         stream_cb = getattr(context, "stream_callback", None) if context else None
 
-        shell_command = _host_shell_command(command, cwd=cwd)
+        try:
+            if native is not None:
+                argv = list(native.command.argv)
+            else:
+                argv = command_shell_argv(
+                    command, shell=shell, login=login,
+                    allow_login_shell=command_login_allowed(workspace),
+                    native_windows_sandbox=runner.capability(cwd=cwd).backend == "windows-elevated-wfp",
+                )
+        except ValueError as exc:
+            return self._error_result(str(exc))
         try:
             result = await runner.run(
                 command,
                 cwd=cwd,
                 cancel_event=cancel_event,
                 stream_callback=stream_cb,
-                host_command=shell_command,
+                argv=argv,
+                tty=tty,
                 preserve_full_output=True,
             )
         except Exception as exc:
@@ -669,7 +713,7 @@ class RunCommandTool(BaseTool):
 
         return await to_thread_cancel_safe(
             self._foreground_result, result, command, timeout, context, policy,
-            escalated, cleanup_receipt, max_chars,
+            escalated, cleanup_receipt, max_chars, Path(argv[0]).stem in {"pwsh", "powershell"},
         )
 
     def _foreground_result(
@@ -682,6 +726,7 @@ class RunCommandTool(BaseTool):
         escalated: bool,
         cleanup_receipt: dict[str, Any],
         max_chars: int | None,
+        powershell: bool = True,
     ) -> ToolResult:
         """Read, retain and project the completed command's captured output."""
         sandbox_active = not policy.disable_os_sandbox
@@ -695,7 +740,7 @@ class RunCommandTool(BaseTool):
             # which are guarded by a fresh user approval in check_permission().
             cleanup_captured_output(*captured_paths)
             retry_hint = (
-                " Retry with with_escalated_permissions=true and a concise justification; "
+                ' Retry with sandbox_permissions="require_escalated" and a concise justification; '
             "the user must explicitly approve bypass execution."
                 if policy.allow_unsandboxed_commands
                 else " Managed policy forbids unsandboxed fallback."
@@ -711,22 +756,14 @@ class RunCommandTool(BaseTool):
 
         # A shell command can change workspace files (sed -i, codegen, git
         # checkout, ...). Its affected paths are unknowable without parsing
-        # shell syntax, so invalidate every derived workspace view. This keeps
-        # MiniCode's caches consistent with CC/Pi, which rescan the filesystem
-        # for each search instead of retaining a stale file-tree index.
-        try:
-            from backend.tools.file_tools_common import invalidate_workspace_file_caches
+        # shell syntax, so invalidate derived views of this command's workspace.
+        from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-            invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True)
-        except Exception:
-            logger.warning(
-                "Failed to invalidate workspace file caches after shell command",
-                exc_info=True,
-            )
+        invalidate_workspace_file_caches(
+            file_tree_changed=True, clear_file_state=True, mutation_policy=policy,
+        )
 
-        output = stdout
-        if stderr:
-            output += f"\n[stderr]\n{stderr}" if output else stderr
+        output = stdout + stderr
 
         if result.cancelled:
             status = "Command execution was cancelled/interrupted"
@@ -736,12 +773,14 @@ class RunCommandTool(BaseTool):
             status = f"Command timed out after {timeout:g} seconds"
             is_failed_exit = True
             result_status = "timeout"
+        elif result.execution_error:
+            status = f"Command execution error: {result.execution_error}"
+            is_failed_exit = True
+            result_status = "failed"
         else:
             status = f"Exit code: {exit_code}"
             is_failed_exit = exit_code != 0
-            if is_failed_exit:
-                status += " (failed)"
-            result_status = "failed" if is_failed_exit else None
+            result_status = "success"
 
         # Codex escalate-on-failure: if a sandboxed command failed in a way that
         # looks caused by the sandbox (network blocked, permission denied), tell
@@ -752,7 +791,7 @@ class RunCommandTool(BaseTool):
             command_sandbox_recovery_hint(
                 stderr, exit_code, sandbox_active=sandbox_active,
                 escalated=escalated, allow_unsandboxed=policy.allow_unsandboxed_commands,
-            ) if is_failed_exit and not result.cancelled and not result.timed_out else ""
+            ) if is_failed_exit and not result.cancelled and not result.timed_out and not result.execution_error else ""
         )
         if escalation_hint:
             status = f"{status}{escalation_hint}"
@@ -761,7 +800,7 @@ class RunCommandTool(BaseTool):
             command,
             stderr,
             exit_code,
-        )
+        ) if powershell else ""
         if portability_hint:
             status = f"{status}\n\n{portability_hint}"
 
@@ -776,8 +815,12 @@ class RunCommandTool(BaseTool):
             cleanup_captured_output(*captured_paths)
             return ToolResult(
                 content=f"{status}\n\n{output}" if output else status,
-                is_error=is_failed_exit,
+                is_error=result.cancelled or result.timed_out or bool(result.execution_error),
                 status=result_status,
+                error_kind="execution_error" if result.execution_error else None,
+                runtime_metadata={"stdout_preview": stdout, "stderr_preview": stderr, "exit_code": exit_code, "hook_output": output,
+                    "command_completed": not (result.cancelled or result.timed_out or result.execution_error),
+                    "process_status": result_status if result.cancelled or result.timed_out else "failed" if is_failed_exit else "completed"},
                 cleanup_receipt=cleanup_receipt,
             )
 
@@ -835,10 +878,14 @@ class RunCommandTool(BaseTool):
 
         return ToolResult(
             content=f"{status}\n\n[{truncation_notice}]",
+            runtime_metadata={"stdout_preview": preview, "stderr_preview": "", "exit_code": exit_code, "hook_output": preview,
+                "command_completed": not (result.cancelled or result.timed_out or result.execution_error),
+                "process_status": result_status if result.cancelled or result.timed_out else "failed" if is_failed_exit else "completed"},
             artifact_id=artifact_id or None,
             artifact_preview=preview,
-            is_error=is_failed_exit,
+            is_error=result.cancelled or result.timed_out or bool(result.execution_error),
             status=result_status,
+            error_kind="execution_error" if result.execution_error else None,
             cleanup_receipt=cleanup_receipt,
         )
 

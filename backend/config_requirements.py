@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Generic, Iterable, Mapping, TypeVar
 
 from backend.plugins.identity import parse_plugin_id_strict
+from backend.permissions.approval_policy import ApprovalPolicy
 
 
 T = TypeVar("T")
@@ -100,6 +101,21 @@ class ConfigRequirements:
 
     def value_for(self, field_name: str, default: Any = None) -> Any:
         return self.raw.get(field_name, default)
+
+    def auto_review_required_for_model(self, model_id: str) -> bool:
+        auto_review = self.raw.get("auto_review")
+        protected = auto_review.get("required_on_models") if auto_review is not None else None
+        if protected is None:
+            return False
+        if "/" in model_id:
+            namespace, model_id = model_id.split("/", 1)
+            if not namespace or "/" in model_id or re.fullmatch(r"[A-Za-z0-9_-]+", namespace) is None:
+                return False
+        return model_id in protected
+
+    def can_select_user_reviewer(self) -> bool:
+        allowed = self.raw.get("allowed_approvals_reviewers")
+        return allowed is None or "user" in allowed
 
     def sourced(self, field_name: str) -> Sourced[Any] | None:
         if field_name not in self.raw:
@@ -219,24 +235,18 @@ class ConfigRequirements:
             effective["feature_flags"] = flags
         return effective
 
-    def ensure_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> None:
+    def ensure_approval_policy(self, policy: Any) -> None:
+        requested = ApprovalPolicy.parse(policy).to_wire()
+        allowed = self.raw.get("allowed_approval_policies")
+        if isinstance(allowed, list) and not any(ApprovalPolicy.parse(item).to_wire() == requested for item in allowed):
+            raise RequirementViolation("approval_policy", requested, allowed, self.source_for("allowed_approval_policies"))
+
+    def ensure_permission_mode(self, mode: str, *, sandbox_mode: str = "", approval_policy: Any = None) -> None:
         normalized = str(mode or "").strip().lower().replace("-", "_")
-        approval_policy, _sandbox = permission_mode_requirements(normalized)
+        mode_approval_policy, _sandbox = permission_mode_requirements(normalized)
+        approval_policy = mode_approval_policy if approval_policy is None else approval_policy
         sandbox_mode = self.sandbox_mode_for_permission_mode(normalized, sandbox_mode=sandbox_mode)
-        allowed_approval = self.raw.get("allowed_approval_policies")
-        # codex enforces allowed_approval_policies for EVERY requested policy
-        # (config requirements raise, not silently converge); bypass is not
-        # special-cased.
-        if (
-            isinstance(allowed_approval, list)
-            and approval_policy not in allowed_approval
-        ):
-            raise RequirementViolation(
-                "approval_policy",
-                approval_policy,
-                allowed_approval,
-                self.source_for("allowed_approval_policies"),
-            )
+        self.ensure_approval_policy(approval_policy)
         allowed_sandbox = self.raw.get("allowed_sandbox_modes")
         if isinstance(allowed_sandbox, list) and sandbox_mode not in allowed_sandbox:
             raise RequirementViolation(
@@ -248,10 +258,8 @@ class ConfigRequirements:
 
     def approval_policy_for_mode(self, mode: str) -> str:
         requested, _sandbox = permission_mode_requirements(mode)
-        allowed = self.raw.get("allowed_approval_policies")
-        if not isinstance(allowed, list) or requested in allowed:
-            return requested
-        return str(allowed[0])
+        self.ensure_approval_policy(requested)
+        return requested
 
     def sandbox_mode_for_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> str:
         # An external sandbox is an explicit host-owned boundary (Codex's
@@ -262,9 +270,9 @@ class ConfigRequirements:
         _approval, sandbox = permission_mode_requirements(mode)
         return sandbox
 
-    def resolve_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> tuple[str, RequirementViolation | None]:
+    def resolve_permission_mode(self, mode: str, *, sandbox_mode: str = "", approval_policy: Any = None) -> tuple[str, RequirementViolation | None]:
         try:
-            self.ensure_permission_mode(mode, sandbox_mode=sandbox_mode)
+            self.ensure_permission_mode(mode, sandbox_mode=sandbox_mode, approval_policy=approval_policy)
             return mode, None
         except RequirementViolation as violation:
             # Managed policy can reject a requested mode, but it must never
@@ -394,6 +402,10 @@ def _normalize_requirements(
     base_dir: Path | None = None,
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(dict(payload))
+    if normalized.get("auto_review") is None:
+        normalized.pop("auto_review", None)
+    if normalized.get("rules") is None:
+        normalized.pop("rules", None)
     if "feature_requirements" in normalized and "features" not in normalized:
         normalized["features"] = normalized.pop("feature_requirements")
     if "experimental_network" in normalized and "network" in normalized:
@@ -411,9 +423,10 @@ def _normalize_requirements(
         ]
     policies = normalized.get("allowed_approval_policies")
     if isinstance(policies, list):
-        normalized["allowed_approval_policies"] = [
-            "on-request" if value == "on-failure" else value for value in policies
-        ]
+        try:
+            normalized["allowed_approval_policies"] = [ApprovalPolicy.parse(value).to_wire() for value in policies]
+        except ValueError as error:
+            raise ConfigRequirementsError(f"allowed_approval_policies in {source}: {error}") from error
     _validate_layer_requirements(normalized, source)
     return normalized
 
@@ -421,12 +434,15 @@ def _normalize_requirements(
 def _validate_layer_requirements(
     payload: Mapping[str, Any], source: RequirementSource
 ) -> None:
-    _validate_string_list(
-        payload,
-        "allowed_approval_policies",
-        _APPROVAL_POLICIES,
-        source,
-    )
+    policies = payload.get("allowed_approval_policies")
+    if policies is not None:
+        if not isinstance(policies, list):
+            raise ConfigRequirementsError(f"allowed_approval_policies in {source} must be a policy array")
+        try:
+            for value in policies:
+                ApprovalPolicy.parse(value)
+        except ValueError as error:
+            raise ConfigRequirementsError(f"allowed_approval_policies in {source}: {error}") from error
     _validate_string_list(
         payload,
         "allowed_approvals_reviewers",
@@ -435,6 +451,19 @@ def _validate_layer_requirements(
     )
     _validate_string_list(payload, "allowed_sandbox_modes", _SANDBOX_MODES, source)
     _validate_string_list(payload, "allowed_web_search_modes", _WEB_SEARCH_MODES, source)
+    auto_review = payload.get("auto_review")
+    if auto_review is not None:
+        if not isinstance(auto_review, Mapping):
+            raise ConfigRequirementsError(f"auto_review in {source} must be a table/object")
+        for field_name in ("required_on_models", "ignore_rules"):
+            values = auto_review.get(field_name)
+            if values is not None and (not isinstance(values, list) or any(not isinstance(value, str) for value in values)):
+                raise ConfigRequirementsError(f"auto_review.{field_name} in {source} must be a string array")
+        for model in auto_review.get("required_on_models") or ():
+            if not model.strip() or model.strip() != model or "/" in model:
+                raise ConfigRequirementsError(
+                    f"auto_review.required_on_models in {source} requires non-empty model slugs without surrounding whitespace or provider namespaces"
+                )
     for bool_field in (
         "allow_managed_permission_rules_only",
         "allow_managed_hooks_only",
@@ -834,6 +863,13 @@ def _validate_marketplace_requirements(
 def _validate_composed_requirements(
     payload: Mapping[str, Any], sources: Mapping[str, RequirementSource]
 ) -> None:
+    if payload.get("rules") is not None:
+        from backend.permissions.native_execpolicy import NativeExecPolicyError, NativeExecPolicyProcessError, NativeExecPolicyRuntime
+        try:
+            NativeExecPolicyRuntime().invoke({"operation": "inspect", "sources": [],
+                "requirements_rules": payload["rules"], "ignore_allow_prefix_rules": False})
+        except (NativeExecPolicyError, NativeExecPolicyProcessError) as error:
+            raise ConfigRequirementsError(f"Invalid execution rules in {sources.get('rules')}: {error}") from error
     for field_name in (
         "allowed_approval_policies",
         "allowed_approvals_reviewers",
@@ -878,6 +914,19 @@ def _merge_requirement_layer(
     existing_deny = _nested_string_list(existing, "permissions", "filesystem", "deny_read")
     hook_events = _requirement_event_lists(incoming.get("hooks"), existing.get("hooks"))
     _deep_merge(target, incoming)
+    if "rules" in incoming:
+        target["rules"] = copy.deepcopy(incoming["rules"])
+    incoming_auto_review = incoming.get("auto_review")
+    previous_auto_review = existing.get("auto_review")
+    if incoming_auto_review is not None and previous_auto_review is not None:
+        auto_review = target["auto_review"]
+        protected = [*(incoming_auto_review.get("required_on_models") or ()), *(previous_auto_review.get("required_on_models") or ())]
+        if "required_on_models" in incoming_auto_review or "required_on_models" in previous_auto_review:
+            auto_review["required_on_models"] = list(dict.fromkeys(protected))
+        if incoming_auto_review.get("ignore_rules") is None and previous_auto_review.get("ignore_rules") is not None:
+            auto_review["ignore_rules"] = copy.deepcopy(previous_auto_review["ignore_rules"])
+    elif incoming_auto_review is None and previous_auto_review is not None:
+        target["auto_review"] = copy.deepcopy(previous_auto_review)
     if incoming_deny is not None:
         permissions = target.setdefault("permissions", {})
         if isinstance(permissions, dict):

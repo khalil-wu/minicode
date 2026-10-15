@@ -126,11 +126,10 @@ async def _project_visible_provider_text(
             not event.item_id or not stream_text.pending_unphased_item_id
             or event.item_id == stream_text.pending_unphased_item_id
         )
-        if stream_text.pending_unphased_text and same_pending_item:
+        if stream_text.has_unphased_text and same_pending_item:
             if provider_phase in {"final_answer", "final"}:
-                stream_text.accept_unphased_answer()
+                stream_text.accept_unphased_answer(item_id=event.item_id)
                 stream_text.saw_final_answer_phase = True
-                stream_text.final_candidate_item_id = event.item_id or stream_text.final_candidate_item_id
                 if stream_text.agent_message_started:
                     stream_text.active_agent_message_source = "model_final"
                 stream_state.response_phase = "final_answer"
@@ -143,7 +142,7 @@ async def _project_visible_provider_text(
             provider_raw_final_text.update(provider_raw_text)
         yield ProviderTextProjectionResult(False)
         return
-    stream_text.full_text += visible_chunk
+    stream_text.record_visible_text(visible_chunk)
     if visible_chunk:
         stream_state.saw_visible_output = True
 
@@ -157,7 +156,7 @@ async def _project_visible_provider_text(
                 or not stream_text.pending_unphased_item_id
                 or event.item_id == stream_text.pending_unphased_item_id
             ):
-                stream_text.accept_unphased_answer()
+                stream_text.accept_unphased_answer(item_id=event.item_id)
             elif stream_text.has_live_provisional_item:
                 completed = stream_text.complete_active_agent_message(
                     stream_text.active_agent_message_text,
@@ -173,16 +172,16 @@ async def _project_visible_provider_text(
             if process_event is not None:
                 yield process_event
         stream_text.saw_final_answer_phase = True
-        stream_text.final_candidate_text += visible_chunk
-        if event.item_id:
-            stream_text.final_candidate_item_id = event.item_id
-        if live_text_streaming and visible_chunk:
+        text_item = stream_text.append_final_text(visible_chunk, item_id=event.item_id)
+        if visible_chunk:
             for projected in stream_text.project_agent_message_delta(
                 visible_chunk,
+                text_item=text_item,
                 source="model_final",
                 item_id=event.item_id,
             ):
-                yield projected
+                if live_text_streaming or projected.type != "agent_message.delta":
+                    yield projected
         provider_raw_final_text.update(provider_raw_text)
     elif provider_phase == "commentary" or (not provider_phase and stream_state.committed_tool_ids):
         if provider_phase == "commentary":
@@ -192,13 +191,14 @@ async def _project_visible_provider_text(
         ):
             # Narration after a committed tool owns a new ordered item. Reusing
             # the iteration's process buffer would replace earlier commentary.
+            text_item = stream_text.append_agent_text(visible_chunk, source="commentary", item_id=event.item_id)
             for projected in stream_text.project_agent_message_delta(
-                visible_chunk, source="commentary", item_id=event.item_id,
+                visible_chunk, text_item=text_item, source="commentary", item_id=event.item_id,
             ):
                 if live_text_streaming or projected.type == "item.started":
                     yield projected
         else:
-            stream_text.pending_process_text += visible_chunk
+            stream_text.append_process_text(visible_chunk)
             if live_text_streaming:
                 process_event = stream_text.maybe_stream_process_text(
                     source="commentary",
@@ -216,7 +216,7 @@ async def _project_visible_provider_text(
             or stream_state.tool_calls
             or awaiting_trailing_done
         ):
-            stream_text.pending_process_text += visible_chunk
+            stream_text.append_process_text(visible_chunk)
             if live_text_streaming:
                 process_event = stream_text.maybe_stream_process_text(
                     source="commentary",
@@ -231,17 +231,18 @@ async def _project_visible_provider_text(
             # the copyable answer surface until the provider settles the
             # assistant item. Otherwise a pre-tool sentence briefly appears as
             # a final reply and is only retracted after the tool frame arrives.
-            stream_text.pending_unphased_text += visible_chunk
-            stream_text.pending_unphased_visible_text += visible_chunk
+            text_item = stream_text.append_unphased_text(visible_chunk)
             if event.item_id:
                 stream_text.pending_unphased_item_id = event.item_id
-            if live_text_streaming and visible_chunk:
+            if visible_chunk:
                 for projected in stream_text.project_agent_message_delta(
                     visible_chunk,
+                    text_item=text_item,
                     source="pending",
                     item_id=event.item_id,
                 ):
-                    yield projected
+                    if live_text_streaming or projected.type != "agent_message.delta":
+                        yield projected
 
     # Raw provider metadata belongs to the authoritative completed item.  It is
     # accumulated here and attached once by the answer commit projection; delta

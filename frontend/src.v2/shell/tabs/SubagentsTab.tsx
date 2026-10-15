@@ -1,3 +1,4 @@
+import { useI18n, type Translate, type TranslationKey } from "../../i18n";
 /**
  * Calm, user-facing view of delegated work.
  *
@@ -5,7 +6,7 @@
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft, Bot, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import { ChatTurn } from "../../chat/components/ChatTurn";
@@ -16,7 +17,9 @@ import {
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { subagentModelPatch } from "../../lib/subagent-model";
 import { formatModelLabel } from "../../lib/model-label";
+import { workspaceRootsEqual } from "../../lib/workspace-path";
 import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
+import { fromMarkdown, markdownNodeText } from "../../lib/markdown";
 import { SubagentPlanReviewCard } from "../../chat/InlineAgentPrompt";
 import {
   projectAgentViews,
@@ -30,10 +33,7 @@ import {
 import { useAppStore } from "../../stores";
 import type { ChatMessage, PendingAskUser, SubagentState } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
-import { EmptyLine, SmallButton } from "../SidebarShared";
 import "./SubagentsTab.css";
-
-const COMPLETED_PREVIEW_LIMIT = 10;
 
 type TranscriptPresentationSource = "none" | "durable" | "push";
 
@@ -86,20 +86,29 @@ const AGENT_UI_TEXT: Record<string, string> = {
 
 const agentUiText = (value: string): string => AGENT_UI_TEXT[value] ?? value;
 
-const relativeTimeText = (value: string): string => {
+const relativeTimeText = (value: string, t: Translate): string => {
   if (!value) return "";
-  if (value === "Just now") return "刚刚";
+  if (value === "Just now" || value === "刚刚") return t("刚刚");
   const match = value.match(/^(\d+)\s*(分钟|小时|天)$/);
-  if (match) return `${match[1]}${match[2]}前`;
+  if (match) return t(match[2] === "分钟" ? "{count}分钟前" : match[2] === "小时" ? "{count}小时前" : "{count}天前", { count: match[1] });
   const englishMatch = value.match(/^(\d+)\s*(m|h|d)\s+ago$/i);
   if (!englishMatch) return value;
   const unit = englishMatch[2].toLowerCase() === "m" ? "分钟" : englishMatch[2].toLowerCase() === "h" ? "小时" : "天";
-  return `${englishMatch[1]}${unit}前`;
+  return t(unit === "分钟" ? "{count}分钟前" : unit === "小时" ? "{count}小时前" : "{count}天前", { count: englishMatch[1] });
 };
 
-const statusText = (view: AgentView): string => agentUiText(view.statusLabel);
-const summaryText = (view: AgentView): string => agentUiText(view.summary);
-
+const statusText = (view: AgentView, t: Translate): string => t(agentUiText(view.statusLabel) as TranslationKey);
+const agentElapsedText = (startedAt: number | undefined, now: number, t: Translate): string => {
+  if (!startedAt) return "";
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  if (seconds < 1) return "";
+  if (seconds < 60) return t("{seconds}秒", { seconds });
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return t("{minutes}分钟", { minutes }) + (remainder ? t("{seconds}秒", { seconds: remainder }) : "");
+  const hours = Math.floor(minutes / 60);
+  return t("{hours}小时", { hours }) + (minutes % 60 ? t("{minutes}分钟", { minutes: minutes % 60 }) : "") + (remainder ? t("{seconds}秒", { seconds: remainder }) : "");
+};
 const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean }) => {
   return (
     <AgentAvatar
@@ -114,42 +123,50 @@ const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean 
 
 const AgentRow = ({
   view,
-  durationMs,
+  source,
+  now,
   onOpen,
 }: {
   view: AgentView;
-  durationMs?: number;
+  source: SubagentState;
+  now: number;
   onOpen: () => void;
-}) => (
+}) => {
+  const { t } = useI18n();
+  const active = view.canStop;
+  const objective = source.objective
+    ? markdownNodeText(fromMarkdown(source.objective)).replace(/\s+/g, " ").trim().slice(0, 60)
+    : "";
+  const preview = objective && objective !== view.title ? objective : !objective && active && view.status === "running" ? t("正在执行") : "";
+  const waiting = active && view.status !== "running";
+  const elapsed = active ? agentElapsedText(view.startedAt, now, t) : "";
+  return (
   <button
     type="button"
     className="subagents-row"
     data-status={view.status}
-    aria-label={`打开子智能体任务：${view.title}`}
-    title={view.title}
+    data-preview={preview ? "true" : "false"}
+    aria-label={t("打开子智能体任务：{name}", { name: view.title })}
+    title={`${view.title} · ${statusText(view, t)}`}
     onClick={onOpen}
   >
     <AgentGlyph view={view} />
     <span className="subagents-row-copy">
       <span className="subagents-row-heading">
-        <span className="subagents-row-title">{view.teammateName || view.title}</span>
-        {view.status !== "completed" && durationMs != null && durationMs >= 1000 && (
-          <span className="subagents-row-time">{Math.floor(durationMs / 60000)}分{Math.floor(durationMs / 1000) % 60}秒</span>
-        )}
-        {view.status === "completed" && view.relativeTimeLabel && (
-          <span className="subagents-row-time">{relativeTimeText(view.relativeTimeLabel)}</span>
-        )}
-      </span>
-      <span className={view.status === "completed" ? "sr-only" : "subagents-row-meta"}>
-        <span className={view.status === "running" ? "sr-only" : "subagents-row-status"}>{statusText(view)}</span>
-        {view.status !== "completed" && view.summary && view.summary !== view.title && (
-          <span className="subagents-row-summary">{summaryText(view)}</span>
+        <span className="subagents-row-title">{view.title}</span>
+        {active ? <span className="subagents-row-trailing">
+          {waiting && <span className="subagents-row-status">{statusText(view, t)}</span>}
+          {elapsed && <span className="subagents-row-time">{elapsed}</span>}
+        </span> : view.relativeTimeLabel && (
+          <span className="subagents-row-time">{relativeTimeText(view.relativeTimeLabel, t)}</span>
         )}
       </span>
+      {preview && <span className="subagents-row-preview">{preview}</span>}
+      {!waiting && <span className="sr-only">{statusText(view, t)}</span>}
     </span>
-    <ChevronRight className="subagents-row-chevron" size={14} aria-hidden="true" />
   </button>
-);
+  );
+};
 
 const AgentRelationLink = ({ agent }: { agent: AgentLink }) => (
   <button type="button" className="subagents-relation-link" onClick={() => useAppStore.getState().setFocusedSubagentId(agent.id)}>
@@ -161,60 +178,54 @@ const AgentRelationLink = ({ agent }: { agent: AgentLink }) => (
 const AgentDetail = ({
   view,
   onBack,
-  onFetchResult,
   transcriptMessages,
   workspaceRoot,
   conversationId,
   transcriptLoading,
   transcriptError,
-  onRefreshTranscript,
-  pendingAction,
   source,
-  agents,
   planRequest,
 }: {
   view: AgentView;
   onBack: () => void;
-  onFetchResult: () => void;
   transcriptMessages: ChatMessage[];
   workspaceRoot: string;
   /** The parent conversation owns the child journal's persisted artifacts. */
   conversationId?: string;
   transcriptLoading: boolean;
   transcriptError: string;
-  onRefreshTranscript: () => void;
-  pendingAction: "result" | null;
   source: SubagentState;
-  agents: AgentView[];
   planRequest?: PendingAskUser;
 }) => {
+  const { t } = useI18n();
   const isLive = view.status === "running" || view.status === "waiting";
+  const executionWorkspaceRoot = source.workspaceRoot ?? "";
   const turns = useMemo(
     () => projectMessagesToTurns(
       transcriptMessages,
       isLive,
-      workspaceRoot,
+      executionWorkspaceRoot,
     ),
-    [isLive, transcriptMessages, workspaceRoot],
+    [isLive, transcriptMessages, executionWorkspaceRoot],
   );
   const finalAnswer = turns.at(-1)?.finalAnswerCell;
   const hasCanonicalResult = Boolean(finalAnswer && !finalAnswer.isStreaming
     && (finalAnswer.markdownSource.trim() || finalAnswer.artifacts?.length));
 
   return (
-    <section className="subagents-detail" aria-label={`子智能体任务详情：${view.title}`}>
+    <section className="subagents-detail" aria-label={t("子智能体任务详情：{name}", { name: view.title })}>
       <header className="subagents-detail-header">
         <button
           type="button"
           className="subagents-back"
-          aria-label="返回子智能体列表"
+          aria-label={t("返回子智能体列表")}
           onClick={onBack}
         >
           <ArrowLeft size={16} />
         </button>
         <AgentGlyph view={view} large />
         <span className="subagents-detail-heading">
-          <strong title={view.title}>{view.teammateName || view.title}</strong>
+          <strong title={view.title}>{view.title}</strong>
         </span>
         {view.model && <span className="subagents-detail-model" title={[view.provider, view.model, view.reasoningEffort].filter(Boolean).join(" · ")}>
           {formatModelLabel(view.model)}{view.reasoningEffort ? ` · ${view.reasoningEffort}` : ""}
@@ -222,24 +233,18 @@ const AgentDetail = ({
       </header>
 
       <div className="subagents-detail-body">
-        <div className="subagents-context" aria-label="任务关系">
-          {(view.status !== "completed" || turns.length === 0) && <span role="status">{statusText(view)}</span>}
-          {(view.teamName || view.parent) && <div className="subagents-identity-row">
-            {view.teamName && <span className="subagents-identity-name">{view.teamName}</span>}
-            {view.teamName && view.parent && <span aria-hidden="true">·</span>}
-            {view.parent && <div className="subagents-relation"><span>由</span><AgentRelationLink agent={view.parent} /><span>委派</span></div>}
+        <div className="subagents-context" aria-label={t("任务关系")}>
+          {view.status !== "running" && (view.status !== "completed" || turns.length === 0) && <span role="status">{statusText(view, t)}</span>}
+          {view.effectiveStatus === "blocked" && view.blockedDependencies.length > 0 && <div className="subagents-relation">
+            <span>{t("正在等待")}</span>
+            {view.blockedDependencies.map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}
           </div>}
-          {(view.blockedDependencies.length > 0 || view.dependencies.length > 0) && <div className="subagents-relation">
-            <span>{view.blockedDependencies.length > 0 ? "正在等待" : "前置任务"}</span>
-            {(view.blockedDependencies.length > 0 ? view.blockedDependencies : view.dependencies).map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}
-          </div>}
-          {view.children.length > 0 && <div className="subagents-relation"><span>已委派</span>{view.children.map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}</div>}
         </div>
         {planRequest?.planReview && <SubagentPlanReviewCard request={planRequest} review={planRequest.planReview} />}
         {view.status === "attention" && !planRequest && !view.resultError && !source.cleanupPending && (
           <div className="subagents-attention" role="status">{view.summary}</div>
         )}
-        {view.canStop && view.effectiveStatus !== "running" && view.statusLabel === "清理未完成" && (
+        {view.canStop && view.effectiveStatus !== "running" && view.statusLabel === t("清理未完成") && (
           <div className="subagents-transcript-error" role="status">{view.summary}</div>
         )}
         {view.resultError && (
@@ -250,66 +255,53 @@ const AgentDetail = ({
         {transcriptError && (
           <div className="subagents-transcript-error" role="status">
             <span>{transcriptError}</span>
-            <button type="button" onClick={onRefreshTranscript}>重试</button>
           </div>
         )}
         {transcriptLoading && transcriptMessages.length === 0 && (
-          <div className="subagents-transcript-loading">正在载入工作详情…</div>
+          <div className="subagents-transcript-loading">{t("正在载入工作详情…")}</div>
         )}
         {!transcriptLoading && !transcriptError && turns.length === 0 && (
           <div className="subagents-transcript-empty">
-            {isLive ? "子智能体正在启动，工作记录会实时显示在这里。" : view.resultContent ? "此任务保留了结果，暂无可回放的工作记录。" : "这个子智能体没有可回放的工作记录。"}
+            {isLive ? t("子智能体正在启动，工作记录会实时显示在这里。") : view.resultContent ? t("此任务保留了结果，暂无可回放的工作记录。") : t("这个子智能体没有可回放的工作记录。")}
           </div>
         )}
-        {view.resultContent && !hasCanonicalResult && <details className="subagents-retained-result" open={turns.length === 0 || undefined}>
-          <summary>保留结果</summary>
-          <div className="subagents-retained-result-content md-prose"><MarkdownRenderer content={view.resultContent} conversationId={conversationId} workspaceRoot={workspaceRoot} /></div>
-        </details>}
+        {view.resultContent && !hasCanonicalResult && <div className="subagents-retained-result" aria-label={t("保留结果")}>
+          <div className="subagents-retained-result-content md-prose"><MarkdownRenderer content={view.resultContent} conversationId={conversationId} workspaceRoot={executionWorkspaceRoot} /></div>
+        </div>}
         {turns.length > 0 && (
-          <div className="subagents-transcript" aria-label="子智能体工作记录">
+          <div className="subagents-transcript" aria-label={t("子智能体工作记录")}>
             {turns.map((turn) => (
               <ChatTurn
                 key={turn.id}
                 turn={turn}
                 isTranscriptMode
                 conversationId={conversationId}
-                workspaceRoot={workspaceRoot}
+                workspaceRoot={executionWorkspaceRoot}
+                allowFileRevert={Boolean(source.workspaceRoot && workspaceRootsEqual(source.workspaceRoot, workspaceRoot))}
               />
             ))}
           </div>
         )}
-        {view.needsResult && transcriptMessages.length === 0 && (
-          <div className="subagents-detail-actions">
-            <SmallButton icon={<ChevronRight size={14} />} label={pendingAction === "result" ? "正在获取" : "获取结果"} onClick={onFetchResult} disabled={pendingAction != null} />
-          </div>
-        )}
-        {source.messages?.length ? <details className="subagents-messages">
-          <summary>协作消息 · {source.messages.length}</summary>
-          {source.messages.map((message) => {
-            const sender = agents.find((agent) => agent.id === message.senderId || agent.teammateName === message.senderId);
-            const recipient = agents.find((agent) => agent.id === message.recipientId || agent.teammateName === message.recipientId);
-            return <div className="subagents-message" key={message.messageId}>
-              <div className="subagents-message-heading">
-                {sender ? <AgentRelationLink agent={sender} /> : <span>{message.senderId === "user" ? "你" : message.senderId === "parent" ? "主任务" : "协作者"}</span>}
-                <span>→</span>
-                {recipient ? <AgentRelationLink agent={recipient} /> : <span>{message.recipientId === "parent" ? "主任务" : "协作者"}</span>}
-                {message.deliveryStatus && <small>{message.deliveryStatus === "sent" ? "已投递" : message.deliveryStatus === "sending" ? "发送中" : "发送失败"}</small>}
-              </div>
-              <p>{message.content}</p>
-            </div>;
-          })}
-        </details> : null}
       </div>
     </section>
   );
 };
 
 export const SubagentsTab = () => {
+  const { t } = useI18n();
   const subagents = useAppStore((state) => state.subagents);
+  const [now, setNow] = useState(Date.now);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
+  const hasStartedActive = subagents.some((agent) => ["running", "blocked"].includes(agent.status) && Boolean(agent.startedAt));
+  useEffect(() => {
+    if (!hasStartedActive) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasStartedActive]);
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
-  const [showAllCompleted, setShowAllCompleted] = useState(false);
-  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "result"; conversationId: string; workspaceRoot: string } | null>(null);
+  const pendingActionRef = useRef<{ id: string; conversationId: string; workspaceRoot: string } | null>(null);
   const [transcriptPresentation, setTranscriptPresentation] = useState<TranscriptPresentation>(
     emptyTranscriptPresentation,
   );
@@ -380,7 +372,15 @@ export const SubagentsTab = () => {
           || (responseSeq === currentPresentation.seq && currentPresentation.source === "push")
         )
       ) return;
-      useAppStore.getState().updateSubagent(id, subagentModelPatch(result.data ?? {}, currentAgent), ownerConversationId);
+      const responseWorkspaceRoot = result.data?.workspace_root;
+      useAppStore.getState().updateSubagent(id, {
+        ...subagentModelPatch(result.data ?? {}, currentAgent),
+        ...(typeof responseWorkspaceRoot === "string" ? { workspaceRoot: responseWorkspaceRoot } : {}),
+        ...(typeof result.data?.accepted_at === "number" ? { acceptedAt: result.data.accepted_at } : {}),
+        ...(typeof result.data?.started_at === "number" ? { startedAt: result.data.started_at } : {}),
+        ...(typeof result.data?.completed_at === "number" ? { completedAt: result.data.completed_at }
+          : result.data?.completed_at === null ? { completedAt: undefined } : {}),
+      }, ownerConversationId);
       if (resultLevel === "warning") {
         setTranscriptError(result.message || "无法读取子智能体工作记录。");
         return;
@@ -407,7 +407,7 @@ export const SubagentsTab = () => {
   }, [conversationId, workingDirectory, commitTranscriptPresentation]);
 
   useEffect(() => {
-    setPendingAction(null);
+    pendingActionRef.current = null;
     actionRequestRef.current += 1;
     transcriptRequestRef.current += 1;
     setTranscriptLoading(false);
@@ -465,13 +465,13 @@ export const SubagentsTab = () => {
     commitTranscriptPresentation,
   ]);
 
-  const fetchResult = async (id: string) => {
+  const fetchResult = useCallback(async (id: string) => {
     if (!conversationId) return;
-    if (pendingAction?.id === id) return;
+    if (pendingActionRef.current?.id === id) return;
     const ownerConversationId = conversationId;
     const requestId = ++actionRequestRef.current;
-    const action = { id, kind: "result" as const, conversationId, workspaceRoot: workingDirectory };
-    setPendingAction(action);
+    const action = { id, conversationId, workspaceRoot: workingDirectory };
+    pendingActionRef.current = action;
     try {
       const result = await sendClientCommandAwaitResult({
         type: "subagent.status",
@@ -492,9 +492,16 @@ export const SubagentsTab = () => {
         || useAppStore.getState().workingDirectory !== workingDirectory) return;
       pushToast(error instanceof Error ? error.message : "获取子智能体结果失败。", "error", 4000);
     } finally {
-      setPendingAction((current) => current === action ? null : current);
+      if (pendingActionRef.current === action) pendingActionRef.current = null;
     }
-  };
+  }, [conversationId, workingDirectory]);
+
+  const transcriptHasResult = visibleTranscript.messages.some((message) => message.role === "assistant"
+    && !message.isStreaming && Boolean(message.content.trim()));
+  useEffect(() => {
+    if (selectedView?.needsResult && !transcriptLoading && !transcriptHasResult
+      && (visibleTranscript.source !== "none" || transcriptError)) void fetchResult(selectedView.id);
+  }, [selectedView?.id, selectedView?.needsResult, transcriptLoading, transcriptHasResult, visibleTranscript.source, transcriptError, fetchResult]);
 
   if (selectedView && selectedAgent) {
     const planRequest = [pendingAskUser, ...askUserQueue].find((request) =>
@@ -507,41 +514,29 @@ export const SubagentsTab = () => {
         key={`${conversationId}:${selectedView.id}`}
         view={selectedView}
         source={selectedAgent}
-        agents={views}
         planRequest={planRequest}
         onBack={() => setSelectedAgentId(null)}
-        onFetchResult={() => void fetchResult(selectedView.id)}
         transcriptMessages={visibleTranscript.messages}
         workspaceRoot={workingDirectory}
         conversationId={conversationId || undefined}
         transcriptLoading={transcriptLoading}
         transcriptError={transcriptError}
-        onRefreshTranscript={() => void loadTranscript(selectedView.id)}
-        pendingAction={pendingAction?.id === selectedView.id && pendingAction.conversationId === conversationId
-          && pendingAction.workspaceRoot === workingDirectory ? pendingAction.kind : null}
       />
     );
   }
 
-  if (views.length === 0) {
-    return (
-      <div className="subagents-tab">
-        <div className="subagents-empty">
-          <span className="subagents-empty-icon" aria-hidden="true"><Bot size={20} strokeWidth={1.8} /></span>
-          <EmptyLine>暂无子智能体</EmptyLine>
-          <span>MiniCode 拆分任务后，委派工作会显示在这里。</span>
-        </div>
-      </div>
-    );
-  }
-
-  const activeViews = views.filter((view) => view.status === "running" || view.status === "waiting");
-  const attentionViews = views.filter((view) => view.status === "attention");
-  const completedViews = views.filter((view) => view.status === "completed");
+  const overviewViews = views.filter((view) => {
+    if (["error", "cancelled"].includes(view.effectiveStatus)) return false;
+    const source = subagents.find((agent) => agent.id === view.id)!;
+    const latestStatus = source.transcriptMessages?.filter((message) => message.role === "assistant").at(-1)?.terminalStatus;
+    return view.canStop || (latestStatus !== "failed" && latestStatus !== "interrupted");
+  });
+  const activeViews = overviewViews.filter((view) => view.canStop);
+  const completedViews = overviewViews.filter((view) => !view.canStop);
+  const waitingCount = activeViews.filter((view) => view.status !== "running").length;
   const groups = [
-    { key: "attention", label: "需要处理", items: attentionViews },
-    { key: "active", label: "进行中", items: activeViews },
-    { key: "completed", label: "已完成", items: completedViews },
+    { key: "active", label: t("进行中"), items: activeViews, initialLimit: 4 },
+    { key: "completed", label: t("已完成"), items: completedViews, initialLimit: 10 },
   ] as const;
 
   return (
@@ -549,49 +544,43 @@ export const SubagentsTab = () => {
       <div className="subagents-groups">
         {groups.map((group) => {
           const items = group.items;
-          if (items.length === 0) return null;
-          const canCollapse = group.key === "completed" && items.length > COMPLETED_PREVIEW_LIMIT;
-          const visibleItems = canCollapse && !showAllCompleted
-            ? items.slice(0, COMPLETED_PREVIEW_LIMIT)
-            : items;
+          if (items.length === 0 && group.key !== "active") return null;
+          const disclosureKey = `${conversationId}:${group.key}`;
+          const expanded = expandedGroups.has(disclosureKey);
+          const visibleItems = expanded ? items : items.slice(0, group.initialLimit);
 
           return (
             <section
               key={group.key}
               className="subagents-group"
-              aria-label={`${group.label}，${items.length} 项`}
+              aria-label={t("{label}，{count} 项", { label: group.label, count: items.length })}
             >
               <div className="subagents-group-heading">
-                <span>{group.key === "active" ? "已开启" : group.key === "completed" ? "完成" : group.label} · {items.length}</span>
+                <span>{group.key === "active" ? t("已开启") : t("完成")} · {items.length}</span>
+                {group.key === "active" && waitingCount > 0 && <span>{t("{count} 个等待中", { count: waitingCount })}</span>}
               </div>
               <div className="subagents-list">
+                {group.key === "active" && items.length === 0 && <div className="subagents-group-empty">{t("没有已开启的子代理")}</div>}
                 {visibleItems.map((view) => (
                   <AgentRow
                     key={view.id}
                     view={view}
-                    durationMs={subagents.find((agent) => agent.id === view.id)?.durationMs}
+                    source={subagents.find((agent) => agent.id === view.id)!}
+                    now={now}
                     onOpen={() => {
                       setSelectedAgentId(view.id);
-                      if (view.needsResult) void fetchResult(view.id);
                     }}
                   />
                 ))}
               </div>
-              {canCollapse && (
-                <button
-                  type="button"
-                  className="subagents-show-more"
-                  aria-expanded={showAllCompleted}
-                  onClick={() => setShowAllCompleted((value) => !value)}
-                >
-                  {showAllCompleted ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  <span>
-                    {showAllCompleted
-                      ? "收起已完成任务"
-                      : `再显示 ${items.length - COMPLETED_PREVIEW_LIMIT} 项`}
-                  </span>
-                </button>
-              )}
+              {items.length > group.initialLimit && <button type="button" className="subagents-show-more"
+                aria-expanded={expanded} aria-label={expanded ? t("收起{label}子智能体", { label: group.label }) : t("再显示 {count} 个{label}子智能体", { count: items.length - group.initialLimit, label: group.label })}
+                onClick={() => setExpandedGroups((current) => {
+                  const next = new Set(current);
+                  if (next.has(disclosureKey)) next.delete(disclosureKey);
+                  else next.add(disclosureKey);
+                  return next;
+                })}>{expanded ? t("收起") : t("再显示 {count} 个", { count: items.length - group.initialLimit })}</button>}
             </section>
           );
         })}

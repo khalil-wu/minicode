@@ -1,0 +1,136 @@
+{
+  "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "models": {
+    "gpt-6-astra": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "2x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-6.1-sol": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "2x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-6-sol": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-6-luna": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-5.6-sol": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-5.6-terra": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v2"
+    },
+    "gpt-5.6-luna": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v1"
+    },
+    "gpt-daybreak-blue-latest": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [],
+      "multi_agent_version": "v2"
+    },
+    "gpt-daybreak-red-latest": {
+      "support_verbosity": true,
+      "default_verbosity": "high",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [],
+      "multi_agent_version": "v2"
+    },
+    "gpt-5.5": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": null
+    },
+    "codex-auto-review": {
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "supports_reasoning_summary_parameter": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "multi_agent_version": "v1"
+    }
+  }
+}

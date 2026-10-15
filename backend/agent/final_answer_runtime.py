@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 from backend.agent.answer_commit_projection import build_answer_commit_projection
 from backend.agent.message import AgentEvent
+from backend.agent.run_events import public_provider_trace
 from backend.agent.terminal_projection import TurnTerminalProjection
 
 
@@ -29,11 +31,13 @@ async def commit_accepted_final_answer(
     """Commit the model-authored answer without a hidden review call."""
 
     runtime.update_phase(run_record.run_id, "final", summary="Preparing final answer")
+    private_ids = {record.tool_call_id for record in state.tool_calls if record.private_model_only}
     projection = build_answer_commit_projection(
         stream_text=stream_text,
         final_text=candidate_text,
         finish_reason=finish_reason,
-        provider_raw={**provider_raw_final_text, **provider_raw_done},
+        provider_raw=public_provider_trace(
+            {**provider_raw_final_text, **provider_raw_done}, private_ids),
         degraded_reason=degraded_reason,
     )
     terminal_projection = answer_committer.commit_answer(
@@ -47,4 +51,4 @@ async def commit_accepted_final_answer(
     )
     for event in projection.text_events:
         yield event
-    yield terminal_projection
+    yield replace(terminal_projection, provider_raw=public_provider_trace(provider_raw_done, private_ids))

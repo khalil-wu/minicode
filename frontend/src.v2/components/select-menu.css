@@ -39,11 +39,32 @@
   transition: border-color var(--transition-fast), background-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.mc-select-trigger > span {
+.mc-select-trigger-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.mc-select-trigger-label,
+.mc-select-option-label {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mc-select-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.mc-select-option-icon:empty { display: none; }
+
+.mc-select-option-icon > img,
+.mc-select-option-icon > svg {
+  flex-shrink: 0;
 }
 
 .mc-select-menu-mono .mc-select-trigger,
@@ -61,7 +82,7 @@
   background: var(--surface-soft);
 }
 
-.mc-select-menu[data-open="true"] .mc-select-trigger > svg {
+.mc-select-menu:not(.settings-select)[data-open="true"] .mc-select-trigger > svg {
   transform: rotate(180deg);
 }
 
@@ -80,7 +101,7 @@
   opacity: 0.5;
 }
 
-.settings-select .mc-select-trigger { min-height: 32px; padding: 5px 9px; border-color: transparent; background: transparent; }
+.settings-select .mc-select-trigger { min-height: 32px; padding: 5px 9px; background: var(--surface-soft); }
 .settings-select .mc-select-trigger:hover:not(:disabled),
 .settings-select[data-open="true"] .mc-select-trigger { border-color: var(--border-subtle); background: var(--surface-soft); }
 
@@ -88,6 +109,8 @@
   position: fixed;
   z-index: var(--z-context-menu);
   box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 16px);
   overflow-x: hidden;
   overflow-y: auto;
   padding: 6px;
@@ -107,6 +130,10 @@
 .mc-select-popover[data-placement="top"] {
   transform-origin: bottom;
 }
+
+/* Source settings hNs has a static down chevron. Sji's menu surface has no
+   authored scale/fade entry; keep the common form-select motion separate. */
+.mc-select-popover[data-settings-select="true"] { animation: none; }
 
 .mc-select-option-wrap {
   display: contents;
@@ -168,13 +195,13 @@
   visibility: visible;
 }
 
-.mc-select-option-label {
+.mc-select-option-content {
   grid-column: 1;
   grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 @keyframes mc-select-enter {

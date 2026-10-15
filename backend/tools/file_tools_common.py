@@ -9,7 +9,7 @@ import logging
 import hashlib
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.diff.unified import count_unified_diff_changes as _count_unified_diff_changes, iter_unified_diff
@@ -20,6 +20,9 @@ from backend.tools.base import (
     MAX_TOOL_RESULT_CHARS,
     MAX_TOOL_RESULT_LINES,
 )
+
+if TYPE_CHECKING:
+    from backend.sandbox import SandboxPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,9 @@ def invalidate_workspace_file_caches(
     *,
     file_tree_changed: bool = False,
     clear_file_state: bool = False,
+    changed_paths: tuple[Path, ...] | None = None,
+    workspace_root: Path | None = None,
+    mutation_policy: SandboxPolicy | None = None,
 ) -> None:
     """Invalidate every derived workspace view affected by a file mutation.
 
@@ -88,7 +94,10 @@ def invalidate_workspace_file_caches(
     """
     from backend.workspace.project_index_runtime import project_index_runtime
 
-    project_index_runtime.invalidate_all()
+    if changed_paths is None:
+        project_index_runtime.invalidate_all(workspace_root, mutation_policy=mutation_policy)
+    else:
+        project_index_runtime.invalidate_paths(changed_paths)
     if file_tree_changed:
         from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
 

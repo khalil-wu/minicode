@@ -15,9 +15,15 @@ from backend.agent.run_context import RunContext
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.async_cleanup import to_thread_cancel_safe
-from backend.agents.loader import (
-    discover_agents,
-    get_custom_agent,
+from backend.agents.source_roles import (
+    SourceAgentRole,
+    discover_execution_agents as discover_agents,
+    get_execution_agent as get_custom_agent,
+    inherit_role_restrictions,
+    load_source_agent_roles,
+    project_role_config,
+    source_child_role,
+    source_spawn_version,
 )
 from backend.artifact.store import ArtifactStore
 from backend.config import (
@@ -32,6 +38,9 @@ from backend.llm.model_selection import (
     default_model_thinking_level,
     model_thinking_levels,
 )
+from backend.llm.base import LLMAdapter
+from backend.llm.openai_adapter import OpenAIAdapter
+from backend.llm.model_request_policy import ModelRequestPolicy, resolve_model_request_policy
 from backend.tools.agent_control_plane import (
     normalize_agent_fork_turns,
     normalize_agent_task_name,
@@ -50,6 +59,7 @@ from backend.tools.toolsets import (
 from contextlib import suppress
 from dataclasses import (
     dataclass,
+    field,
     replace,
 )
 from pathlib import (
@@ -167,8 +177,6 @@ def _custom_agent_deny_rules(
     see the subagent write. Returns [] for built-in agent types or unrestricted
     custom agents.
     """
-    if agent_type in BUILTIN_AGENT_TYPES:
-        return []
     try:
         custom = get_custom_agent(agent_type, workspace_root)
     except Exception as exc:
@@ -177,6 +185,8 @@ def _custom_agent_deny_rules(
             "the child was not started."
         ) from exc
     if custom is None:
+        return []
+    if isinstance(custom, SourceAgentRole):
         return []
     deny: list[str] = []
     deny.extend(str(t).strip() for t in (custom.disallowed_tools or []) if str(t).strip())
@@ -316,6 +326,8 @@ class _SubagentLLMResolution:
     model: str
     effort: str
     owns_llm: bool = False
+    role_overrides: dict[str, Any] = field(default_factory=dict)
+    source_role_name: str | None = None
 
 
 async def _close_subagent_llm(adapter: Any) -> None:
@@ -373,9 +385,9 @@ def _configured_subagent_overrides(
     explicit_effort = bool(str(effort_override or "").strip())
     model = str(model_override or "").strip()
     effort = str(effort_override or "").strip()
-    if not explicit_model and custom is not None:
+    if (not explicit_model or isinstance(custom, SourceAgentRole)) and custom is not None:
         model = str(getattr(custom, "model", "") or "").strip()
-    if not explicit_effort and custom is not None:
+    if (not explicit_effort or isinstance(custom, SourceAgentRole)) and custom is not None:
         effort = str(getattr(custom, "effort", "") or "").strip()
     return model, effort, explicit_model, explicit_effort
 
@@ -392,6 +404,11 @@ async def _resolve_subagent_llm(
     effort_override: str = "",
     workspace_root: str | Path | None = None,
     build_adapter: bool = True,
+    fork_turns: str = "none",
+    role_requested: bool = True,
+    resume_source_role: bool = False,
+    resumed_role_name: str | None = None,
+    _apply_source_role: bool = True,
 ) -> _SubagentLLMResolution:
     """Resolve one child using the live parent config and ModelRuntime.
 
@@ -405,6 +422,21 @@ async def _resolve_subagent_llm(
         raise ValueError("Subagent runtime has no parent LLM to inherit.")
 
     parent_config = snapshot.config if snapshot is not None else load_config(cwd=workspace_root)
+    captured_parent_config = parent_config
+
+    inherited_tier_provider = inherited_llm.root_service_tier_provider() if isinstance(inherited_llm, LLMAdapter) else None
+    def root_service_tier() -> str | None:
+        current = (run_context.active_model_execution or run_context.model_execution) if run_context is not None else snapshot
+        config = current.config if current is not None else captured_parent_config
+        if inherited_tier_provider is not None:
+            tier = inherited_tier_provider()
+        elif config.model_request_policy is not None:
+            tier = config.model_request_policy.service_tier
+        else:
+            effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+            tier = effective.get("service_tier")
+        enabled = tier == "flex" or config.feature_flags.enabled("ultrafast_mode" if tier == "ultrafast" else "fast_mode", True)
+        return tier if enabled else None
 
     inferred_provider, inferred_model = _adapter_provider_model(inherited_llm)
     parent_provider = snapshot.provider if snapshot is not None else inferred_provider
@@ -421,6 +453,16 @@ async def _resolve_subagent_llm(
             or "off"
         ).strip().lower()
 
+    spawn_version = source_spawn_version(parent_config, model=parent_model, definition=snapshot.model_info if snapshot is not None else None)
+    roles = load_source_agent_roles(parent_config.config_layer_stack)
+    source_role_name = resumed_role_name if resume_source_role else (agent_type if role_requested else (
+        "default" if spawn_version == "v2" and fork_turns != "all" and "default" in roles and roles["default"].config_file is not None else None))
+    if resume_source_role:
+        if resumed_role_name is not None and resumed_role_name not in roles and resumed_role_name not in {"default", "explorer", "worker"}:
+            raise ValueError(f"unknown agent_type '{resumed_role_name}'")
+        source_overrides = source_child_role(parent_config, role_name=resumed_role_name, role_requested=True, fork_turns="none", version=spawn_version) if resumed_role_name is not None else {}
+    else:
+        source_overrides = source_child_role(parent_config, role_name=agent_type, role_requested=role_requested, fork_turns=fork_turns, version=spawn_version) if _apply_source_role else {}
     requested_model, requested_effort, _explicit_model, _explicit_effort = (
         _configured_subagent_overrides(
             agent_type=agent_type,
@@ -429,6 +471,31 @@ async def _resolve_subagent_llm(
             workspace_root=workspace_root,
         )
     )
+    definition = roles.get(agent_type)
+    source_policy_active = _apply_source_role and (agent_type in {"default", "explorer", "worker"} or isinstance(definition, SourceAgentRole))
+    if not source_policy_active:
+        source_role_name = None
+    if isinstance(definition, SourceAgentRole) or not _apply_source_role:
+        requested_model = model_override
+        requested_effort = effort_override
+    if _apply_source_role:
+        agents_config = parent_config.config_layer_stack.effective_config().get("agents", {}) if parent_config.config_layer_stack is not None else {}
+        requested_model = model_override or agents_config.get("default_subagent_model", "") or requested_model
+        requested_effort = effort_override or agents_config.get("default_subagent_reasoning_effort", "") or requested_effort
+        if not resume_source_role and ("model" in source_overrides or "model_reasoning_effort" in source_overrides):
+            # Source first prepares the requested model, then applies the role.
+            # A role changing only the model preserves that prepared effort.
+            prepared = await _resolve_subagent_llm(inherited_llm, parent_metadata=parent_metadata, run_context=run_context,
+                model_execution=snapshot, agent_type="default", model_override=requested_model,
+                provider_override=provider_override, effort_override=requested_effort, workspace_root=workspace_root,
+                build_adapter=False, _apply_source_role=False)
+            requested_effort = prepared.effort
+        requested_model = source_overrides.get("model", requested_model)
+        requested_effort = source_overrides.get("model_reasoning_effort", requested_effort)
+    has_role_layer = bool(source_overrides)
+    source_overrides = inherit_role_restrictions(parent_config, source_overrides)
+    if has_role_layer:
+        parent_config = project_role_config(parent_config, source_overrides)
     # An explicitly selected model owns its own default reasoning level, even
     # when it happens to equal the parent's current model.  Only an omitted
     # (or explicit ``inherit``) model inherits the parent's effort.  This is
@@ -442,15 +509,21 @@ async def _resolve_subagent_llm(
     requested_provider = str(provider_override or "").strip()
     target_provider = parent_provider if requested_provider.lower() in {"", "inherit"} else requested_provider
     target_model = parent_model
-    if snapshot is not None and model_inherits and effort_inherits and target_provider == parent_provider:
+    inherited_policy = inherited_llm.model_request_policy() if isinstance(inherited_llm, LLMAdapter) else ModelRequestPolicy()
+    request_policy = resolve_model_request_policy(parent_config, model=parent_model, definition=snapshot.model_info if snapshot is not None else None,
+        root_service_tier=root_service_tier()) if source_policy_active else parent_config.model_request_policy
+    request_policy_changed = request_policy is not None and request_policy.request_signature() != inherited_policy.request_signature()
+    source_owned_transport = source_policy_active and isinstance(inherited_llm, OpenAIAdapter)
+    if snapshot is not None and model_inherits and effort_inherits and target_provider == parent_provider and not request_policy_changed and not source_owned_transport:
         # Inheritance uses the captured parent choice even if its catalog has
         # since changed. No new selection or adapter resolution is involved.
-        return _SubagentLLMResolution(llm=inherited_llm, config=parent_config,
-            provider=parent_provider, model=parent_model, effort=parent_effort, owns_llm=False)
+        child_config = replace(parent_config, model_request_policy=request_policy) if source_policy_active else parent_config
+        return _SubagentLLMResolution(llm=inherited_llm, config=child_config,
+            provider=parent_provider, model=parent_model, effort=parent_effort, owns_llm=False, role_overrides=source_overrides, source_role_name=source_role_name)
     if not model_inherits:
         target_model = requested_model
         alias = requested_model.strip().lower()
-        if alias in _MODEL_FAMILY_ALIASES:
+        if alias in _MODEL_FAMILY_ALIASES and agent_type not in {"default", "explorer", "worker"} and not isinstance(definition, SourceAgentRole):
             # Keep the parent's exact model when a bare family alias already
             # matches; otherwise resolve it within the current provider before
             # applying provider-qualified model selection.
@@ -509,12 +582,15 @@ async def _resolve_subagent_llm(
                 provider=parent_provider,
                 model=parent_model,
                 effort=parent_effort,
-                owns_llm=False,
+                owns_llm=False, role_overrides=source_overrides, source_role_name=source_role_name,
             )
         raise ValueError("Unable to resolve the child provider/model from the parent turn.")
 
     runtime_model = None
-    if model_runtime is not None:
+    captured_model_inheritance = snapshot is not None and model_inherits and target_provider == parent_provider
+    if captured_model_inheritance:
+        runtime_model = snapshot.model_info
+    elif model_runtime is not None:
         runtime_model = model_runtime.get_model(target_provider, target_model)
         if runtime_model is None:
             available = [model.id for model in model_runtime.get_models(target_provider)]
@@ -568,6 +644,10 @@ async def _resolve_subagent_llm(
         provider=target_provider,
         model=target_model,
     )
+    if source_policy_active:
+        request_policy = resolve_model_request_policy(parent_config, model=target_model, definition=runtime_model, root_service_tier=root_service_tier())
+        child_config = replace(child_config, model_request_policy=request_policy)
+        request_policy_changed = request_policy.request_signature() != inherited_policy.request_signature()
     child_llm_settings = getattr(child_config, "llm", None)
     if child_llm_settings is not None and (
         str(getattr(child_llm_settings, "provider", "") or "") != target_provider
@@ -585,7 +665,7 @@ async def _resolve_subagent_llm(
                     reasoning_effort=effective_effort,
                 ),
             )
-    requires_fresh_adapter = model_changed or effective_effort != parent_effort
+    requires_fresh_adapter = model_changed or effective_effort != parent_effort or request_policy_changed or source_owned_transport
     if not requires_fresh_adapter or not build_adapter:
         return _SubagentLLMResolution(
             llm=inherited_llm,
@@ -593,10 +673,15 @@ async def _resolve_subagent_llm(
             provider=target_provider,
             model=target_model,
             effort=effective_effort,
-            owns_llm=False,
+            owns_llm=False, role_overrides=source_overrides, source_role_name=source_role_name,
         )
 
     from backend.llm.model_registry import create_session_llm
+    source_capture_transport = source_owned_transport and not model_changed and model_inherits
+    if source_capture_transport:
+        # A Source child owns its client/turn state. Preserve the invoked
+        # step's exact provider settings even after the live catalog refreshes.
+        child_config = replace(child_config, llm=replace(inherited_llm._settings, reasoning_effort=effective_effort))
 
     adapter = None
     def create_owned_adapter() -> Any:
@@ -605,7 +690,7 @@ async def _resolve_subagent_llm(
             child_config,
             model_override=target_model,
             provider_override=target_provider,
-            model_runtime=model_runtime,
+            model_runtime=None if source_capture_transport else model_runtime,
         )
         return adapter
 
@@ -632,6 +717,8 @@ async def _resolve_subagent_llm(
             runtime_model,
             effective_effort or "off",
         )
+        if isinstance(adapter, LLMAdapter) and request_policy is not None:
+            adapter.apply_model_request_policy(request_policy, service_tier_provider=root_service_tier)
         # Keep the child config snapshot and concrete adapter in lock step. A
         # model switch must not leave extensions or resume metadata observing
         # the parent's provider/model settings.
@@ -684,7 +771,7 @@ async def _resolve_subagent_llm(
         provider=target_provider,
         model=target_model,
         effort=effective_effort,
-        owns_llm=adapter is not inherited_llm,
+        owns_llm=adapter is not inherited_llm, role_overrides=source_overrides, source_role_name=source_role_name,
     )
 
 

@@ -7,7 +7,7 @@ from backend.permissions.checker import PermissionChecker, check_permission_leve
 from backend.permissions.context import PermissionContext
 from backend.tools.base import PermissionLevel
 from backend.tools.agent_tools import TaskTool
-from backend.tools.agent_user_tools import AskUserTool
+from backend.tools.agent_user_tools import RequestUserInputTool
 from backend.tools.edit_file import EditFileTool
 from backend.tools.agent_artifact_tools import ReadArtifactTool
 from backend.tools.command_tool import RunCommandTool
@@ -90,12 +90,12 @@ def test_mcp_runtime_guidance_does_not_append_custom_account_auditing_rules() ->
 
 def test_tool_runtime_guidance_keeps_host_api_without_custom_plan_or_behavior_rules() -> None:
     guidance = build_tool_runtime_guidance(
-        [_tool_schema(name) for name in ("run_command", "monitor", "ask_user", "apply_patch", "grep_files", "update_plan", "web_fetch")]
+        [_tool_schema(name) for name in ("run_command", "monitor", "request_user_input", "apply_patch", "grep_files", "update_plan", "web_fetch")]
     )
 
     assert "Shell execution is run_command with command, cwd and env" in guidance
     assert "monitor and its command_id" in guidance
-    assert "Structured user questions use ask_user" in guidance
+    assert "Structured user questions use request_user_input" in guidance
     assert "advertised patch argument, not a command array" in guidance
     assert "fixed_strings=true means literal text" in guidance
     assert "Call it before the first substantive tool action" not in guidance
@@ -127,12 +127,12 @@ def test_update_plan_does_not_require_permission_prompt():
     ) == PermissionLevel.ALWAYS_DENY
 
 
-def test_ask_user_model_schema_is_minimal() -> None:
-    schema = AskUserTool().model_schema()
+def test_request_user_input_model_schema_is_minimal() -> None:
+    schema = RequestUserInputTool().model_schema()
 
-    assert schema.description == "Ask the user one clarification question."
-    assert set(schema.parameters["properties"].keys()) == {"question", "options"}
-    assert schema.parameters["required"] == ["question"]
+    assert "one to three short questions" in schema.description and "Plan mode" in schema.description
+    assert set(schema.parameters["properties"].keys()) == {"questions"}
+    assert schema.parameters["required"] == ["questions"]
 
 
 def test_write_file_model_schema_hides_runtime_guard_field() -> None:
@@ -213,10 +213,10 @@ def test_common_direct_tool_model_descriptions_stay_short() -> None:
     assert "tool_search" in search_description
     assert len(search_description) < 400
     discovery = ToolSearchTool().model_schema().description
-    assert "BM25" in discovery and "capability keywords" in discovery
-    assert "next model call" in discovery and "select:ToolName" in discovery
-    assert "tool_exec" in discovery
-    assert "always use tool_search instead of list_mcp_resources or list_mcp_resource_templates" in discovery
+    assert "BM25" in discovery and "deferred tool metadata" in discovery
+    assert "next model call" in discovery and "select:" not in discovery
+    assert "For MCP tool discovery, always use `tool_search`" in discovery
+    assert "instead of `list_mcp_resources` or `list_mcp_resource_templates`" in discovery
 
 
 def test_openai_strict_is_only_advertised_for_strict_compatible_tool_schemas() -> None:
@@ -246,7 +246,13 @@ def test_task_model_schema_exposes_parallel_delegation() -> None:
         "write_scope",
         "isolation",
     } <= set(parallel_properties)
-    assert tool.model_schema().parameters == tool.get_schema().parameters
+    def argument_contract(value):
+        if isinstance(value, dict):
+            return {key: argument_contract(item) for key, item in value.items() if key != "description"}
+        if isinstance(value, list):
+            return [argument_contract(item) for item in value]
+        return value
+    assert argument_contract(tool.model_schema().parameters) == argument_contract(parameters)
     assert {tuple(item["required"]) for item in parameters["anyOf"]} == {
         ("description", "prompt"),
         ("description", "prompt", "name"),
@@ -268,6 +274,9 @@ def test_run_command_model_schema_exposes_execution_policy_controls() -> None:
         "description",
         "with_escalated_permissions",
         "justification",
+        "shell",
+        "login",
+        "tty",
     }
     assert schema.parameters["required"] == ["command"]
 

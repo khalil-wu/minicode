@@ -1,8 +1,10 @@
+/* @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getChatSendBlockReason, resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
+import { getChatSendBlockReason, handleUserMessageAdmission, resetPendingUserMessagesForTests, sendChatMessage } from "./sendChatMessage";
 import { useAppStore } from "../stores";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import type { CommandResultEvent } from "../protocol/events";
+import { handleRuntimeEvent } from "./runtimeEvents";
 
 const wsMock = vi.hoisted(() => ({
   sent: [] as unknown[],
@@ -56,7 +58,7 @@ describe("sendChatMessage attachment feedback", () => {
     expect(useAppStore.getState().draft).toBe("main stays");
   });
   beforeEach(() => {
-    resetSendDeduplication();
+    resetPendingUserMessagesForTests();
     sent.length = 0;
     clientCommands.length = 0;
     wsMock.throwOnSend = false;
@@ -1011,8 +1013,11 @@ describe("sendChatMessage attachment feedback", () => {
       backendContent: "换个游戏吧 我要完cf",
     });
 
-    const state = useAppStore.getState();
     expect(ok).toBe(true);
+    expect(useAppStore.getState().plan?.turnId).toBe("turn-angry-birds");
+    handleRuntimeEvent({ type: "agent.run.started", role: "main", conversation_id: "conv-test",
+      message_id: (sent[0] as { assistant_message_id: string }).assistant_message_id, run_id: "next-real-run" });
+    const state = useAppStore.getState();
     expect(state.plan).toBeNull();
     expect(state.todos).toEqual([]);
     expect(state.agentProgress).toEqual([]);
@@ -1235,7 +1240,7 @@ describe("sendChatMessage attachment feedback", () => {
     ]);
   });
 
-  it("recovers stale streaming state before sending instead of showing a running error", () => {
+  it("does not invent a terminal transition when a nonqueue caller sees a busy conversation", () => {
     useAppStore.setState({
       conversationId: "conv-test",
       messages: [
@@ -1259,13 +1264,13 @@ describe("sendChatMessage attachment feedback", () => {
       backendContent: "continue",
     });
 
-    expect(ok).toBe(true);
-    expect(sent).toHaveLength(1);
-    expect(useAppStore.getState().messages.some((message) => message.content === "continue")).toBe(true);
+    expect(ok).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().messages.some((message) => message.content === "continue")).toBe(false);
   });
 
   it("allows a short repeated reply after the previous turn has finished", () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-05T00:00:00.000Z"));
     useAppStore.setState({
       conversationId: "conv-repeat",
@@ -1746,7 +1751,12 @@ describe("sendChatMessage attachment feedback", () => {
       retry_from_message_id: "user-retry",
     })]);
     expect(sent[0]).not.toHaveProperty("queue_if_busy");
-    expect(useAppStore.getState().messages.map((message) => message.content)).toEqual(["try again", ""]);
+    expect(useAppStore.getState().messages.map((message) => message.content)).toEqual(["try again", "old", "newer"]);
+    handleUserMessageAdmission({ type: "command.result", command: "user_message", level: "success", message: "admitted",
+      client_command_id: (sent[0] as { client_command_id: string }).client_command_id,
+      data: { admitted: true, conversation_id: "conv-test" } });
+    expect(useAppStore.getState().messages.map((message) => message.content)).toEqual(["try again"]);
+    expect(useAppStore.getState().isStreaming).toBe(false);
   });
 
   it("does not rewind the local transcript when an atomic retry cannot be sent", () => {

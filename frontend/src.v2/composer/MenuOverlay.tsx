@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { AtSign, Blocks, Command, Folder, RefreshCw } from "lucide-react";
 import { BrandIcon } from "../components/BrandIcon";
 import { fileIcon } from "../lib/file-icons";
@@ -5,11 +6,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
-import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { fuzzyFilter } from "../lib/fuzzy-match";
 import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
 import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
+import { useComposerPlugins } from "./useComposerPlugins";
+import { recentGuardianDenials, useGuardianApprovalState } from "../chat/guardianApprovalState";
 
 interface Props {
   open: boolean;
@@ -45,18 +47,6 @@ const MENTION_CACHE_LIMIT = 80;
 const SLASH_MENU_LIMIT = 18;
 const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
 
-interface PluginMentionEntry {
-  id: string;
-  name: string;
-  marketplace: string;
-  displayName?: string;
-  description?: string;
-  shortDescription?: string;
-  skill_count?: number;
-  mcp_server_count?: number;
-  enabled: boolean;
-}
-
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
   if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
     const oldestKey = cache.keys().next().value;
@@ -66,43 +56,51 @@ const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, res
 };
 
 export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above", workspaceRoot }: Props) => {
+  const { t: tr } = useI18n();
   const [activeIndex, setActiveIndex] = useState(0);
   const [fileResults, setFileResults] = useState<FileItem[]>([]);
-  const [pluginResults, setPluginResults] = useState<PluginMentionEntry[]>([]);
-  const [pluginLoading, setPluginLoading] = useState(false);
-  const [pluginLoadError, setPluginLoadError] = useState("");
-  const [pluginRefresh, setPluginRefresh] = useState(0);
   const [searching, setSearching] = useState(false);
   const [fileSearchError, setFileSearchError] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
   const searchSequenceRef = useRef(0);
   const storeCommands = useAppStore((s) => s.slashCommands);
+  const guardianOwner = useAppStore(s => s.conversationId ?? "");
+  const guardianMessages = useAppStore(s => s.messages);
+  const guardianState = useGuardianApprovalState(guardianOwner);
+  const hasGuardianDenials = guardianMessages.length > 0 && recentGuardianDenials(guardianOwner, guardianState.approved).length > 0;
   const availableSkills = useAppStore((s) => s.availableSkills);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
+  const { plugins: pluginResults, loading: pluginLoading, error: pluginLoadError, refresh: refreshPlugins } = useComposerPlugins(open && kind === "mention", workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const slashFilter = filter ?? "";
+  const emptyReviewComposer = useAppStore(s => !s.draft.trim() || /^\s*\/[^/\r\n]*\s*$/.test(s.draft));
   const skillKey = (path: string | undefined, name: string): string => path
     ? `path:${workspaceFilePathComparisonKey(path, workingDirectory)}`
     : `name:${name}`;
   const selectedSkillKeys = new Set(selectedSkills.map((skill) => skillKey(skill.path, skill.name)));
 
   // Slash commands and explicit skill picker
-  const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands).map((item) => ({
+  const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands)
+    .filter(item => item.name !== "/approve" || hasGuardianDenials || storeCommands.find(command => command.name === "approve")?.source !== "builtin")
+    .filter(item => item.name !== "/review" || emptyReviewComposer || !storeCommands.some(command => command.name === "review" && command.source === "builtin"))
+    .map((item) => ({
     ...item,
+    description: item.name === "/approve" && storeCommands.find(command => command.name === "approve")?.source === "builtin"
+      ? tr("批准最近一次自动审查驳回") : item.description,
     type: "command" as const,
-    section: item.section ?? "命令",
+    section: item.section ?? tr("命令"),
     path: item.name,
   }));
   const slashSkillItems: MenuItem[] = availableSkills
     .filter((skill) => skill.user_invocable !== false)
     .map((skill) => ({
       name: `/${skill.name}`,
-      description: skill.short_description || skill.description || "技能",
+      description: skill.short_description || skill.description || tr("技能"),
       type: "skill" as const,
       path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
-      section: "技能",
+      section: tr("技能"),
       displayName: skill.display_name,
       icon: skill.icon,
       sourceLevel: skill.source_level,
@@ -121,7 +119,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
     ? buildRuntimeSlashArgMenuItems(slashFilter, storeCommands)?.map((item) => ({
         ...item,
         type: "argument" as const,
-        section: "选项",
+        section: tr("选项"),
         path: item.name,
       }))
     : null;
@@ -151,10 +149,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
     ? fuzzyFilter(
         availableSkills.filter((skill) => skill.user_invocable !== false).map((skill) => ({
           name: `$${skill.name}`,
-          description: skill.short_description || skill.description || "技能",
+          description: skill.short_description || skill.description || tr("技能"),
           type: "skill" as const,
           path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
-          section: "技能",
+          section: tr("技能"),
           displayName: skill.display_name,
           icon: skill.icon,
           sourceLevel: skill.source_level,
@@ -177,13 +175,13 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
             name: `@${plugin.displayName || plugin.name}`,
             displayName: plugin.displayName || plugin.name,
             description: plugin.shortDescription || plugin.description || [
-              plugin.skill_count ? `${plugin.skill_count} 个技能` : "",
-              plugin.mcp_server_count ? `${plugin.mcp_server_count} 个 MCP 服务` : "",
-            ].filter(Boolean).join(" · ") || "插件",
+              plugin.skill_count ? tr("{count} 个技能", { count: plugin.skill_count }) : "",
+              plugin.mcp_server_count ? tr("{count} 个 MCP 服务", { count: plugin.mcp_server_count }) : "",
+            ].filter(Boolean).join(" · ") || tr("插件"),
             type: "plugin" as const,
             path: `plugin:${encodeURIComponent(plugin.id)}`,
             marketplace: plugin.marketplace,
-            section: "插件",
+            section: tr("插件"),
           })),
         mentionSearchQuery,
         (plugin) => [plugin.name, plugin.displayName, plugin.description].filter(Boolean).join(" "),
@@ -193,37 +191,6 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
   useEffect(() => {
     setActiveIndex(0);
   }, [open, kind, filter, workingDirectory]);
-
-  useEffect(() => {
-    if (!open || kind !== "mention") return;
-    let active = true;
-    const controller = new AbortController();
-    setPluginResults([]);
-    setPluginLoadError("");
-    setPluginLoading(true);
-    const loadPlugins = async () => {
-      try {
-        const query = new URLSearchParams({ workspace_root: workingDirectory });
-        const response = await fetchWithTimeout(`${apiBase()}/api/plugins?${query}`, {
-          headers: authHeaders(), signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(errorMessageFromResponseText(await response.text(), `HTTP ${response.status}`));
-        }
-        const payload = await response.json() as { plugins: PluginMentionEntry[] };
-        if (active) setPluginResults(payload.plugins);
-      } catch (error) {
-        if (active) setPluginLoadError(error instanceof Error ? error.message : "插件加载失败");
-      } finally {
-        if (active) setPluginLoading(false);
-      }
-    };
-    void loadPlugins();
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [open, kind, pluginRefresh, workingDirectory]);
 
   // File search effect for @ mentions
   useEffect(() => {
@@ -261,7 +228,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
                 name: entry.name || entry.path,
                 description: entry.path.replace(/[\\/][^\\/]*$/, ""),
                 type,
-                section: "文件",
+                section: tr("文件"),
                 path: `${type}:${entry.path}`,
               };
             });
@@ -271,7 +238,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
           .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
-            setFileSearchError(error instanceof Error ? error.message : "无法读取工作区文件，请重试。");
+            setFileSearchError(error instanceof Error ? error.message : tr("无法读取工作区文件，请重试。"));
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -287,7 +254,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
             name: node.name || node.path,
             description: node.path,
             type: node.is_dir ? "folder" as const : "file" as const,
-            section: "文件",
+            section: tr("文件"),
             path: `${node.is_dir ? "folder" : "file"}:${node.path}`,
           }));
           rememberMentionResults(mentionTreeCache, cacheKey, results);
@@ -296,7 +263,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
         .catch((error: unknown) => {
           if (searchId !== searchSequenceRef.current) return;
           setFileResults([]);
-          setFileSearchError(error instanceof Error ? error.message : "无法读取工作区文件，请重试。");
+          setFileSearchError(error instanceof Error ? error.message : tr("无法读取工作区文件，请重试。"));
         })
         .finally(() => {
           if (searchId !== searchSequenceRef.current) return;
@@ -324,7 +291,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
             if (searchId !== searchSequenceRef.current) return; // Stale result
             const results = files.map((f) => {
               const type = f.kind === "folder" || f.path.endsWith("/") || f.path.endsWith("\\") ? "folder" as const : "file" as const;
-              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, section: "文件", path: `${type}:${f.path}` };
+              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, section: tr("文件"), path: `${type}:${f.path}` };
             });
             rememberMentionResults(mentionSearchCache, cacheKey, results);
             setFileResults(results);
@@ -332,7 +299,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
           .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
-            setFileSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
+            setFileSearchError(error instanceof Error ? error.message : tr("文件搜索失败，请重试。"));
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -346,7 +313,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
               name: f.name || f.path,
               description: f.path.replace(/[\\/][^\\/]*$/, ""),
               type: f.kind === "folder" ? "folder" as const : "file" as const,
-              section: "文件",
+              section: tr("文件"),
               path: `${f.kind === "folder" ? "folder" : "file"}:${f.path}`,
             }));
             rememberMentionResults(mentionSearchCache, cacheKey, results);
@@ -355,7 +322,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
           .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
-            setFileSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
+            setFileSearchError(error instanceof Error ? error.message : tr("文件搜索失败，请重试。"));
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -443,8 +410,8 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
         {fileSearchError && <div role="alert" style={emptyMenuStyle}>{fileSearchError}</div>}
         {kind === "mention" && pluginLoadError && (
           <div role="alert" style={{ ...emptyMenuStyle, display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ flex: 1, overflowWrap: "anywhere" }}>插件加载失败：{pluginLoadError}</span>
-            <button type="button" onClick={() => setPluginRefresh((value) => value + 1)} title="重试加载插件" aria-label="重试加载插件" className="mc-icon-btn">
+            <span style={{ flex: 1, overflowWrap: "anywhere" }}>{tr("插件加载失败：")}{pluginLoadError}</span>
+            <button type="button" onClick={refreshPlugins} title={tr("重试加载插件")} aria-label={tr("重试加载插件")} className="mc-icon-btn">
               <RefreshCw size={14} />
             </button>
           </div>
@@ -452,17 +419,17 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
         {items.length === 0 ? (
           fileSearchError || (kind === "mention" && pluginLoadError) ? null : <div style={emptyMenuStyle}>
             {searching || (kind === "mention" && pluginLoading)
-              ? "正在搜索…"
+              ? tr("正在搜索…")
               : kind === "mention"
-                  ? "未找到文件或插件"
-                  : (skillsPickerActive || explicitSkillPickerActive) ? "未找到技能" : "无匹配项"}
+                  ? tr("未找到文件或插件")
+                  : (skillsPickerActive || explicitSkillPickerActive) ? tr("未找到技能") : tr("无匹配项")}
           </div>
         ) : (
           items.map((it, i) => {
             const showSection = i === 0 || items[i - 1]?.section !== it.section;
             const displayName = displayMenuName(it, skillsPickerActive || explicitSkillPickerActive);
-            const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : it.marketplace ?? "";
-            const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it) : "";
+            const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel, tr) : it.marketplace ?? "";
+            const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it, tr) : "";
             return (
               <div key={it.path ?? it.name}>
                 {showSection && it.section && (
@@ -490,7 +457,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
                   <span style={menuBodyStyle}>
                     <span style={menuTitleRowStyle}>
                       <span style={menuNameStyle}>{displayName}</span>
-                      {it.active && <span style={activeBadgeStyle}>已启用</span>}
+                      {it.active && <span style={activeBadgeStyle}>{tr("已启用")}</span>}
                     </span>
                     {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
                     {skillPolicyLabel && <span style={menuTriggerStyle}>{skillPolicyLabel}</span>}
@@ -645,21 +612,21 @@ function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {
   return item.name;
 }
 
-function formatSkillPolicy(item: MenuItem): string {
+function formatSkillPolicy(item: MenuItem, tr: Translate): string {
   const parts: string[] = [];
-  if (item.allowImplicitInvocation === false) parts.push("仅显式调用");
+  if (item.allowImplicitInvocation === false) parts.push(tr("仅显式调用"));
   const mcp = (item.mcpDependencies ?? []).filter(Boolean);
   if (mcp.length > 0) parts.push(`MCP: ${mcp.slice(0, 2).join(", ")}`);
   return parts.join(" · ");
 }
 
-function formatSourceLevel(level?: string): string {
+function formatSourceLevel(level: string | undefined, tr: Translate): string {
   const normalized = (level || "").replace(/-legacy$/i, "").toLowerCase();
   if (!normalized) return "";
-  if (normalized === "global") return "个人";
-  if (normalized === "builtin") return "内置";
-  if (normalized === "project") return "项目";
-  if (normalized === "user" || normalized === "personal") return "个人";
+  if (normalized === "global") return tr("个人");
+  if (normalized === "builtin") return tr("内置");
+  if (normalized === "project") return tr("项目");
+  if (normalized === "user" || normalized === "personal") return tr("个人");
   return normalized;
 }
 

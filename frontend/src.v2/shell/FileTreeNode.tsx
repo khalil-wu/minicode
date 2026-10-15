@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { memo, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronRight, LoaderCircle } from "../lib/icons";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
@@ -54,6 +55,7 @@ export const TreeNode = memo(({
   onContextMenu: (menu: ContextMenuState) => void;
   onNavigate?: () => void;
 }) => {
+  const { t: tr } = useI18n();
   const hasQuery = query.trim().length > 0;
   const expanded = expandedPaths.has(node.path) || (hasQuery && nodeMatchesQuery(node, query));
   const loading = loadingPaths.has(node.path);
@@ -166,7 +168,7 @@ export const TreeNode = memo(({
           </span>
         )}
         {loading && (
-          <span role="status" aria-label={`正在加载 ${node.name}`} style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>
+          <span role="status" aria-label={tr("正在加载 {v0}", { v0: node.name })} style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>
             <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
           </span>
         )}

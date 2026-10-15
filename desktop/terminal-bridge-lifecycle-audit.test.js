@@ -9,6 +9,9 @@ const http = require("node:http");
 const { EventEmitter } = require("node:events");
 const cdp = require("./cdp-bridge");
 const bridge = require("./embedded-browser-bridge");
+bridge.init({ getWindowRecordByInstanceId: (instance) => instance === "fixture-window" ? {
+  windowInstanceId: instance, windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => false },
+} : null });
 
 function loadModule(name, overrides = {}) {
   const module = { exports: {} };
@@ -58,7 +61,7 @@ test("concurrent HTTP bridge start publishes one endpoint and serialization erro
   const endpoints = await Promise.all([bridge.start(), bridge.start()]);
   assert.ok(endpoints[0]); assert.equal(endpoints[0], endpoints[1]);
   try {
-    const response = await fetch(`${endpoints[0]}/v1/command`, { method: "POST", headers: { authorization: "Bearer fixture-token" }, body: "{}" });
+    const response = await fetch(`${endpoints[0]}/v1/command`, { method: "POST", headers: { authorization: "Bearer fixture-token" }, body: JSON.stringify({ conversation_id: "fixture-owner", window_instance_id: "fixture-window", window_binding_token: "fixture-binding" }) });
     assert.equal(response.status, 400);
     assert.equal((await response.json()).ok, false);
   } finally { await bridge.stop(); }

@@ -1,0 +1,83 @@
+{
+  "reference_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "source_file": "codex-rs/models-manager/models.json",
+  "models": {
+    "gpt-6-astra": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-6.1-sol": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-6-sol": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-6-luna": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-5.6-sol": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-5.6-terra": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-5.6-luna": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-daybreak-blue-latest": {
+      "model_specialty": "cyber",
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-daybreak-red-latest": {
+      "model_specialty": "cyber",
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "gpt-5.5": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    },
+    "codex-auto-review": {
+      "model_specialty": null,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false,
+      "guardian": null,
+      "auto_review_model_override": null
+    }
+  }
+}

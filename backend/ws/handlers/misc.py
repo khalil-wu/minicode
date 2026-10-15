@@ -302,6 +302,24 @@ async def handle_inspector_focus(session: "WebSocketSession", data: dict[str, An
     return True
 
 
+async def handle_turn_settings_update(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    command = "turn.settings.update"
+    if any(name in data for name in ("approvals_reviewer", "environments", "summary", "service_tier")):
+        await emit_command_error(session, command, "Only model and effort turn settings are supported")
+        return True
+    conversation_id, turn_id = data["conversation_id"], data["turn_id"]
+    owner = _model_execution_owner(session, conversation_id)
+    try:
+        applied = await owner.update_turn_model_settings(conversation_id, turn_id,
+            model=data.get("model"), effort=data.get("effort"))
+    except ValueError as error:
+        await emit_command_error(session, command, error)
+        return True
+    await session.emit_command_result(command, "", level="success", data={
+        "conversation_id": conversation_id, "turn_id": turn_id, "status": "applied" if applied else "targetUnavailable"})
+    return True
+
+
 async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.misc_command_service import parse_model_command
 
@@ -311,8 +329,12 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
         return True
     conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "")
     owner = _model_execution_owner(session, conversation_id)
+    changed = False
     try:
-        changed = await owner.set_selected_model(request.model, manual_override=True, conversation_id=conversation_id or None)
+        changed = (await owner.restore_default_model_selection(conversation_id or None)
+            if request.selection_mode == "default" else await owner.set_selected_model(request.model,
+                manual_override=True, conversation_id=conversation_id or None,
+                reasoning_effort=request.reasoning_effort, selection_mode="model"))
         if not changed and owner is not session:
             await emit_command_error(session, "model.set", "The requested model is unavailable for this conversation.")
     except ValueError as exc:
@@ -322,6 +344,10 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
     # duplicate background runtime projection.
     await session.send_llm_state(force=True)
     await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set", include_catalogs=False)
+    if changed:
+        await session.emit_command_result("model.set", "", level="success", data={
+            "conversation_id": conversation_id, "selection_mode": request.selection_mode,
+        })
     return True
 
 
@@ -412,6 +438,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
     public_snapshot = project_public_subagent_run(snapshot)
     execution_metadata = {key: public_snapshot[key] for key in (
         "model", "provider", "reasoning_effort", "agent_path", "mailbox_epoch",
+        "workspace_root", "accepted_at", "started_at", "completed_at",
     ) if key in public_snapshot}
     transcript = runtime.load_agent_transcript(subagent_id)
     events = transcript.get("events") if isinstance(transcript, dict) else None
@@ -539,9 +566,12 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
         or (expected_task_id and expected_task_id != current_task_id)
     ):
         if expected_message_id and not (expected_turn_id or expected_task_id):
-            stopped = await session.command_dispatcher.interrupt_user_message_admission(
-                target_conversation_id, expected_message_id,
-            )
+            from backend.ws.conversation_activity import live_sessions
+            stopped = False
+            for submitting in live_sessions(session):
+                if await submitting.command_dispatcher.interrupt_user_message_admission(target_conversation_id, expected_message_id):
+                    stopped = True
+                    break
             if stopped:
                 await _emit_user_queue_state(session, target_conversation_id)
         return True
@@ -550,7 +580,6 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
     # ``_cancel_agent_runs`` is the one cancellation entry: it stops the run
     # task, its child subagents and its pending approvals, then drains them and
     # retains ownership of whatever refused to stop.
-    session.run_manager.set_user_queue_paused(target_conversation_id, current_message_id or expected_turn_id or expected_task_id)
     await session.cancel_agent_runs(
         conversation_id=target_conversation_id or None,
         reason="user_interrupted",
@@ -564,17 +593,26 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
 
 
 async def handle_send_message(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    return await _handle_agent_message(session, data, trigger_turn=False)
+
+
+async def handle_followup_task(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    return await _handle_agent_message(session, data, trigger_turn=True)
+
+
+async def _handle_agent_message(session: "WebSocketSession", data: dict[str, Any], *, trigger_turn: bool) -> bool:
     from backend.agent.message import AgentEvent
     from backend.agent.runtime import default_runtime
     from backend.agent.run_context import RunContext
     from backend.permissions.context import ToolExecutionContext
 
-    recipient = str(data.get("recipient") or data.get("recipient_id") or "").strip()
+    command = "followup_task" if trigger_turn else "send_message"
+    recipient = str(data.get("target") or data.get("recipient") or data.get("recipient_id") or "").strip()
     content = str(data.get("message") or data.get("content") or "").strip()
     message_id = str(data.get("message_id") or "").strip()
     if not recipient or not content:
         await session.emit_command_result(
-            "send_message",
+            command,
             "recipient and message are required.",
             level="error",
             data={"recipient": recipient, "message_id": message_id},
@@ -585,7 +623,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
     subagent = _load_subagent_record(runtime, recipient)
     if subagent is None:
         await session.emit_command_result(
-            "send_message",
+            command,
             f"No subagent found for {recipient}.",
             level="error",
             data={"recipient": recipient, "message_id": message_id},
@@ -602,7 +640,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         )
     except ValueError as exc:
         await session.emit_command_result(
-            "send_message",
+            command,
             str(exc),
             level="error",
             data={"recipient": recipient, "message_id": message_id},
@@ -610,12 +648,13 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         return True
     parent_run_id = str(getattr(subagent, "parent_run_id", "") or "").strip()
     subagent_status = str(getattr(subagent, "status", "") or "evicted")
-    if subagent_status in _SUBAGENT_TERMINAL_STATUSES:
-        task_tool = session.tool_registry.get_tool("task")
+    if trigger_turn and subagent_status in _SUBAGENT_TERMINAL_STATUSES:
+        registry = session._conversation_tool_registry(target_conversation_id)
+        task_tool = registry.get_tool("task")
         resume = getattr(task_tool, "resume_background_subtask", None)
         if not callable(resume):
             await session.emit_command_result(
-                "send_message",
+                command,
                 "The stopped subagent cannot be resumed because TaskTool is unavailable.",
                 level="error",
                 data={
@@ -634,7 +673,8 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
                 subagent_id=recipient,
                 prompt=content,
                 context=ToolExecutionContext(
-                    permission=session.permission_context,
+                    permission=session.permission_context_for_conversation(
+                        session.conversation_repo.get_conversation(target_conversation_id), source=command),
                     workspace_root=(
                         Path(scope.workspace_root)
                         if scope.workspace_root
@@ -646,12 +686,12 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
                     emit_event=emit_subagent_event,
                     metadata={"run_id": parent_run_id or session.session_id},
                     run_context=RunContext(agent_runtime=runtime),
-                    tool_registry=session.tool_registry,
+                    tool_registry=registry,
                 ),
             )
         except Exception as exc:
             await session.emit_command_result(
-                "send_message",
+                command,
                 f"Stopped subagent resume failed: {exc}",
                 level="error",
                 data={
@@ -662,7 +702,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
             )
             return True
         await session.emit_command_result(
-            "send_message",
+            command,
             "Stopped subagent resumed with the message.",
             data={
                 "recipient": recipient,
@@ -680,6 +720,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         team_name=str(data.get("team_name") or ""),
         task_id=str(data.get("task_id") or getattr(subagent, "task_id", "") or ""),
         message_id=message_id,
+        delivery_mode="trigger_turn" if trigger_turn else "queue_only",
     )
     message_event_type = "message"
     await session.send_payload(
@@ -695,7 +736,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         log_context="subagent.message",
     )
     await session.emit_command_result(
-        "send_message",
+        command,
         "Message sent to subagent.",
         data={"recipient": recipient, "message_id": record.message_id},
     )
@@ -1306,8 +1347,10 @@ HANDLERS: dict[str, Any] = {
     "subagent.plan_review": handle_subagent_plan_review,
     "subagent.transcript": handle_subagent_transcript,
     "send_message": handle_send_message,
+    "followup_task": handle_followup_task,
     "inspector.focus": handle_inspector_focus,
     "llm.model.set": handle_model_command,
+    "turn.settings.update": handle_turn_settings_update,
     "read_artifact": handle_read_artifact_command,
     "approval.file_diff": handle_approval_file_diff_command,
     "interrupt": handle_interrupt_command,

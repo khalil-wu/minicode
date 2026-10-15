@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -48,7 +48,7 @@ from backend.services.workspace_api_service import (
 )
 from .service import WorkspaceService
 from .text_search import WorkspaceTextSearchRequest, search_workspace_text
-from .editor_language import EditorLanguageRequest, editor_language_request
+from .editor_language import EditorLanguageRequest, EditorLanguageLifecycleOperation, editor_language_request, editor_language_lifecycle
 from .editor_ai import EditorCompletionRequest, editor_completion_response
 from .delivery import GitDeliveryRequest, git_delivery_action, git_delivery_status
 from .environment_setup import EnvironmentSetupRequest, environment_setup_response, environment_setup_status
@@ -85,6 +85,70 @@ def create_workspace_router() -> APIRouter:
         # suggestions in the background; to_thread is the minimal equivalent).
         return await asyncio.to_thread(_service(workspace_root).list_tree, path)
 
+    def _browser_service(session_id: str, conversation_id: str, execution_cwd: str) -> WorkspaceService:
+        from backend.api import _state
+
+        session = _state.ws_manager.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session is not connected.")
+        if conversation_id != session.active_conversation_id:
+            raise HTTPException(status_code=409, detail="File browser conversation owner is stale.")
+        conversation = session.conversation_repo.get_conversation_summary(conversation_id)
+        if conversation is None or conversation.archived:
+            raise HTTPException(status_code=404, detail="The target conversation is not available.")
+        if not conversation.execution_cwd:
+            raise HTTPException(status_code=409, detail="The conversation has no fixed execution owner.")
+        actual_directory = Path(conversation.execution_cwd).expanduser().resolve()
+        if actual_directory != Path(execution_cwd).expanduser().resolve():
+            raise HTTPException(status_code=409, detail="File browser execution owner is stale.")
+        execution_service = _service(str(actual_directory))
+        if conversation.workspace_root or conversation.worktree_path or not conversation.projectless_browser_root:
+            return execution_service
+        browser_root = Path(conversation.projectless_browser_root).expanduser().resolve()
+        return WorkspaceService(get_workspace_root=lambda: browser_root)
+
+    @router.get("/browser-tree", response_model=WorkspaceTreeResponse)
+    async def projectless_browser_tree_api(
+        session_id: str = Query(..., min_length=1),
+        conversation_id: str = Query(..., min_length=1),
+        execution_cwd: str = Query(..., min_length=1),
+        path: str = Query(".", min_length=1),
+    ) -> WorkspaceTreeResponse:
+        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
+        return await asyncio.to_thread(service.list_tree, path)
+
+    @router.get("/browser-file", response_model=WorkspaceFileResponse)
+    async def projectless_browser_file_api(
+        session_id: str = Query(..., min_length=1),
+        conversation_id: str = Query(..., min_length=1),
+        execution_cwd: str = Query(..., min_length=1),
+        path: str = Query(..., min_length=1),
+    ) -> WorkspaceFileResponse:
+        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
+        return await asyncio.to_thread(service.read_file, path)
+
+    @router.get("/browser-preview")
+    async def projectless_browser_preview_api(
+        session_id: str = Query(..., min_length=1),
+        conversation_id: str = Query(..., min_length=1),
+        execution_cwd: str = Query(..., min_length=1),
+        path: str = Query(..., min_length=1),
+    ) -> dict[str, object]:
+        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
+        return await asyncio.to_thread(service.preview_file, path)
+
+    @router.get("/browser-raw")
+    async def projectless_browser_raw_api(
+        session_id: str = Query(..., min_length=1),
+        conversation_id: str = Query(..., min_length=1),
+        execution_cwd: str = Query(..., min_length=1),
+        path: str = Query(..., min_length=1),
+        raw_token: str | None = Query(None),
+    ) -> FileResponse:
+        _ = raw_token
+        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
+        return await asyncio.to_thread(service.raw_file_response, path)
+
     @router.get("/search", response_model=WorkspaceSearchResponse)
     async def workspace_search_api(
         query: str = Query(..., min_length=1),
@@ -118,8 +182,17 @@ def create_workspace_router() -> APIRouter:
     async def workspace_language_api(
         request: EditorLanguageRequest,
         workspace_root: str = Query(..., min_length=1),
+        window_binding_token: str = Header(default="", alias="x-minicode-window-binding-token"),
     ) -> dict:
-        return await editor_language_request(_service(workspace_root), request)
+        return await editor_language_request(_service(workspace_root), request, binding_token=window_binding_token)
+
+    @router.post("/language/lifecycle")
+    async def workspace_language_lifecycle_api(
+        request: EditorLanguageLifecycleOperation,
+        window_binding_token: str = Header(default="", alias="x-minicode-window-binding-token"),
+        desktop_lifecycle_token: str = Header(default="", alias="x-minicode-desktop-lifecycle-token"),
+    ) -> dict:
+        return await editor_language_lifecycle(request, binding_token=window_binding_token, desktop_lifecycle_token=desktop_lifecycle_token)
 
     @router.post("/inline-completion")
     async def workspace_inline_completion_api(
@@ -148,7 +221,10 @@ def create_workspace_router() -> APIRouter:
     async def workspace_project_index_api(
         request: Request,
         workspace_root: str = Query(..., min_length=1),
-        include_dependencies: bool = Query(True),
+        include_dependencies: bool = Query(False),
+        include_dependency_paths: bool = Query(False),
+        previous_revision: int | None = Query(None, ge=0),
+        previous_instance_id: str | None = Query(None),
     ) -> WorkspaceProjectIndexResponse:
         service = _service(workspace_root)
         from .project_index_runtime import project_index_runtime
@@ -159,7 +235,7 @@ def create_workspace_router() -> APIRouter:
                 if message["type"] == "http.disconnect":
                     return
 
-        scan = asyncio.create_task(project_index_runtime.read(service, include_dependencies=include_dependencies))
+        scan = asyncio.create_task(project_index_runtime.read(service, include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths, previous_revision=previous_revision, previous_instance_id=previous_instance_id))
         disconnect = asyncio.create_task(wait_for_disconnect())
         try:
             completed, _ = await asyncio.wait((scan, disconnect), return_when=asyncio.FIRST_COMPLETED)

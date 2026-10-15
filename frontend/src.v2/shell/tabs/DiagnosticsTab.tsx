@@ -9,7 +9,9 @@ import {
   errorMessageFromResponseText,
   fetchWithTimeout,
 } from '../../protocol/api'
-import { isDesktop } from '../../desktop/runtime'
+import { isDesktop, runtime } from '../../desktop/runtime'
+import { getConnectionPresentation } from '../connectionPresentation'
+import { mcpServerNeedsAttention } from '../../lib/mcp-status'
 import { sendClientCommand } from '../../protocol/ws-outbox'
 import { useAppStore } from '../../stores'
 import { selectActiveConversationPreview } from '../../lib/preview-projection'
@@ -39,12 +41,21 @@ import {
 import { InfoCard, InfoRow, PanelHeader, SectionLabel, SmallButton } from '../SidebarShared'
 import { openSettings } from '../../lib/settings-navigation'
 import type { SettingsTab } from '../../stores/types'
+import { useI18n } from '../../i18n'
 
 type InfoTone = 'default' | 'muted' | 'accent' | 'warning'
 
 export const DiagnosticsTab = () => {
+  const { t } = useI18n()
   const [doctor, setDoctor] = useState<DoctorPayload | null>(null)
   const [loading, setLoading] = useState(false)
+  const isConnected = useAppStore(s => s.isConnected)
+  const connectionPhase = useAppStore(s => s.connectionPhase)
+  const reconnectAttempt = useAppStore(s => s.reconnectAttempt)
+  const reconnectMaxAttempts = useAppStore(s => s.reconnectMaxAttempts)
+  const connectionError = useAppStore(s => s.connectionError)
+  const connection = getConnectionPresentation({ isConnected, connectionPhase, reconnectAttempt, reconnectMaxAttempts,
+    connectionError, isDesktop: isDesktop(), hasRuntimeToken: Boolean(runtime()?.runtimeToken) }, t)
   const local = useLocalDiagnostics()
   const mcpSnapshot = useAppStore((s) => mcpDiagnosticsSnapshot(s.mcpServers))
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities)
@@ -69,12 +80,12 @@ export const DiagnosticsTab = () => {
     || ['unknown', 'pending'].includes(sandboxStatus.probe_status)
     || mcpServers.some((server) => !['connected', 'disabled', 'error', 'failed', 'auth_required', 'expired'].includes(server.phase || server.status))
     || remoteMcp.some((server) => !['connected', 'disabled', 'error', 'failed', 'auth_required', 'expired'].includes(server.phase || server.status || ''))
-  const stateLabel = loading ? '检查中' : issues.length ? `${issues.length} 项需要处理` : unknown ? '状态未知' : '正常'
+  const stateLabel = !isConnected ? connection.shortLabel || connection.accessibleLabel : loading ? '检查中' : issues.length ? `${issues.length} 项需要处理` : unknown ? '状态未知' : '正常'
 
   const refresh = useCallback(async () => {
     const requestId = ++refreshRequestRef.current
     setLoading(true)
-    sendClientCommand(
+    if (isConnected) sendClientCommand(
       { type: 'runtime.capabilities.inspect', source: 'diagnostics' },
       { silent: true },
     )
@@ -95,7 +106,7 @@ export const DiagnosticsTab = () => {
     } finally {
       if (requestId === refreshRequestRef.current) setLoading(false)
     }
-  }, [])
+  }, [isConnected])
 
   useEffect(() => {
     void refresh()
@@ -125,6 +136,7 @@ export const DiagnosticsTab = () => {
       </section> : <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 'var(--mc-font-secondary)' }}>{stateLabel === '正常' ? '当前已检测组件运行正常。' : loading ? '正在检查连接和运行能力。' : '部分组件尚未返回检测结果，刷新后可查看。'}</p>}
 
       <InfoCard>
+        <InfoRow label="会话连接" value={connection.accessibleLabel} tone={isConnected ? 'accent' : 'warning'} />
         <InfoRow label="后端" value={doctor?.backend?.status === 'ok' ? '正常' : String(doctor?.backend?.status ?? '未知')} tone={doctor?.backend?.status === 'ok' ? 'accent' : 'warning'} />
         <InfoRow label="会话" value={String(doctor?.backend?.active_sessions ?? local.activeSessions)} />
         <InfoRow label="服务商" value={String(doctor?.llm?.provider ?? '未知')} />
@@ -182,11 +194,11 @@ const diagnosisIssues = (doctor: DoctorPayload | null, servers: { name: string; 
   if (doctor?.llm && !doctor.llm.active_model && !doctor.llm.current_model) issues.push({ title: '尚未选择模型', description: '选择并配置模型后才能运行新任务。', tab: 'provider' })
   if (doctor?.workspace?.exists === false || doctor?.workspace?.writable === false) issues.push({ title: '工作区需要处理', description: doctor.workspace.exists === false ? '当前项目目录不存在，请重新打开项目。' : '当前项目不可写，代码修改无法保存。', tab: 'advanced' })
   const remote = (doctor?.mcp || []) as { name?: string; status?: string; phase?: string; error?: string; message?: string }[]
-  const byName = new Map(servers.map((server) => [server.name, server]))
-  for (const server of remote) byName.set(server.name || '未命名服务', { name: server.name || '未命名服务', status: server.status || '', phase: server.phase, lastError: server.error || server.message })
+  const byName = new Map<string, (typeof servers)[number]>(remote.map(server => [server.name || '未命名服务', { name: server.name || '未命名服务', status: server.status || '', phase: server.phase, lastError: server.error || server.message }]))
+  for (const server of servers) byName.set(server.name, server)
   for (const server of byName.values()) {
     const phase = server.phase || server.status
-    if (!['error', 'failed', 'auth_required', 'expired'].includes(phase)) continue
+    if (!mcpServerNeedsAttention(server)) continue
     issues.push({ title: `MCP · ${server.name}`, description: ['auth_required', 'expired'].includes(phase) ? '登录需要完成或已过期。此服务的工具暂不可用。' : '服务连接失败。检查配置后重新连接。', tab: 'connectors', detail: server.lastError })
   }
   if (sandbox?.backend_available === false || sandbox?.probe_status === 'failed') issues.push({ title: '执行隔离需要处理', description: sandbox.unavailable_action === 'run_unsandboxed' ? '当前执行环境无法提供系统隔离，命令将按现有权限策略运行。' : '当前隔离后端不可用，部分命令可能无法执行。', tab: 'advanced', detail: sandbox.reason })

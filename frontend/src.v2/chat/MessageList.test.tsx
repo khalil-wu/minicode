@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
@@ -104,6 +104,33 @@ describe("MessageList cell UI", () => {
       gitReviewRequest: null,
       workingDirectory: "",
     });
+  });
+
+  it.each([1, 9, 12, 40])("retains the previous reply DOM and open details when appending to %i turns", (count) => {
+    const history: ChatMessage[] = Array.from({ length: count - 1 }, (_, index) => [
+      { id: `history-user-${index}`, role: "user" as const, content: `question ${index}`, artifacts: [], timestamp: index },
+      { id: `history-answer-${index}`, role: "assistant" as const, content: `answer ${index}`, artifacts: [], timestamp: index },
+    ]).flat();
+    useAppStore.setState({ messages: [...history, ...conversationMessages], viewMode: "normal" });
+    const { container } = render(<MessageList />);
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    const previousTurn = container.querySelector('[data-message-id="assistant-1"]');
+    const previousAnswer = screen.getByText("最终答案：已经整理成 cell UI。");
+    const previousTool = screen.getByTitle("frontend/src.v2/chat/MessageList.tsx");
+    const previousUser = screen.getByText("请检查聊天 UI 输出。");
+
+    act(() => useAppStore.setState((state) => ({ messages: [...state.messages,
+      { id: "appended-user", role: "user", content: "追加消息", artifacts: [], timestamp: 100 },
+      { id: "appended-answer", role: "assistant", content: "", blocks: [], artifacts: [], timestamp: 101, isStreaming: true },
+    ], isStreaming: true })));
+
+    expect(container.querySelector('[data-message-id="assistant-1"]')).toBe(previousTurn);
+    expect(screen.getByText("最终答案：已经整理成 cell UI。")).toBe(previousAnswer);
+    expect(screen.getByTitle("frontend/src.v2/chat/MessageList.tsx")).toBe(previousTool);
+    expect(screen.getByText("请检查聊天 UI 输出。")).toBe(previousUser);
+    expect(previousTurn?.querySelector('.agent-loop-process')?.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.getByText("追加消息")).toBeTruthy();
+    expect(screen.getByTestId("streaming-turn-tail").contains(previousTurn)).toBe(false);
   });
 
   it("opens every persisted parent file change without a parent file-tool receipt or Git tab", () => {
@@ -215,7 +242,8 @@ describe("MessageList cell UI", () => {
     expect(work.querySelector(".diff-cell")).toBeNull();
     expect(diff.querySelector(".diff-cell")).toBeTruthy();
     expect(reply.compareDocumentPosition(diff) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getAllByText("src/app.ts").length).toBe(2);
+    expect(screen.getByText("src/app.ts")).toBeTruthy();
+    expect(within(work).getByTitle("src/app.ts")).toBeTruthy();
     expect(work.querySelector(".activity-cell")).toBeTruthy();
     if (aggregate === "unavailable") {
       expect(screen.getByText("编辑记录 1 个文件")).toBeTruthy();
@@ -263,7 +291,7 @@ describe("MessageList cell UI", () => {
     render(<MessageList />);
 
     // Minimal home: just the greeting, nothing clickable above the composer.
-    expect(screen.getByText("今天想构建什么？")).toBeTruthy();
+    expect(screen.getByText("我们要构建什么？")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -281,7 +309,7 @@ describe("MessageList cell UI", () => {
 
     render(<MessageList />);
 
-    expect(screen.getByText("今天想构建什么？")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "你想让我们在 MiniCode 中构建什么？" })).toBeTruthy();
     expect(document.body.textContent).not.toContain("C:/repo/MiniCode");
     expect(document.body.textContent).not.toContain("gpt-5");
   });
@@ -305,7 +333,7 @@ describe("MessageList cell UI", () => {
 
     expect(screen.queryByText("请检查聊天 UI 输出。")).toBeNull();
     expect(screen.queryByText("最终答案：已经整理成 cell UI。")).toBeNull();
-    expect(screen.getByText("今天想构建什么？")).toBeTruthy();
+    expect(screen.getByText("我们要构建什么？")).toBeTruthy();
   });
 
   it("shows an optimistic first turn before conversation metadata arrives", () => {
@@ -395,7 +423,7 @@ describe("MessageList cell UI", () => {
     expect(screen.queryByText("old user 0")).toBeNull();
     expect(screen.getByText("answer 41")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /显示更早的消息/ }));
+    fireEvent.wheel(screen.getByTestId("message-list-scroll"), { deltaY: -120 });
 
     expect(screen.queryByRole("button", { name: /显示更早的消息/ })).toBeNull();
     expect(screen.getByTestId("virtual-turn-list")).toBeTruthy();
@@ -416,9 +444,12 @@ describe("MessageList cell UI", () => {
     useAppStore.setState({ messages: longConversation, isStreaming: false });
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole("button", { name: /显示更早的消息/ }));
+    const beforeHeight = Number.parseFloat(screen.getByTestId("virtual-turn-list").style.height);
+    fireEvent.wheel(screen.getByTestId("message-list-scroll"), { deltaY: -120 });
 
     expect(screen.getByTestId("virtual-turn-list")).toBeTruthy();
+    expect(Number.parseFloat(screen.getByTestId("virtual-turn-list").style.height)).toBeGreaterThan(beforeHeight);
+    expect(screen.queryByRole("button", { name: /显示更早的消息/ })).toBeNull();
   });
 
   it("renders the actively streaming turn outside historical rows", () => {
@@ -499,6 +530,29 @@ describe("MessageList cell UI", () => {
     });
   });
 
+  it.each([true, false])("follows the physical assistant after an admitted steer while preserving upstream reading (%s)", async (following) => {
+    useAppStore.setState({ messages: [conversationMessages[0], { ...conversationMessages[1], content: "", blocks: [], isStreaming: true }], isStreaming: true });
+    render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 600 });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    if (!following) { fireEvent.wheel(scroll, { deltaY: -120 }); scroll.scrollTop = 250; }
+    act(() => useAppStore.getState().recordTurnUserInput({ id: "admitted-steer", role: "user", content: "Same-turn actual input",
+      artifacts: [], timestamp: 10, steeredIntoMessageId: "assistant-1" }, "conv-message-list-test", "assistant-1"));
+    expect(screen.getAllByText("Same-turn actual input")).toHaveLength(1);
+    expect(screen.getByTestId("streaming-turn-tail").querySelector('.chat-turn')?.getAttribute("data-message-id")).toBe("assistant-1");
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1420 });
+    act(() => useAppStore.setState(state => ({ messages: state.messages.map(message => message.id === "assistant-1" ? {
+      ...message, content: "The original physical turn continues", blocks: [...message.blocks!, { type: "text", itemId: "continued-answer",
+        content: "The original physical turn continues", source: "model_final", status: "partial", isStreaming: false }],
+    } : message) })));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(scroll.scrollTop).toBe(following ? 1420 : 250);
+    expect(useAppStore.getState().messages.map(message => message.id)).toEqual(["user-1", "assistant-1", "admitted-steer"]);
+  });
+
   it("does not steal scroll when the user has intentionally scrolled up", async () => {
     render(<MessageList />);
     const scroll = screen.getByTestId("message-list-scroll");
@@ -549,8 +603,7 @@ describe("MessageList cell UI", () => {
     scroll.scrollTop = 250;
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1480 });
     scroll.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
-    screen.getByTestId("latest-turn-tail").getBoundingClientRect = () => ({ top: 930 } as DOMRect);
-    useAppStore.setState((state) => ({
+    act(() => useAppStore.setState((state) => ({
       messages: [
         ...state.messages,
         {
@@ -571,7 +624,8 @@ describe("MessageList cell UI", () => {
         },
       ],
       isStreaming: true,
-    }));
+    })));
+    screen.getByTestId("streaming-turn-tail").getBoundingClientRect = () => ({ top: 930 } as DOMRect);
 
     await waitFor(() => {
       expect(scroll.scrollTop).toBe(1080);

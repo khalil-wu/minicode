@@ -1,0 +1,20 @@
+{
+  "正在优化对话": "Optimizing the conversation",
+  "正在优化对话 · 可能需要几分钟": "Optimizing the conversation · This can take a few minutes",
+  "正在压缩上下文": "Compacting context",
+  "正在压缩上下文 · 可能需要几分钟": "Compacting context · This can take a few minutes",
+  "优化已中断": "Optimization interrupted",
+  "压缩已中断": "Compaction interrupted",
+  "上下文已压缩": "Context compacted",
+  "已优化对话": "Optimized the conversation",
+  "上下文已自动压缩": "Context automatically compacted",
+  "正在运行命令": "Running command",
+  "命令已运行 {duration}": "Running command for {duration}",
+  "已运行命令": "Ran command",
+  "已在 {duration} 内运行": "Ran in {duration}",
+  "命令已在 {duration} 内运行完成": "Ran command in {duration}",
+  "已停止命令": "Stopped command",
+  "运行 {duration} 后停止": "Stopped after {duration}",
+  "运行 {duration} 后停止命令": "Stopped command after {duration}",
+  "退出码 {code}": "Exit code {code}"
+}

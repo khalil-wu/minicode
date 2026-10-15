@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { ChunkErrorBoundary } from "./shell/ChunkErrorBoundary";
 import { startUpdateActivityMirror } from "./desktop/updateActivityMirror";
+import { initializeWindowNavigation } from "./desktop/windowNavigation";
 import "./styles/fonts.css";
 import "./styles/tokens.css";
 import "./reset.css";
@@ -17,6 +18,7 @@ import "./composer/composer.css";               // Composer owner
 import "./shell/shell.css";                     // Shell/header/sidebar/layout owner
 import "./styles/ui-polish.css";                // Canonical final typography and surface layer
 
+initializeWindowNavigation();
 startUpdateActivityMirror();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

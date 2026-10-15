@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const net = require("node:net");
 const bridge = require("./embedded-browser-bridge");
+bridge.init({ getWindowRecordByInstanceId: (instance) => instance === "fixture-window" ? {
+  windowInstanceId: instance, windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => false },
+} : null });
 
 test("embedded browser bridge requires its token and forwards commands", async () => {
   const calls = [];
@@ -18,10 +21,10 @@ test("embedded browser bridge requires its token and forwards commands", async (
     const accepted = await fetch(`${endpoint}/v1/command`, {
       method: "POST",
       headers: { authorization: "Bearer bridge-test-token", "content-type": "application/json" },
-      body: JSON.stringify({ action: "list_targets" }),
+      body: JSON.stringify({ action: "list_targets", conversation_id: "fixture-owner", window_instance_id: "fixture-window", window_binding_token: "fixture-binding" }),
     });
     assert.equal(accepted.status, 200);
-    assert.deepEqual(calls, [{ action: "list_targets" }]);
+    assert.deepEqual(calls, [{ action: "list_targets", conversation_id: "fixture-owner", window_instance_id: "fixture-window", window_binding_token: "fixture-binding" }]);
   } finally {
     await bridge.stop();
   }
@@ -59,9 +62,49 @@ function deferred() {
 function command(endpoint, payload, path = "command") {
   return fetch(`${endpoint}/v1/${path}`, {
     method: "POST", headers: { authorization: "Bearer bridge-test-token", "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ window_instance_id: "fixture-window", window_binding_token: "fixture-binding", ...payload }),
   }).then((response) => response.json());
 }
+
+test("window bindings reject another instance's capability and expire new resource authority on close", async () => {
+  const records = new Map([ ["window-a", { windowInstanceId: "window-a", windowOwnerId: "primary", windowBindingToken: "token-a", window: { isDestroyed: () => false } }],
+    ["window-b", { windowInstanceId: "window-b", windowOwnerId: "secondary-1", windowBindingToken: "token-b", window: { isDestroyed: () => false } }] ]);
+  let effects = 0;
+  bridge.init({ token: "bridge-test-token", getWindowRecordByInstanceId: (instance) => records.get(instance),
+    manager: { async executeControlCommand() { effects++; return { ok: true }; } } });
+  const endpoint = await bridge.start();
+  const send = (payload, route = "command", authorization = "bridge-test-token") => fetch(`${endpoint}/v1/${route}`, {
+    method: "POST", headers: { authorization: `Bearer ${authorization}` }, body: JSON.stringify(payload),
+  });
+  const b = { window_instance_id: "window-b", window_owner_id: "secondary-1", window_binding_token: "token-b" };
+  try {
+    const valid = await send(b, "window-binding");
+    assert.equal(valid.status, 200);
+    assert.deepEqual(await valid.json(), { ok: true, window_instance_id: "window-b", window_owner_id: "secondary-1" });
+    assert.equal((await send(b, "window-binding", "shared-renderer-runtime-token")).status, 401);
+    assert.equal((await send({ ...b, window_binding_token: "token-a" }, "window-binding")).status, 403);
+    assert.equal((await send({ ...b, window_owner_id: "primary" }, "window-binding")).status, 403);
+    assert.equal((await send({ ...b, window_binding_token: "token-a", action: "evaluate", conversation_id: "owner" })).status, 403);
+    assert.equal(effects, 0);
+    const operation = { ...b, action: "evaluate", conversation_id: "owner", operation_id: "captured-b-operation" };
+    assert.equal((await send(operation)).status, 200);
+    records.delete("window-b");
+    assert.equal((await send(b, "window-binding")).status, 403);
+    assert.equal((await send({ ...operation, operation_id: "late-b-operation" })).status, 403);
+    const status = await send({ ...operation, action: "status" }, "operation");
+    assert.equal(status.status, 200);
+    assert.equal((await status.json()).cleanup_receipt.completed, true);
+    assert.equal((await send({ ...operation, action: "status", window_binding_token: "token-a" }, "operation")).status, 403);
+    records.set("window-c", { windowInstanceId: "window-c", windowOwnerId: "secondary-1", windowBindingToken: "token-c", window: { isDestroyed: () => false } });
+    assert.equal((await send({ ...b, window_instance_id: "window-c" }, "window-binding")).status, 403);
+    assert.equal(effects, 1);
+  } finally {
+    await bridge.stop();
+    bridge.init({ getWindowRecordByInstanceId: (instance) => instance === "fixture-window" ? {
+      windowInstanceId: instance, windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => false },
+    } : null });
+  }
+});
 
 test("owned-preview authority is bound to its exact operation, owner, and preview origin", async () => {
   let calls = 0;

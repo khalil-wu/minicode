@@ -194,7 +194,7 @@
   gap: 7px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in oklch, var(--surface-raised) 88%, var(--accent-primary));
+  background: var(--surface-raised);
 }
 
 .mc-browser-annotation-heading {
@@ -245,6 +245,23 @@
 }
 .mc-browser-annotation-actions button:last-child { border-color: color-mix(in oklch, var(--accent-primary) 48%, var(--border-subtle)); color: var(--accent-primary); }
 .mc-browser-annotation-actions button:disabled { cursor: default; opacity: 0.45; }
+
+.mc-browser-annotation-actions .mc-browser-feedback-send {
+  display: grid;
+  place-items: center;
+  width: 29px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text-primary);
+  color: var(--surface-base);
+}
+
+.mc-browser-feedback-status {
+  color: var(--text-muted);
+  text-align: right;
+  font-size: var(--text-xs);
+}
 
 .mc-browser-picker-button {
   display: inline-flex;

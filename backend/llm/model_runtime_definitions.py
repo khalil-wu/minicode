@@ -194,18 +194,24 @@ _MODEL_KNOWN_KEYS = frozenset(
         "supports_hosted_web_search",
         "responses_websocket",
         "native_compaction",
+        "comp_hash",
         "model_instructions",
         "parallel_tool_calls",
         "tool_mode",
+        "supports_experimental_context",
+        "truncation_policy", "supports_image_detail_original",
+        "supports_search_tool",
     }
 )
 
 
 def _extension_model_extra(model: Mapping[str, Any]) -> dict[str, Any]:
+    if model.get("model_messages") is not None and not isinstance(model["model_messages"], Mapping):
+        raise ProviderRegistrationError("model_messages must be an object")
     return {
         str(key): value
         for key, value in model.items()
-        if str(key) not in _MODEL_KNOWN_KEYS
+        if str(key) not in _MODEL_KNOWN_KEYS and str(key) not in {"source_model_metadata", "used_fallback_model_metadata"}
     }
 
 
@@ -999,6 +1005,8 @@ def _base_model(
     max_tokens: int,
     settings: Mapping[str, Any],
 ) -> ModelDefinition:
+    from backend.llm.model_metadata import source_guardian_model_metadata, source_model_metadata_source
+
     metadata = get_provider_model_metadata(settings, model_id)
     try:
         configured_thinking_budget = int(settings.get("thinking_budget") or 0)
@@ -1021,7 +1029,7 @@ def _base_model(
             if api == "anthropic-messages"
             else bool(metadata["reasoning_effort_levels"])
         ),
-        input=tuple(metadata["input_modalities"]) or ("text",),
+        input=tuple(metadata["input_modalities"]),
         cost={},
         context_window=int(metadata["context_window"]),
         context_window_source=str(metadata["context_window_source"]),
@@ -1048,9 +1056,16 @@ def _base_model(
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
         supports_custom_tools=metadata["supports_custom_tools"],
+        supports_experimental_context=metadata["supports_experimental_context"],
+        truncation_policy=metadata["truncation_policy"],
+        supports_image_detail_original=metadata["supports_image_detail_original"],
+        supports_search_tool=metadata["supports_search_tool"],
+        extra={**source_guardian_model_metadata(model_id), **({"model_messages": metadata["model_messages"]} if metadata["model_messages"] is not None else {})},
+        source_model_metadata=source_model_metadata_source(model_id),
         supports_hosted_web_search=metadata["supports_hosted_web_search"],
         responses_websocket=metadata["responses_websocket"],
         native_compaction=metadata["native_compaction"],
+        comp_hash=metadata["comp_hash"],
         model_instructions=metadata["model_instructions"],
         parallel_tool_calls=metadata["parallel_tool_calls"],
         tool_mode=metadata["tool_mode"],

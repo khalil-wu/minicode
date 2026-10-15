@@ -32,7 +32,7 @@ from backend.ws.handler import WebSocketSession
 def test_large_code_output_preserves_content_and_exact_receipt(tmp_path, body):
     async def scenario():
         output = json.dumps("SOURCE_BEGIN\n" + body + "\nSOURCE_END")
-        model = ScriptModel(f"text({output});", max_chars=512)
+        model = ScriptModel(f"text({output});", max_output_tokens=128)
         state, _, _, events, _ = await run_model(tmp_path, model)
         assert state.terminal_status == "completed"
         receipt = model.reports[-1]
@@ -70,7 +70,7 @@ def test_unavailable_cell_keeps_recovery_receipt_when_outcomes_are_large(tmp_pat
         store = ArtifactStore(storage_dir=tmp_path / "artifacts")
         report = {"cell_id": "lost-cell", "status": "unavailable", "error": "Inspect recorded outcomes before retrying writes.", "completed_tools": [{"output": "x" * 10000}]}
         result = await _present_result(ToolResult(json.dumps(report), is_error=True, status="failed", runtime_metadata={"code_cell": report}),
-                                       ToolExecutionContext(permission=PermissionContext(), artifact_store=store), 512, "tool_wait")
+                                       ToolExecutionContext(permission=PermissionContext(), artifact_store=store), 128, "tool_wait")
         preview = json.loads(result.content)
         assert preview["cell_id"] == "lost-cell"
         assert preview["status"] == "unavailable"

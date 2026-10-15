@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 
 import pytest
 
 from backend.agent.tool_execution import generate_diff
-from backend.agent.tool_execution import _invalidate_turn_diff_after_inexact_mutation
-from backend.llm.base import ToolCallEvent
-from backend.tools.base import ToolResult
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.registry import ToolRegistry
 from backend.artifact.store import ArtifactStore
@@ -24,7 +22,7 @@ from backend.tools.write_file import WriteFileTool
 
 
 @pytest.mark.parametrize("has_prior_diff", [False, True])
-def test_command_marks_aggregate_unknown_without_claiming_edits_were_reverted(tmp_path, has_prior_diff):
+def test_command_preserves_the_exact_file_change_diff(tmp_path, has_prior_diff):
     tracker = TurnDiffTracker()
     if has_prior_diff:
         tracker.track_change(old_path="a.py", new_path="a.py", old_content="old", new_content="new")
@@ -40,12 +38,15 @@ def test_command_marks_aggregate_unknown_without_claiming_edits_were_reverted(tm
     context.metadata["run_id"] = "turn-diff"
     registry = ToolRegistry()
     registry.register(RunCommandTool(ArtifactStore()))
-    asyncio.run(_invalidate_turn_diff_after_inexact_mutation(
-        ToolCallEvent(id="test-command", name="run_command", arguments={"command": "node --test"}),
-        ToolResult(content="Tests passed"), tool_registry=registry, tool_ctx=context,
-    ))
-    assert events[-1][0] == "turn.diff.updated"
-    assert events[-1][1]["diff"] is None
+    before = tracker.snapshot()
+    command = "Write-Output 'Tests passed'" if os.name == "nt" else "printf 'Tests passed\\n'"
+    result = asyncio.run(registry.execute("run_command", {"command": command}, context=context))
+    assert not result.is_error, result.content
+    assert "Tests passed" in result.content
+    # Codex tools/events.rs updates the aggregate only for applied file deltas;
+    # an ordinary shell result does not erase committed file-change evidence.
+    assert tracker.snapshot() == before
+    assert not any(event == "turn.diff.updated" for event, _data in events)
 
 
 @pytest.mark.parametrize("old,new", [

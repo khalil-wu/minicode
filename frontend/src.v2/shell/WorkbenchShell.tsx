@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { RefreshCw, X } from "lucide-react";
@@ -37,7 +38,7 @@ const currentConnectionPresentation = (state: {
   reconnectAttempt: number;
   reconnectMaxAttempts: number | null;
   connectionError: string | null;
-}) => getConnectionPresentation({
+}, tr: Translate) => getConnectionPresentation({
   isConnected: state.isConnected,
   isDesktop: isDesktop(),
   hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
@@ -45,9 +46,10 @@ const currentConnectionPresentation = (state: {
   reconnectAttempt: state.reconnectAttempt,
   reconnectMaxAttempts: state.reconnectMaxAttempts,
   connectionError: state.connectionError,
-});
+}, tr);
 
 const ConnectionBanner = () => {
+  const { t: tr } = useI18n();
   const isConnected = useAppStore((s) => s.isConnected);
   const connectionPhase = useAppStore((s) => s.connectionPhase);
   const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
@@ -60,7 +62,7 @@ const ConnectionBanner = () => {
     reconnectMaxAttempts,
     connectionError,
   };
-  const presentation = currentConnectionPresentation(connectionState);
+  const presentation = currentConnectionPresentation(connectionState, tr);
   const previousAnnouncementRef = useRef(presentation.accessibleLabel);
   const [announcement, setAnnouncement] = useState(
     presentation.accessibleLabel,
@@ -85,8 +87,7 @@ const ConnectionBanner = () => {
           {connectionPhase === "failed" && (
             <button type="button" className="mc-connection-retry" onClick={() => getWebSocket()?.reconnect()}>
               <RefreshCw size={13} aria-hidden="true" />
-              重新连接
-            </button>
+              {tr("重新连接")}</button>
           )}
         </div>
       )}
@@ -140,6 +141,7 @@ const NarrowSidebarDrawer = ({
   modal?: boolean;
   open?: boolean;
 }) => {
+  const { t: tr } = useI18n();
   const dialogRef = useFocusTrap(modal && open);
   useEscapeKey(onClose, modal && open, dialogRef);
   return (
@@ -192,8 +194,8 @@ const NarrowSidebarDrawer = ({
           <button
             type="button"
             className="btn-ghost mc-icon-button"
-            aria-label={`关闭${label}`}
-            title={`关闭${label}`}
+            aria-label={tr("关闭{label}", { label })}
+            title={tr("关闭{label}", { label })}
             onClick={onClose}
           >
             <X size={16} />
@@ -206,6 +208,7 @@ const NarrowSidebarDrawer = ({
 };
 
 export const WorkbenchShell = () => {
+  const { t: tr } = useI18n();
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const [marketplaceVisited, setMarketplaceVisited] = useState(skillsMarketplaceOpen);
   useEffect(() => {
@@ -335,12 +338,12 @@ export const WorkbenchShell = () => {
               </div>
             </div>
             <div hidden={!skillsMarketplaceOpen} style={{ display: skillsMarketplaceOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
-              <Suspense fallback={<div role="status" className="skills-empty-state">正在加载插件与技能…</div>}>
+              <Suspense fallback={<div role="status" className="skills-empty-state">{tr("正在加载插件与技能…")}</div>}>
                 {(marketplaceVisited || skillsMarketplaceOpen) && <SkillsMarketplace />}
               </Suspense>
             </div>
             <NarrowSidebarDrawer
-              id="right-panel-drawer" label="右侧面板" side="right"
+              id="right-panel-drawer" label={tr("右侧面板")} side="right"
               modal={compact && !expandedRight} open={!settingsOpen && rightPanelAvailable && (expandedRight || !compact || compactPanel === "right")}
               onClose={() => setCompactPanel(null)}
             >
@@ -351,7 +354,7 @@ export const WorkbenchShell = () => {
       </div>
 
       {compact && leftPanelAvailable && compactPanel === "left" && (
-        <NarrowSidebarDrawer id="left-sidebar-drawer" label="左侧栏" side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
+        <NarrowSidebarDrawer id="left-sidebar-drawer" label={tr("左侧栏")} side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
           <SidebarLeft embedded onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
       )}

@@ -46,16 +46,18 @@ def _iter_plugin_manifests(plugin_roots: Iterable[Path]) -> list[Path]:
     for raw_root in plugin_roots:
         root = Path(raw_root).expanduser()
         candidates: list[Path] = []
-        if root.is_file() and root.name == "plugin.json" and root.parent.name == PLUGIN_MANIFEST_DIRECTORY:
+        if root.is_file() and root.name == "plugin.json" and (root.parent.name == PLUGIN_MANIFEST_DIRECTORY or plugin_manifest_path(root.parent) == root):
             candidates.append(root)
         elif root.is_dir():
             if root.name == PLUGIN_MANIFEST_DIRECTORY:
                 candidates.append(root / "plugin.json")
             else:
                 candidates.extend(root.glob(f"*/{PLUGIN_MANIFEST_DIRECTORY}/plugin.json"))
+                candidates.extend(plugin_manifest_path(child) for child in root.iterdir() if child.is_dir())
                 candidates.append(plugin_manifest_path(root))
                 candidates.extend(_active_versioned_manifests(root))
                 candidates.extend(root.glob(f"cache/*/*/*/{PLUGIN_MANIFEST_DIRECTORY}/plugin.json"))
+                candidates.extend(plugin_manifest_path(child) for child in root.glob("cache/*/*/*") if child.is_dir())
         for candidate in candidates:
             if not candidate.is_file():
                 continue

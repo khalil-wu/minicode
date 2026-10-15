@@ -487,3 +487,21 @@ describe("workspace model indexing and real editor-buffer adoption", () => {
     expect(owner.sourceCount()).toBe(1);
   });
 });
+
+
+it("merges an owned source delta without making deleted drafts disk-backed or replacing unsaved content", async () => {
+  const owner = createOwner();
+  const first = file("src/first.ts", "export const first = 1;");
+  const second = file("src/second.ts", "export const second = 1;");
+  await owner.applySnapshot({ ...snapshot([first, second]), revision: 1 }, true, new AbortController().signal);
+  open(first);
+  type(model(first.path), "export const first = 99;");
+  await Promise.resolve();
+  await owner.applySnapshot({ ...snapshot([file(second.path, "export const second = 2;")]), revision: 2, base_revision: 1, removed_paths: [first.path] }, false, new AbortController().signal);
+  expect(tab(first.path).content).toBe("export const first = 99;");
+  expect(tab(first.path).externalChanged).toBe(true);
+  expect(owner.sourceCount()).toBe(1);
+  await owner.applySnapshot({ ...snapshot([]), revision: 3, base_revision: 2 }, false, new AbortController().signal);
+  expect(owner.sourceCount()).toBe(1);
+  expect(tab(first.path).content).toBe("export const first = 99;");
+});

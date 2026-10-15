@@ -404,6 +404,7 @@ async def _reject_tool_call(
         iteration_id=runtime.iteration_id,
         tool_registry=runtime.tool_registry,
         turn_id=runtime.turn_id,
+        workspace_root=runtime.tool_ctx.workspace_root,
     )
     async for event in _finalize_tool_result(
         tc,
@@ -910,6 +911,7 @@ async def execute_tool_batch(
                 iteration_id=iteration_id,
                 tool_registry=tool_registry,
                 turn_id=runtime.turn_id,
+                workspace_root=tool_ctx.workspace_root,
             )
             await _emit_tool_runtime_span(
                 tc,
@@ -1416,13 +1418,15 @@ async def execute_serial(
     started_epoch = _tool_start_times(state).get(tc.id, time.time())
     tool_call_emitted = False
 
-    def final_tool_call_event() -> AgentEvent:
+    def final_tool_call_event(*, status: str = "running") -> AgentEvent:
         return tool_call_start_event(
             tc,
             started_epoch=started_epoch,
             iteration_id=iteration_id,
             tool_registry=tool_registry,
             turn_id=turn_id,
+            workspace_root=tool_ctx.workspace_root,
+            status=status,
         )
 
     execution_args = deepcopy(dict(tc.arguments or {}))
@@ -1525,6 +1529,7 @@ async def execute_serial(
         permission_allowed_by_hook = (
             hook_requested_allow
             and permission_decision.matched_rule_source in hook_overridable_sources
+            and permission_decision.matched_rule != "strict_auto_review"
             and tc.name != "exit_plan_mode"
         )
         if hook_mgr and not permission_allowed_by_hook and tc.name != "exit_plan_mode":
@@ -1753,6 +1758,7 @@ async def execute_serial(
                     and permission_decision.decision != "deny"
                     and permission_decision.matched_rule_source
                     in hook_overridable_sources
+                    and permission_decision.matched_rule != "strict_auto_review"
                 ):
                     permission_allowed_by_hook = True
             except Exception:
@@ -1788,21 +1794,11 @@ async def execute_serial(
         if not permission_allowed_by_hook:
             approval_request = _bound_final_tool_request(tc)
             if approval_request is None:
-                approval_request = FinalExecutableToolRequest.freeze(tc)
+                captured_tool = tool_registry.get_tool(tc.name)
+                approval_request = FinalExecutableToolRequest.freeze(tc,
+                    policy_identity=captured_tool.policy_identity if captured_tool is not None else tc.name)
                 _bind_final_tool_request(tc, approval_request)
-            await _emit_tool_runtime_span(
-                tc,
-                tool_ctx,
-                event="approval.waiting",
-                iteration_id=iteration_id,
-                phase="approval",
-                status="running",
-                summary=f"Waiting for approval: {tc.name}",
-                detail="Awaiting explicit approval before this tool can run",
-                waiting_on="user",
-                blocking_reason="approval_required",
-            )
-            yield AgentEvent.approval_request(
+            approval_event = AgentEvent.approval_request(
                 tool_call_id=tc.id,
                 tool_name=tc.name,
                 args=approval_args,
@@ -1822,18 +1818,45 @@ async def execute_serial(
                 request_digest=_final_tool_request_digest(tc),
                 network_unisolated=permission_decision.matched_rule == "network_not_isolated",
             )
-            if approval_handler:
-                approval = await _await_approval_within_turn_deadline(
-                    approval_handler,
-                    tc,
-                    tool_ctx,
-                    expected_digest=_final_tool_request_digest(tc),
-                )
-                current_digest = canonical_tool_request_digest(
-                    tc.name,
-                    tc.arguments or {},
-                )
-                if current_digest != approval_request.digest:
+            approval_event.data["policy_identity"] = approval_request.policy_identity
+            if approval_request.exec_policy is not None:
+                native = approval_request.exec_policy
+                approval_event.data["command"] = list(native.command.policy_argv)
+                approval_event.data["display_command"] = approval_request.arguments["command"]
+                approval_event.data["cwd"] = str(native.command.cwd)
+                approval_event.data["reason"] = native.reason if native.reason is not None else approval_request.arguments.get("justification")
+                approval_event.data["proposed_execpolicy_amendment"] = native.amendment_array()
+                approval_event.data["available_decisions"] = native.available_decisions()
+                # Source app-server retains a real planned command item before
+                # its separate requestApproval. This is the frozen same-id
+                # presentation; no process has started at this point.
+                yield final_tool_call_event(status="pending")
+            from backend.mcp.registry import MCPToolProxy
+
+            captured_mcp_tool = tool_registry.get_tool(tc.name)
+            if isinstance(captured_mcp_tool, MCPToolProxy):
+                approval_event.data["mcp_approval"] = captured_mcp_tool.approval_snapshot()
+            if (tool_ctx.permission.strict_auto_review or tool_ctx.permission_grants.strict_auto_review_enabled(tool_ctx.turn_id)) and tc.name in {"run_command", "apply_patch"}:
+                approval_event.data["strict_auto_review"] = True
+            from backend.agent.guardian.tool_approval import review_tool_request
+            approval = await review_tool_request(approval_request, tool_ctx, tool_registry)
+            guardian_owned_approval = approval is not None
+            if approval is None:
+                await _emit_tool_runtime_span(tc, tool_ctx, event="approval.waiting",
+                    iteration_id=iteration_id, phase="approval", status="running",
+                    summary=f"Waiting for approval: {tc.name}",
+                    detail="Awaiting explicit approval before this tool can run",
+                    waiting_on="user", blocking_reason="approval_required")
+                yield approval_event
+            if approval is not None or approval_handler:
+                if approval is None:
+                    approval = await _await_approval_within_turn_deadline(
+                        approval_handler,
+                        tc,
+                        tool_ctx,
+                        expected_digest=_final_tool_request_digest(tc),
+                    )
+                if not approval_request.matches_arguments(tc.arguments or {}):
                     # Restore the immutable proposal so neither the rejection
                     # evidence nor a later callback can accidentally adopt the
                     # unapproved mutation.
@@ -1869,12 +1892,38 @@ async def execute_serial(
                     ):
                         yield event
                     return
-                if approval.get("action") == "reject":
+                if approval_request.exec_policy is not None and not guardian_owned_approval:
+                    native_choice = approval.get("decision", "approved" if approval.get("action") == "approve" else None)
+                    if native_choice is not None and native_choice not in approval_request.exec_policy.available_decisions():
+                        approval = {**approval, "action": "invalid_execpolicy_decision"}
+                    elif native_choice == "abort":
+                        result = ToolResult(
+                            content="Command execution was cancelled before approval; the command was not executed.",
+                            is_error=True,
+                            status="cancelled",
+                            error_kind="approval_aborted",
+                            projection="approval",
+                        )
+                        async for event in _finalize_tool_result(
+                            tc, result, ctx=ctx, state=state, diff=None,
+                            iteration_id=iteration_id, turn_id=turn_id,
+                            tool_ctx=tool_ctx, tool_registry=tool_registry,
+                        ):
+                            yield event
+                        if tool_ctx.run_context.record_user_cancelled is not None:
+                            tool_ctx.run_context.record_user_cancelled("user_cancelled")
+                        if tool_ctx.cancel_event is not None:
+                            tool_ctx.cancel_event.set()
+                        raise asyncio.CancelledError
+                if approval.get("action") in {"reject", "cancel"}:
                     guidance = approval.get("guidance", "user rejected this action")
                     yield final_tool_call_event()
                     tool_call_emitted = True
                     result = ToolResult(
-                        content=f"Operation rejected: {guidance}", is_error=True
+                        content=f"Operation rejected: {guidance}", is_error=True,
+                        status="cancelled" if approval.get("action") == "cancel" else "blocked",
+                        error_kind="approval_aborted" if approval.get("action") == "cancel" else "approval_rejected",
+                        projection="approval",
                     )
                     # Preserve the proposed diff on rejection so the UI can show what
                     # would have been applied so the UI can show the rejected edit.
@@ -1892,6 +1941,13 @@ async def execute_serial(
                         yield event
                     return
                 action = str(approval.get("action") or "").strip().lower()
+                native = approval_request.exec_policy
+                accepted_amendment = approval.get("decision") if isinstance(approval.get("decision"), dict) else None
+                if accepted_amendment is not None and native is not None:
+                    expected_amendment = {"approved_execpolicy_amendment": {
+                        "proposed_execpolicy_amendment": native.amendment_array()}}
+                    if native.proposed_amendment is None or accepted_amendment != expected_amendment:
+                        action = "invalid_execpolicy_amendment"
                 if action not in {"approve", "partial"}:
                     yield final_tool_call_event()
                     tool_call_emitted = True
@@ -2099,6 +2155,14 @@ async def execute_serial(
                             if inspect.isawaitable(setter_result):
                                 await setter_result
 
+                if native is not None and accepted_amendment is not None:
+                    async def amendment_warning(message: str) -> None:
+                        if tool_ctx.emit_event is not None:
+                            await tool_ctx.emit_event("system_notice", {"message": message, "level": "warning",
+                                "conversation_id": tool_ctx.conversation_id, "tool_call_id": tc.id,
+                                "request_digest": approval_request.digest})
+                    await tool_ctx.run_context.exec_policy_owner.apply_approved_amendment(native, amendment_warning)
+
                 # Only the final, fully approved request owns approval evidence.
                 # Atomic rejection and edited-input validation above must finish
                 # before catastrophic command checks can consume this digest.
@@ -2106,6 +2170,10 @@ async def execute_serial(
                     "_approved_request_digests", set()
                 )
                 approved_digests.add(_final_tool_request_digest(tc))
+                if isinstance(captured_mcp_tool, MCPToolProxy):
+                    from backend.mcp.approval import apply_mcp_approval
+
+                    await apply_mcp_approval(captured_mcp_tool, approval, tool_ctx.run_context)
 
                 if not tool_call_emitted:
                     yield final_tool_call_event()
@@ -2174,6 +2242,7 @@ async def execute_serial(
         approval_handler=approval_handler,
         skill_manager=skill_manager,
         tool_context=tool_ctx,
+        available_modes=tool_registry.get_tool("request_user_input").available_modes if tc.name == "request_user_input" else ("plan",),
         hook_manager=_tool_hook_manager(tool_ctx),
         await_response=(
             (

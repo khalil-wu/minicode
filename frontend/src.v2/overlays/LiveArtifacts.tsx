@@ -63,7 +63,7 @@ export const LiveArtifacts = () => {
     return collectLiveArtifacts(messages, conversationId?.trim() || undefined);
   }, [conversationId, messages]);
   const filtered = artifacts.filter((artifact) => `${artifact.summary} ${artifact.turnId || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-    && (typeFilter === "all" || (typeFilter === "execution" ? artifact.executionResult : artifact.kind === typeFilter)));
+    && (typeFilter === "all" || artifact.kind === typeFilter));
   const visible = recentOnly ? filtered.slice(0, 12) : filtered;
 
   if (!liveArtifactsOpen) return null;
@@ -108,8 +108,8 @@ export const LiveArtifacts = () => {
 
         <div style={{ display: "flex", gap: 8, padding: "10px 18px", flexWrap: "wrap", alignItems: "center" }}>
           <input aria-label="搜索实时制品" placeholder="搜索文件名或轮次…" value={query} onChange={(event) => setQuery(event.target.value)} style={{ ...filterStyle, flex: "1 1 200px" }} />
-          <SelectMenu ariaLabel="实时制品类型" className="settings-select" value={typeFilter} onValueChange={setTypeFilter} style={{ width: 180 }}>
-            <option value="all">全部类型</option>{Object.entries(KIND_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="execution">执行结果</option>
+          <SelectMenu ariaLabel="实时制品类型" className="settings-select" align="end" value={typeFilter} onValueChange={setTypeFilter} style={{ width: "max-content", maxWidth: "100%" }}>
+            <option value="all">全部类型</option>{Object.entries(KIND_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </SelectMenu>
           <label style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}><input type="checkbox" checked={recentOnly} onChange={(event) => setRecentOnly(event.target.checked)} />仅最近 12 项</label>
         </div>
@@ -194,7 +194,9 @@ export function collectLiveArtifacts(
       if (entry) upsert({ ...entry, turnId: message.turnId });
     }
   }
-  return out.reverse();
+  // The merged image/PDF/audio metadata determines whether the id is a
+  // deliverable; execution-result text stays in its original tool evidence.
+  return out.filter((artifact) => !artifact.executionResult).reverse();
 }
 
 function liveArtifactFromToolRecord(
@@ -341,7 +343,6 @@ function LiveArtifactCard({
           </div>
           <div style={{ ...metaRowStyle, flexWrap: "wrap", color: "var(--text-muted)" }} title={artifact.turnId || artifact.messageId}>
             {artifact.turnId ? `轮次 ${artifact.turnId.slice(-8)}` : `消息 ${artifact.messageId.slice(-8)}`} · {new Date(artifact.timestamp).toLocaleString()}
-            {artifact.executionResult && <span>执行结果</span>}
           </div>
         </div>
       </button>

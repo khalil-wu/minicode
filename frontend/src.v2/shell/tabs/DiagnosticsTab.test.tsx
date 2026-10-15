@@ -7,11 +7,32 @@ import { DiagnosticsTab } from "./DiagnosticsTab";
 const { diagnose } = vi.hoisted(() => ({ diagnose: vi.fn() }));
 vi.mock("../../protocol/api", () => ({ apiBase: () => "http://diagnosis.test", authHeaders: () => ({}), errorMessageFromResponseText: (text: string) => text, fetchWithTimeout: diagnose }));
 vi.mock("../../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
-vi.mock("../../desktop/runtime", () => ({ isDesktop: () => false }));
-beforeEach(() => { vi.clearAllMocks(); useAppStore.setState({ mcpServers: [], runtimeCapabilities: null, settingsOpen: false, currentModel: "model", terminalSessions: [] }); });
+vi.mock("../../desktop/runtime", () => ({ isDesktop: () => false, runtime: () => null }));
+beforeEach(() => { vi.clearAllMocks(); useAppStore.setState({ isConnected: true, connectionPhase: "connected", connectionError: null, mcpServers: [], runtimeCapabilities: null, settingsOpen: false, currentModel: "model", terminalSessions: [] }); });
 afterEach(cleanup);
 const payload = (mcp: unknown[] = [], withSandbox = true) => ({ backend: { status: "ok" }, llm: { active_model: "model" }, mcp,
   capabilities: { tools: [], commands: [], skills: [], permission: withSandbox ? { sandbox_status: { probe_status: "ready", backend_available: true } } : undefined } });
+
+it("shows the failed conversation connection even while HTTP diagnosis succeeds", async () => {
+  useAppStore.setState({ isConnected: false, connectionPhase: "failed", connectionError: "会话连接中断" });
+  diagnose.mockResolvedValue({ ok: true, json: async () => payload() });
+  const { sendClientCommand } = await import("../../protocol/ws-outbox");
+  render(<DiagnosticsTab />);
+  expect(await screen.findByText("连接失败")).toBeTruthy();
+  await waitFor(() => expect(diagnose).toHaveBeenCalled());
+  expect(screen.getByText("会话连接中断")).toBeTruthy();
+  expect(screen.queryByText("当前已检测组件运行正常。")).toBeNull();
+  expect(sendClientCommand).not.toHaveBeenCalled();
+});
+
+it("uses live MCP lifecycle errors over stale healthy doctor entries", async () => {
+  useAppStore.setState({ mcpServers: [{ name: "live", status: "connected", phase: "expired", lastError: "登录已过期" }] });
+  diagnose.mockResolvedValue({ ok: true, json: async () => payload([{ name: "live", status: "connected" }]) });
+  render(<DiagnosticsTab />);
+  expect(await screen.findByText("1 项需要处理")).toBeTruthy();
+  expect(screen.getByText("MCP · live")).toBeTruthy();
+  expect(screen.getByText("登录已过期")).toBeTruthy();
+});
 
 it("reports MCP faults despite a successful backend response and links to its configuration", async () => {
   diagnose.mockResolvedValue({ ok: true, json: async () => payload([{ name: "broken", status: "error", error: "connection refused" }]) });

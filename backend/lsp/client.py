@@ -103,6 +103,10 @@ class LSPSymbol:
     children: list["LSPSymbol"] = field(default_factory=list)
 
 
+class LSPTransportClosed(RuntimeError):
+    """The client no longer owns a writable server transport."""
+
+
 class LSPClient:
     """Minimal stdio-based LSP client for a single language server."""
 
@@ -129,6 +133,7 @@ class LSPClient:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._initialized = False
         self._opened_files: dict[str, tuple[int, str]] = {}
+        self._file_versions: dict[str, int] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -173,6 +178,8 @@ class LSPClient:
         self._stdout = None
         self._initialized = False
         self._opened_files.clear()
+        self._file_versions.clear()
+        self.diagnostics.clear()
         try:
             try:
                 self._process = await self._sandbox_runner.spawn_interactive(
@@ -217,7 +224,7 @@ class LSPClient:
                 await self._send_request("shutdown", {})
                 await self._send_notification("exit", {})
             except Exception:
-                pass
+                logger.warning("LSP graceful shutdown failed; terminating the owned process", exc_info=True)
         # A failed spawn may retain resources before it returns a process to
         # this client. The runner owns that launch attempt in either case.
         if not await self._sandbox_runner.cleanup():
@@ -241,6 +248,9 @@ class LSPClient:
         self._stdout = None
         self._initialized = False
         self._opened_files.clear()
+        self._file_versions.clear()
+        self.diagnostics.clear()
+        self.diagnostics_changed.set()
         self.startup_cleanup_pending = False
 
     async def _initialize(self) -> None:
@@ -293,24 +303,37 @@ class LSPClient:
             if previous_hash == content_hash:
                 return
             self.diagnostics.pop(os.path.normcase(abs_path), None)
-            version += 1
-            await self._send_notification("textDocument/didChange", {
-                "textDocument": {"uri": self._path_to_uri(abs_path), "version": version},
-                "contentChanges": [{"text": content}],
-            })
+            version = self._file_versions[abs_path] + 1
+            self._file_versions[abs_path] = version
             self._opened_files[abs_path] = (version, content_hash)
+            try:
+                await self._send_notification("textDocument/didChange", {
+                    "textDocument": {"uri": self._path_to_uri(abs_path), "version": version},
+                    "contentChanges": [{"text": content}],
+                })
+            except (OSError, LSPTransportClosed):
+                self._opened_files[abs_path] = opened
+                self.diagnostics.pop(os.path.normcase(abs_path), None)
+                raise
             return
         ext = Path(abs_path).suffix.lstrip(".")
         lang_id = language_id or _language_id_for_extension(ext)
-        await self._send_notification("textDocument/didOpen", {
-            "textDocument": {
-                "uri": self._path_to_uri(abs_path),
-                "languageId": lang_id,
-                "version": 1,
-                "text": content,
-            }
-        })
-        self._opened_files[abs_path] = (1, content_hash)
+        version = self._file_versions.get(abs_path, 0) + 1
+        self._file_versions[abs_path] = version
+        self._opened_files[abs_path] = (version, content_hash)
+        try:
+            await self._send_notification("textDocument/didOpen", {
+                "textDocument": {
+                    "uri": self._path_to_uri(abs_path),
+                    "languageId": lang_id,
+                    "version": version,
+                    "text": content,
+                }
+            })
+        except (OSError, LSPTransportClosed):
+            self._opened_files.pop(abs_path)
+            self.diagnostics.pop(os.path.normcase(abs_path), None)
+            raise
 
     async def close_file(self, file_path: str) -> None:
         """Notify the server that a tracked document is no longer active."""
@@ -322,6 +345,8 @@ class LSPClient:
                 "textDocument": {"uri": self._path_to_uri(abs_path)},
             })
             self._opened_files.pop(abs_path, None)
+            self.diagnostics.pop(os.path.normcase(abs_path), None)
+            self.diagnostics_changed.set()
 
     async def definition(self, file_path: str, line: int, character: int) -> list[LSPLocation]:
         await self._ensure_file_open(file_path)
@@ -387,7 +412,7 @@ class LSPClient:
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> Any:
         if not self._stdin or not self._process or self._process.returncode is not None:
-            raise RuntimeError("LSP client not running")
+            raise LSPTransportClosed("LSP client not running")
         msg_id = self._next_id
         self._next_id += 1
         message = {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params}
@@ -400,9 +425,9 @@ class LSPClient:
             self._pending.pop(msg_id, None)
             try:
                 await self._send_notification("$/cancelRequest", {"id": msg_id})
-            except OSError:
+            except (OSError, LSPTransportClosed):
                 # Preserve the caller's cancellation when the transport closed.
-                logger.debug("LSP request cancellation reached a closed transport")
+                logger.debug("LSP request cancellation reached a closed transport", exc_info=True)
             if isinstance(exc, asyncio.TimeoutError):
                 raise RuntimeError(f"LSP request timed out: {method}") from exc
             raise
@@ -412,15 +437,19 @@ class LSPClient:
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         if not self._stdin or not self._process or self._process.returncode is not None:
-            return
+            raise LSPTransportClosed("LSP client not running")
         message = {"jsonrpc": "2.0", "method": method, "params": params}
         await self._write_message(message)
 
     async def _write_message(self, message: dict[str, Any]) -> None:
         body = json.dumps(message).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self._stdin.write(header + body)
-        await self._stdin.drain()
+        try:
+            self._stdin.write(header + body)
+            await self._stdin.drain()
+        except OSError:
+            self._initialized = False
+            raise
 
     async def _respond_to_server_request(self, message: dict[str, Any]) -> None:
         response: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
@@ -462,8 +491,11 @@ class LSPClient:
                         elif message["method"] == "textDocument/publishDiagnostics":
                             params = message["params"]
                             diagnostic_path = _uri_to_path(params["uri"], path_mapper=self._sandbox_runner.map_path_from_sandbox)
-                            self.diagnostics[os.path.normcase(str(Path(diagnostic_path).resolve()))] = params
-                            self.diagnostics_changed.set()
+                            path_key = os.path.normcase(str(Path(diagnostic_path).resolve()))
+                            opened = next((state for path, state in self._opened_files.items() if os.path.normcase(path) == path_key), None)
+                            if opened is not None and params.get("version", opened[0]) == opened[0]:
+                                self.diagnostics[path_key] = params
+                                self.diagnostics_changed.set()
                         continue
                     if msg_id is not None and msg_id in self._pending:
                         future = self._pending.pop(msg_id)

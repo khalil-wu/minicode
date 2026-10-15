@@ -7,6 +7,7 @@ import {
   workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
 import { fetchWorkspaceFilePreview } from "../protocol/workspace";
+import { conversationBrowserRawUrl, fetchConversationBrowserPreview } from "../protocol/conversation-browser";
 import {
   commandResultSucceeded,
   createClientCommandId,
@@ -61,6 +62,13 @@ export interface LocalFilePreviewTarget {
   file?: File;
   url?: string;
   conversationId?: string;
+}
+
+export interface ConversationBrowserFilePreviewTarget {
+  conversationId: string;
+  executionCwd: string;
+  path: string;
+  name: string;
 }
 
 const normalizedMediaType = (value?: string): string =>
@@ -294,6 +302,8 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
     mediaType: target.mediaType,
     kind: target.kind,
     source: "workspace" as const,
+    sourcePath: path,
+    workspaceRoot,
   };
 
   const lease = beginPreviewRequest(conversationId, { abortable: true });
@@ -331,6 +341,8 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
           ? workspaceRawResourceUrlWithToken(path, workspaceRoot)
           : undefined,
         source: "workspace",
+        sourcePath: preview.path,
+        workspaceRoot,
         loading: false,
         loadedAt: Date.now(),
       });
@@ -343,6 +355,33 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
         : "文件预览加载失败。";
       failPreview(lease, conversationId, base, message);
     });
+  return true;
+};
+
+/** Browse a file without changing the conversation's execution or editor root. */
+export const openConversationBrowserFilePreview = (target: ConversationBrowserFilePreviewTarget): boolean => {
+  const owner = { conversationId: target.conversationId, executionCwd: target.executionCwd };
+  const base = { artifactId: `browser:${target.executionCwd}:${target.path}`, name: target.name,
+    source: "browser" as const, sourcePath: target.path, workspaceRoot: target.executionCwd };
+  const lease = beginPreviewRequest(target.conversationId, { abortable: true });
+  openPreviewSurface(base.artifactId, target.name, target.conversationId);
+  publishPreview(lease, target.conversationId, { ...base, content: "", loading: true, loadedAt: Date.now() });
+  void fetchConversationBrowserPreview(owner, target.path, lease.controller!.signal).then(preview => {
+    if (!isPreviewRequestCurrent(lease)) return;
+    const mediaType = normalizedMediaType(preview.media_type);
+    publishPreview(lease, target.conversationId, {
+      ...base, content: preview.content, preview: preview.summary,
+      warning: preview.parse_error || preview.parse_warning || undefined,
+      name: preview.file_name, mediaType, kind: preview.kind,
+      sizeBytes: preview.size_bytes, contentChars: preview.content_chars,
+      truncated: preview.truncated, hasNative: preview.has_native,
+      url: preview.has_native && supportsNativePreview(mediaType) ? conversationBrowserRawUrl(owner, target.path) : undefined,
+      loading: false, loadedAt: Date.now(),
+    });
+  }).catch(error => {
+    if (!isPreviewRequestCurrent(lease) || lease.controller!.signal.aborted) return;
+    failPreview(lease, target.conversationId, base, error instanceof Error ? error.message : String(error));
+  });
   return true;
 };
 

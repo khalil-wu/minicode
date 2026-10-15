@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { ArrowLeft, Columns2, Folder, Maximize2, Minimize2, Search, SlidersHorizontal, PanelRightOpen } from "lucide-react";
@@ -22,6 +23,7 @@ interface MainSlotsProps {
 }
 
 export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = false }: MainSlotsProps) => {
+  const { t: tr } = useI18n();
   const floating = useAppStore((s) => s.rightPanelExpanded && s.rightPanelOpen);
   const forceChat = requestedForceChat || floating;
   const panelSlots = useAppStore((s) => s.panelSlots);
@@ -42,7 +44,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
 
-  const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "对话" };
+  const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: tr("对话") };
   const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor") ?? null;
   const showEditorLayout = Boolean(editorSlot) && !forceChat;
@@ -101,18 +103,18 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
               <button
                 type="button"
                 className="btn-ghost mc-icon-button"
-                aria-label="搜索当前对话"
-                title="搜索当前对话"
+                aria-label={tr("搜索当前对话")}
+                title={tr("搜索当前对话")}
                 onClick={() => window.dispatchEvent(new Event("chat:request-search"))}
               ><Search size={16} /></button>
             )}
             {showEditorLayout && (
-              <div className="mc-workbench-layout-actions" role="group" aria-label="工作区布局">
+              <div className="mc-workbench-layout-actions" role="group" aria-label={tr("工作区布局")}>
                 {activeSlot.kind === "editor" && previewReturnTarget && <button
                   type="button"
                   className="btn-ghost mc-icon-button"
-                  aria-label="返回预览"
-                  title={previewReturnTarget.url ? `返回预览 · ${previewReturnTarget.url}` : "返回预览"}
+                  aria-label={tr("返回预览")}
+                  title={previewReturnTarget.url ? tr("返回预览 · {url}", { url: previewReturnTarget.url }) : tr("返回预览")}
                   onClick={() => {
                     if (previewReturnTarget.tab === "browser" && previewReturnTarget.targetId && previewReturnTarget.url) {
                       returnToBrowserPage({ conversationId: previewReturnTarget.conversationId, targetId: previewReturnTarget.targetId, url: previewReturnTarget.url });
@@ -122,8 +124,8 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                 {!compact && <button
                   type="button"
                   className="btn-ghost mc-icon-button"
-                  aria-label={tabbed || effectiveMaximizedSlot ? "并排显示对话与文件" : "切换为单页显示"}
-                  title={tabbed || effectiveMaximizedSlot ? "并排显示对话与文件" : "切换为单页显示"}
+                  aria-label={tabbed || effectiveMaximizedSlot ? tr("并排显示对话与文件") : tr("切换为单页显示")}
+                  title={tabbed || effectiveMaximizedSlot ? tr("并排显示对话与文件") : tr("切换为单页显示")}
                   aria-pressed={!tabbed && !effectiveMaximizedSlot}
                   onClick={() => {
                     if (effectiveMaximizedSlot) togglePanelMaximized(effectiveMaximizedSlot.id);
@@ -133,8 +135,8 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                 <button
                   type="button"
                   className="btn-ghost mc-icon-button"
-                  aria-label={effectiveMaximizedSlot ? "退出专注模式" : "专注当前面板"}
-                  title={effectiveMaximizedSlot ? "退出专注模式" : "专注当前面板"}
+                  aria-label={effectiveMaximizedSlot ? tr("退出专注模式") : tr("专注当前面板")}
+                  title={effectiveMaximizedSlot ? tr("退出专注模式") : tr("专注当前面板")}
                   aria-pressed={Boolean(effectiveMaximizedSlot)}
                   onClick={() => togglePanelMaximized(activeSlot.id)}
                 >{effectiveMaximizedSlot ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
@@ -142,7 +144,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
             )}
             <div className="mc-workbench-task-actions">
               <ChatActionsButton />
-              {visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label="切换摘要" title="切换摘要"
+              {visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("切换摘要")} title={tr("切换摘要")}
                 aria-pressed={!contextCardCollapsed && !rightPanelOpen} onClick={() => {
                   const chatFrame = surfaceRef.current!.querySelector<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]')!;
                   if (chatFrame.clientWidth < COMPACT_MAIN_WIDTH) setRightStackTab("tasks");
@@ -150,7 +152,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                   else setContextCardCollapsed(!contextCardCollapsed);
                 }}><SlidersHorizontal size={17} /></button>}
               {(!rightPanelOpen || (effectiveMaximizedSlot && effectiveMaximizedSlot.kind !== "chat")) && <button
-                type="button" className="btn-ghost mc-icon-button" aria-label="打开右侧栏" title="打开右侧栏"
+                type="button" className="btn-ghost mc-icon-button" aria-label={tr("打开右侧栏")} title={tr("打开右侧栏")}
                 aria-controls="workbench-right-sidebar" onClick={() => {
                   if (effectiveMaximizedSlot && effectiveMaximizedSlot.kind !== "chat") togglePanelMaximized(effectiveMaximizedSlot.id);
                   if (!rightPanelOpen) toggleRightPanel();
@@ -212,6 +214,7 @@ const ResizeHandle = ({
   neighborSize: number;
   onResize: (id: string, delta: number) => void;
 }) => {
+  const { t: tr } = useI18n();
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => resizeCleanupRef.current?.(), []);
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -274,11 +277,11 @@ const ResizeHandle = ({
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="调整主面板宽度"
+      aria-label={tr("调整主面板宽度")}
       aria-valuemin={18}
       aria-valuemax={82}
       aria-valuenow={currentPercent}
-      aria-valuetext={`左侧面板占 ${currentPercent}%`}
+      aria-valuetext={tr("左侧面板占 {percent}%", { percent: currentPercent })}
       tabIndex={0}
       onPointerDown={startResize}
       onDoubleClick={() => resizeToPercent(50)}
@@ -289,7 +292,9 @@ const ResizeHandle = ({
   );
 };
 
-const PanelContent = ({ slot }: { slot: PanelSlot }) => (
+const PanelContent = ({ slot }: { slot: PanelSlot }) => {
+  const { t: tr } = useI18n();
+  return (
   <div key={slot.id} className="anim-fade-in" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
     {slot.kind === "chat" && (
       <SafeBoundary fallback={<ChatErrorFallback />}>
@@ -299,7 +304,7 @@ const PanelContent = ({ slot }: { slot: PanelSlot }) => (
     {slot.kind === "editor" && (
       <ChunkErrorBoundary>
         <Suspense fallback={<PanelSkeleton kind={slot.kind} />}>
-          <SafeBoundary fallback={<PanelErrorFallback panelName="编辑器" />}>
+          <SafeBoundary fallback={<PanelErrorFallback panelName={tr("编辑器")} />}>
             {/* chrome="full" renders the multi-file tab strip (open many files
                 like VSCode). The store already tracks multiple editorTabs; the
                 strip is what lets the user see and switch between them. */}
@@ -310,6 +315,7 @@ const PanelContent = ({ slot }: { slot: PanelSlot }) => (
     )}
   </div>
 );
+};
 
 const mainCanvasStyle: React.CSSProperties = {
   flex: 1,

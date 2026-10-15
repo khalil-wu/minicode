@@ -8,6 +8,10 @@ import { useAppStore } from "../../stores";
 const mocks = vi.hoisted(() => ({ send: vi.fn(() => true), chat: vi.fn(() => true), confirm: vi.fn() }));
 vi.mock("../../protocol/ws-outbox", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../protocol/ws-outbox")>(), sendClientCommand: mocks.send,
+  sendClientCommandAwaitResult: async (command: { type: string }) => {
+    mocks.send(command);
+    return { type: "command.result", command: command.type, level: "success", message: "", data: {} };
+  },
 }));
 vi.mock("../sendChatMessage", () => ({ sendChatMessage: mocks.chat }));
 vi.mock("../../overlays/DialogService", () => ({ showConfirm: mocks.confirm }));
@@ -21,7 +25,7 @@ const renderOwned = (workspaceRoot = "C:/A", conversationId = "A") => render(
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.confirm.mockResolvedValue(true);
-  useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A",
+  useAppStore.setState({ ...initial, appMode: "chat", conversationId: "A", workingDirectory: "C:/A",
     messages: [
       { id: "user", role: "user", content: "owned question", artifacts: [], timestamp: 1 },
       { id: "assistant", role: "assistant", content: "owned answer", artifacts: [], timestamp: 2, terminalStatus: "completed" },

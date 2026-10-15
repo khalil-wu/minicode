@@ -48,6 +48,8 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "agent.run.completed",
     "agent.item",
     "agent.item.delta",
+    "guardian_assessment",
+    "guardian_warning",
     "agent.progress",
     "runtime.span",
     "task.update",
@@ -56,6 +58,7 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "approval_request",
     "approval.file_diff",
     "ask_user",
+    "request_user_input",
     "citation.add",
     "artifact.preview",
     "done",
@@ -112,11 +115,9 @@ class EventEnvelope:
 
         data: dict[str, Any] = event.data
 
-        # Capture turn_id from the first agent.run.started event.
+        # Capture the issuing host turn from its first lifecycle event.
         if event.type == "agent.run.started" and not self._turn_id:
-            run_id = str(data.get("run_id") or "").strip()
-            if run_id:
-                self._turn_id = run_id
+            self._turn_id = str(data.get("turn_id") or data.get("run_id") or "").strip()
 
         if event.type not in _TURN_SCOPED:
             return event

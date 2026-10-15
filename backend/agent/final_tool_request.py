@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -90,18 +90,33 @@ class FinalExecutableToolRequest:
     tool_name: str
     arguments: Mapping[str, Any]
     digest: str
+    policy_identity: str = ""
+    arguments_digest: str = ""
+    exec_policy: Any | None = None
 
     @classmethod
-    def freeze(cls, tc: ToolCallEvent) -> "FinalExecutableToolRequest":
+    def freeze(cls, tc: ToolCallEvent, *, policy_identity: str = "") -> "FinalExecutableToolRequest":
         arguments = _freeze_value(dict(tc.arguments or {}))
+        digest = canonical_tool_request_digest(policy_identity or tc.name, _thaw_value(arguments))
         return cls(
             tool_call_id=str(tc.id or "").strip(),
             tool_name=str(tc.name or "").strip(),
             arguments=arguments,
-            digest=canonical_tool_request_digest(tc.name, _thaw_value(arguments)),
+            digest=digest,
+            policy_identity=policy_identity or str(tc.name or "").strip(),
+            arguments_digest=digest,
         )
+
+    def with_exec_policy(self, decision: Any) -> "FinalExecutableToolRequest":
+        return replace(self, digest=decision.command.execution_digest, exec_policy=decision)
+
+    def matches_arguments(self, arguments: Mapping[str, Any]) -> bool:
+        return canonical_tool_request_digest(self.policy_identity, arguments) == (self.arguments_digest or self.digest)
 
     def apply(self, tc: ToolCallEvent) -> None:
         """Replace mutable event arguments with a detached canonical copy."""
 
         tc.arguments = _thaw_value(self.arguments)
+
+    def argument_values(self) -> dict[str, Any]:
+        return _thaw_value(self.arguments)

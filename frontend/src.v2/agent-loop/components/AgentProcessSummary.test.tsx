@@ -79,7 +79,7 @@ describe("AgentProcessSummary", () => {
     expect(onToggle).not.toHaveBeenCalled();
   });
 
-  it("does not offer process collapse until a complete final answer exists", () => {
+  it("lets the reader reopen running work before a final answer exists", () => {
     const onToggle = vi.fn();
     render(
       <AgentProcessSummary
@@ -91,8 +91,8 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
-    expect(onToggle).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(onToggle).toHaveBeenCalledOnce();
   });
 
   it("keeps the running heading compact above an expanded authoritative timeline", () => {

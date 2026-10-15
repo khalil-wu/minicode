@@ -201,6 +201,7 @@ interface TerminalOwnedCommand {
 export interface TerminalCreateCommand extends TerminalOwnedCommand {
   type: "terminal.create";
   cwd?: string;
+  shell?: "powershell" | "pwsh" | "cmd" | "system";
 }
 
 export interface TerminalListCommand extends TerminalOwnedCommand {

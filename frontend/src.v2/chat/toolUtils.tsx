@@ -3,16 +3,15 @@ import {
   BookOpenText,
   Code2,
   FileSearch,
-  FileText,
   FolderOpen,
   Globe,
   ListChecks,
   MonitorPlay,
   PencilLine,
   Search,
-  TerminalSquare,
   Wrench,
 } from "../lib/icons";
+import { commandActivityIcon } from "../lib/command-activity-icon";
 
 export const ToolGlyph = ({
   kind,
@@ -29,9 +28,13 @@ export const ToolGlyph = ({
   if (normalized === "web") return <Globe {...props} />;
   if (normalized === "browser") return <AppWindow {...props} />;
   if (normalized === "preview") return <MonitorPlay {...props} />;
-  if (normalized === "commandexecution" || normalized === "command") return <TerminalSquare {...props} />;
+  if (normalized === "commandexecution" || normalized === "command") return <svg width={size} height={size}
+    viewBox={commandActivityIcon.viewBox} className={props.className} fill="currentColor" aria-hidden="true" data-source-icon="terminal-light-16">
+    {commandActivityIcon.paths.map((path, index) => <path key={index} d={path.d}
+      fillRule={"fill-rule" in path ? path["fill-rule"] : undefined} clipRule={"clip-rule" in path ? path["clip-rule"] : undefined} />)}
+  </svg>;
   if (normalized === "filechange" || normalized === "edit") return <PencilLine {...props} />;
-  if (normalized === "fileread" || normalized === "file") return <FileText {...props} />;
+  if (normalized === "fileread" || normalized === "file") return <BookOpenText {...props} />;
   if (normalized === "workspacelist") return <FolderOpen {...props} />;
   if (normalized === "workspacesearch") return <FileSearch {...props} />;
   if (normalized === "skill") return <BookOpenText {...props} />;

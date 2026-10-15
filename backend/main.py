@@ -46,6 +46,7 @@ from backend.api.auth import (
     _is_attachment_asset_token_authorized,
     _is_plugin_asset_token_authorized,
     _is_skill_asset_token_authorized,
+    _is_workspace_browser_raw_token_authorized,
     _is_workspace_raw_token_authorized,
     _is_runtime_authorized,
     _is_websocket_authorized,
@@ -304,6 +305,7 @@ async def _api_v1_path_alias(request: Request, call_next):
         _is_artifact_asset_token_authorized(request)
         or _is_attachment_asset_token_authorized(request)
         or _is_workspace_raw_token_authorized(request)
+        or _is_workspace_browser_raw_token_authorized(request)
         or _is_skill_asset_token_authorized(request)
         or _is_plugin_asset_token_authorized(request)
     )

@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import type { ServerEvent } from "../protocol/events";
@@ -6,12 +7,12 @@ import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { handleChatStreamEvent } from "./chatStreamEvents";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { pushToast } from "../overlays/ToastContainer";
-import { sendClientCommand } from "../protocol/ws-outbox";
-import { resetSendDeduplication } from "./sendChatMessage";
+import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-outbox";
+import { resetPendingUserMessagesForTests } from "./sendChatMessage";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
-vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true) }));
-vi.mock("./sendChatMessage", () => ({ resetSendDeduplication: vi.fn() }));
+vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), rejectClientCommandResult: vi.fn(() => false) }));
+vi.mock("./sendChatMessage", async load => ({ ...await load<typeof import("./sendChatMessage")>(), resetPendingUserMessagesForTests: vi.fn() }));
 
 const immediateBuffer = (
   apply: (chunk: string, conversationId?: string, itemId?: string, metadata?: Record<string, unknown>, messageId?: string) => void,
@@ -25,6 +26,7 @@ const seedStreamingAssistant = () => {
   useAppStore.setState({
     conversationId: "conv-stream",
     pendingConversationSwitchId: null,
+    pendingConversationCreateId: null,
     messages: [{
       id: "assistant-stream",
       role: "assistant",
@@ -74,7 +76,43 @@ const handle = (event: ServerEvent) =>
 describe("handleChatStreamEvent typed lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(rejectClientCommandResult).mockReturnValue(false);
     seedStreamingAssistant();
+  });
+
+  it("rejects an awaited menu error without failing the unrelated active assistant", () => {
+    const messages = useAppStore.getState().messages;
+    vi.mocked(rejectClientCommandResult).mockReturnValue(true);
+    expect(handle({ type: "error", conversation_id: "inactive", client_command_type: "conversation.clone",
+      client_command_id: "clone-request", message: "Attachment copy failed" } as ServerEvent)).toBe(true);
+    expect(rejectClientCommandResult).toHaveBeenCalledWith("clone-request", "Attachment copy failed");
+    expect(useAppStore.getState().messages).toBe(messages);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps a compact error in one persistent notice without duplicate toasts or changing the previous answer", () => {
+    const previous = { ...useAppStore.getState().messages[0], content: "上次的完整回答", isStreaming: false, terminalStatus: "completed" as const };
+    useAppStore.setState({ messages: [previous], isStreaming: false, draft: "新的未发送草稿" });
+    const error = { type: "error", conversation_id: "conv-stream", error_code: "context.compact_failed",
+      message: "Compact failed: HTTP 400", recoverable: true } as ServerEvent;
+    handle(error);
+    handle(error);
+    expect(useAppStore.getState().messages).toHaveLength(2);
+    expect(useAppStore.getState().messages[0]).toEqual(previous);
+    expect(useAppStore.getState().messages[1]).toMatchObject({ id: "system-compact-status", systemNoticeProcessing: false });
+    expect(useAppStore.getState().draft).toBe("新的未发送草稿");
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("restores the source after a rejected switch without erasing its transcript or draft", () => {
+    const messages = useAppStore.getState().messages;
+    useAppStore.setState({ pendingConversationSwitchId: "missing-target", draft: "unsent prompt" });
+    expect(handle({ type: "error", conversation_id: "missing-target", error_code: "workspace_missing",
+      message: "Target workspace missing" } as ServerEvent)).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-stream", pendingConversationSwitchId: null,
+      messages, draft: "unsent prompt", isStreaming: true });
+    expect(pushToast).toHaveBeenCalledWith("Target workspace missing", "error", 6000);
   });
 
   it("projects started, delta and completed into one authoritative answer block", () => {
@@ -1059,7 +1097,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(state.workingDirectory).toBe("C:\\workspace");
     expect(state.messages[0]).toMatchObject({ id: "assistant-stream", isStreaming: true });
     expect(state.isStreaming).toBe(true);
-    expect(resetSendDeduplication).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
   });
 
   it("hydrates replayed owned errors without replaying destructive recovery or toasts", () => {
@@ -1088,7 +1126,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
 
     const state = useAppStore.getState();
     expect(pushToast).not.toHaveBeenCalled();
-    expect(resetSendDeduplication).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
     expect(state.workingDirectory).toBe("C:\\workspace");
     expect(state.conversations[0]).toMatchObject({
       id: "conv-stream",
@@ -1173,7 +1211,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     ]);
     expect(pushToast).not.toHaveBeenCalled();
     expect(sendClientCommand).not.toHaveBeenCalled();
-    expect(resetSendDeduplication).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
   });
 
   it("clears pending provider progress when a live conversation is missing", () => {
@@ -1620,7 +1658,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     });
     expect(useAppStore.getState().pendingApproval?.requestId).toBe("approval-current");
     expect(sendClientCommand).not.toHaveBeenCalled();
-    expect(resetSendDeduplication).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
   });
   it("keeps one error visible when partial output precedes a provider failure", () => {
     useAppStore.getState().appendAgentMessageDelta("reply-part", "I will inspect the files.", "conv-stream", "assistant-stream");

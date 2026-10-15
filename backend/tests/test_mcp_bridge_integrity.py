@@ -280,5 +280,5 @@ def test_mcp_proxy_exposes_its_effective_read_only_contract() -> None:
         ),
         None,
     )
-    assert not proxy.is_read_only({})
-    assert proxy.to_runtime_metadata()["read_only"] is False
+    assert proxy.is_read_only({})
+    assert proxy.to_runtime_metadata()["read_only"] is True

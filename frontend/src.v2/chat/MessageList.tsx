@@ -1,9 +1,9 @@
+import { useI18n } from "../i18n";
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { useAppStore } from "../stores";
 import { BrandMark } from "../components/icons";
-import { Button } from "../components/Button";
 import {
   createRecentTurnProjectionCache,
   projectMessagesToTurns,
@@ -17,6 +17,7 @@ import type { ChatTurnState } from "./cells/cellTypes";
 import { loadRevealMessage } from "./revealConversationMessage";
 import { useReplyViewport } from "./useReplyViewport";
 import { conversationReadingState } from "./transcriptReadingState";
+import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -26,6 +27,7 @@ const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 800;
 const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
 
 export const MessageList = ({ searchActive = false }: { searchActive?: boolean } = {}) => {
+  const { t: tr } = useI18n();
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -106,16 +108,16 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     [projectedTurns.turns, turnDiff],
   );
   const hiddenTurnCount = projectedTurns.hiddenTurnCount;
-  // Keep the newest turn outside historical virtualization. The current reply
-  // then streams without invalidating row measurements, and a newly restored
-  // conversation always paints its latest result before observers settle.
+  // Keep recent turns in one keyed list. Appending a reply must not remount
+  // the previous reply by moving it from a tail container into history.
   const tailTurn = turns.at(-1) ?? null;
   const liveTurn = isStreaming && tailTurn?.status === "streaming" ? tailTurn : null;
   const reserveLatestReply = Boolean(tailTurn?.userCell && !searchActive && !sourceMessage);
-  const historicalTurns = tailTurn ? turns.slice(0, -1) : turns;
   // DOM Range search needs all loaded turns, not just the current viewport.
   // Use the existing full-history renderer only while the user searches.
-  const shouldVirtualize = !searchActive && !sourceMessage && historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
+  const shouldVirtualize = !searchActive && !sourceMessage && turns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION + 1;
+  const historicalTurns = shouldVirtualize ? turns.slice(0, -MAX_TURNS_WITHOUT_VIRTUALIZATION) : [];
+  const recentTurns = shouldVirtualize ? turns.slice(-MAX_TURNS_WITHOUT_VIRTUALIZATION) : turns;
   useEffect(() => {
     setSourceMessage(null);
     setRevealStatus("");
@@ -126,7 +128,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     const ownerState = useAppStore.getState();
     const chat = ownerState.panelSlots.find((slot) => slot.kind === "chat");
     if (chat) ownerState.focusPanel(chat.id);
-    setRevealStatus("正在定位来源消息…");
+    setRevealStatus(tr("正在定位来源消息…"));
     isNearBottom.current = false;
     setIsFollowing(false);
     setShowScrollBtn(true);
@@ -136,7 +138,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
         setShowAllHistory(true);
         setSourceMessage({ id: revealTarget.messageId, requestId: revealTarget.requestId });
       } else {
-        setRevealStatus(result === "missing" ? "找不到来源消息，它可能已被删除。" : "来源历史加载失败，请再次点击“回到对话”重试。");
+        setRevealStatus(result === "missing" ? tr("找不到来源消息，它可能已被删除。") : tr("来源历史加载失败，请再次点击“回到对话”重试。"));
         useAppStore.setState({ messageRevealTarget: null });
       }
     });
@@ -146,7 +148,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     const target = [...(contentRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])].find((element) => element.dataset.messageId === sourceMessage.id);
     if (!target) {
       const queued = useAppStore.getState().messages.find((message) => message.id === sourceMessage.id)?.queueState === "queued";
-      setRevealStatus(queued ? "来源消息仍在队列中，执行后会出现在对话中。" : "来源消息已载入，但当前视图无法显示这条记录。");
+      setRevealStatus(queued ? tr("来源消息仍在队列中，执行后会出现在对话中。") : tr("来源消息已载入，但当前视图无法显示这条记录。"));
       if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
       return;
     }
@@ -210,7 +212,15 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   }, [conversationId, turnVirtualizer]);
   const liveScrollSignature = useMemo(() => {
     if (!shouldShowMessages || timelineMessages.length === 0) return "empty";
-    const last = timelineMessages[timelineMessages.length - 1];
+    let last = timelineMessages[timelineMessages.length - 1];
+    // A Source user input is an item in the same physical turn. Its canonical
+    // row can follow the aggregate assistant, whose work/reply still grows.
+    if (tailTurn) for (let index = timelineMessages.length - 1; index >= 0; index -= 1) {
+      if (timelineMessages[index].id === tailTurn.id) {
+        last = timelineMessages[index];
+        break;
+      }
+    }
     const blocks = last?.blocks ?? [];
     const lastBlockRaw = blocks[blocks.length - 1];
     const lastBlock = (lastBlockRaw && typeof lastBlockRaw === "object")
@@ -237,7 +247,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       turns.length,
       hiddenTurnCount,
     ].join("|");
-  }, [conversationId, hiddenTurnCount, shouldShowMessages, timelineMessages, turns.length]);
+  }, [conversationId, hiddenTurnCount, shouldShowMessages, timelineMessages, turns.length, tailTurn?.id]);
 
   const scrollRafRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
@@ -335,6 +345,20 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     }
   }, [conversationId]);
 
+  const revealEarlierHistory = useCallback(() => {
+    if (followPausedRef.current) return;
+    if (hiddenTurnCount > 0) {
+      captureHistoryScroll();
+      setShowAllHistory(true);
+    } else if (conversationId && historyPage?.hasMore && !historyPage.loading) {
+      void loadEarlierConversationMessages(conversationId, () => {
+        if (useAppStore.getState().conversationId !== conversationId) return;
+        captureHistoryScroll();
+        setShowAllHistory(true);
+      });
+    }
+  }, [captureHistoryScroll, conversationId, hiddenTurnCount, historyPage]);
+
   useLayoutEffect(() => {
     const previous = historyScrollRef.current;
     const el = ref.current;
@@ -370,6 +394,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
         return;
       }
       showScrollbarBriefly();
+      if (el.scrollTop <= 160) revealEarlierHistory();
       // Any user-driven upward scroll (wheel OR drag) disengages auto-follow —
       // the old 80px band yanked users back who scrolled up < 80px to read.
       if (el.scrollTop < prev - 4) {
@@ -390,6 +415,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
         userScrollIntentRef.current = Date.now();
         isNearBottom.current = false;
         setIsFollowing(false);
+        if (el.scrollTop <= 160) revealEarlierHistory();
       }
     };
     el.addEventListener("scroll", onScroll);
@@ -399,7 +425,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       el.removeEventListener("wheel", onWheel);
       if (scrollbarFadeTimerRef.current !== null) window.clearTimeout(scrollbarFadeTimerRef.current);
     };
-  }, []);
+  }, [revealEarlierHistory]);
 
   useLayoutEffect(() => {
     followBottom();
@@ -427,7 +453,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     const messageChanged = Boolean(latestId && latestId !== lastRenderedMessageIdRef.current);
     lastRenderedMessageIdRef.current = latestId;
     if (!messageChanged && appendedMessages.length === 0) return;
-    if (appendedMessages.some((message) => message.role === "user" && message.queueState !== "queued"
+    if (appendedMessages.some((message) => message.role === "user" && !message.queueState && !message.steeredIntoMessageId
       && message.messageSource?.kind !== "scheduled_task") && !searchActive) {
       setSourceMessage(null);
       startLatestTurn();
@@ -463,12 +489,15 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
         data-testid="message-list-scroll"
         className={`message-list-scroll chat-scrollbar-auto-hide${isScrollbarActive ? " is-scrolling" : ""} flex-1 min-h-0 overflow-y-auto flex flex-col`}
         role="log"
-        aria-label="会话历史"
+        aria-label={tr("会话历史")}
         tabIndex={0}
         style={{
           flex: 1,
           minHeight: 0,
           overflowY: "auto",
+          // TanStack owns height compensation while historical rows are
+          // virtualized. Native anchoring would apply the same delta twice.
+          overflowAnchor: shouldVirtualize ? "none" : undefined,
           display: "flex",
           flexDirection: "column",
           gap: "var(--space-turn-gap)",
@@ -491,28 +520,6 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
             <EmptyState />
           ) : (
             <>
-            {(hiddenTurnCount > 0 || historyPage?.hasMore) && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="self-center"
-                disabled={historyPage?.loading}
-                onClick={async () => {
-                  if (historyPage?.hasMore && conversationId) {
-                    await loadEarlierConversationMessages(conversationId, () => {
-                      if (useAppStore.getState().conversationId !== conversationId) return;
-                      captureHistoryScroll();
-                      setShowAllHistory(true);
-                    });
-                  } else {
-                    captureHistoryScroll();
-                    setShowAllHistory(true);
-                  }
-                }}
-              >
-                {historyPage?.loading ? "正在加载…" : historyPage?.hasMore ? "加载更早的消息" : `显示更早的消息（${hiddenTurnCount}）`}
-              </Button>
-            )}
             {shouldVirtualize ? (
               <div
                 ref={virtualListRef}
@@ -545,35 +552,25 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                   );
                 })}
               </div>
-            ) : historicalTurns.map((turn, i) => {
-              // Aggressive content-visibility optimization:
-              // - Last 5 turns: always visible (active conversation)
-              // - Earlier turns: use content-visibility auto for lazy rendering
-              const isRecent = i >= turns.length - 5;
-              const isVeryOld = i < turns.length - 20;
+            ) : null}
+            {recentTurns.map((turn) => {
+              const isTail = turn === tailTurn;
 
               return (
                 <div
                   key={turn.id}
+                  ref={isTail ? tailRef : undefined}
+                  data-testid={isTail ? liveTurn ? "streaming-turn-tail" : "latest-turn-tail" : undefined}
+                  data-reply-viewport={isTail ? reserveLatestReply ? "true" : "false" : undefined}
                   style={{
-                    contentVisibility: isRecent ? "visible" : "auto",
-                    containIntrinsicSize: isVeryOld ? "auto 200px" : "auto 120px",
+                    flex: "0 0 auto",
+                    minHeight: isTail && reserveLatestReply ? "var(--reply-viewport-height)" : undefined,
                   }}
                 >
                 <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
                 </div>
               );
             })}
-            {tailTurn && (
-              <div
-                ref={tailRef}
-                data-testid={liveTurn ? "streaming-turn-tail" : "latest-turn-tail"}
-                data-reply-viewport={reserveLatestReply ? "true" : "false"}
-                style={{ flex: "0 0 auto", minHeight: reserveLatestReply ? "var(--reply-viewport-height)" : undefined }}
-              >
-                <ChatTurn turn={tailTurn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
-              </div>
-            )}
             </>
           )}
         </div>
@@ -582,8 +579,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
         <button
           type="button"
           onClick={scrollToBottom}
-          aria-label="回到底部"
-          title={isStreaming && !isFollowing ? "回到底部 · 正在回复" : "回到底部"}
+          aria-label={tr("回到底部")}
+          title={isStreaming && !isFollowing ? tr("回到底部 · 正在回复") : tr("回到底部")}
           data-testid="scroll-to-bottom-button"
           className="absolute bottom-3 z-[20] inline-flex items-center justify-center cursor-pointer"
           style={{
@@ -609,15 +606,22 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   );
 };
 
-const EmptyState = () => (
+const EmptyState = () => {
+  const { t: tr } = useI18n();
+  const workingDirectory = useAppStore((state) => {
+    const conversation = state.conversations.find((item) => item.id === state.conversationId);
+    return conversation?.executionCwd && !conversation.workspaceRoot && !conversation.worktreePath ? "" : state.workingDirectory;
+  });
+  return (
   <div className="workbench-empty-state">
     <section className="workbench-empty-hero">
       <div className="workbench-empty-brand">
         <div className="workbench-empty-mark" aria-hidden="true">
           <BrandMark size={22} />
         </div>
-        <h1 className="workbench-empty-title">今天想构建什么？</h1>
+        <h1 className="workbench-empty-title">{workingDirectory ? <>{tr("你想让我们在")}<button type="button" className="workbench-empty-project" onClick={() => window.dispatchEvent(new CustomEvent("composer:open-project-picker"))}>{workspaceDisplayName(canonicalWorkspacePath(workingDirectory))}</button> {tr("中构建什么？")}</> : tr("我们要构建什么？")}</h1>
       </div>
     </section>
   </div>
-);
+  );
+};

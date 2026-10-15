@@ -14,6 +14,18 @@
 
 .skills-workspace[hidden],
 .skills-workspace-scroll[hidden] { display: none; }
+.skills-workspace-scroll { grid-column: 1; grid-row: 2; }
+.skills-workspace:has(.skills-product-tabs[data-sidebar-visible="true"]) { grid-template-rows: 0 minmax(0, 1fr); }
+.skills-workspace:has(.skills-product-tabs[data-sidebar-visible="true"]) .skills-workspace-toolbar { position: absolute; top: 28px; right: 40px; z-index: 2; padding: 0; }
+.skills-workspace-toolbar [hidden] { display: none; }
+.skills-product-tabs[data-sidebar-visible="true"] { display: none; }
+.skills-catalog-heading { margin-inline: 8px; }
+@media (max-width: 900px) {
+  .skills-workspace:has(.skills-product-tabs[data-sidebar-visible="true"]) { grid-template-rows: 50px minmax(0, 1fr); }
+  .skills-workspace:has(.skills-product-tabs[data-sidebar-visible="true"]) .skills-workspace-toolbar { position: static; padding: 0 12px; }
+  .skills-product-tabs[data-sidebar-visible="true"] { display: flex; }
+  .skills-catalog-heading { display: none; }
+}
 
 .skills-workspace-toolbar {
   display: flex;

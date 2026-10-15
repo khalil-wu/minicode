@@ -424,7 +424,7 @@ class WebSocketReplayEventStore:
         should_rewrite = False
         dropped_lines = 0
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
+            with self.path.open("rb") as handle:
                 for line in handle:
                     raw = line.strip()
                     if not raw:
@@ -432,7 +432,7 @@ class WebSocketReplayEventStore:
                         continue
                     try:
                         payload = json.loads(raw)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, UnicodeDecodeError):
                         logger.warning(
                             "Dropping malformed websocket replay log line in %s",
                             self.path,

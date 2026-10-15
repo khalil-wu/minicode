@@ -13,7 +13,8 @@ DEFAULT_WS_PING_INTERVAL_SECONDS: float | None = None
 
 
 def _should_enable_reload() -> bool:
-    return not sys.platform.startswith("win")
+    return (not sys.platform.startswith("win") and os.environ.get("MINICODE_BACKEND_RELOAD") == "1"
+            and os.environ.get("MINICODE_DESKTOP_OWNED") != "1")
 
 
 def _resolve_backend_host() -> str:
@@ -38,6 +39,11 @@ def _resolve_ws_ping_interval() -> float | None:
 
 
 if __name__ == "__main__":
+    if os.environ.get("MINICODE_DESKTOP_OWNED") == "1":
+        from backend.desktop_lifetime import bind_desktop_lifetime
+
+        desktop_lifetime = bind_desktop_lifetime(sys.stdin.buffer)
+
     # Windows 上必须使用 ProactorEventLoop 才能支持 asyncio.create_subprocess_exec
     # 必须在 uvicorn.run() 之前设置，否则 uvicorn 可能用 SelectorEventLoop
     if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):

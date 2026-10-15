@@ -62,6 +62,15 @@ def _candidate_executables() -> Iterable[Path]:
         yield PROJECT_ROOT / "desktop" / "windows-sandbox-runtime" / "codex.exe"
 
 
+def pty_command(argv: list[str], *, cwd: str | Path | None) -> list[str]:
+    executable = next((candidate.resolve() for candidate in _candidate_executables() if candidate.is_file()), None)
+    if executable is None:
+        from backend.sandbox.runner import SandboxUnavailableError
+
+        raise SandboxUnavailableError("Windows PTY runtime is unavailable; build the bundled native runtime.")
+    return [str(executable), "--run-as-pty", "--command-cwd", str(Path(cwd or Path.cwd()).resolve()), "--", *argv]
+
+
 def discover_runtime() -> tuple[WindowsNativeRuntime | None, str]:
     if sys.platform != "win32":
         return None, "the native Windows sandbox is Windows-only"
@@ -313,6 +322,7 @@ def prepare_command(
     deny_read_paths: Iterable[Path],
     deny_write_paths: Iterable[Path],
     argv: list[str] | None = None,
+    tty: bool = False,
 ) -> tuple[list[str], PrivateDesktop, Path]:
     runtime, reason = discover_runtime()
     if runtime is None:
@@ -358,6 +368,8 @@ def prepare_command(
             args.extend(("--deny-read-paths-json", _json(deny_read)))
         if deny_write:
             args.extend(("--deny-write-paths-json", _json(deny_write)))
+        if tty:
+            args.append("--tty")
         args.append("--")
         args.extend(argv if argv is not None else _powershell_argv(command))
         preparation.pop_all()

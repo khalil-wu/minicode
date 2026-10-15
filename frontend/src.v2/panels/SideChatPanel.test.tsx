@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../stores/types";
+import { File as NativeFile } from "node:buffer";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", {
   configurable: true,
@@ -33,7 +34,9 @@ vi.mock("../chat/sendChatMessage", async (importOriginal) => ({
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { SideChatPanel } from "./SideChatPanel";
+import { openNewSideChat } from "../chat/openSideChat";
 
 const successfulCreate = {
   type: "command.result",
@@ -117,9 +120,10 @@ describe("SideChatPanel server lifecycle", () => {
   });
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.awaitResult.mockImplementation(async (command) => ({ ...successfulCreate, data: { conversation_id: command.conversation_id } }));
+    mocks.awaitResult.mockImplementation(async (command) => ({ ...successfulCreate, data: { conversation_id: command.conversation_id, side_chat_transcript: [] } }));
     useAppStore.setState({
       sideChats: {},
+      activeSideChatId: null,
       sideChatPendingContext: null,
       isConnected: false,
       permissionMode: "confirm",
@@ -141,7 +145,81 @@ describe("SideChatPanel server lifecycle", () => {
     });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it("forks the captured main context into an inactive side owner and never puts a shortened main transcript into the user's message", async () => {
+    const mainMessages: ChatMessage[] = [{ id: "main-question", role: "user", content: "Main context that must be inherited by the backend", timestamp: 1, artifacts: [] }];
+    useAppStore.setState({ isConnected: true, isStreaming: true, messages: mainMessages, draft: "Main draft" });
+    const id = openNewSideChat({ conversationId: "main-conversation", workspaceRoot: "C:/workspace/primary", permissionMode: "confirm" });
+    render(<SideChatPanel />);
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalledWith(expect.objectContaining({
+      type: "conversation.create", conversation_id: id, conversation_type: "side_chat", source_conversation_id: "main-conversation", activate: false,
+    }), "conversation.create"));
+    expect(useAppStore.getState().sideChats[id].inheritedContext).toBeUndefined();
+    fireEvent.change(screen.getByRole("textbox", { name: "侧边对话消息" }), { target: { value: "My side question" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: id, displayContent: "My side question", backendContent: "My side question" })));
+    expect(useAppStore.getState().messages).toBe(mainMessages);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(useAppStore.getState().draft).toBe("Main draft");
+  });
+
+  it("restores only the server-projected side history and keeps its current draft after cold reuse", async () => {
+    const id = "side-recovered";
+    useAppStore.setState({ isConnected: true, activeSideChatId: id, sideChats: { [id]: {
+      id, workspaceRoot: "C:/workspace/primary", permissionMode: "confirm", parentConversationId: "main-conversation",
+      messages: [], isStreaming: false, draft: "Keep my new side draft", attachments: [], contextRefs: [],
+    } } });
+    mocks.awaitResult.mockResolvedValue({ ...successfulCreate, data: { conversation_id: id, parent_message_index: 0, side_chat_transcript: [
+      { id: "side-user", role: "user", content: "Real earlier side question", timestamp: 1 },
+      { id: "side-answer", role: "assistant", content: "Real earlier side answer", timestamp: 2 },
+    ] } });
+    render(<SideChatPanel />);
+    await screen.findByText("Real earlier side answer");
+    expect(useAppStore.getState().sideChats[id].messages.map(message => message.id)).toEqual(["side-user", "side-answer"]);
+    expect((screen.getByRole("textbox", { name: "侧边对话消息" }) as HTMLTextAreaElement).value).toBe("Keep my new side draft");
+    expect(useAppStore.getState().conversationId).toBe("main-conversation");
+  });
+
+  it("keeps each earlier side draft while a new header side chat is selected in the same workspace", async () => {
+    useAppStore.setState({ isConnected: true });
+    const first = openNewSideChat({ conversationId: "main-conversation", workspaceRoot: "C:/workspace/primary", permissionMode: "confirm" });
+    const view = render(<SideChatPanel />);
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "侧边对话消息" }), { target: { value: "Earlier side draft" } });
+    let second!: string;
+    act(() => { second = openNewSideChat({ conversationId: "main-conversation", workspaceRoot: "C:/workspace/primary", permissionMode: "confirm" }); });
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalledTimes(2));
+    expect((screen.getByRole("textbox", { name: "侧边对话消息" }) as HTMLTextAreaElement).value).toBe("");
+    expect(useAppStore.getState().sideChats[first].draft).toBe("Earlier side draft");
+    expect(useAppStore.getState().activeSideChatId).toBe(second);
+    expect(view.container.querySelectorAll('[data-side-chat-workspace="C:/workspace/primary"]')).toHaveLength(2);
+  });
+
+  it("retains an unmounted side draft, selection and original attachment bytes through a cold recovery read", async () => {
+    vi.stubGlobal("File", NativeFile);
+    useAppStore.setState({ isConnected: true });
+    const range = { startLineNumber: 2, startColumn: 1, endLineNumber: 4, endColumn: 3 };
+    useAppStore.getState().openSideChatWithSelection("retained selection", "source.ts", { range, workspaceRoot: "C:/workspace/primary" });
+    const view = render(<SideChatPanel />);
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalledOnce());
+    const id = Object.keys(useAppStore.getState().sideChats)[0];
+    fireEvent.change(screen.getByRole("textbox", { name: "侧边对话消息" }), { target: { value: "hidden side input" } });
+    const file = new File(["original side file bytes"], "side.txt", { type: "text/plain", lastModified: 456 });
+    act(() => useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id],
+      attachments: [{ id: "side-cold-file", name: file.name, type: file.type, size: file.size, status: "error", localFile: file }],
+    } } })));
+    view.unmount();
+    expect(mocks.deleteConversation).not.toHaveBeenCalled();
+    await flushComposerDrafts();
+    await resetComposerDraftStorageForTests(true);
+    const recovered = (await loadComposerDrafts()).find(record => record.owner.kind === "side" && record.owner.id === id)!;
+    expect(recovered.draft.draft).toBe("hidden side input");
+    expect(recovered.side?.parentConversationId).toBe("main-conversation");
+    expect(recovered.side?.selectedContext).toMatchObject({ text: "retained selection", source: "source.ts", range, workspaceRoot: "C:/workspace/primary" });
+    expect(await recovered.draft.attachments[0].localFile!.text()).toBe("original side file bytes");
+  });
 
   it("does not create while disconnected and creates exactly once after reconnect", async () => {
     render(<SideChatPanel />);
@@ -240,7 +318,14 @@ describe("SideChatPanel server lifecycle", () => {
     expect(mocks.sendChatMessage).not.toHaveBeenCalled();
     expect(mocks.deleteConversation).not.toHaveBeenCalled();
     view.unmount();
-    expect(mocks.deleteConversation).toHaveBeenCalledTimes(2);
+    expect(mocks.deleteConversation).not.toHaveBeenCalled();
+    await flushComposerDrafts();
+    await resetComposerDraftStorageForTests(true);
+    const recovered = (await loadComposerDrafts()).filter(record => record.owner.kind === "side");
+    expect(recovered.find(record => record.owner.id === firstId)).toMatchObject({ draft: { draft: "A 的未发送草稿" },
+      side: { selectedContext: { text: "project A code", source: "src/shared.ts", workspaceRoot: "C:/project-a" } } });
+    expect(recovered.find(record => record.owner.id === second.id)).toMatchObject({ draft: { draft: "B 的草稿" },
+      side: { selectedContext: { text: "project B code", source: "src/shared.ts", workspaceRoot: "C:/project-b" } } });
   });
 
   it("respects IME composition and the shared send shortcut", async () => {
@@ -347,7 +432,7 @@ describe("SideChatPanel server lifecycle", () => {
     expect(container.querySelector(".side-chat-composer-region")?.getAttribute("data-approval-replacement")).toBe("false");
   });
 
-  it("interrupts only the side turn through the command, composer and Escape actions", () => {
+  it("interrupts only the side turn through the source composer and Escape actions", () => {
     render(<SideChatPanel />);
     const sideId = Object.keys(useAppStore.getState().sideChats)[0];
     act(() => useAppStore.setState((state) => ({
@@ -358,10 +443,10 @@ describe("SideChatPanel server lifecycle", () => {
           blocks: [{ type: "tool_call", record: { id: "side-command", name: "run_command", args: { command: "npm test" }, status: "running", startedAt: 1 } }] },
       ] } },
     })));
-    fireEvent.click(screen.getByRole("button", { name: "停止命令" }));
+    expect(screen.queryByRole("button", { name: "停止命令" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
     fireEvent.keyDown(screen.getByRole("textbox", { name: "侧边对话消息" }), { key: "Escape" });
-    expect(mocks.sendCommand).toHaveBeenCalledTimes(3);
+    expect(mocks.sendCommand).toHaveBeenCalledTimes(2);
     for (const [command] of mocks.sendCommand.mock.calls) expect(command).toEqual({
       type: "interrupt", conversation_id: sideId, turn_id: "side-turn", message_id: "side-answer",
     });

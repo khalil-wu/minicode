@@ -19,6 +19,7 @@ class _FakeBackgroundManager:
             started_at=123.0,
             completed_at=None,
             conversation_id="conv-monitor",
+            command_completed=False,
         )
 
     def list_commands(self, include_completed: bool = False, *, conversation_id: str):
@@ -65,6 +66,10 @@ class _FakeBackgroundManager:
         *,
         conversation_id: str,
         close_stdin: bool = False,
+        context=None,
+        authorize_input=None,
+        wait_ms=0,
+        cursor=None,
     ) -> int:
         command = self.get_status(command_id, conversation_id=conversation_id)
         if command is None:
@@ -74,6 +79,10 @@ class _FakeBackgroundManager:
         command.stdin_chars = getattr(command, "stdin_chars", "") + chars
         command.stdin_closed = close_stdin
         return len(chars.encode("utf-8"))
+
+    def terminal_hook_payload(self, command_id, *, conversation_id, output):
+        assert self.get_status(command_id, conversation_id=conversation_id) is self.command
+        return {"command_id": command_id, "ready": False}
 
 
 def test_monitor_lists_background_commands() -> None:
@@ -163,8 +172,9 @@ def test_monitor_writes_exact_input_to_owned_background_command() -> None:
     assert not result.is_error
     assert manager.command.stdin_chars == "yes\n"
     assert manager.command.stdin_closed is True
-    assert "Wrote 4 UTF-8 bytes" in result.content
-    assert "closed stdin" in result.content
+    assert "server ready" in result.content
+    assert result.runtime_metadata["stdin_bytes_written"] == 4
+    assert result.runtime_metadata["stdin_closed"] is True
     assert tool.is_read_only({"action": "write_stdin"}) is False
     assert tool.is_idempotent({"action": "write_stdin"}) is False
 

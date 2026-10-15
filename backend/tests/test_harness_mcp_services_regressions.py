@@ -148,7 +148,8 @@ async def test_structured_mcp_result_survives_sdk_and_tool_projection():
     client._request = AsyncMock(return_value={"content": [], "structuredContent": {"answer": 42}, "_meta": {"ui/resourceUri": "ui://result"}})
     proxy = MCPToolProxy("structured", MCPToolDef("act", "act"), client)
     result = await proxy.execute({})
-    assert json.loads(result.content) == {"answer": 42}
+    assert json.loads(result.content.split("\nOutput:\n", 1)[1]) == {"answer": 42}
+    assert result.mcp_result == {"content": [], "structuredContent": {"answer": 42}}
     assert result.runtime_metadata["mcp"]["_meta"] == {"ui/resourceUri": "ui://result"}
 
 
@@ -162,9 +163,10 @@ def test_unchanged_tool_contract_reuses_derivation_and_changes_invalidate(monkey
     registry = ToolRegistry()
     registry.register(ToolSearchTool(registry))
     registry.register(MCPToolProxy("demo", MCPToolDef("old", "old"), None))
-    build = Mock(wraps=module.build_deferred_tools_prompt_block)
-    monkeypatch.setattr(module, "build_deferred_tools_prompt_block", build)
+    build = Mock(wraps=registry.build_schema_views)
+    monkeypatch.setattr(registry, "build_schema_views", build)
     schemas = registry.get_schemas()
+    build.reset_mock()
     first = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry)
     same = derive_turn_tool_schema_state(base_tool_schemas=deepcopy(schemas), mcp_instructions={}, tool_registry=registry, previous=first)
     assert same is first
@@ -207,8 +209,9 @@ def test_instructions_and_deferred_catalog_are_rederived():
     new = MCPToolProxy("demo", MCPToolDef("new", "new"), None)
     registry.register(new)
     second = derive_turn_tool_schema_state(base_tool_schemas=registry.get_schemas(), mcp_instructions={}, tool_registry=registry, previous=first)
-    assert new.name in second.deferred_tools_prompt_block
-    assert old.name not in second.deferred_tools_prompt_block
+    assert new.name in second.tool_names
+    assert old.name not in second.tool_names
+    assert first.deferred_tools_prompt_block == second.deferred_tools_prompt_block == ""
 
 
 def test_plugin_server_identity_is_shared_by_instructions_and_mentions(monkeypatch):
@@ -399,10 +402,12 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     monkeypatch.setattr(scheduled, "default_runtime", lambda: runtime)
     bootstrap = SimpleNamespace(create_tool_registry=lambda *args, **kwargs: object(),
         create_permission_checker=lambda **kwargs: object(), create_llm=lambda **kwargs: object(), mcp_manager=None)
-    task = SimpleNamespace(id="schedule", name="heartbeat", prompt="Continue", conversation_id=conversation.id,
+    from backend.tasks.scheduler import ScheduledTask, ScheduledTaskRun
+
+    task = ScheduledTask(id="schedule", name="heartbeat", prompt="Continue", conversation_id=conversation.id,
         workspace_root=str(tmp_path), permission_mode="confirm", isolation="workspace")
     try:
-        result = await scheduled.run_scheduled_task(task, SimpleNamespace(id="heartbeat-run"), bootstrap=bootstrap)
+        result = await scheduled.run_scheduled_task(task, ScheduledTaskRun(id="heartbeat-run"), bootstrap=bootstrap)
     finally:
         runtime.close()
     conversation = repository.get_conversation(conversation.id)

@@ -13,14 +13,16 @@ from backend.agent.code_execution_vm import CodeVM
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.loop_session import AgentLoopSessionContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.agent.turn_state import AgentTurnState
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, LLMSettings, PermissionSettings, TokenBudget
+from backend.config import AppConfig, AgentSettings, LLMSettings, PermissionSettings, TokenBudget
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
+from backend.llm.provider_contracts import ModelDefinition
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -35,11 +37,11 @@ def report_from_message(message):
 
 
 class ScriptModel(LLMAdapter):
-    def __init__(self, code, *, streamed=True, yield_time_ms=10000, max_chars=8000, after_first=None, terminate=False, parent_id="script-parent", first_call=None):
+    def __init__(self, code, *, streamed=True, yield_time_ms=10000, max_output_tokens=10000, after_first=None, terminate=False, parent_id="script-parent", first_call=None):
         self.code = code
         self.streamed = streamed
         self.yield_time_ms = yield_time_ms
-        self.max_chars = max_chars
+        self.max_output_tokens = max_output_tokens
         self.calls = 0
         self.reports = []
         self.inputs = []
@@ -49,6 +51,7 @@ class ScriptModel(LLMAdapter):
         self.terminate = terminate
         self.parent_id = parent_id
         self.first_call = first_call
+        self.receipt_state = None
 
     async def simple_chat(self, messages, *, max_tokens=None):
         raise AssertionError("No auxiliary model request is expected in this fixture")
@@ -59,13 +62,20 @@ class ScriptModel(LLMAdapter):
         self.visible_tool_names.append({item["function"]["name"] for item in tools or []})
         self.visible_tool_descriptions.append({item["function"]["name"]: item["function"]["description"] for item in tools or []})
         if self.calls == 1:
-            call = self.first_call or ToolCallEvent(id=self.parent_id, name="tool_exec", arguments={"code": self.code, "yield_time_ms": self.yield_time_ms, "max_chars": self.max_chars})
+            call = self.first_call or ToolCallEvent(id=self.parent_id, name="tool_exec", arguments={"code": self.code, "yield_time_ms": self.yield_time_ms, "max_output_tokens": self.max_output_tokens})
         else:
             latest = next(message for message in reversed(messages) if message.role == "tool")
-            try:
-                report = report_from_message(latest)
-            except (ValueError, StopIteration):
-                report = {"status": "unexpected", "error": latest.content}
+            if latest.code_mode_output is not None:
+                # Runtime receipts are observation evidence for this fixture.
+                # Providers receive the Source native body, never this JSON.
+                record = next(item for item in self.receipt_state.tool_calls
+                    if item.tool_call_id == latest.tool_call_id)
+                report = json.JSONDecoder().raw_decode(record.result_payload["summary"])[0]
+            else:
+                try:
+                    report = report_from_message(latest)
+                except (ValueError, StopIteration):
+                    report = {"status": "unexpected", "error": latest.content}
             self.reports.append(report)
             if self.after_first and self.calls == 2:
                 call = await self.after_first(report)
@@ -88,6 +98,7 @@ class FixtureTool(BaseTool):
     def __init__(self, name="rows", *, effect=False, delay=0, count=5000):
         self.name = name
         self.read_only = not effect
+        self.description = "Read fixture rows" if self.read_only else "Write fixture marker"
         self.mutates_workspace = effect
         self.delay = delay
         self.count = count
@@ -97,7 +108,7 @@ class FixtureTool(BaseTool):
         self.on_start = None
 
     def get_schema(self):
-        return ToolSchema(self.name, "Read fixture rows" if self.read_only else "Write fixture marker", {"type": "object", "properties": {}, "additionalProperties": False})
+        return ToolSchema(self.name, self.description, {"type": "object", "properties": {}, "additionalProperties": False})
 
     async def execute(self, args, context=None):
         self.executions += 1
@@ -109,12 +120,12 @@ class FixtureTool(BaseTool):
                 (context.workspace_root / "marker.txt").write_text("one write", encoding="utf-8")
                 return ToolResult("written")
             data = {"rows": [{"id": index, "text": "x" * 60} for index in range(self.count)]}
-            return ToolResult(json.dumps(data), runtime_metadata={"mcp": {"structuredContent": data, "_meta": {"private": "host-only"}}})
+            return ToolResult(json.dumps(data), mcp_result={"content": [{"type": "text", "text": json.dumps(data)}], "structuredContent": data, "isError": False}, runtime_metadata={"mcp": {"_meta": {"private": "host-only"}}})
         finally:
             self.finished.set()
 
 
-async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None, code_mode_only=False):
+async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None, code_mode_only=False, model_info=None):
     registry = ToolRegistry()
     for tool in [ToolExecTool(), ToolWaitTool(), *tools]: registry.register(tool)
     registry.register(ToolSearchTool(registry))
@@ -125,12 +136,16 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
         settings_args["code_mode_only"] = code_mode_only
     settings = AgentSettings(**settings_args)
     session = session or AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
-        permission_checker=PermissionChecker(PermissionSettings(require_confirm=[tool.name for tool in tools if not tool.read_only]), tmp_path),
+        permission_checker=PermissionChecker(PermissionSettings(require_confirm=[] if mode == "bypass" else [tool.name for tool in tools if not tool.read_only], require_diff_review=[]), tmp_path),
         agent_settings=settings, token_budget=budget, context_builder=builder, approval_handler=approval)
     runtime = AgentRuntime(metrics_file=tmp_path / "runtime/metrics.jsonl", swarm_store_dir=tmp_path / "runtime/swarm", enable_lease_heartbeat=False)
     journal = ExecutionJournal("code", base_dir=tmp_path / "journals")
-    run_context = RunContext(agent_runtime=runtime, execution_journal=journal)
+    admitted_model = (ModelExecutionSnapshot(config=AppConfig(llm=model._settings, agent=settings, token_budget=budget),
+        llm=model, provider=model_info.provider, model=model_info.id, model_info=model_info) if model_info is not None else None)
+    run_context = RunContext(agent_runtime=runtime, execution_journal=journal, model_execution=admitted_model)
     state = AgentState(user_message="Complete the fixture", conversation_id="code-conv", workspace_root=tmp_path)
+    if isinstance(model, ScriptModel):
+        model.receipt_state = state
     events = []
     try:
         async with asyncio.timeout(15), aclosing(QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state,
@@ -149,7 +164,7 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
 def test_clear_timeout_keeps_awaited_tool_running(tmp_path):
     async def scenario():
         tool = FixtureTool(delay=.01, count=1)
-        model = ScriptModel("const timer = setTimeout(() => text('unexpected timer'), 10000); clearTimeout(timer); const result = await tools.rows({}); text(result.structured_content.rows.length);")
+        model = ScriptModel("const timer = setTimeout(() => text('unexpected timer'), 10000); clearTimeout(timer); const result = await tools.rows({}); text(result.structuredContent.rows.length);")
         state, _, _, _, _ = await run_model(tmp_path, model, [tool])
         assert state.terminal_status == "completed", model.reports
         assert model.reports[-1]["status"] == "completed", model.reports
@@ -160,11 +175,34 @@ def test_clear_timeout_keeps_awaited_tool_running(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("shape", ["object", "array", "computed"])
+def test_selected_output_carries_only_actual_forwarded_tool_identities(tmp_path, shape):
+    async def scenario():
+        suffix = {"object": "text(r);", "array": "const second = await tools.rows({}); text([r, second]);",
+                  "computed": "text({content:r.content,is_error:r.is_error,note:'computed'});"}[shape]
+        model = ScriptModel("const r = await tools.rows({}); " + suffix)
+        state, _, _, events, _ = await run_model(tmp_path, model, [FixtureTool(count=1)])
+        assert state.terminal_status == "completed"
+        leaf_ids = [event.data["id"] for event in events if event.type == "tool_result"
+                    and event.data.get("call_source", {}).get("kind") == "code_mode"]
+        report = model.reports[-1]
+        if shape == "computed":
+            assert report["output_tool_call_ids"] == [""]
+            assert json.loads(report["output"][0])["note"] == "computed"
+        elif shape == "array":
+            assert report["output_tool_call_ids"] == [leaf_ids]
+            assert len(json.loads(report["output"][0])) == 2
+        else:
+            assert report["output_tool_call_ids"] == leaf_ids
+            assert "content" in json.loads(report["output"][0])
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("streamed", [False, True])
 def test_composition_filters_full_results_and_keeps_only_parent_calls_in_model_history(tmp_path, streamed):
     async def scenario():
         tool = FixtureTool()
-        model = ScriptModel('const r = await tools.rows({}); text(r.structured_content.rows.filter(row => row.id === 2500)); text(r.runtime_metadata === undefined);', streamed=streamed)
+        model = ScriptModel('const r = await tools.rows({}); text(r.structuredContent.rows.filter(row => row.id === 2500)); text(r.runtime_metadata === undefined);', streamed=streamed)
         state, builder, journal, events, _ = await run_model(tmp_path, model, [tool])
         assert state.terminal_status == "completed", model.reports
         assert model.calls == 2, model.reports
@@ -188,7 +226,7 @@ def test_composition_filters_full_results_and_keeps_only_parent_calls_in_model_h
 def test_code_mode_only_hides_direct_tools_but_executes_them_inside_tool_exec(tmp_path):
     async def scenario():
         tool = FixtureTool(count=2)
-        model = ScriptModel('const result = await tools.rows({}); text(result.structured_content.rows.length);')
+        model = ScriptModel('const result = await tools.rows({}); text(result.structuredContent.rows.length);')
         state, _, _, _, _ = await run_model(tmp_path, model, [tool], code_mode_only=None)
 
         assert state.terminal_status == "completed"
@@ -243,9 +281,12 @@ def test_independent_reads_overlap_and_deferred_tool_can_be_loaded_inside_one_sc
         left, right = ConcurrentRead("left", count=2), ConcurrentRead("right", count=2)
         left.peer, right.peer = right, left
         right.should_defer = True
-        model = ScriptModel('await tools.tool_search({query:"select:right"}); const rows = await Promise.all([tools.left({}), tools.right({})]); text(rows.map(r => r.structured_content.rows.length));')
-        state, _, _, _, _ = await run_model(tmp_path, model, [left, right], code_mode_only=code_mode_only)
-        assert model.reports[-1].get("output") == ["[2,2]"], model.reports
+        model = ScriptModel('const found=await tools.tool_search({query:"fixture rows"});text(found.tools.map(tool=>tool.name)); const rows = await Promise.all([tools.left({}), tools.right({})]); text(rows.map(r => r.structuredContent.rows.length));')
+        model._settings = LLMSettings(api_key="fixture", supports_search_tool=True)
+        info = ModelDefinition(provider="custom", id="fixture", name="Search-capable fixture", api="openai-responses", base_url="",
+            supports_search_tool=True)
+        state, _, _, _, _ = await run_model(tmp_path, model, [left, right], code_mode_only=code_mode_only, model_info=info)
+        assert model.reports[-1].get("output") == ['["right"]', "[2,2]"], model.reports
         assert state.terminal_status == "completed"
         assert left.executions == right.executions == 1
         assert left.started.is_set() and right.started.is_set()
@@ -330,7 +371,7 @@ def test_nested_tool_callback_cannot_complete_parent_or_inject_model_messages(tm
 def test_unawaited_calls_do_not_start_and_large_output_retains_a_valid_handle(tmp_path):
     async def scenario():
         writer = FixtureTool("write_marker", effect=True)
-        model = ScriptModel('tools.write_marker({}); text("x".repeat(30000));', max_chars=256)
+        model = ScriptModel('tools.write_marker({}); text("x".repeat(30000));', max_output_tokens=64)
         _, _, _, events, _ = await run_model(tmp_path, model, [writer])
         assert writer.executions == 0
         report = model.reports[-1]
@@ -437,16 +478,21 @@ def test_sdk_session_reuses_code_values_without_sharing_them_with_a_fork(tmp_pat
             workspace_root=tmp_path, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
             permission_context=PermissionContext(mode="bypass"), agent_settings=AgentSettings(max_iterations=4),
             token_budget=TokenBudget(total=96000, response_reserve=4096)) as sdk:
-            async for _ in sdk.query("Store the value"): pass
-            async for _ in sdk.query("Read the value", llm=second): pass
+            async def execute(session, prompt, model):
+                model.receipt_state = AgentState(user_message=prompt, workspace_root=tmp_path)
+                async for _ in session.query(prompt, llm=model, state=model.receipt_state):
+                    pass
+
+            await execute(sdk, "Store the value", first)
+            await execute(sdk, "Read the value", second)
             assert second.reports[-1].get("output") == ["7"], second.reports
             prior = ScriptModel("", first_call=ToolCallEvent(id="prior-receipt", name="tool_wait", arguments={"cell_id": first.reports[-1]["cell_id"]}))
-            async for _ in sdk.query("Read the prior receipt", llm=prior): pass
+            await execute(sdk, "Read the prior receipt", prior)
             assert prior.reports[-1]["status"] == "completed", prior.reports
             assert prior.reports[-1]["output"] == []
             child_model = ScriptModel('text(load("answer"));', parent_id="fork-parent")
             async with sdk.fork(session_id="code-fork") as child:
-                async for _ in child.query("Inspect the fork", llm=child_model): pass
+                await execute(child, "Inspect the fork", child_model)
                 assert child_model.reports[-1].get("output") == ["undefined"], child_model.reports
     asyncio.run(scenario())
 
@@ -458,7 +504,8 @@ def test_native_text_tool_input_uses_the_canonical_patch_executor(tmp_path):
         model = ScriptModel(f'text((await tools.apply_patch({json.dumps(patch)})).status);')
         state, _, _, events, _ = await run_model(tmp_path, model, [ApplyPatchTool()])
         assert state.terminal_status == "completed", model.reports
-        assert (tmp_path / "from-code.txt").read_text().strip() == "created through the canonical executor"
+        assert (tmp_path / "from-code.txt").is_file(), model.reports
+        assert (tmp_path / "from-code.txt").read_text(encoding="utf-8").strip() == "created through the canonical executor"
         nested = next(event for event in events if event.type == "tool_call" and event.data.get("name") == "apply_patch")
         assert nested.data["args"]["patch"] == patch
         assert nested.data["call_source"]["parent_call_id"] == "script-parent"
@@ -516,7 +563,7 @@ def test_only_selected_images_enter_model_context_and_artifacts_keep_the_owner(t
         model = ScriptModel(code)
         state, builder, _, events, _ = await run_model(tmp_path, model, [ImageTool("picture")])
         assert state.terminal_status == "completed", model.reports
-        assert sum(len(message.images) for message in builder._history) == int(emit_image)
+        assert sum(item["type"] == "input_image" for message in builder._history for item in message.code_mode_output or []) == int(emit_image)
         previews = [event for event in events if event.type == "artifact.preview"]
         assert len(previews) == int(emit_image)
         if emit_image:
@@ -562,8 +609,9 @@ def test_forwarded_leaf_images_keep_each_original_artifact_even_when_the_pixels_
         leaves = [event.data for event in events if event.type == "tool_result" and event.data.get("artifact_id") in original_ids]
         assert [event["tool_call_id"] for event in previews] == [event["id"] for event in leaves]
         assert all(event["source"] == "tool" and event["operation"] == "picture" and event["call_source"]["kind"] == "code_mode" for event in previews)
-        emitted = [image for message in builder._history for image in message.images]
-        assert [image["artifact_id"] for image in emitted] == original_ids
+        emitted = [image for message in builder._history for image in message.code_mode_output or [] if image["type"] == "input_image"]
+        assert [image["image_url"] for image in emitted] == ["data:image/png;base64," + png] * 2
+        assert [event["artifact_id"] for event in previews] == original_ids
         assert len(list((tmp_path / "artifacts").glob("art_*.meta.json"))) == 2
     asyncio.run(scenario())
 
@@ -585,16 +633,16 @@ def test_code_image_does_not_reuse_a_foreign_or_changed_artifact(tmp_path, misma
     async def scenario():
         code = 'const r=await tools.picture({});'
         if mismatch == "bytes":
-            code += 'r.images[0].data="aW1hZ2UtZWRpdA==";'
+            code += 'r.images[0].image_url="data:image/png;base64,aW1hZ2UtZWRpdA==";'
         if mismatch == "script-created-id":
             code += 'r.images[0].artifact_id=r.content;'
         code += 'image(r.images[0]); text("selected");'
         model = ScriptModel(code)
         state, builder, _, events, _ = await run_model(tmp_path, model, [SavedImageTool("picture")])
         assert state.terminal_status == "completed", model.reports
-        emitted = [image for message in builder._history for image in message.images]
+        emitted = [image for message in builder._history for image in message.code_mode_output or [] if image["type"] == "input_image"]
         assert len(emitted) == 1
-        selected = emitted[0]["artifact_id"]
+        selected = next(event.data["artifact_id"] for event in events if event.type == "artifact.preview")
         assert selected not in original_ids
         store = ArtifactStore(storage_dir=tmp_path / "artifacts")
         try:

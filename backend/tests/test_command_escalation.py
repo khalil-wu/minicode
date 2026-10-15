@@ -36,27 +36,16 @@ def test_sandbox_denial_detection(stderr, exit_code, expected):
 
 
 def test_check_permission_forces_confirm_on_escalation():
-    tool = RunCommandTool(ArtifactStore())
-    default_ctx = PermissionContext(mode="confirm")
-
-    # Escalation request in a normal mode must require confirmation.
-    assert (
-        tool.check_permission(
-            {"command": "pip install x", "with_escalated_permissions": True},
-            default_ctx,
-        )
-        == PermissionLevel.CONFIRM
-    )
-    # No escalation -> defer to centralized policy.
-    assert tool.check_permission({"command": "ls"}, default_ctx) is None
-    # Bypass mode already runs unsandboxed -> escalation is moot, defer.
-    assert (
-        tool.check_permission(
-            {"command": "pip install x", "with_escalated_permissions": True},
-            PermissionContext(mode="bypass"),
-        )
-        is None
-    )
+    from backend.permissions.native_execpolicy import NativeExecPolicyRuntime
+    payload = {"operation": "command_requirement", "sources": [], "environment_sources": [],
+        "ignore_allow_prefix_rules": False, "command": ["bash", "-lc", "git status"],
+        "configured_shell": "bash", "shell_mode": "normal", "approval_policy": "on-request",
+        "permission_profile": {"managed": True, "file_system": {"kind": "restricted", "full_disk_write": False}},
+        "windows_sandbox_level": "elevated", "sandbox_permissions": "require_escalated", "prefix_rule": None}
+    native = NativeExecPolicyRuntime()
+    assert native.invoke(payload)["requirement"]["kind"] == "needs_approval"
+    payload["sandbox_permissions"] = "use_default"
+    assert native.invoke(payload)["requirement"]["kind"] == "skip"
 
 
 def _sandboxed_ctx(workspace: Path) -> ToolExecutionContext:
@@ -81,10 +70,11 @@ def test_sandbox_failure_surfaces_escalation_hint():
             return_value=SandboxResult(stdout="", stderr="Network is unreachable", exit_code=1),
         ):
             res = asyncio.run(tool._execute_foreground(cmd, str(d), 30, _sandboxed_ctx(d), escalated=False))
-        assert res.is_error
-        assert res.status == "failed"
+        assert not res.is_error
+        assert res.status == "success"
+        assert res.runtime_metadata["exit_code"] == 1
         assert "[sandbox]" in res.content
-        assert "with_escalated_permissions=true" in res.content
+        assert 'sandbox_permissions="require_escalated"' in res.content
 
 
 def test_escalated_retry_does_not_readvertise_hint():
@@ -114,7 +104,8 @@ def test_ordinary_failure_has_no_escalation_hint():
             return_value=SandboxResult(stdout="", stderr="SyntaxError: bad", exit_code=1),
         ):
             res = asyncio.run(tool._execute_foreground(cmd, str(d), 30, _sandboxed_ctx(d), escalated=False))
-        assert res.is_error
+        assert not res.is_error
+        assert res.runtime_metadata["exit_code"] == 1
         assert "[sandbox]" not in res.content
 
 
@@ -134,14 +125,15 @@ def test_unavailable_sandbox_requires_explicit_escalation(tmp_path: Path):
     if not res.is_error:
         pytest.skip("This host has an enforceable restricted sandbox")
     assert "sandbox is unavailable" in res.content.lower()
-    assert "with_escalated_permissions=true" in res.content
-    assert "with_escalated_permissions=true" in res.content
+    assert 'sandbox_permissions="require_escalated"' in res.content
+    assert 'sandbox_permissions="require_escalated"' in res.content
 
 
 def test_schema_exposes_escalation_fields():
     tool = RunCommandTool(ArtifactStore())
     props = tool.get_schema().parameters["properties"]
-    assert "with_escalated_permissions" in props
+    assert props["sandbox_permissions"]["enum"] == ["use_default", "require_escalated", "with_additional_permissions"]
+    assert "prefix_rule" in props
     assert "justification" in props
 
 

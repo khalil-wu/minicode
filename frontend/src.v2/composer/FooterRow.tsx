@@ -1,4 +1,5 @@
-import { ArrowUp, Check, ChevronDown, ChevronRight, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare } from "lucide-react";
+import { useI18n, type Translate, type TranslationKey } from "../i18n";
+import { ArrowUp, Check, ChevronDown, ChevronRight, Folder, Globe, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare, X } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
@@ -10,10 +11,12 @@ import { formatModelLabel } from "../lib/model-label";
 import { UsageRing } from "../shell/UsageRing";
 import { openSettings } from "../lib/settings-navigation";
 import { selectableModelsForProvider } from "../lib/provider-models";
-import { ModelBrandIcon } from "../components/ModelBrandIcon";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
 import { Button } from "../components/Button";
+import { ComposerAddMenu } from "./ComposerAddMenu";
+import { isDesktop, openExternal, pickDirectory } from "../desktop/runtime";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 
 interface Props {
   sendState: SendButtonState;
@@ -29,11 +32,11 @@ interface Props {
 }
 
 const PERMISSION_MODES = [
-  { id: "confirm", label: "询问", icon: Hand, description: "敏感操作前请求确认" },
-  { id: "plan", label: "规划", icon: ListChecks, description: "先分析和规划，不执行修改" },
-  { id: "auto", label: "自动", icon: TerminalSquare, description: "按工作区权限策略执行" },
-  { id: "bypass", label: "完全访问", icon: ShieldAlert, description: "文件、命令与网络操作无需逐项确认" },
+  { id: "auto", label: "请求批准", icon: Hand, description: "编辑外部文件和使用互联网时始终询问" },
+  { id: "bypass", label: "完全访问", icon: ShieldAlert, description: "可不受限制地访问互联网和你电脑上的任何文件" },
 ] as const;
+const PERMISSIONS_HELP_URL = "https://developers.openai.com/codex/concepts/sandboxing#how-you-control-it";
+const openPermissionsHelp = () => isDesktop() ? openExternal(PERMISSIONS_HELP_URL) : window.open(PERMISSIONS_HELP_URL, "_blank", "noopener,noreferrer");
 
 type EffortOption = {
   id: EffortLevel;
@@ -41,7 +44,7 @@ type EffortOption = {
   description: string;
 };
 
-const KNOWN_EFFORT_OPTIONS: Record<string, Omit<EffortOption, "id">> = {
+const KNOWN_EFFORT_OPTIONS: Record<string, { label: TranslationKey | "Ultra"; description: TranslationKey }> = {
   none: { label: "关闭", description: "关闭模型推理" },
   minimal: { label: "最低", description: "最低推理强度" },
   low: { label: "低", description: "低推理强度" },
@@ -53,10 +56,21 @@ const KNOWN_EFFORT_OPTIONS: Record<string, Omit<EffortOption, "id">> = {
 };
 
 export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, minimal = false }: Props) => {
+  const { t: tr } = useI18n();
+  const { preferences } = useDesktopPreferences();
   const permissionMode = useAppStore((s) => s.permissionMode);
+  const agentMode = useAppStore((s) => s.agentMode);
+  const setAgentMode = useAppStore((s) => s.setAgentMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const conversationId = useAppStore((s) => s.conversationId);
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const currentModel = useAppStore((s) => s.currentModel);
+  const projectedDefaultModel = useAppStore((s) => s.defaultModelSelection);
+  const modelSelectionMode = useAppStore((s) => s.modelSelectionMode);
+  const availableModelOptions = useAppStore((s) => s.availableModelOptions);
+  const defaultModelSelection = projectedDefaultModel && projectedDefaultModel.conversationId === (conversationId || "")
+    && workspaceRootsEqual(projectedDefaultModel.workingDirectory, workingDirectory) ? projectedDefaultModel : null;
   const currentProvider = useAppStore((s) => s.currentProvider);
   const availableModels = useAppStore((s) => s.availableModels);
   const availableModelLabels = useAppStore((s) => s.availableModelLabels);
@@ -66,11 +80,21 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const prStatusIssue = useAppStore((s) => s.prStatusIssue);
   const setPermissionMode = useAppStore((s) => s.setPermissionMode);
   const setEffortLevel = useAppStore((s) => s.setEffortLevel);
+  const setModelSelection = useAppStore((s) => s.setModelSelection);
   const fileInputId = useId();
   const fileRef = useRef<HTMLInputElement>(null);
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const addTrigger = useRef<HTMLButtonElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setAddOpen(false); }, [conversationId, workingDirectory]);
+  useEffect(() => {
+    const openAddMenu = () => { setAddOpen(true); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); };
+    window.addEventListener("composer:open-add-menu", openAddMenu);
+    return () => window.removeEventListener("composer:open-add-menu", openAddMenu);
+  }, []);
   const [effortDraft, setEffortDraft] = useState<{ level: EffortLevel; model: string; owner: string | null | undefined; accepted: boolean } | null>(null);
   const effortRequest = useRef(0);
   const displayedEffort = effortDraft?.model === currentModel && effortDraft.owner === conversationId
@@ -84,6 +108,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
+      if (addOpen && !footerRef.current!.contains(e.target as Node)) setAddOpen(false);
       if ((modelOpen || effortOpen) && dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setModelOpen(false);
         setEffortOpen(false);
@@ -92,7 +117,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [modelOpen, permissionOpen, effortOpen]);
+  }, [modelOpen, permissionOpen, effortOpen, addOpen]);
 
   useEffect(() => {
     const root = modelOpen || effortOpen
@@ -168,38 +193,94 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     fileRef.current?.click();
   };
 
-  const switchModel = (model: string) => {
-    const conversationId = useAppStore.getState().conversationId;
-    sendClientCommand({ type: "llm.model.set", model, ...(conversationId ? { conversation_id: conversationId } : {}) });
-    setModelOpen(false);
-    queueMicrotask(() => dropdownRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
+  const addFolder = async () => {
+    const owner = useAppStore.getState();
+    const folder = await pickDirectory();
+    if (!folder) return;
+    const state = useAppStore.getState();
+    if (state.conversationId !== owner.conversationId || !workspaceRootsEqual(state.workingDirectory, owner.workingDirectory)) {
+      pushToast(tr("会话已切换，请在当前会话重新选择文件夹。"), "warning");
+      return;
+    }
+    state.addSelectedMention({ kind: "folder", path: folder, name: folder.split(/[/\\]/).filter(Boolean).pop()! });
   };
 
-  const switchEffort = (level: EffortLevel) => {
+  const editGoal = async () => {
+    const owner = useAppStore.getState();
+    const targetConversationId = await owner.ensureComposerConversation();
+    if (!targetConversationId) return;
+    const { showPrompt } = await import("../overlays/DialogService");
+    const text = await showPrompt({ title: tr("目标"), message: tr("设置这项任务持续追求的目标。清空内容可移除已有目标。"),
+      defaultValue: owner.activeGoal?.text || "", placeholder: tr("描述目标…"), confirmLabel: tr("保存") });
+    if (text === null) return;
+    sendClientCommand({ type: "conversation.goal.set", action: text.trim() ? "set" : "clear", text,
+      conversation_id: targetConversationId, source: "frontend.composer" });
+  };
+
+  const confirmUltraWithFullAccess = async (level: EffortLevel | undefined, owner: ReturnType<typeof useAppStore.getState>) => {
+    if (level !== "ultra" || owner.effortLevel === "ultra" || owner.permissionMode !== "bypass") return true;
+    const fallback = owner.runtimeCapabilities?.permission?.available_modes?.find(mode => mode !== "bypass");
+    const { showChoice } = await import("../overlays/DialogService");
+    const choice = await showChoice({ title: tr("要将 Ultra 与完全访问搭配使用吗？"), titleIcon: <ShieldAlert size={17} />,
+      message: fallback ? tr("开启 Ultra 和完全访问后，MiniCode 可在未经询问的前提下运行命令、联网检索、编辑电脑内任意路径文件，同时启用深度推理。你可切换至管控更严格的权限模式，或使用完全访问。")
+        : tr("开启 Ultra 和完全访问后，MiniCode 可在未经询问的前提下运行命令、联网检索、编辑电脑内任意路径文件，同时启用深度推理。目前没有可用的更严格权限模式。"),
+      confirmLabel: tr("使用完全访问"), cancelLabel: tr("继续"), cancelDisabled: !fallback, danger: true });
+    const current = useAppStore.getState();
+    if (choice === null || current.conversationId !== owner.conversationId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return false;
+    if (choice === false && (!fallback || !await setPermissionMode(fallback))) return false;
+    const after = useAppStore.getState();
+    return after.conversationId === owner.conversationId && workspaceRootsEqual(after.workingDirectory, owner.workingDirectory);
+  };
+
+  const switchModel = async (selection: { mode: "model"; model: string } | { mode: "default" }) => {
+    const owner = useAppStore.getState();
+    const option = selection.mode === "model" ? availableModelOptions.find(option => option.model === selection.model) : null;
+    const nextEffort = selection.mode === "default" ? defaultModelSelection?.reasoningEffort
+      : option?.reasoningEffortLevels.includes(owner.effortLevel) ? owner.effortLevel : option?.defaultReasoningEffort;
+    if (!await confirmUltraWithFullAccess(nextEffort, owner)) return;
+    const admitted = useAppStore.getState();
+    if (admitted.conversationId !== owner.conversationId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) return;
+    if (!await setModelSelection(selection)) return;
+    const current = useAppStore.getState();
+    if (current.conversationId !== owner.conversationId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return;
+    setModelOpen(false);
+    const capabilities = current.runtimeCapabilities?.provider_capabilities;
+    const hasEffort = capabilityBool(capabilities?.reasoning_effort_supported ?? capabilities?.reasoning_effort)
+      && normalizeCapabilityEffortLevels(capabilities?.reasoning_effort_levels).length > 0;
+    setEffortOpen(hasEffort);
+    if (!hasEffort) queueMicrotask(() => dropdownRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
+  };
+
+  const switchEffort = async (level: EffortLevel) => {
     if (level === displayedEffort) return;
+    const owner = useAppStore.getState();
     const request = ++effortRequest.current;
     const draft = { level, model: currentModel, owner: conversationId, accepted: false };
     setEffortDraft(draft);
-    void setEffortLevel(level).then((accepted) => {
-      if (request === effortRequest.current) setEffortDraft(accepted ? { ...draft, accepted: true } : null);
-    });
+    if (!await confirmUltraWithFullAccess(level, owner)) {
+      if (request === effortRequest.current) setEffortDraft(null);
+      return;
+    }
+    const admitted = useAppStore.getState();
+    if (admitted.conversationId !== owner.conversationId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) {
+      if (request === effortRequest.current) setEffortDraft(null);
+      return;
+    }
+    const accepted = await setEffortLevel(level);
+    if (request === effortRequest.current) setEffortDraft(accepted ? { ...draft, accepted: true } : null);
   };
 
   const switchPermissionMode = async (mode: PermissionMode) => {
     const owner = useAppStore.getState();
-    // Gate Full access (bypass) behind an explicit accept-responsibility
-    // confirm, mirroring cc's BypassPermissionsModeDialog. Other modes switch
-    // instantly. The dialog fires on every entry into bypass (no persisted
-    // skip-flag) — a deliberate extra confirmation step for a destructive mode.
-    if (mode === "bypass" && permissionMode !== "bypass") {
+    if (mode === "bypass") {
       setPermissionOpen(false);
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: "开启完全访问？",
-        message:
-          "完全访问允许智能体无需询问即可运行命令、编辑文件和使用网络。请仅在可信工作区中启用。",
-        confirmLabel: "开启完全访问",
-        cancelLabel: "取消",
+        title: tr("要开启完全访问吗？"),
+        titleIcon: <ShieldAlert size={17} />,
+        message: <FullAccessDetails tr={tr} />,
+        confirmLabel: tr("确认"),
+        cancelLabel: tr("取消"),
         danger: true,
       });
       if (!ok) return;
@@ -207,10 +288,10 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     const current = useAppStore.getState();
     if (current.conversationId !== owner.conversationId
       || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) {
-      pushToast("会话或工作区已切换，未应用原完全访问确认；请重新选择权限。", "warning");
+      pushToast(tr("会话或工作区已切换，未应用原完全访问确认；请重新选择权限。"), "warning");
       return;
     }
-    setPermissionMode(mode);
+    await setPermissionMode(mode);
     setPermissionOpen(false);
     queueMicrotask(() => permissionRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };
@@ -220,12 +301,12 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     const owner = useAppStore.getState();
     const next = !prMonitor[key];
     if (next) {
-      const label = key === "autoFix" ? "自动修复" : "自动合并";
+      const label = key === "autoFix" ? tr("自动修复") : tr("自动合并");
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: `开启${label}？`,
-        message: `${label}会在当前项目中持续生效；代码写入仍遵循当前权限策略。`,
-        confirmLabel: "开启",
+        title: tr("开启{label}？", { label }),
+        message: tr("{label}会在当前项目中持续生效；代码写入仍遵循当前权限策略。", { label }),
+        confirmLabel: tr("开启"),
       });
       if (!ok) return;
     }
@@ -234,7 +315,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)
       || current.prMonitor?.prNumber !== prMonitor.prNumber
       || current.prMonitor?.prUrl !== prMonitor.prUrl) {
-      pushToast("会话、工作区或 PR 已变化，原自动化确认已取消；请重新选择。", "warning");
+      pushToast(tr("会话、工作区或 PR 已变化，原自动化确认已取消；请重新选择。"), "warning");
       return;
     }
     const automationKey = key === "autoFix" ? "auto_fix" : "auto_merge";
@@ -248,17 +329,20 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     });
   };
 
-  const modelLabel = formatModelLabel(availableModelLabels[currentModel] || currentModel, "选择模型");
+  const modelLabel = formatModelLabel(availableModelLabels[currentModel] || currentModel, tr("选择模型"));
   const selectableModels = selectableModelsForProvider(
     availableModels,
     currentModel,
     currentProvider,
     modelsSource,
   );
-  const disabledReason = !currentModel.trim() ? "请先选择模型再发送" : undefined;
+  const disabledReason = sendState === "disabled" && !currentModel.trim() ? tr("请先选择模型再发送") : undefined;
 
-  const permLabel = permissionLabel(permissionMode);
-  const PermissionIcon = PERMISSION_MODES.find((mode) => mode.id === permissionMode)!.icon;
+  const permLabel = permissionLabel(permissionMode, tr);
+  const PermissionIcon = permissionMode === "bypass" ? ShieldAlert : Hand;
+  const availablePermissionModes = runtimeCapabilities?.permission?.available_modes;
+  const defaultPermissionMode = permissionMode !== "bypass" && availablePermissionModes?.includes(permissionMode)
+    ? permissionMode : availablePermissionModes?.find(mode => mode !== "bypass");
   const providerCapabilities = runtimeCapabilities?.provider_capabilities;
   const capabilityEffortLevels = normalizeCapabilityEffortLevels(
     providerCapabilities?.reasoning_effort_levels,
@@ -270,10 +354,10 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const composerEffortLevels = capabilityEffortLevels;
   const effortOptions = supportsReasoningEffort
     ? composerEffortLevels.map((level) => {
-      const option = effortOption(level);
+      const option = effortOption(level, tr);
       const wireMap = providerCapabilities?.reasoning_effort_wire_map as Record<string, string> | undefined;
       return level === "ultra" && wireMap?.ultra
-        ? { ...option, description: `主动多智能体协作；模型请求使用${effortOption(wireMap.ultra).label}推理` }
+        ? { ...option, description: tr("主动多智能体协作；模型请求使用{effort}推理", { effort: effortOption(wireMap.ultra, tr).label }) }
         : option;
     })
     : [];
@@ -283,33 +367,36 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   // real level unreachable from the menu.
   const effortIsDeclared = capabilityEffortLevels.includes(displayedEffort);
   const selectedEffort = effortOptions.find((option) => option.id === displayedEffort)
-    ?? effortOption(displayedEffort);
-  const effortTitle = supportsReasoningEffort && !effortIsDeclared
-    ? `模型推理强度：${selectedEffort.description}。当前 Provider 未声明支持该强度，请改选下方受支持的档位。`
-    : `模型推理强度：${selectedEffort.description}。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。`;
+    ?? effortOption(displayedEffort, tr);
+  const effortTitle = tr("选择模型");
   const effortLabel = supportsReasoningEffort && !effortIsDeclared
-    ? `${selectedEffort.label}（不支持）`
+    ? tr("{label}（不支持）", { label: selectedEffort.label })
     : selectedEffort.label;
 
   return (
-    <div className="flex flex-col gap-0">
+    <div ref={footerRef} className="flex flex-col gap-0">
+      {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} goalAvailable={!pendingConversationSwitchId}
+        onFiles={openFilePicker} onFolder={isDesktop() ? () => void addFolder() : undefined}
+        onGoal={() => void editGoal()} onPlan={() => setAgentMode(agentMode === "plan" ? "build" : "plan")}
+        onPlugin={id => useAppStore.getState().addSelectedMention({ kind: "plugin", name: id, configName: id, path: `plugin://${id}` })}
+        onClose={() => { setAddOpen(false); addTrigger.current!.focus(); }} />}
       {prMonitor && (
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
           <span className={prMonitor.ciStatus === "running" ? "thinking-pulse-dot" : undefined} style={prDotStyle(prMonitor.ciStatus)} />
           <span className="font-semibold" style={{ color: "var(--text-primary)" }}>PR #{prMonitor.prNumber}</span>
-          <span style={{ color: "var(--text-muted)" }}>检查：{ciStatusLabel(prMonitor.ciStatus)}</span>
+          <span style={{ color: "var(--text-muted)" }}>{tr("检查：")}{ciStatusLabel(prMonitor.ciStatus, tr)}</span>
           {prMonitor.failedChecks && prMonitor.failedChecks.length > 0 && (
-            <span style={{ color: "var(--state-danger)" }}>{prMonitor.failedChecks.length} 项失败</span>
+            <span style={{ color: "var(--state-danger)" }}>{prMonitor.failedChecks.length} {tr("项失败")}</span>
           )}
           <span className="flex-1" />
           <ToggleChip
-            label="自动修复"
+            label={tr("自动修复")}
             active={prMonitor.autoFix}
             disabled={Boolean(prStatusIssue)}
             onClick={() => togglePRAutomation("autoFix")}
           />
           <ToggleChip
-            label="自动合并"
+            label={tr("自动合并")}
             active={prMonitor.autoMerge}
             disabled={Boolean(prStatusIssue)}
             onClick={() => togglePRAutomation("autoMerge")}
@@ -320,17 +407,17 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       {prStatusIssue && <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
         <ShieldAlert size={13} aria-hidden="true" />
         <span style={{ flex: 1 }}>
-          {prStatusIssue.code === "auth_required" ? "GitHub 尚未连接。"
-            : prStatusIssue.code === "gh_unavailable" ? "GitHub 连接组件未就绪。"
-            : prStatusIssue.code === "permission_denied" ? "GitHub 无权访问当前仓库。"
-            : `PR 状态读取失败：${prStatusIssue.message}`}
+          {prStatusIssue.code === "auth_required" ? tr("GitHub 尚未连接。")
+            : prStatusIssue.code === "gh_unavailable" ? tr("GitHub 连接组件未就绪。")
+            : prStatusIssue.code === "permission_denied" ? tr("GitHub 无权访问当前仓库。")
+            : tr("PR 状态读取失败：{message}", { message: prStatusIssue.message })}
           {prMonitor && " 当前显示上次成功读取的结果。"}
         </span>
-        <Button variant="ghost" size="sm" onClick={() => openSettings("workspaceGit")}>{prStatusIssue.code === "auth_required" ? "连接 GitHub" : "查看连接设置"}</Button>
+        <Button variant="ghost" size="sm" onClick={() => openSettings("workspaceGit")}>{prStatusIssue.code === "auth_required" ? tr("连接 GitHub") : tr("查看连接设置")}</Button>
         <Button variant="ghost" size="sm" onClick={() => {
           const owner = useAppStore.getState();
           sendClientCommand({ type: "git.pr_status", conversation_id: owner.conversationId!, workspace_root: owner.workingDirectory });
-        }}>重试</Button>
+        }}>{tr("重试")}</Button>
       </div>}
 
       <div
@@ -354,15 +441,14 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         <div className="composer-footer-primary" style={footerLeftStyle}>
             <button
               type="button"
-            title="添加附件"
+            ref={addTrigger}
+            title={tr("添加文件等内容")}
             className="composer-attach-btn"
             style={iconBtn(compact)}
-            aria-label="添加附件"
-            onClick={openFilePicker}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              openFilePicker(event);
-            }}
+            aria-label={tr("添加文件等内容")}
+            aria-haspopup="menu"
+            aria-expanded={addOpen}
+            onClick={() => { setAddOpen(value => !value); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }}
           >
             <Plus size={compact ? 16 : 18} strokeWidth={1.8} />
           </button>
@@ -378,24 +464,29 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
               setPermissionOpen(open);
             }}
             label={permLabel}
-            title={`权限：${permLabel}`}
+            title={tr("更改权限")}
             icon={<PermissionIcon size={15} />}
+            disabled={availablePermissionModes === undefined}
+            warning={permissionMode === "bypass"}
           >
-            <div className="composer-menu-heading">操作权限</div>
-            {PERMISSION_MODES.map((mode) => (
+            <div className="composer-permission-heading"><span>{tr("应如何批准操作？")}</span><button type="button" onClick={openPermissionsHelp}>{tr("了解更多")}</button></div>
+            {PERMISSION_MODES.filter(mode => mode.id !== "bypass" || preferences?.showFullAccess !== false).map((mode) => (
               <MenuChoice
                 key={mode.id}
-                active={permissionMode === mode.id}
-                label={mode.label}
+                active={mode.id === "bypass" ? permissionMode === "bypass" : permissionMode !== "bypass"}
+                label={tr(mode.label)}
                 icon={<mode.icon size={17} />}
-                description={mode.description}
+                description={mode.id === "bypass" && !availablePermissionModes?.includes("bypass") ? tr("被 requirements.toml 禁用") : tr(mode.description)}
+                disabled={mode.id === "bypass" ? !availablePermissionModes?.includes("bypass") : !defaultPermissionMode}
                 warning={mode.id === "bypass"}
                 onClick={() => {
-                  switchPermissionMode(mode.id);
+                  void switchPermissionMode(mode.id === "bypass" ? "bypass" : defaultPermissionMode!);
                 }}
               />
             ))}
           </Picker>
+
+          {agentMode === "plan" && <button type="button" className="composer-plan-chip" aria-label={tr("关闭计划模式")} title={tr("计划模式")} onClick={() => setAgentMode("build")}><ListChecks size={15} /><span>{tr("计划")}</span><X size={13} /></button>}
 
         </div>
 
@@ -403,7 +494,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
 
         {!minimal && <ContextUsageRing />}
 
-        <div className="composer-model-controls" role="group" aria-label="模型与推理强度">
+        <div className="composer-model-controls" role="group" aria-label={tr("模型与推理强度")}>
         <div ref={dropdownRef} className="composer-model-picker relative" onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) { setModelOpen(false); setEffortOpen(false); }
         }}>
@@ -417,31 +508,32 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             }}
             className="composer-model-select"
             data-reasoning-supported={supportsReasoningEffort}
-            aria-label={supportsReasoningEffort ? `模型与推理强度：${modelLabel}，${effortLabel}` : undefined}
+            aria-label={supportsReasoningEffort ? tr("模型与推理强度：{model}，{effort}", { model: modelLabel, effort: effortLabel }) : undefined}
             aria-expanded={modelOpen || effortOpen}
             aria-haspopup={supportsReasoningEffort ? "dialog" : "listbox"}
             style={pill}
-            title={supportsReasoningEffort ? effortTitle : currentModel || "选择模型"}
+            title={supportsReasoningEffort ? effortTitle : currentModel || tr("选择模型")}
           >
-            {!supportsReasoningEffort && <span className="composer-floating-model-icon" aria-hidden="true"><ModelBrandIcon model={currentModel} size={15} /></span>}
             <span className="composer-model-trigger-label">{modelLabel}</span>
             {supportsReasoningEffort && <span className="composer-model-trigger-effort" data-effort={displayedEffort}>{effortLabel}</span>}
             <ChevronDown size={13} aria-hidden="true" />
           </button>
           {modelOpen && (
-            <div className="mc-dropdown-menu composer-picker-menu composer-model-menu" role="listbox" aria-label="选择模型" style={{ ...dropdownStyle("right"), overflow: "hidden" }}>
-              <div className="composer-menu-heading">选择模型</div>
+            <div className="mc-dropdown-menu composer-picker-menu composer-model-menu" role="listbox" aria-label={tr("选择模型")} style={{ ...dropdownStyle("right"), overflow: "hidden" }}>
+              <div className="composer-menu-heading">{tr("选择模型")}</div>
               <div className="composer-model-options">
-              {selectableModels.length === 0 && <div className="composer-menu-empty">尚未配置模型</div>}
-              {selectableModels.map((m) => (
-                  <button key={m} type="button" role="option" aria-selected={m === currentModel} className="composer-model-option" onClick={() => switchModel(m)} style={{ ...dropdownItem, display: "grid", gridTemplateColumns: "20px minmax(0, 1fr) 16px" }}>
-                  <ModelBrandIcon model={m} size={16} />
-                  <span className="composer-model-option-label" title={availableModelLabels[m] || m}>{availableModelLabels[m] || m}</span>
-                  <Check size={14} aria-hidden="true" style={{ visibility: m === currentModel ? "visible" : "hidden" }} />
+              {selectableModels.length === 0 && <div className="composer-menu-empty">{tr("尚未配置模型")}</div>}
+               {defaultModelSelection && <button type="button" role="option" aria-selected={modelSelectionMode === "default"} className="composer-model-option composer-model-default" onClick={() => { void switchModel({ mode: "default" }); }} style={dropdownItem}>
+                 <span><span>{tr("默认")}</span><small>{tr("项目配置的模型与强度")}</small></span><Check size={14} style={{ visibility: modelSelectionMode === "default" ? "visible" : "hidden" }} aria-hidden="true" />
+               </button>}
+               {selectableModels.map((m) => (
+                   <button key={m} type="button" role="option" aria-selected={m === currentModel && modelSelectionMode !== "default"} className="composer-model-option" onClick={() => { void switchModel({ mode: "model", model: m }); }} style={{ ...dropdownItem, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 16px" }}>
+                  <span className="composer-model-option-label" title={m}>{formatModelLabel(availableModelLabels[m] || m)}</span>
+                   <Check size={14} aria-hidden="true" style={{ visibility: m === currentModel && modelSelectionMode !== "default" ? "visible" : "hidden" }} />
                 </button>
               ))}
               </div>
-              <div className="composer-model-menu-footer">
+              {selectableModels.length === 0 && <div className="composer-model-menu-footer">
                 <button
                   type="button"
                   role="option"
@@ -452,19 +544,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
                   }}
                   style={dropdownItem}
                 >
-                  配置模型…
-                </button>
-              </div>
+                  {tr("配置模型…")}</button>
+              </div>}
             </div>
           )}
         {supportsReasoningEffort && effortOpen && (
-          <div className="mc-dropdown-menu composer-picker-menu composer-reasoning-menu" role="dialog" aria-label="模型与推理强度" style={dropdownStyle("right")}>
+          <div className="mc-dropdown-menu composer-picker-menu composer-reasoning-menu" role="dialog" aria-label={tr("模型与推理强度")} style={dropdownStyle("right")}>
             <EffortControl
               key={`${currentModel}:${conversationId}:${composerEffortLevels.join(",")}`}
               options={effortOptions}
               selected={selectedEffort}
               modelLabel={modelLabel}
               onSelect={switchEffort}
+              onReset={defaultModelSelection && modelSelectionMode === "model" ? () => { void switchModel({ mode: "default" }); } : undefined}
               onChooseModel={() => {
                 setEffortOpen(false);
                 setModelOpen(true);
@@ -479,8 +571,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
           <button
             type="button"
             onClick={onStop}
-             title="停止当前回复"
-             aria-label="停止当前回复"
+             title={tr("停止当前回复")}
+             aria-label={tr("停止当前回复")}
             className="composer-stop-current-btn w-7 h-7 border-0 inline-flex items-center justify-center"
           >
             <Square size={14} fill="currentColor" className="anim-icon-swap" />
@@ -505,6 +597,8 @@ const Picker = ({
   icon,
   children,
   menuRole = "listbox",
+  disabled = false,
+  warning = false,
 }: {
   refEl: React.RefObject<HTMLDivElement>;
   open: boolean;
@@ -516,6 +610,8 @@ const Picker = ({
   icon?: React.ReactNode;
   children: React.ReactNode;
   menuRole?: "listbox" | "dialog";
+  disabled?: boolean;
+  warning?: boolean;
 }) => (
   <div ref={refEl} className={`${className ?? "composer-permission-picker"} relative`} onBlur={(event) => {
     if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
@@ -526,26 +622,30 @@ const Picker = ({
         setOpen(!open);
       }}
       className="composer-permission-btn"
+      disabled={disabled}
+      data-warning={warning || undefined}
       aria-expanded={open}
       aria-haspopup={menuRole}
-      style={{ ...pill, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent" }}
+      aria-label={title}
+      style={{ ...pill, color: warning ? "var(--state-warning)" : pill.color, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent" }}
       title={title}
     >
       {icon}
       <span className="composer-control-label">{label}</span>
-      <ChevronDown size={14} className="opacity-55 ml-0.5" />
     </button>
     {open && <div className="mc-dropdown-menu composer-picker-menu" role={menuRole} aria-label={title} style={dropdownStyle(align)}>{children}</div>}
   </div>
 );
 
-function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel }: {
+function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel, onReset }: {
   options: EffortOption[];
   selected: EffortOption;
   modelLabel: string;
   onSelect: (level: EffortLevel) => void;
   onChooseModel: () => void;
+  onReset?: () => void;
 }) {
+  const { t: tr } = useI18n();
   const selectedIndex = options.findIndex((option) => option.id === selected.id);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const index = dragIndex ?? Math.max(0, selectedIndex);
@@ -561,12 +661,12 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel 
     <div className="composer-effort-heading">
       <div className="composer-effort-selection">
         <span className="composer-effort-value">{current.label}</span>
-        <button type="button" className="composer-effort-model-toggle" aria-label="选择模型" title={modelLabel} aria-haspopup="listbox" onClick={onChooseModel}>
+        <button type="button" className="composer-effort-model-toggle" aria-label={tr("选择模型")} title={modelLabel} aria-haspopup="listbox" onClick={onChooseModel}>
           <span className="composer-effort-model">{modelLabel}</span>
           <ChevronRight size={14} aria-hidden="true" />
         </button>
       </div>
-      {options.some((option) => option.id === "medium") && <button type="button" className="composer-effort-reset" title="恢复中等推理强度" aria-label="恢复中等推理强度" onClick={() => onSelect("medium")}><RotateCcw size={16} /></button>}
+      {onReset && <button type="button" className="composer-effort-reset" title={tr("重置为默认")} aria-label={tr("重置为默认")} onClick={onReset}><RotateCcw size={16} /></button>}
     </div>
     {canSlide && <div
       className="composer-effort-slider"
@@ -583,7 +683,7 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel 
       <input
         className="composer-effort-input"
         type="range" min={0} max={options.length - 1} step={1} value={index}
-        aria-label="推理强度" aria-valuetext={current.label}
+        aria-label={tr("推理强度")} aria-valuetext={current.label}
         onChange={(event) => setDragIndex(Number(event.target.value))}
         onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
         onPointerMove={(event) => { if (event.buttons === 1) setDragging(true); }}
@@ -593,7 +693,7 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel 
         onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(); }}
       />
     </div>}
-    {!canSlide && <div role="listbox" aria-label="推理档位" className="composer-effort-options">
+    {!canSlide && <div role="listbox" aria-label={tr("推理档位")} className="composer-effort-options">
       {options.map((option) => <MenuChoice key={option.id} label={option.label} active={selected.id === option.id} onClick={() => onSelect(option.id)} />)}
     </div>}
   </div>;
@@ -606,6 +706,7 @@ const MenuChoice = ({
   icon,
   description,
   warning = false,
+  disabled = false,
 }: {
   active: boolean;
   label: string;
@@ -613,6 +714,7 @@ const MenuChoice = ({
   icon?: React.ReactNode;
   description?: string;
   warning?: boolean;
+  disabled?: boolean;
 }) => (
   <button
     type="button"
@@ -620,10 +722,12 @@ const MenuChoice = ({
     aria-selected={active}
     aria-label={label}
     onClick={onClick}
+    disabled={disabled}
     className="composer-menu-choice"
-    data-warning={warning && active ? "true" : undefined}
+    data-warning={warning ? "true" : undefined}
     style={{
       ...dropdownItem,
+      color: warning ? "var(--state-warning)" : dropdownItem.color,
       display: "grid",
       gridTemplateColumns: icon ? "20px minmax(0, 1fr) 16px" : "18px minmax(0, 1fr)",
       columnGap: 8,
@@ -640,14 +744,14 @@ const MenuChoice = ({
   </button>
 );
 
-const effortOption = (level: EffortLevel): EffortOption => {
+const effortOption = (level: EffortLevel, tr: Translate): EffortOption => {
   const normalized = String(level || "").trim().toLowerCase() as EffortLevel;
   const known = KNOWN_EFFORT_OPTIONS[normalized];
-  if (known) return { id: normalized, ...known };
+  if (known) return { id: normalized, label: known.label === "Ultra" ? "Ultra" : tr(known.label), description: tr(known.description) };
   return {
     id: normalized,
     label: normalized,
-    description: `Provider 声明的推理强度：${normalized}`,
+    description: tr("Provider 声明的推理强度：{effort}", { effort: normalized }),
   };
 };
 
@@ -664,6 +768,7 @@ const normalizeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
 };
 
 const ContextUsageRing = memo(() => {
+  const { t: tr } = useI18n();
   const contextUsage = useAppStore((s) => s.contextUsage);
   const budgetBuckets = useAppStore((s) => s.budgetBuckets);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
@@ -695,7 +800,7 @@ const ContextUsageRing = memo(() => {
         conversation_id: conversationId || undefined,
         source: "usage_ring",
       })}
-       aria-label="查看会话用量详情"
+       aria-label={tr("查看会话用量详情")}
       className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >
@@ -722,18 +827,27 @@ const ToggleChip = ({ label, active, onClick, disabled = false }: { label: strin
   </button>
 );
 
-const permissionLabel = (mode: PermissionMode): string => {
-  if (mode === "confirm") return "询问";
-  if (mode === "plan") return "规划";
-  if (mode === "auto") return "自动";
-  if (mode === "bypass") return "完全访问";
-  return "自动";
+const permissionLabel = (mode: PermissionMode, tr: Translate): string => {
+  if (mode === "bypass") return tr("完全访问");
+  return tr("请求批准");
 };
 
-const ciStatusLabel = (status: string): string => ({
-  running: "运行中",
-  passed: "已通过",
-  failed: "失败",
+const FullAccessDetails = ({ tr }: { tr: Translate }) => <div className="composer-full-access-details">
+  <p>{tr("MiniCode 将能够在未经您许可的情况下，在这台计算机上的任何位置运行命令、使用互联网，以及创建和编辑文件。这包括但不限于：")}</p>
+  <div className="composer-full-access-capabilities">
+    {[
+      { Icon: Folder, title: "文件和文件夹", description: "读取、创建、修改、上传或删除此计算机上任意位置的文件" },
+      { Icon: TerminalSquare, title: "终端命令", description: "运行命令、安装软件和更改系统设置" },
+      { Icon: Globe, title: "互联网和已连接的应用", description: "访问网站、发送数据并使用已启用的插件" },
+    ].map(({ Icon, title, description }) => <div key={title}><Icon size={24} /><span><strong>{tr(title as TranslationKey)}</strong><small>{tr(description as TranslationKey)}</small></span></div>)}
+  </div>
+  <p>{tr("这会带来敏感数据丢失或泄露、提示注入等风险。你可以将其关闭。")}{" "}<button type="button" onClick={openPermissionsHelp}>{tr("了解更多")}</button></p>
+</div>;
+
+const ciStatusLabel = (status: string, tr: Translate): string => ({
+  running: tr("运行中"),
+  passed: tr("已通过"),
+  failed: tr("失败"),
 }[status] ?? status);
 
 const prMonitorStyle = (status: string): React.CSSProperties => ({
@@ -827,14 +941,15 @@ const dropdownItem: React.CSSProperties = {
 };
 
 const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
+  const { t: tr } = useI18n();
   const disabled = sendState === "disabled";
   const label = sendState === "stop"
-    ? "停止当前回复"
+    ? tr("停止当前回复")
     : sendState === "queue"
-      ? "将消息加入队列"
+      ? tr("将消息加入队列")
       : sendState === "offline-queue"
-         ? "连接恢复后发送"
-         : "发送";
+         ? tr("连接恢复后发送")
+         : tr("发送");
   return (
     <button onClick={onSend} disabled={disabled} title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
       {sendState === "stop" ? <Square size={14} fill="currentColor" className="anim-icon-swap" /> : <ArrowUp size={16} strokeWidth={1.8} className="anim-icon-swap" />}

@@ -72,11 +72,11 @@ describe("content block helpers", () => {
     })).toBe(false);
   });
 
-  it("joins completed and partial agent-message items and ignores process text", () => {
+  it("accepts the latest completed or partial item and retains separate process evidence", () => {
     expect(getAnswerTextFromBlocks([
       { type: "text", itemId: "a", content: "A", status: "completed", isStreaming: false },
       { type: "process", id: "p", itemKind: "process_text", content: "working", status: "completed", timestamp: 1 },
       { type: "text", itemId: "b", content: "B", status: "partial", isStreaming: false },
-    ])).toBe("AB");
+    ])).toBe("B");
   });
 });

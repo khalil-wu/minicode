@@ -14,7 +14,7 @@ vi.mock("../protocol/workspace", () => ({ readWorkspaceProjectIndex: vi.fn(), re
 vi.mock("./monacoLanguageServices", async (original) => ({
   ...await original<typeof import("./monacoLanguageServices")>(),
   setWorkspaceTypeScriptFiles: vi.fn(),
-  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: async () => [], configurationDiagnostics: async () => [], addConfigurationFiles: async () => {} })),
+  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: async () => [], dependencyRequests: async () => [], configurationDiagnostics: async () => [], addConfigurationFiles: async () => {} })),
 }));
 
 const root = "/pending-index";
@@ -96,7 +96,7 @@ describe("shared index refresh with actual editor drafts", () => {
     await act(async () => finishFirst(snapshot(original)));
     expect(result.current.status.phase).toBe("ready");
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith(root, false, signal);
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith(root, false, signal, undefined, undefined);
     await act(async () => finishSecond(snapshot("export const value = 3;")));
     expect(result.current.status.phase).toBe("ready");
     expect(monaco.editor.getModels()).toEqual([model]);

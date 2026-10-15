@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import os
 import stat
+from array import array
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any
 
@@ -33,13 +35,27 @@ class WorkspaceTextSearchRequest(BaseModel):
     limit: int = Field(default=1000, ge=1, le=2000)
 
 
-def _utf16(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
+def _text_index(content: str) -> tuple[array, list[int]]:
+    offsets = array("I", [0])
+    for character in content:
+        offsets.append(offsets[-1] + (2 if ord(character) > 0xFFFF else 1))
+    line_starts = [0, *(match.end() for match in re.finditer(r"\r\n|\r|\n", content))]
+    return offsets, line_starts
 
 
-def _position(content: str, offset: int) -> tuple[int, int]:
-    lines = re.split(r"\r\n|\r|\n", content[:offset])
-    return len(lines), _utf16(lines[-1]) + 1
+def _position(offset: int, utf16: array, line_starts: list[int]) -> tuple[int, int]:
+    line = bisect_right(line_starts, offset)
+    return line, utf16[offset] - utf16[line_starts[line - 1]] + 1
+
+
+def _snippet(content: str, start: int, line_start: int) -> str:
+    snippet_start = max(line_start, start - 160)
+    boundary = min(len(content), snippet_start + 320)
+    line_end = re.search(r"\r|\n", content[start:boundary])
+    snippet_end = start + line_end.start() if line_end else boundary
+    return ("…" if snippet_start > line_start else "") + content[snippet_start:snippet_end] + (
+        "…" if snippet_end < len(content) and content[snippet_end] not in "\r\n" else ""
+    )
 
 
 def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearchRequest) -> dict[str, Any]:
@@ -95,6 +111,7 @@ def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearc
             read_only = not bool((root / relative).stat().st_mode & stat.S_IWUSR)
         if "\x00" in content:
             continue
+        utf16, line_starts = _text_index(content)
         matches: list[dict[str, Any]] = []
         for match in pattern.finditer(content):
             if request.whole_word and ((match.start() and re.match(r"\w", content[match.start() - 1]))
@@ -103,17 +120,18 @@ def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearc
             if count >= request.limit:
                 truncated = True
                 break
-            line, column = _position(content, match.start())
-            end_line, end_column = _position(content, match.end())
-            offset = _utf16(content[:match.start()])
-            length = _utf16(match.group())
-            line_start = max(content.rfind("\n", 0, match.start()), content.rfind("\r", 0, match.start())) + 1
-            line_end = re.search(r"\r|\n", content[match.end():])
-            snippet_end = match.end() + line_end.start() if line_end else len(content)
+            line, column = _position(match.start(), utf16, line_starts)
+            end_line, end_column = _position(match.end(), utf16, line_starts)
+            offset = utf16[match.start()]
+            length = utf16[match.end()] - offset
+            groups = [None if match.start(index) < 0 else {
+                "offset": utf16[match.start(index)],
+                "length": utf16[match.end(index)] - utf16[match.start(index)],
+            } for index in range(1, pattern.groups + 1)]
             matches.append({"id": f"{relative}:{offset}:{length}:{len(matches)}", "offset": offset, "length": length,
                 "line": line, "column": column, "end_line": end_line, "end_column": end_column,
-                "text": match.group(), "snippet": content[line_start:snippet_end],
-                "groups": list(match.groups()), "named_groups": match.groupdict()})
+                "snippet": _snippet(content, match.start(), line_starts[line - 1]),
+                "groups": groups, "named_groups": {name: groups[index - 1] for name, index in pattern.groupindex.items()}})
             count += 1
         if matches:
             files.append({"path": relative, "content": content, "original": original, "content_hash": content_hash,

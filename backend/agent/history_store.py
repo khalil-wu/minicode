@@ -209,7 +209,7 @@ class ConversationHistory:
         tokens, count, sources = estimate_native_attachments(message.images, message.documents)
         return _HistoryAccounting(
             "tool_results" if message.role == "tool" else "history",
-            str(message.name or "tool") if message.role == "tool" else str(message.role or "message"),
+            "" if message.private_model_only else str(message.name or "tool") if message.role == "tool" else str(message.role or "message"),
             max(0, estimate - tokens), tokens, count, tuple(sources),
         )
 
@@ -222,6 +222,8 @@ class ConversationHistory:
             row["tokens"] += sign * tokens
             row["items"] += sign * count
             for source in sources:
+                if not source:
+                    continue
                 row["sources"][source] += sign
                 if row["sources"][source] == 0:
                     del row["sources"][source]

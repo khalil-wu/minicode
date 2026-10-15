@@ -625,7 +625,7 @@ class FileSwarmStore:
                     mailbox_epoch = excluded.mailbox_epoch
                 WHERE ? IS NULL
                    OR subagent_runs.owner_token = ?
-                   OR (? = 1 AND subagent_runs.status != 'running')
+                   OR (? = 1 AND subagent_runs.status NOT IN ('pending', 'running'))
                 """,
                 (
                     subagent_id,
@@ -670,6 +670,25 @@ class FileSwarmStore:
                 values,
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
+
+    def active_subagent_snapshot(self) -> list[dict[str, Any]]:
+        """Read global work blockers without loading child prompts or transcripts."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT subagent_id, status,
+                       json_extract(payload_json, '$.cleanup_pending') AS cleanup_pending
+                FROM subagent_runs
+                WHERE status IN ('pending', 'running')
+                   OR json_extract(payload_json, '$.cleanup_pending') = 1
+                ORDER BY subagent_id
+                """
+            ).fetchall()
+        return [
+            {"id": row["subagent_id"], "status": row["status"],
+             "cleanup_pending": bool(row["cleanup_pending"])}
+            for row in rows
+        ]
 
     def get_subagent(self, subagent_id: str) -> dict[str, Any] | None:
         clean_id = str(subagent_id or "").strip()
@@ -858,7 +877,7 @@ class FileSwarmStore:
                     """
                     SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
                     FROM subagent_runs
-                    WHERE status = 'running'
+                    WHERE status IN ('pending', 'running')
                        OR json_extract(payload_json, '$.cleanup_pending') = 1
                     ORDER BY updated_at DESC, subagent_id
                     """
@@ -867,7 +886,7 @@ class FileSwarmStore:
                     """
                     SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
                     FROM subagent_runs
-                    WHERE status != 'running'
+                    WHERE status NOT IN ('pending', 'running')
                       AND json_extract(payload_json, '$.cleanup_pending') IS NOT 1
                     ORDER BY updated_at DESC, subagent_id
                     LIMIT ?
@@ -882,17 +901,18 @@ class FileSwarmStore:
                 owner_is_active = bool(
                     previous_owner_token and previous_owner_token in active_owner_tokens
                 )
-                if payload.get("status") == "running" and not owner_is_active:
+                if payload.get("status") in {"pending", "running"} and not owner_is_active:
+                    never_started = payload["status"] == "pending"
                     payload.update({
                         "status": "interrupted",
                         "completed_at": interrupted_at,
-                        "result_summary": summary,
+                        "result_summary": "Interrupted before the queued subagent started." if never_started else summary,
                         "runtime_instance_id": current_instance_id,
                         "runtime_process_id": int(current_process_id),
                         "runtime_process_start_identity": current_process_start_identity,
                         "runtime_owner_token": current_owner_token,
-                        "cleanup_pending": True,
-                        "cleanup_reason": "runtime_interrupted",
+                        "cleanup_pending": not never_started,
+                        "cleanup_reason": "interrupted_before_start" if never_started else "runtime_interrupted",
                         "cleanup_requested_at": interrupted_at,
                         "cleanup_completed_at": None,
                     })
@@ -906,7 +926,7 @@ class FileSwarmStore:
                         UPDATE subagent_runs
                         SET status = 'interrupted', updated_at = ?, payload_json = ?,
                             owner_token = ?, agent_path = ?, mailbox_epoch = ?
-                        WHERE subagent_id = ? AND status = 'running' AND owner_token = ?
+                        WHERE subagent_id = ? AND status IN ('pending', 'running') AND owner_token = ?
                         """,
                         (
                             interrupted_at,
@@ -987,6 +1007,7 @@ class FileSwarmStore:
                 "team_name": str(payload.get("team_name") or ""),
                 "task_id": str(payload.get("task_id") or ""),
                 "summary": str(payload.get("summary") or "")[:200],
+                "delivery_mode": payload.get("delivery_mode", "trigger_turn"),
                 "sender_mailbox_epoch": max(0, int(payload.get("sender_mailbox_epoch") or 0)),
                 "recipient_mailbox_epoch": max(0, int(payload.get("recipient_mailbox_epoch") or 0)),
                 "recipient_mailbox_epochs": {
@@ -1232,6 +1253,7 @@ class FileSwarmStore:
         limit: int = 100,
         now_ms: int | None = None,
         lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
+        trigger_turn_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Atomically claim incoming messages for one agent incarnation.
 
@@ -1248,6 +1270,10 @@ class FileSwarmStore:
         expires_at = now + max(1_000, int(lease_ms))
         bounded_limit = max(1, min(int(limit or 100), 100))
         clauses = ["(recipient_id = ? OR recipient_id IN ('all', '*'))"]
+        if trigger_turn_only:
+            # Shutdown is a fenced lifecycle action, not a request to start a
+            # model turn. An idle task must still be able to stop.
+            clauses.append("(COALESCE(json_extract(payload_json, '$.delivery_mode'), 'trigger_turn') = 'trigger_turn' OR message_kind = 'shutdown_request')")
         values: list[Any] = [participant]
         if conversation_id:
             clauses.append("conversation_id = ?")

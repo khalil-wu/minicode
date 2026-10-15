@@ -16,6 +16,7 @@ from backend.plugins.identity import (
     parse_plugin_id_strict,
 )
 from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_install_root, plugin_manifest_path
+from backend.plugins.source_agent_manifest import is_agent_plugin_schema, resolve_agent_manifest
 
 def plugin_name_from_directory(plugin_dir: Path) -> str:
     plugin_dir = Path(plugin_dir)
@@ -48,6 +49,8 @@ def _read_plugin_manifest(manifest_path: Path) -> Mapping[str, Any] | None:
         payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+    if isinstance(payload, Mapping) and is_agent_plugin_schema(payload):
+        return resolve_agent_manifest(payload, plugin_directory_for_manifest(manifest_path))
     return payload if isinstance(payload, Mapping) else None
 
 def _primary_plugin_manifest(plugin_dir: Path) -> Path | None:
@@ -215,6 +218,11 @@ def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path) -> None
         return
     if not isinstance(raw, Mapping):
         return
+    agent_plugin = is_agent_plugin_schema(raw)
+    if agent_plugin:
+        raw = resolve_agent_manifest(raw, plugin_directory_for_manifest(manifest_path))
+    entry["manifest_format"] = "agent_plugin" if agent_plugin else "legacy"
+    entry["skill_discovery_mode"] = "direct_children" if agent_plugin else "recursive"
     if not entry.get("description"):
         entry["description"] = str(raw.get("description") or "").strip()
     if not entry.get("version"):
@@ -351,6 +359,11 @@ def _validate_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
             "warnings": warnings,
             "errors": [f"{rel_manifest}: manifest must be a JSON object."],
         }
+    if is_agent_plugin_schema(raw):
+        try:
+            raw = resolve_agent_manifest(raw, plugin_directory_for_manifest(manifest_path))
+        except ValueError as exc:
+            return {"manifest": {"path": rel_manifest}, "warnings": warnings, "errors": [str(exc)]}
     plugin_name = str(raw.get("name") or "").strip()
     if not plugin_name:
         errors.append(f"{rel_manifest}: manifest name is required.")

@@ -3,15 +3,27 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { bridge, popup, send, awaitResult, openFolder } = vi.hoisted(() => ({
-  bridge: { enabled: false },
-  popup: vi.fn(async (_key: string) => undefined),
-  send: vi.fn(() => true),
-  awaitResult: vi.fn(async (_command: unknown, command: string) => ({
-    type: "command.result", command, level: "success", message: "", data: {},
-  })),
-  openFolder: vi.fn(async () => true),
-}));
+const { bridge, popup, send, awaitResult, openFolder, windowControls, windowStateListeners } = vi.hoisted(() => {
+  const windowStateListeners = new Set<(state: { isMaximized: boolean }) => void>();
+  return {
+    bridge: { enabled: false },
+    popup: vi.fn(async (_key: string) => undefined),
+    send: vi.fn(() => true),
+    awaitResult: vi.fn(async (_command: unknown, command: string) => ({
+      type: "command.result", command, level: "success", message: "", data: {},
+    })),
+    openFolder: vi.fn(async () => true),
+    windowStateListeners,
+    windowControls: {
+      getState: vi.fn(async () => ({ isMaximized: false })),
+      onStateChanged: vi.fn((callback: (state: { isMaximized: boolean }) => void) => {
+        windowStateListeners.add(callback);
+        return vi.fn(() => windowStateListeners.delete(callback));
+      }),
+      minimize: vi.fn(), maximize: vi.fn(), close: vi.fn(),
+    },
+  };
+});
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: () => ({
@@ -20,7 +32,7 @@ vi.hoisted(() => {
 });
 vi.mock("../desktop/runtime", async (original) => ({
   ...await original<typeof import("../desktop/runtime")>(),
-  desktop: () => bridge.enabled ? { menu: { popup }, windowControls: { minimize: vi.fn(), maximize: vi.fn(), close: vi.fn() } } : null,
+  desktop: () => bridge.enabled ? { menu: { popup }, windowControls } : null,
   isDesktop: () => bridge.enabled,
   runtime: () => ({ runtimeToken: "fixture-runtime-token" }),
 }));
@@ -43,8 +55,18 @@ const header = (overrides = {}) => <HeaderBar
 const previousExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
 
 describe("desktop chrome uses the existing workbench command and owner chain", () => {
+  it("opens the settings-and-help menu before navigating and keeps the conversation draft",()=>{
+    useAppStore.setState({settingsOpen:false,draft:"Keep gear-menu draft",conversationId:"A"});
+    render(<NavigationRail />);
+    fireEvent.click(screen.getByRole("button",{name:"设置与帮助"}));
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    fireEvent.click(screen.getByRole("menuitem",{name:"帮助"}));
+    expect(useAppStore.getState()).toMatchObject({settingsOpen:true,settingsTab:"shortcuts",draft:"Keep gear-menu draft",conversationId:"A"});
+  });
   beforeEach(() => {
     vi.clearAllMocks();
+    windowControls.getState.mockResolvedValue({ isMaximized: false });
+    windowStateListeners.clear();
     bridge.enabled = false;
     localStorage.clear();
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -81,6 +103,39 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(input.value).toBe("unfinished");
     expect(screen.queryByRole("menu")).toBeNull();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("shows restore for a native window already maximized before the header subscribes", async () => {
+    bridge.enabled = true;
+    windowControls.getState.mockResolvedValue({ isMaximized: true });
+    const view = render(header());
+    const restore = await screen.findByRole("button", { name: "还原窗口", exact: true });
+    expect(restore.querySelector(".lucide-copy")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "最大化", exact: true })).toBeNull();
+    expect(windowControls.getState).toHaveBeenCalledOnce();
+    expect(windowStateListeners.size).toBe(1);
+    expect(useAppStore.getState().draft).toBe("unfinished");
+    view.unmount();
+    expect(windowStateListeners.size).toBe(0);
+    expect(windowControls.onStateChanged.mock.results[0].value).toHaveBeenCalledOnce();
+  });
+
+  it("updates the native maximize button from native events and delegates restore without guessing its result", async () => {
+    bridge.enabled = true;
+    const view = render(header());
+    await waitFor(() => expect(windowControls.getState).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "最大化", exact: true }).querySelector(".lucide-square")).toBeTruthy();
+    act(() => { for (const callback of windowStateListeners) callback({ isMaximized: true }); });
+    fireEvent.click(screen.getByRole("button", { name: "还原窗口", exact: true }));
+    expect(windowControls.maximize).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "还原窗口", exact: true })).toBeTruthy();
+    act(() => { for (const callback of windowStateListeners) callback({ isMaximized: false }); });
+    expect(screen.getByRole("button", { name: "最大化", exact: true }).querySelector(".lucide-square")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "还原窗口", exact: true })).toBeNull();
+    expect(useAppStore.getState().draft).toBe("unfinished");
+    expect(send).not.toHaveBeenCalled();
+    view.unmount();
+    expect(windowStateListeners.size).toBe(0);
   });
 
   it("routes browser menus to the real folder, settings, terminal, and conversation actions", async () => {
@@ -219,7 +274,7 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     act(() => useAppStore.setState({ conversationId: "B" }));
     expect(back.disabled).toBe(false);
     fireEvent.click(back);
-    expect(send).toHaveBeenCalledExactlyOnceWith({ type: "conversation.switch", conversation_id: "A" });
+    expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "A" }));
     expect(useAppStore.getState().conversationId).toBe("B");
     expect(back.disabled).toBe(true);
     expect(forward.disabled).toBe(true);
@@ -239,10 +294,10 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     act(() => useAppStore.setState({ conversationId: "D" }));
     expect(forward.disabled).toBe(true);
     fireEvent.click(back);
-    expect(send).toHaveBeenLastCalledWith({ type: "conversation.switch", conversation_id: "B" });
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "B", client_command_id: expect.any(String) }));
     act(() => useAppStore.setState({ conversationId: "B", pendingConversationSwitchId: null }));
     fireEvent.click(forward);
-    expect(send).toHaveBeenLastCalledWith({ type: "conversation.switch", conversation_id: "D" });
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "D", client_command_id: expect.any(String) }));
   });
 
   it("uses existing rail navigation while retaining the active conversation and draft", () => {
@@ -251,7 +306,7 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     fireEvent.click(within(rail).getByRole("button", { name: "已安排" }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "scheduler" });
     fireEvent.click(within(rail).getByRole("button", { name: "Git 与工作树" }));
-    expect(useAppStore.getState().settingsTab).toBe("workspaceGit");
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, dockCollapsed: false, activeBottomTab: "git", conversationId: "A", draft: "unfinished" });
     fireEvent.click(within(rail).getByRole("button", { name: "插件与技能" }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins" });
     fireEvent.click(within(rail).getByRole("button", { name: "更多工作区视图" }));

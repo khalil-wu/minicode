@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+/* @vitest-environment jsdom */
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { createElement } from "react";
 import type { ChatMessage } from "../../stores/types";
-import { collectArtifacts } from "./ArtifactsTab";
+import { useAppStore } from "../../stores";
+import { ArtifactsTab, collectArtifacts, mergeResourceInventory } from "./ArtifactsTab";
 import { collectAttachments } from "../../chat/ChatContextCard";
 import { hydrateMessages } from "../../chat/transcriptHydration";
 import { collectLiveArtifacts } from "../../overlays/LiveArtifacts";
+
+afterEach(cleanup);
 
 const messageWithToolArtifact = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
   id: "message-browser",
@@ -31,7 +37,14 @@ const messageWithToolArtifact = (overrides: Partial<ChatMessage> = {}): ChatMess
 });
 
 describe("ArtifactsTab projection", () => {
-  it("keeps persisted execution output, real deliverables and uploads consistent across artifact collectors", () => {
+  it("keeps the Files panel free of unsupported inventory filters", () => {
+    useAppStore.setState({ conversationId: "owner", isConnected: false, messages: [], previewArtifact: null });
+    render(createElement(ArtifactsTab));
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByText("执行结果")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+  it("excludes persisted transport text while retaining real deliverables and same-id uploads across collectors", () => {
     const startedAt = 1790857935157;
     const messages = hydrateMessages([
       {
@@ -57,13 +70,14 @@ describe("ArtifactsTab projection", () => {
       },
     ]);
     const owner = "conversation-audit";
+    const original = JSON.stringify(messages);
     const contextItems = collectAttachments(messages, owner);
     const sidebarItems = collectArtifacts(messages, null, owner);
     const galleryItems = collectLiveArtifacts(messages, owner);
 
     for (const items of [contextItems, sidebarItems, galleryItems]) {
-      expect(items.filter((item) => item.executionResult).map((item) => item.artifactId).sort())
-        .toEqual(["output-first", "output-second"]);
+      expect(items.filter((item) => item.executionResult)).toEqual([]);
+      expect(items.some((item) => item.artifactId === "output-second")).toBe(false);
       expect(items.find((item) => item.artifactId === "generated-image")).toMatchObject({
         kind: "image", executionResult: false, conversationId: owner,
       });
@@ -72,19 +86,20 @@ describe("ArtifactsTab projection", () => {
       });
       expect(items.every((item) => item.conversationId === owner)).toBe(true);
     }
-    expect(sidebarItems).toHaveLength(6);
+    expect(sidebarItems).toHaveLength(4);
     expect(sidebarItems.filter((item) => item.kind !== "attachment" && !item.executionResult)).toHaveLength(3);
     expect(sidebarItems.filter((item) => item.kind === "attachment")).toMatchObject([{ label: "reference.txt" }]);
     expect(sidebarItems.find((item) => item.path)).toMatchObject({ label: "audit.svg", path: "reports/audit.svg", kind: "image" });
-    expect(contextItems.filter((item) => item.executionResult).map((item) => item.label)).toEqual(["代码执行输出", "代码执行输出"]);
-    expect(sidebarItems.filter((item) => item.executionResult).map((item) => item.label)).toEqual(["代码执行输出", "代码执行输出"]);
-    expect(galleryItems.filter((item) => item.executionResult).map((item) => item.summary)).toEqual(["代码执行输出", "代码执行输出"]);
+    expect(contextItems.find((item) => item.artifactId === "output-first")).toMatchObject({ source: "attachment", label: "reference.txt" });
+    expect(sidebarItems.find((item) => item.artifactId === "output-first")).toMatchObject({ kind: "attachment", label: "reference.txt" });
+    expect(galleryItems.some((item) => item.artifactId === "output-first")).toBe(false);
     expect(galleryItems.find((item) => item.artifactId === "generated-image")?.summary).toBe("生成图片");
 
-    const [preview] = collectArtifacts(messages, {
+    const previewItems = collectArtifacts(messages, {
       artifactId: "output-first", source: "artifact", name: "Script completed", kind: "text", content: "测试执行输出", loadedAt: startedAt,
     }, owner);
-    expect(preview).toMatchObject({ artifactId: "output-first", label: "代码执行输出", executionResult: true, occurredAt: startedAt, conversationId: owner });
+    expect(previewItems.filter((item) => item.artifactId === "output-first")).toMatchObject([{ kind: "attachment", label: "reference.txt" }]);
+    expect(JSON.stringify(messages)).toBe(original);
   });
 
   it("preserves a specific artifact title and does not classify a status title without its producer", () => {
@@ -97,9 +112,60 @@ describe("ArtifactsTab projection", () => {
       tool_calls: [{ id: "named-call", name: "tool_exec", args: {}, status: "success", artifact_id: "named-output", display_summary: "Script completed", started_at: 100 }],
     }]);
     const items = collectArtifacts(messages, null, "conversation-names");
-    expect(items.find((item) => item.artifactId === "named-output")).toMatchObject({ label: "审计执行记录.txt", executionResult: true });
+    expect(items.some((item) => item.artifactId === "named-output")).toBe(false);
     expect(items.find((item) => item.artifactId === "unowned-status")).toMatchObject({ label: "Script completed", kind: "file" });
     expect(items.find((item) => item.artifactId === "unowned-status")?.executionResult).toBeUndefined();
+  });
+
+  it.each([
+    ["image", "image/png", "", "diagram.png"],
+    ["file", "application/pdf", "", "report.pdf"],
+    ["file", "audio/wav", "", "voice.wav"],
+    ["file", "text/plain", "file", "report.txt"],
+  ])("retains actual %s/%s deliverables with execution producer metadata", (kind, mediaType, producerKind, summary) => {
+    const messages = hydrateMessages([{
+      id: "actual-deliverable", role: "assistant", content: "", timestamp: 100,
+      artifacts: [{ artifactId: "real-file", kind, mediaType, summary }],
+      tool_calls: [{ id: "producer", name: "tool_exec", args: {}, status: "success", artifact_id: "real-file",
+        artifact_kind: producerKind, display_summary: "Script completed", started_at: 100 }],
+    }]);
+    const original = JSON.stringify(messages);
+    for (const items of [collectAttachments(messages, "owner"), collectArtifacts(messages, null, "owner"), collectLiveArtifacts(messages, "owner")]) {
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ artifactId: "real-file", kind, mediaType, conversationId: "owner" });
+      expect(items[0].executionResult).not.toBe(true);
+    }
+    expect(JSON.stringify(messages)).toBe(original);
+  });
+
+  it("classifies richer artifact metadata across messages before excluding a sparse code record", () => {
+    const messages = hydrateMessages([
+      { id: "tool-record", role: "assistant", content: "", timestamp: 1,
+        tool_calls: [{ id: "exec", name: "tool_wait", args: {}, status: "success", artifact_id: "later-image", started_at: 1 }] },
+      { id: "image-preview", role: "assistant", content: "", timestamp: 2,
+        artifacts: [{ artifactId: "later-image", kind: "image", mediaType: "image/webp", summary: "Generated image" }] },
+    ]);
+    for (const items of [collectAttachments(messages, "owner"), collectArtifacts(messages, null, "owner"), collectLiveArtifacts(messages, "owner")]) {
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ artifactId: "later-image", kind: "image", mediaType: "image/webp" });
+    }
+  });
+
+  it("keeps historical execution wrappers out of the normal resource inventory while preserving same-id uploads and richer images", () => {
+    const base = { conversation_id: "owner", workspace_root: "/workspace", size_bytes: 100, occurred_at: 1, media_type: "text/plain", kind: "text", source: "artifact" as const, execution_result: true };
+    const resources = [
+      { ...base, id: "artifact:wrapper", artifact_id: "wrapper", name: "Code output" },
+      { ...base, id: "attachment:wrapper", artifact_id: "wrapper", name: "user.txt", source: "attachment" as const, execution_result: false },
+      { ...base, id: "artifact:image", artifact_id: "image", name: "Sparse image" },
+    ];
+    const original = JSON.stringify(resources);
+    const items = mergeResourceInventory(collectArtifacts([messageWithToolArtifact({ blocks: [],
+      artifacts: [{ artifactId: "image", kind: "image", mediaType: "image/png", summary: "diagram.png" }],
+    })], null, "owner"), resources);
+    expect(items).toHaveLength(2);
+    expect(items.find((item) => item.artifactId === "wrapper")).toMatchObject({ kind: "attachment", label: "user.txt" });
+    expect(items.find((item) => item.artifactId === "image")).toMatchObject({ kind: "image", label: "diagram.png", mediaType: "image/png" });
+    expect(JSON.stringify(resources)).toBe(original);
   });
 
   it("includes image artifacts owned by tool_call records", () => {

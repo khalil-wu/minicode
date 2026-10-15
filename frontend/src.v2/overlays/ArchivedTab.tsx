@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { Fragment, useEffect, useState } from "react";
 import { Archive, MoreHorizontal, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -14,6 +15,7 @@ import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { hydrateMessages } from "../chat/transcriptHydration";
 
 export const ArchivedTab = () => {
+  const { t: tr } = useI18n();
   const conversations = useAppStore((s) => s.conversations);
   const archived = conversations.filter((conversation) => conversation.archived);
   const [restoringIds, setRestoringIds] = useState<Record<string, boolean>>({});
@@ -33,7 +35,7 @@ export const ArchivedTab = () => {
     const root = conversation.worktreePath || conversation.workspaceRoot || "";
     const date = new Date(conversation.updatedAt);
     const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    return `${conversation.title} ${root} ${workspaceDisplayName(root, "本机")}`.toLowerCase().includes(query.trim().toLowerCase())
+    return `${conversation.title} ${root} ${workspaceDisplayName(root, tr("本机"))}`.toLowerCase().includes(query.trim().toLowerCase())
       && (!project || root === project) && (!fromDate || day >= fromDate) && (!toDate || day <= toDate);
   }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const selected = archived.find((conversation) => conversation.id === previewId);
@@ -42,7 +44,7 @@ export const ArchivedTab = () => {
   useEffect(() => {
     if (!previewId) return;
     const sessionId = getWebSocket()?.sessionId;
-    if (!sessionId) { setPreviewError("连接后端后可读取完整归档对话。"); return; }
+    if (!sessionId) { setPreviewError(tr("连接后端后可读取完整归档对话。")); return; }
     let cancelled = false;
     setPreviewLoading(true); setPreviewError("");
     const url = new URL(`${apiBase()}/api/conversations/${encodeURIComponent(previewId)}/messages`);
@@ -76,13 +78,13 @@ export const ArchivedTab = () => {
         archived: false,
       }, "conversation.unarchive");
       if (!commandResultSucceeded(result)) {
-        pushToast(`恢复任务失败：${result.message || "后端未返回具体原因"}`, "error");
+        pushToast(tr("恢复任务失败：{v0}", { v0: result.message || tr("后端未返回具体原因") }), "error");
         return;
       }
-      pushToast(`已恢复任务：${title}`, "success");
+      pushToast(tr("已恢复任务：{v0}", { v0: title }), "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`恢复任务失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      pushToast(tr("恢复任务失败：{v0}", { v0: message }), "error");
     } finally {
       setRestoringIds((current) => {
         const next = { ...current };
@@ -97,9 +99,9 @@ export const ArchivedTab = () => {
     setDeletingIds((current) => ({ ...current, [conversationId]: true }));
     try {
       const confirmed = await showConfirm({
-        title: "删除已归档任务",
-        message: `确定删除“${title}”？此操作无法撤销。`,
-        confirmLabel: "删除",
+        title: tr("删除已归档任务"),
+        message: tr("确定删除“{v0}”？此操作无法撤销。", { v0: title }),
+        confirmLabel: tr("删除"),
         danger: true,
       });
       if (!confirmed) return;
@@ -109,10 +111,10 @@ export const ArchivedTab = () => {
         cleanup_worktree: cleanupWorktree,
       });
       if (!deleted) return;
-      pushToast(`已删除任务：${title}`, "success");
+      pushToast(tr("已删除任务：{v0}", { v0: title }), "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`删除任务失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      pushToast(tr("删除任务失败：{v0}", { v0: message }), "error");
     } finally {
       setDeletingIds((current) => {
         const next = { ...current };
@@ -123,13 +125,13 @@ export const ArchivedTab = () => {
   };
 
   return (
-    <Section title="已归档任务" description={`${archived.length} 个任务已从会话列表隐藏。`}>
+    <Section title={tr("已归档任务")} description={tr("{v0} 个任务已从会话列表隐藏。", { v0: archived.length })}>
       {archived.length > 0 && <div className="settings-archive-filters">
-        <label className="settings-search"><Search size={15} /><input aria-label="搜索已归档任务" placeholder="搜索标题或项目…" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <SelectMenu ariaLabel="归档项目" className="settings-select" style={{ width: 220 }} value={project} onValueChange={setProject}><option value="">全部项目</option>{projects.map((root) => <option key={root} value={root}>{workspaceDisplayName(root, "本机")}{root ? ` · ${root}` : ""}</option>)}</SelectMenu>
-        <label>最后活动自<input type="date" aria-label="归档最后活动开始日期" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
-        <label>至<input type="date" aria-label="归档最后活动结束日期" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
-        <span className="settings-archive-count">{matching.length} / {archived.length} 个任务</span>
+        <label className="settings-search"><Search size={15} /><input aria-label={tr("搜索已归档任务")} placeholder={tr("搜索标题或项目…")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <SelectMenu ariaLabel={tr("归档项目")} className="settings-select" align="end" value={project} onValueChange={setProject}><option value="">{tr("全部项目")}</option>{projects.map((root) => <option key={root} value={root}>{workspaceDisplayName(root, tr("本机"))}{root ? ` · ${root}` : ""}</option>)}</SelectMenu>
+        <label>{tr("最后活动自")}<input type="date" aria-label={tr("归档最后活动开始日期")} value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+        <label>{tr("至")}<input type="date" aria-label={tr("归档最后活动结束日期")} value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+        <span className="settings-archive-count">{matching.length} / {archived.length} {tr("个任务")}</span>
       </div>}
       <div className="settings-archive-list">
         {matching.length > 0 ? matching.map((conversation) => (
@@ -137,53 +139,53 @@ export const ArchivedTab = () => {
           <div className="settings-archive-row" key={conversation.id}>
             <span className="settings-archive-icon" aria-hidden="true"><Archive /></span>
             <div className="settings-archive-copy">
-              <button type="button" className="settings-archive-title" aria-expanded={previewId === conversation.id} onClick={() => openPreview(conversation.id)}>{conversation.title || "未命名任务"}</button>
-              <span title={conversation.worktreePath || conversation.workspaceRoot}>{workspaceDisplayName(conversation.worktreePath || conversation.workspaceRoot, "本机")}</span>
-              <time dateTime={conversation.updatedAt}>最后活动 {new Date(conversation.updatedAt).toLocaleString()}</time>
+              <button type="button" className="settings-archive-title" aria-expanded={previewId === conversation.id} onClick={() => openPreview(conversation.id)}>{conversation.title || tr("未命名任务")}</button>
+              <span title={conversation.worktreePath || conversation.workspaceRoot}>{workspaceDisplayName(conversation.worktreePath || conversation.workspaceRoot, tr("本机"))}</span>
+              <time dateTime={conversation.updatedAt}>{tr("最后活动") + " "}{new Date(conversation.updatedAt).toLocaleString()}</time>
             </div>
             <div className="settings-archive-actions">
               <button
                 type="button"
                 className="settings-action-button"
-                aria-label={`恢复 ${conversation.title || "未命名任务"}`}
+                aria-label={tr("恢复 {v0}", { v0: conversation.title || tr("未命名任务") })}
                 disabled={Boolean(restoringIds[conversation.id] || deletingIds[conversation.id])}
-                onClick={() => void restoreConversation(conversation.id, conversation.title || "未命名任务")}
+                onClick={() => void restoreConversation(conversation.id, conversation.title || tr("未命名任务"))}
               >
                 <RotateCcw className={restoringIds[conversation.id] ? "settings-spin" : undefined} />
-                {restoringIds[conversation.id] ? "恢复中…" : "恢复"}
+                {restoringIds[conversation.id] ? tr("恢复中…") : tr("恢复")}
               </button>
-              <details className="settings-archive-more"><summary aria-label={`更多操作 ${conversation.title || "未命名任务"}`}><MoreHorizontal size={16} /></summary><button
+              <details className="settings-archive-more"><summary aria-label={tr("更多操作 {v0}", { v0: conversation.title || tr("未命名任务") })}><MoreHorizontal size={16} /></summary><button
                 type="button"
                 className="settings-action-button"
                 data-danger="true"
-                aria-label={`删除 ${conversation.title || "未命名任务"}`}
+                aria-label={tr("删除 {v0}", { v0: conversation.title || tr("未命名任务") })}
                 disabled={Boolean(restoringIds[conversation.id] || deletingIds[conversation.id])}
-                onClick={() => void deleteConversation(conversation.id, conversation.title || "未命名任务", Boolean(conversation.gitIsolated))}
+                onClick={() => void deleteConversation(conversation.id, conversation.title || tr("未命名任务"), Boolean(conversation.gitIsolated))}
               >
                 <Trash2 />
-                {deletingIds[conversation.id] ? "删除中…" : "删除"}
+                {deletingIds[conversation.id] ? tr("删除中…") : tr("删除")}
               </button></details>
             </div>
           </div>
-          {previewId === conversation.id && <section className="settings-archive-preview" aria-label={`只读预览 ${conversation.title || "未命名任务"}`}>
-            <div className="settings-archive-preview-heading"><strong>归档对话 · 只读预览</strong><button type="button" className="settings-icon-button" aria-label="关闭归档预览" onClick={() => setPreviewId(null)}><X size={16} /></button></div>
-            {previewLoading && <p role="status">正在读取对话…</p>}
-            {previewError && <p role="alert">{previewError}<button type="button" className="settings-action-button" onClick={() => setPreviewVersion((version) => version + 1)}>重试</button></p>}
-            {preview?.transcript_page?.has_more && <button type="button" className="settings-action-button" disabled={previewLoading} onClick={() => setBeforeMessageId(preview.transcript_page!.before_message_id)}>读取更早的消息</button>}
+          {previewId === conversation.id && <section className="settings-archive-preview" aria-label={tr("只读预览 {v0}", { v0: conversation.title || tr("未命名任务") })}>
+            <div className="settings-archive-preview-heading"><strong>{tr("归档对话 · 只读预览")}</strong><button type="button" className="settings-icon-button" aria-label={tr("关闭归档预览")} onClick={() => setPreviewId(null)}><X size={16} /></button></div>
+            {previewLoading && <p role="status">{tr("正在读取对话…")}</p>}
+            {previewError && <p role="alert">{previewError}<button type="button" className="settings-action-button" onClick={() => setPreviewVersion((version) => version + 1)}>{tr("重试")}</button></p>}
+            {preview?.transcript_page?.has_more && <button type="button" className="settings-action-button" disabled={previewLoading} onClick={() => setBeforeMessageId(preview.transcript_page!.before_message_id)}>{tr("读取更早的消息")}</button>}
             <div className="settings-archive-transcript">{previewMessages.length > 0 ? previewMessages.map((message) => <article key={message.id} data-role={message.role}>
-              <div className="settings-archive-message-label">{message.role === "user" ? "你" : "助手"}</div>
-              <MarkdownRenderer content={message.content} conversationId={conversation.id} workspaceRoot={conversation.worktreePath || conversation.workspaceRoot} />
+              <div className="settings-archive-message-label">{message.role === "user" ? tr("你") : tr("助手")}</div>
+              <MarkdownRenderer content={message.content} conversationId={conversation.id} workspaceRoot={conversation.executionCwd || conversation.worktreePath || conversation.workspaceRoot} />
             </article>) : selected?.summary ? <article data-role="summary">
-              <MarkdownRenderer content={selected.summary} conversationId={conversation.id} workspaceRoot={conversation.worktreePath || conversation.workspaceRoot} />
+              <MarkdownRenderer content={selected.summary} conversationId={conversation.id} workspaceRoot={conversation.executionCwd || conversation.worktreePath || conversation.workspaceRoot} />
             </article> : null}</div>
           </section>}
           </Fragment>
         )) : (
           <div className="settings-archive-empty">
             <Archive aria-hidden="true" />
-            <strong>{archived.length ? "没有匹配的任务" : "没有已归档任务"}</strong>
-            <span>{archived.length ? "试试其他标题、项目或日期。" : "从会话菜单归档的任务会显示在这里。"}</span>
-            {archived.length > 0 && <button type="button" className="settings-action-button" onClick={() => { setQuery(""); setProject(""); setFromDate(""); setToDate(""); }}>清除筛选</button>}
+            <strong>{archived.length ? tr("没有匹配的任务") : tr("没有已归档任务")}</strong>
+            <span>{archived.length ? tr("试试其他标题、项目或日期。") : tr("从会话菜单归档的任务会显示在这里。")}</span>
+            {archived.length > 0 && <button type="button" className="settings-action-button" onClick={() => { setQuery(""); setProject(""); setFromDate(""); setToDate(""); }}>{tr("清除筛选")}</button>}
           </div>
         )}
       </div>

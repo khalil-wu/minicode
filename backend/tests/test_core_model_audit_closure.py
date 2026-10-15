@@ -120,7 +120,7 @@ async def test_rest_returns_query_engine_canonical_answer(tmp_path, monkeypatch,
     bootstrap = SimpleNamespace(create_tool_registry=lambda *args, **kwargs: ToolRegistry(),
         create_permission_checker=lambda **kwargs: PermissionChecker(PermissionSettings()), create_llm=lambda **kwargs:llm, mcp_manager=None)
     result = await rest.run_rest_chat(message="Finish the task", max_iterations=None, bootstrap=bootstrap,
-        query_engine=Engine(), conversation_id=tmp_path.name, permission_mode="bypass")
+        query_engine=Engine(), conversation_id=f"conv_rest_audit_{mode}", permission_mode="bypass")
     assert result["reply"] == expected
     assert result["reply"] == states[0].reply
     assert result["status"] == status

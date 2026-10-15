@@ -16,6 +16,12 @@ import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, per
 import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
+import { emptyConversationWorkbenchState } from "./ui-slice";
+import {
+  loadComposerDrafts, collectComposerDrafts, persistComposerDrafts, watchComposerDraftStorage,
+  selectComposerDraftInputs, composerDraftInputsEqual, composerWorkspaceKey,
+  hasComposerDraft, hasPendingComposerDrafts, flushComposerDrafts,
+} from "./composer-drafts";
 
 export const useAppStore = create<AppStore>()(
   subscribeWithSelector((...a) => ({
@@ -30,6 +36,54 @@ export const useAppStore = create<AppStore>()(
     ...createEditorSlice(...a),
   })),
 );
+
+let composerSnapshotRevision = 0;
+watchComposerDraftStorage(status => {
+  useAppStore.setState({ composerDraftStoragePending: status.pending, composerDraftRevision: status.revision,
+    composerDraftStorageError: status.error });
+  if (status.error) pushToast(`无法保存输入草稿：${status.error}。请保留窗口和未发送内容。`, "error");
+});
+const composerRecovery = loadComposerDrafts().then(records => {
+  useAppStore.setState(state => {
+    const workspaceComposerDrafts = { ...state.workspaceComposerDrafts };
+    const conversationWorkbenchStates = { ...state.conversationWorkbenchStates };
+    const sideChats = { ...state.sideChats };
+    for (const record of records) {
+      if (record.owner.kind === "workspace") workspaceComposerDrafts[record.owner.id] = record.draft;
+      else if (record.owner.kind === "conversation") conversationWorkbenchStates[record.owner.id] = {
+        ...emptyConversationWorkbenchState(), ...conversationWorkbenchStates[record.owner.id], ...record.draft,
+      };
+      else sideChats[record.owner.id] = {
+        ...(sideChats[record.owner.id] ?? { id: record.owner.id, messages: [], isStreaming: false }),
+        workspaceRoot: record.owner.workspaceRoot, ...record.side,
+        draft: record.draft.draft, attachments: record.draft.attachments,
+      };
+    }
+    const active = state.conversationId ? conversationWorkbenchStates[state.conversationId]
+      : workspaceComposerDrafts[composerWorkspaceKey(state.workingDirectory)];
+    return { workspaceComposerDrafts, conversationWorkbenchStates, sideChats, composerDraftsReady: true,
+      ...(!hasComposerDraft(state) && active ? {
+        agentMode: active.agentMode ?? "build",
+        draft: active.draft, attachments: active.attachments, quotedMessage: active.quotedMessage,
+        selectedMentions: active.selectedMentions, selectedSkills: active.selectedSkills,
+        allowedRemoteImageDomains: active.allowedRemoteImageDomains,
+      } : {}),
+    };
+  });
+}).catch(error => {
+  const message = error instanceof Error ? error.message : String(error);
+  useAppStore.setState({ composerDraftStorageError: message });
+  pushToast(`无法读取输入草稿：${message}。原有恢复数据未被覆盖。`, "error");
+  throw error;
+});
+// The close/update boundary observes this same recovery promise. Reporting a
+// read failure above does not turn an unknown old draft into an empty record.
+void composerRecovery.catch(error => console.error("Composer draft recovery failed", error));
+export const waitComposerDraftRecovery = () => composerRecovery;
+useAppStore.subscribe(selectComposerDraftInputs, () => {
+  const state = useAppStore.getState();
+  if (state.composerDraftsReady) persistComposerDrafts(collectComposerDrafts(state, ++composerSnapshotRevision));
+}, { equalityFn: composerDraftInputsEqual });
 
 useAppStore.subscribe(
   (state) => [state.workingDirectory, state.editorTabs, state.activeTabPath, state.activeEditorPath] as const,
@@ -160,12 +214,14 @@ useAppStore.subscribe(
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", event => {
-    if (!hasPendingEditorDrafts()) return;
+    if (!hasPendingEditorDrafts() && useAppStore.getState().composerDraftsReady && !hasPendingComposerDrafts()) return;
+    const desktop = window.__MINICODE_RUNTIME__?.desktop;
+    const intent = desktop?.windowControls.captureUnloadIntent();
     event.preventDefault();
     event.returnValue = "";
-    const desktop = window.__MINICODE_RUNTIME__?.desktop;
-    if (desktop) void flushEditorDrafts().then(() => desktop.windowControls.close()).catch(error => {
-      console.error("Window remains open because editor recovery did not commit", error);
+    if (desktop && intent) void Promise.all([composerRecovery, flushComposerDrafts(), flushEditorDrafts()])
+      .then(() => desktop.windowControls.resumeUnload(intent.id)).catch(error => {
+      console.error("Window remains open because authored drafts did not commit", error);
     });
   });
   (window as typeof window & { __zustandStore?: typeof useAppStore }).__zustandStore = useAppStore;

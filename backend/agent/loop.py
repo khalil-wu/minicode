@@ -478,5 +478,6 @@ async def run_agent_loop(
             ):
                 yield event
     finally:
+        bootstrap.tool_context.permission_grants.end_turn(bootstrap.tool_context.turn_id)
         if run_context.code_execution is not None:
             await run_context.code_execution.aclose()

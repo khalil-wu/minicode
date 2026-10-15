@@ -1,5 +1,6 @@
 import type { GoalInfo, McpTransport, RuntimeSessionSnapshot, TurnPlanStep } from "../protocol/events";
 import type { AgentCapabilitiesPayload } from "../protocol/capabilities";
+import type { CompletionNotification } from "../protocol/notification-types";
 import type {
   AgentProgressPhase,
   AgentProgressProviderState,
@@ -39,7 +40,7 @@ export type EffortLevel =
   | "max"
   | "ultra"
   | (string & Record<never, never>);
-export type SendShortcut = "enter" | "mod-enter";
+export type SendShortcut = "enter" | "cmdIfMultiline" | "mod-enter";
 export type FollowUpBehavior = "queue" | "steer";
 
 export interface SkillInfo {
@@ -126,7 +127,10 @@ export interface ArtifactContentState {
   truncated?: boolean;
   loading?: boolean;
   error?: string;
-  source?: "artifact" | "attachment" | "workspace" | "local";
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local";
+  /** Real disk origin of a workspace preview; uploaded/generated artifacts have none. */
+  sourcePath?: string;
+  workspaceRoot?: string;
   loadedAt: number;
 }
 
@@ -239,6 +243,9 @@ export interface DiffReviewFile {
 }
 
 export interface DiffReviewState {
+  codeReview?: import("../protocol/code-review-types").CodeReviewScope;
+  modelComments?: import("../lib/code-comment").CodeReviewComment[];
+  workspaceRoot?: string;
   requestId: string;
   conversationId?: string;
   turnId?: string;
@@ -266,6 +273,7 @@ export interface DiffLineComment {
 }
 
 export interface ConversationWorkbenchState {
+  agentMode?: AgentMode;
   diffReview: DiffReviewState | null;
   gitReviewRequest?: GitReviewRequest | null;
   previewArtifact: ArtifactContentState | null;
@@ -408,6 +416,9 @@ export interface UISlice {
   quickOpenResults: QuickOpenResult[];
   quickOpenLoading: boolean;
   currentModel: string;
+  modelSelectionMode: "default" | "model" | null;
+  defaultModelSelection: { provider: string; model: string; reasoningEffort: EffortLevel; conversationId: string; workingDirectory: string } | null;
+  availableModelOptions: { model: string; reasoningEffortLevels: EffortLevel[]; defaultReasoningEffort: EffortLevel }[];
   currentProvider: string;
   currentProviderId: string;
   currentProviderBaseUrl: string;
@@ -438,6 +449,7 @@ export interface UISlice {
   gitChanges: GitChangesState;
   skillsMarketplaceOpen: boolean;
   skillsMarketplaceTab: "plugins" | "skills";
+  skillsMarketplaceSelectedPluginId: string | null;
   skillsMarketplaceReturnTarget: "app" | "settings";
   liveArtifactsOpen: boolean;
   agentEditorOpen: boolean;
@@ -666,6 +678,8 @@ export interface ScheduledTaskEntry {
   timezone?: string;
   isolation?: "worktree" | "workspace";
   conversation_id?: string;
+  kind?: "cron" | "heartbeat";
+  notification_policy?: "failed_runs_only" | null;
   permission_mode: string;
   enabled: boolean;
   last_run_at?: string | null;
@@ -687,6 +701,8 @@ export interface ScheduledTaskRunEntry {
   conversation_id?: string;
   workspace_root?: string;
   result_summary?: string;
+  message_id?: string;
+  completion_notification?: CompletionNotification | null;
   error?: string;
 }
 
@@ -702,6 +718,7 @@ export interface WorkspaceSlice {
   leftSidebarWidth: number;
   leftSidebarExpandedWidth: number;
   rightSidebarWidth: number;
+  rightSidebarWidthRatio: number | null;
   rightPanelOpen: boolean;
   rightPanelExpanded: boolean;
   gitReviewRequest: GitReviewRequest | null;
@@ -710,6 +727,7 @@ export interface WorkspaceSlice {
   activeBottomTab: "terminal" | "git" | "tasks" | "timeline" | "debug" | "budget" | "problems";
   panelSlots: PanelSlot[];
   sideChatOpen: boolean;
+  activeSideChatId: string | null;
   sideChatPendingContext: CodeSelectionContext | null;
   terminalSessions: TerminalSessionInfo[];
   terminalSnapshots: Record<string, TerminalSnapshotInfo>;
@@ -719,8 +737,8 @@ export interface WorkspaceSlice {
   editorOpenRequests: EditorOpenRequest[];
   activeEditorOpenRequestId: string | null;
   activeEditorPath: string | null;
-  setLeftSidebarWidth: (w: number) => void;
-  setRightSidebarWidth: (w: number) => void;
+  setLeftSidebarWidth: (w: number, options?: { persist?: boolean }) => void;
+  setRightSidebarWidth: (w: number, options?: { mainContentWidth?: number; persist?: boolean }) => void;
   toggleRightPanel: () => void;
   setRightPanelExpanded: (expanded: boolean) => void;
   openGitReview: (request: Omit<GitReviewRequest, "id">) => void;
@@ -1116,7 +1134,7 @@ export interface TextContentBlock {
   type: "text";
   itemId?: string;
   content: string;
-  source?: "stream" | "reply" | "model_final" | "commentary" | "model_preamble" | "post_tool" | "runtime" | string;
+  source?: "stream" | "reply" | "model_final" | "retained" | "commentary" | "model_preamble" | "post_tool" | "runtime" | string;
   status?: "in_progress" | "completed" | "partial" | string;
   isStreaming?: boolean;
   providerRaw?: ProviderRawMetadata;
@@ -1148,6 +1166,8 @@ export interface ProcessContentBlock {
   seq?: number;
   order?: number;
   timestamp: number;
+  startedAt?: number;
+  finishedAt?: number;
 }
 export interface ToolCallContentBlock { type: "tool_call"; record: ToolCallRecord; }
 export interface ProgressContentBlock {
@@ -1183,7 +1203,10 @@ export interface ProgressContentBlock {
 export interface AgentProgressEntry extends ProgressContentBlock {
   conversationId?: string;
 }
-export type ContentBlock = (ThinkingContentBlock | TextContentBlock | ProcessContentBlock | ToolCallContentBlock | ProgressContentBlock) & { transcriptIndex?: number };
+export interface GuardianAssessmentContentBlock { type: "guardian_assessment"; review: import("../protocol/guardian-types").GuardianAssessment; }
+export interface GuardianWarningContentBlock { type: "guardian_warning"; message: string; turnId: string; interruption?: boolean; }
+export interface UserInputContentBlock { type: "user_input"; userMessageId: string; }
+export type ContentBlock = (GuardianAssessmentContentBlock | GuardianWarningContentBlock | UserInputContentBlock | ThinkingContentBlock | TextContentBlock | ProcessContentBlock | ToolCallContentBlock | ProgressContentBlock) & { transcriptIndex?: number };
 
 export interface ToolHistoryPage { before: number; remaining: number; total: number; revision?: string }
 
@@ -1197,6 +1220,7 @@ export interface ChatMessage {
   content: string;
   /** Exact assembled model input for a user message with separate display text. */
   backendContent?: string;
+  codeReview?: import("../protocol/code-review-types").CodeReviewScope;
   quotedMessage?: ComposerQuote | null;
   messageSource?: ChatMessageSource;
   contextRefs?: MessageContextRef[];
@@ -1206,6 +1230,8 @@ export interface ChatMessage {
   citations?: Citation[];
   usage?: MessageUsage;
   timestamp: number;
+  /** Original execution start received from main run-start or stream_resume. */
+  runStartedAt?: number;
   completedAt?: number;
   durationMs?: number;
   isStreaming?: boolean;
@@ -1217,6 +1243,7 @@ export interface ChatMessage {
   /** Short label for transcript-only system records; content remains the
    * information-bearing notice body instead of being forced into a title. */
   systemNoticeTitle?: string;
+  systemNoticeProcessing?: boolean;
   queueState?: "queued" | "cancelled";
   queuePosition?: number;
   queuePaused?: boolean;
@@ -1238,6 +1265,7 @@ export interface ReplyAttachmentMeta {
 }
 
 export interface ConversationMeta {
+  agentMode?: AgentMode;
   id: string;
   title: string;
   updatedAt: string;
@@ -1246,11 +1274,19 @@ export interface ConversationMeta {
   compactionState?: string;
   compactionSummary?: string;
   conversationType?: "main" | "side_chat";
+  threadSource?: string;
   archived?: boolean;
+  pinned?: boolean;
+  pinnedAt?: string;
+  hasUnreadTurn?: boolean;
+  projectId?: string | null;
   memoryMode?: "enabled" | "disabled" | "polluted" | string;
   memoryPolluted?: boolean;
   memoryPollutionSources?: string[];
   workspaceRoot?: string;
+  executionCwd?: string;
+  projectlessOutputDir?: string;
+  projectlessBrowserRoot?: string;
   gitBranch?: string;
   worktreePath?: string;
   gitIsolated?: boolean;
@@ -1315,6 +1351,7 @@ export interface SideChatThread {
   isStreaming: boolean;
   draft: string;
   inheritedContext?: string;
+  parentConversationId?: string;
   selectedContext?: CodeSelectionContext;
   attachments?: ComposerAttachment[];
   contextRefs?: MessageContextRef[];
@@ -1337,6 +1374,9 @@ export interface ChatSlice {
   conversations: ConversationMeta[];
   conversationInventoryInstanceId: string | null;
   conversationInventoryRevision: number;
+  pinnedConversationIds: string[];
+  pinnedConversationSortMode: "manual" | "updated_at";
+  sidebarOrder: import("../protocol/conversation-types").SidebarOrderPayload | null;
   activeGoal: ConversationGoal | null;
   messages: ChatMessage[];
   conversationMessages: Record<string, ChatMessage[]>;
@@ -1357,19 +1397,22 @@ export interface ChatSlice {
   sideChats: Record<string, SideChatThread>;
   toolCallCount: number;
   sendMessage: (content: string, options?: { assistant?: boolean; contextRefs?: MessageContextRef[]; attachmentRefs?: MessageAttachmentRef[] }) => void;
-  upsertSystemMessage: (id: string, content: string, options?: { conversationId?: string; replacePrefix?: string }) => void;
+  upsertSystemMessage: (id: string, content: string, options?: { conversationId?: string; replacePrefix?: string; title?: string; processing?: boolean; failureMessage?: string; process?: Omit<ProcessContentBlock, "type" | "timestamp"> & { timestamp?: number } }) => void;
   recallMessage: (id: string) => Promise<boolean>;
   removeEmptyStreamingAssistant: (conversationId?: string, messageId?: string) => void;
   interrupt: () => void;
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
-  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode }) => Promise<boolean>;
+  pendingComposerConversationAdoption: { conversationId: string; workspaceRoot: string } | null;
+  ensureComposerConversation: () => Promise<string | null>;
+  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode; adoptDraft?: boolean }) => Promise<boolean>;
   removeConversation: (id: string) => Promise<boolean>;
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string, revision?: number) => void;
   hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean; historyPage?: ConversationHistoryPage }) => void;
-  bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined) => void;
+  recordTurnUserInput: (message: ChatMessage, conversationId: string, assistantMessageId: string) => void;
+  bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined, startedAt?: number) => void;
   startAgentMessage: (
     itemId: string,
     conversationId?: string,
@@ -1444,6 +1487,7 @@ export interface ChatSlice {
     messageId?: string,
     turnId?: string,
     snapshotBlocks?: ContentBlock[],
+    startedAt?: number,
   ) => void;
   setConnected: (c: boolean) => void;
   setConnectionState: (
@@ -1451,7 +1495,7 @@ export interface ChatSlice {
     details?: Partial<Omit<ConnectionStateDetails, "phase">>,
   ) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
-  ensureSideChat: (id: string, owner?: { workspaceRoot: string; permissionMode: PermissionMode }) => void;
+  ensureSideChat: (id: string, owner?: { workspaceRoot: string; permissionMode: PermissionMode; parentConversationId?: string }) => void;
   removeSideChat: (id: string) => void;
   setSideChatDraft: (id: string, draft: string) => void;
   startSideChatMessage: (
@@ -1465,6 +1509,8 @@ export type PendingToolCallResume = {
   id: string;
   name: string;
   args: Record<string, unknown>;
+  command_actions?: ToolCallRecord["commandActions"];
+  commandActions?: ToolCallRecord["commandActions"];
   status?: ToolCallRecord["status"] | "completed" | "error" | "cancelled" | "waiting_approval";
   transition?: string;
   started_at?: number;
@@ -1489,6 +1535,9 @@ export type PendingToolCallResume = {
   outputPreview?: string;
   stdoutPreview?: string;
   stderrPreview?: string;
+  exitCode?: number;
+  recipientId?: string;
+  recipientIds?: string[];
 };
 
 // ── Composer Slice ────────────────────────────────────────────────
@@ -1525,12 +1574,19 @@ export interface ComposerQuote {
 }
 
 export interface ComposerSlice {
+  workspaceComposerDrafts: Record<string, import("./composer-drafts").ComposerDraft>;
+  composerDraftsReady: boolean;
+  composerDraftStoragePending: boolean;
+  composerDraftStorageError: string | null;
+  composerDraftRevision: number;
   draft: string;
   attachments: ComposerAttachment[];
   quotedMessage: ComposerQuote | null;
   permissionMode: PermissionMode;
   pendingPermissionModeChanges: Record<string, { workspaceRoot: string; confirmation: Promise<boolean> }>;
   agentMode: AgentMode;
+  pendingAgentModeChanges: Record<string, { commandId: string; mode: AgentMode }>;
+  latestAgentModeCommandIds: Record<string, string>;
   effortLevel: EffortLevel;
   prMonitor: PRMonitorState | null;
   prStatusIssue: { message: string; code: string } | null;
@@ -1548,8 +1604,10 @@ export interface ComposerSlice {
   removeAttachment: (id: string) => void;
   clearAttachments: () => void;
   setPermissionMode: (m: PermissionMode) => Promise<boolean>;
-  setAgentMode: (m: AgentMode) => void;
+  setAgentMode: (m: AgentMode, conversationId?: string) => Promise<boolean>;
+  syncConversationAgentMode: (m: AgentMode, conversationId: string, commandId?: string, revision?: number) => void;
   setEffortLevel: (e: EffortLevel) => Promise<boolean>;
+  setModelSelection: (selection: { mode: "model"; model: string } | { mode: "default" }) => Promise<boolean>;
   setPRMonitor: (pr: PRMonitorState | null) => void;
   setPRStatusIssue: (issue: ComposerSlice["prStatusIssue"]) => void;
   setActionChip: (c: ComposerSlice["actionChip"]) => void;
@@ -1595,6 +1653,7 @@ export interface SubagentMessageState {
 }
 
 export interface SubagentState {
+  workspaceRoot?: string;
   id: string;
   model?: string;
   provider?: string;
@@ -1615,9 +1674,13 @@ export interface SubagentState {
   currentActivity?: string;
   waitingOn?: string;
   lastProgressAt?: number;
+  acceptedAt?: number;
+  startedAt?: number;
+  completedAt?: number;
   background?: boolean;
   needsInput?: boolean;
   teammateName?: string;
+  displayName?: string;
   teamName?: string;
   awaitingPlanApproval?: boolean;
   activePlanRequestId?: string;
@@ -1698,6 +1761,13 @@ export interface PendingApproval {
   turnId?: string;
   messageId?: string;
   toolName: string;
+  requestDigest?: string;
+  command?: string[];
+  displayCommand?: string;
+  cwd?: string;
+  approvalReason?: string | null;
+  proposedExecpolicyAmendment?: string[] | null;
+  availableDecisions?: import("../protocol/common-types").ControlCanUseToolRequest["available_decisions"];
   args: Record<string, unknown>;
   sourceAgent?: string;
   sourceThread?: string;
@@ -1706,6 +1776,14 @@ export interface PendingApproval {
   expiresAt?: number;
   status?: "pending" | "submitted" | "error";
   error?: string;
+  permissionRequest?: {
+    permissions: import("../protocol/common-types").AdditionalPermissionProfile;
+    reason?: string;
+    cwd?: string;
+    environmentId?: string;
+  };
+  stdinAction?: Record<string, unknown>;
+  mcpApproval?: import("../protocol/common-types").ControlCanUseToolRequest["mcp_approval"];
 }
 
 export interface PendingDiffReview {
@@ -1745,6 +1823,7 @@ export interface PendingAskUser {
   conversationId?: string;
   turnId?: string;
   messageId?: string;
+  taskId?: string;
   prompt?: string;
   question: string;
   provider?: string;
@@ -1757,13 +1836,31 @@ export interface PendingAskUser {
   inputSchema?: Record<string, unknown>;
   options?: PendingAskUserOption[];
   planReview?: PendingSubagentPlanReview;
+  requestUserInput?: {
+    toolCallId: string;
+    questions: import("../protocol/common-types").RequestUserInputQuestion[];
+    isBlocking: boolean;
+  };
+  elicitation?: {
+    mode: "form" | "url";
+    url?: string;
+    elicitationId?: string;
+    serverName?: string;
+    meta?: Record<string, unknown>;
+  };
+}
+
+export interface UserInputQuestionDraft {
+  questionIndex: number;
+  answers: Record<string, { selectedOptionId: string | null; freeformText: string }>;
 }
 
 export interface AgentPromptDraft {
   requestId: string;
   conversationId?: string;
+  inputOwner?: { turnId?: string; messageId?: string; taskId?: string };
   answer?: string;
-  elicitationValues?: Record<string, string | boolean | string[]>;
+  elicitationValues?: Record<string, string | boolean | string[] | undefined>;
   selectedOption?: number | null;
   initialPlan?: string;
   plan?: string;
@@ -1773,11 +1870,13 @@ export interface AgentPromptDraft {
   rejectionFeedback?: string;
   amending?: boolean;
   feedback?: string;
+  userInputDraft?: UserInputQuestionDraft;
+  planImplementationSettled?: boolean;
 }
 
 export interface ApprovalSlice {
   promptDrafts: Record<string, AgentPromptDraft>;
-  updatePromptDraft: (request: { requestId: string; conversationId?: string }, patch: Partial<AgentPromptDraft>) => void;
+  updatePromptDraft: (request: Pick<AgentPromptDraft, "requestId" | "conversationId" | "inputOwner">, patch: Partial<AgentPromptDraft>) => void;
   pendingApproval: PendingApproval | null;
   approvalQueue: PendingApproval[];
   pendingDiffReview: PendingDiffReview | null;
@@ -1793,8 +1892,8 @@ export interface ApprovalSlice {
   clearDiffReview: (requestId?: string) => void;
   clearDiffReviews: (requestIds: string[]) => void;
   setAskUser: (a: PendingAskUser) => void;
-  clearAskUser: (requestId?: string) => void;
-  clearAskUsers: (requestIds: string[]) => void;
+  clearAskUser: (requestId?: string, conversationId?: string, inputOwner?: AgentPromptDraft["inputOwner"]) => void;
+  clearAskUsers: (requestIds: string[], conversationId?: string) => void;
 }
 
 // ── Control-plane projection slice ───────────────────────────────

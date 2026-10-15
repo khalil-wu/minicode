@@ -10,8 +10,15 @@ describe("agentIdentity", () => {
 
   it("gives a group of concurrent agents multiple distinguishable identities", () => {
     const identities = Array.from({ length: 12 }, (_, index) => agentIdentity(`agent-${index}`));
-    expect(new Set(identities.map(({ glyph, color }) => `${glyph}:${color}`)).size).toBeGreaterThan(4);
-    expect(new Set(identities.map(({ glyph }) => glyph)).size).toBeGreaterThan(1);
-    expect(new Set(identities.map(({ color }) => color)).size).toBeGreaterThan(1);
+    expect(new Set(identities.map(({ index }) => index)).size).toBeGreaterThan(4);
+    expect(new Set(identities.map(({ light }) => light)).size).toBeGreaterThan(4);
+  });
+
+  // Values executed directly from the installed desktop's pure qOc function.
+  it.each([
+    ["", 0], ["agent-research", 25], ["agent-editor", 23], ["agent-review", 18],
+    ["agent-tests", 11], ["/root/files_browser_finish", 2], ["智能体-编辑", 8], ["agent-🚀", 17],
+  ])("uses the actual desktop identity for %s", (key, index) => {
+    expect(agentIdentity(String(key)).index).toBe(index);
   });
 });

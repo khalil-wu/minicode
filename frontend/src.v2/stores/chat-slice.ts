@@ -58,6 +58,9 @@ import {
 } from "../lib/tool-call-reducer";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
+import { composerWorkspaceKey } from "./composer-drafts";
+import { emptyConversationWorkbenchState } from "./ui-slice";
+import { rememberSentCommandProjection } from "../protocol/command-projection";
 
 function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -291,6 +294,7 @@ function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?
 }
 
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
+  pendingComposerConversationAdoption: null,
   conversationId: null,
   pendingConversationSwitchId: null,
   pendingConversationCreateId: null,
@@ -298,6 +302,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   conversations: [],
   conversationInventoryInstanceId: null,
   conversationInventoryRevision: 0,
+  pinnedConversationIds: [],
+  pinnedConversationSortMode: "manual",
+  sidebarOrder: null,
   activeGoal: null,
   messages: [],
   conversationMessages: {},
@@ -370,6 +377,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         id,
         role: "system" as const,
         content,
+        systemNoticeTitle: options?.title,
+        systemNoticeProcessing: options?.processing,
+        failureMessage: options?.failureMessage,
+        ...(options?.process ? { blocks: [{ ...options.process, type: "process" as const, timestamp: options.process.timestamp ?? Date.now() }] } : {}),
         artifacts: [],
         timestamp: Date.now(),
       };
@@ -607,11 +618,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // every later command then carried a conversation_id its scope check
     // rejects. Keep the authority unchanged while presenting the requested
     // conversation as an empty view until its public page arrives.
-    set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null,
+    set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+      gitChanges: { ...state.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined },
       messageRevealTarget: state.messageRevealTarget?.conversationId === targetId ? state.messageRevealTarget : null,
     }));
-    if (!sendClientCommand({ type: "conversation.switch", conversation_id: targetId })) {
+    const switchCommand = { type: "conversation.switch" as const, conversation_id: targetId, client_command_id: uniqueMessageId("cmd") };
+    rememberSentCommandProjection(switchCommand, switchCommand.client_command_id, get().conversationId);
+    if (!sendClientCommand(switchCommand)) {
       set({ pendingConversationSwitchId: null });
+      get().requestGitChanges();
     }
   },
   applyConversationSwitched: ({ conversationId }) => {
@@ -625,8 +640,24 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // A startup/reconnect acknowledgement can precede the conversation list.
     // Its matching owner confirms the active UI state; retain choices and
     // drafts made while the server was restoring the same conversation.
-    if (currentConversationId && (currentConversationKnown || currentConversationId === id)) {
-      get().snapshotWorkbenchState(currentConversationId);
+    if (!currentConversationId || currentConversationKnown || currentConversationId === id) {
+      get().snapshotWorkbenchState(currentConversationId ?? undefined);
+    }
+    const adoption = get().pendingComposerConversationAdoption;
+    if (adoption?.conversationId === id && !currentConversationId
+      && workspaceRootsEqual(adoption.workspaceRoot, get().workingDirectory)) {
+      set((state) => {
+        const workspaceKey = composerWorkspaceKey(adoption.workspaceRoot);
+        const draft = state.workspaceComposerDrafts[workspaceKey];
+        const remainingWorkspaceDrafts = { ...state.workspaceComposerDrafts };
+        delete remainingWorkspaceDrafts[workspaceKey];
+        return {
+          conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+            [id]: { ...emptyConversationWorkbenchState(), ...draft } },
+          workspaceComposerDrafts: remainingWorkspaceDrafts,
+          pendingComposerConversationAdoption: null,
+        };
+      });
     }
     const targetConversation = get().conversations.find((c) => c.id === id);
     const targetWorkspace = conversationWorkspacePath(targetConversation);
@@ -666,6 +697,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               usageTotals: s.usageTotals,
             }
           : {}),
+        // Hydration publishes the same authoritative owner again. Its Git
+        // reads still belong to that owner and must keep their request IDs.
+        ...(sameConversation && !workspaceChanged ? { gitChanges: s.gitChanges } : {}),
         conversationId: id,
         messageRevealTarget: s.messageRevealTarget?.conversationId === id ? s.messageRevealTarget : null,
         activeGoal: targetConversation?.goal ?? null,
@@ -720,17 +754,28 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   switchConversation: (id) => {
     get().applyConversationSwitched({ conversationId: id });
   },
+  ensureComposerConversation: async () => {
+    const owner = get();
+    if (owner.pendingConversationSwitchId) return null;
+    if (owner.conversationId) return owner.conversationId;
+    const creation = get().createConversation({ bindWorkspace: Boolean(owner.workingDirectory), appMode: owner.appMode, adoptDraft: true });
+    const requestedId = get().pendingConversationCreateId;
+    if (!await creation || get().conversationId !== requestedId) return null;
+    return requestedId;
+  },
   createConversation: async (options) => {
     const state = get();
     const id = newConversationId();
     const nextAppMode = options?.appMode ?? "cowork";
-    const requestedWorkspace = canonicalWorkspacePath(
-      options?.workspaceRoot ?? state.workingDirectory,
-    );
+    const workspaceAtRequest = options?.workspaceRoot ?? state.workingDirectory;
+    const requestedWorkspace = options?.adoptDraft ? workspaceAtRequest.trim() : canonicalWorkspacePath(workspaceAtRequest);
+    const currentIsProjectless = state.conversations.some((conversation) =>
+      conversation.id === state.conversationId && conversation.executionCwd && !conversation.workspaceRoot && !conversation.worktreePath);
     const shouldBindWorkspace = Boolean(options?.workspaceRoot)
-      || options?.bindWorkspace === true
+      || (options?.bindWorkspace === true && !currentIsProjectless)
       || (
         options?.bindWorkspace === undefined
+        && !currentIsProjectless
         && (options?.appMode ?? state.appMode) === "code"
         && Boolean(state.workingDirectory)
       );
@@ -741,16 +786,29 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const workspaceRoot = shouldBindWorkspace
       ? requestedWorkspace
       : "";
-    set({ pendingConversationSwitchId: id, pendingConversationCreateId: id });
+    set((current) => ({ pendingConversationSwitchId: id, pendingConversationCreateId: id,
+      pendingComposerConversationAdoption: options?.adoptDraft ? { conversationId: id, workspaceRoot: current.workingDirectory } : null,
+      gitChanges: { ...current.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined },
+    }));
+    let created = false;
     try {
-      const result = await sendClientCommandAwaitResult({
+      const preferences = desktop() ? await desktop()!.preferences.get() : null;
+      if (get().pendingConversationCreateId !== id) return false;
+      const createCommand = {
         type: "conversation.create",
         conversation_id: id,
         title: "New chat",
         conversation_type: "main",
         workspace_root: workspaceRoot || undefined,
-        permission_mode: toBackendPermissionMode(state.permissionMode),
-      }, "conversation.create");
+        ...(!workspaceRoot && preferences ? { projectless_base: preferences.defaultTaskDirectory,
+          initial_prompt: options?.adoptDraft ? state.draft : "" } : {}),
+        permission_mode: options?.adoptDraft || !preferences
+          ? toBackendPermissionMode(state.permissionMode) : preferences.defaultPermissionMode,
+        agent_mode: options?.adoptDraft ? state.agentMode : "build",
+        client_command_id: uniqueMessageId("cmd"),
+      } as const;
+      rememberSentCommandProjection(createCommand, createCommand.client_command_id, state.conversationId);
+      const result = await sendClientCommandAwaitResult(createCommand, "conversation.create");
       if (!commandResultSucceeded(result)) {
         if (get().pendingConversationSwitchId === id) set({ pendingConversationSwitchId: null });
         pushToast(result.message || "Unable to create the conversation.", "error", 4000);
@@ -761,6 +819,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         || (current.pendingConversationSwitchId === null && current.conversationId === id)) {
         current.setAppMode(nextAppMode);
       }
+      created = true;
       return true;
     } catch (error) {
       if (get().pendingConversationSwitchId === id) set({ pendingConversationSwitchId: null });
@@ -771,6 +830,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return false;
     } finally {
       if (get().pendingConversationCreateId === id) set({ pendingConversationCreateId: null });
+      if (get().pendingComposerConversationAdoption?.conversationId === id) set({ pendingComposerConversationAdoption: null });
+      if (!created) get().requestGitChanges();
     }
   },
   removeConversation: async (id) => sendConversationDeleteCommand({
@@ -855,7 +916,26 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       }
     }
   },
-  bindStreamingTurn: (conversationId, messageId, turnId) => {
+  recordTurnUserInput: (message, conversationId, assistantMessageId) => {
+    set((state) => updateMessagesForConversation(state, conversationId, (messages) => {
+      const assistantIndex = messages.findIndex((item) => item.role === "assistant" && item.id === assistantMessageId);
+      if (assistantIndex < 0) return null;
+      const next = messages.slice();
+      const assistant = messages[assistantIndex];
+      const blocks = getContentBlocks(assistant);
+      if (!blocks.some((block) => block.type === "user_input" && block.userMessageId === message.id)) {
+        next[assistantIndex] = { ...assistant, isThinkingStreaming: false,
+          blocks: [...settleThinkingBlocks(blocks.slice()), { type: "user_input", userMessageId: message.id }] };
+      }
+      const userIndex = messages.findIndex((item) => item.role === "user" && item.id === message.id);
+      const admitted = { ...(userIndex < 0 ? {} : messages[userIndex]), ...message,
+        queueState: undefined, queuePosition: undefined, queuePaused: undefined };
+      if (userIndex < 0) next.push(admitted);
+      else next[userIndex] = admitted;
+      return next;
+    }));
+  },
+  bindStreamingTurn: (conversationId, messageId, turnId, startedAt) => {
     const normalizedTurnId = turnId?.trim();
     if (!normalizedTurnId) return;
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
@@ -863,9 +943,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       if (index < 0) return null;
       const message = messages[index];
       if (message.turnId && message.turnId !== normalizedTurnId) return null;
-      if (message.turnId === normalizedTurnId) return null;
+      if (message.turnId === normalizedTurnId && (startedAt === undefined || message.runStartedAt === startedAt)) return null;
       const next = messages.slice();
-      next[index] = { ...message, turnId: normalizedTurnId };
+      next[index] = { ...message, turnId: normalizedTurnId,
+        ...(startedAt === undefined ? {} : { timestamp: startedAt, runStartedAt: startedAt }),
+      };
       return next;
     }));
   },
@@ -1011,8 +1093,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const blocks = msg.blocks ? msg.blocks.slice() : [];
         const thinkingMetadata = normalizeThinkingMetadata(metadata);
         const identity = thinkingMetadata.item_id;
+        let userInputIndex = blocks.length - 1;
+        while (userInputIndex >= 0 && blocks[userInputIndex].type !== "user_input") userInputIndex -= 1;
         const matchingIndex = identity
-          ? blocks.findIndex((block) => block.type === "thinking" && block.item_id === identity)
+          ? blocks.findIndex((block, index) => index > userInputIndex && block.type === "thinking" && block.item_id === identity)
           : -1;
         const lastIndex = blocks.length - 1;
         const fallbackIndex = matchingIndex >= 0
@@ -1467,7 +1551,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     });
     get().clearPendingProviderProgress(conversationId, messageId);
   },
-  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId, snapshotBlocks) => {
+  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId, snapshotBlocks, startedAt) => {
     set((s) => {
       const targetId = conversationId || s.conversationId;
       const sourceMessages = targetId && targetId !== s.conversationId
@@ -1480,6 +1564,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const targetMessage = targetIndex >= 0 && sourceMessages[targetIndex]?.role === "assistant"
         ? sourceMessages[targetIndex]
         : null;
+      // started/resume names the canonical current assistant. A preserved
+      // earlier partial/checkpoint is evidence, not another live turn.
+      const retainedMessages = sourceMessages.map((message) =>
+        message.role === "assistant" && message.id !== targetMessageId
+          && (message.isStreaming || message.isThinkingStreaming)
+          ? { ...message, isStreaming: false, isThinkingStreaming: false }
+          : message,
+      );
       const hasStructuredSnapshot = snapshotBlocks !== undefined;
       const resumedBlocks = (existingBlocks: ContentBlock[]) => mergeResumeToolCalls(
         snapshotBlocks ?? existingBlocks,
@@ -1489,20 +1581,21 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
 
       let nextMessages: typeof sourceMessages;
       if (targetMessage) {
-        nextMessages = sourceMessages.slice();
+        nextMessages = retainedMessages.slice();
         const baseMessage = resumedFromInFlightProjection(stripLegacyContentFields(targetMessage));
         const blocks = resumedBlocks(getContentBlocks(targetMessage));
         nextMessages[targetIndex] = {
           ...baseMessage,
           content: hasStructuredSnapshot ? getAnswerTextFromBlocks(blocks) : "",
           ...(turnId ? { turnId } : {}),
+          ...(startedAt === undefined ? {} : { timestamp: startedAt, runStartedAt: startedAt }),
           isStreaming: true,
           blocks,
         };
       } else {
         const blocks = resumedBlocks([]);
         nextMessages = [
-          ...sourceMessages,
+          ...retainedMessages,
           {
             id: targetMessageId || uniqueMessageId("resume"),
             ...(turnId ? { turnId } : {}),
@@ -1510,7 +1603,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             content: hasStructuredSnapshot ? getAnswerTextFromBlocks(blocks) : "",
             blocks,
             artifacts: [],
-            timestamp: Date.now(),
+            // Creation/ordering time may be local for an older sender. Only a
+            // received runStartedAt is allowed to drive the process clock.
+            timestamp: startedAt ?? Date.now(),
+            ...(startedAt === undefined ? {} : { runStartedAt: startedAt }),
             isStreaming: true,
           },
         ];
@@ -1599,23 +1695,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const selectedContext = s.sideChatPendingContext
         && workspaceRootsEqual(s.sideChatPendingContext.workspaceRoot ?? s.workingDirectory, workspaceRoot)
         ? s.sideChatPendingContext : undefined;
-      const recentMessages = (workspaceRootsEqual(workspaceRoot, s.workingDirectory) ? s.messages : [])
-        .filter((message) => message.role === "user" || message.role === "assistant")
-        .slice(-6)
-        .map((message) => {
-          const role = message.role === "assistant" ? "Assistant" : "User";
-          const content = (message.content || getThinkingFromMessage(message) || "").trim().replace(/\s+/g, " ");
-          return content ? `${role}: ${content.slice(0, 280)}` : "";
-        })
-        .filter(Boolean);
-      const inheritedContext = recentMessages.length > 0
-        ? `Main conversation context:\n${recentMessages.join("\n")}`
-        : "";
       return {
         sideChatPendingContext: selectedContext ? null : s.sideChatPendingContext,
         sideChats: {
           ...s.sideChats,
-          [id]: { id, messages: [], isStreaming: false, draft: "", inheritedContext, selectedContext,
+          [id]: { id, messages: [], isStreaming: false, draft: "", selectedContext, parentConversationId: owner?.parentConversationId ?? s.conversationId ?? undefined,
             attachments: [], contextRefs: [], workspaceRoot, permissionMode: owner?.permissionMode ?? s.permissionMode },
         },
       };

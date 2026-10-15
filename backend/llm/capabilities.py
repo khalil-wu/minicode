@@ -127,7 +127,7 @@ def capabilities_from_openai_settings(
     effort_levels = reasoning_effort_levels(
         model,
         wire_api,
-        getattr(settings, "reasoning_effort_levels", ()),
+        settings.reasoning_effort_levels,
     )
     configured_effort = str(settings.reasoning_effort or "").strip().lower()
     effective_effort = normalize_reasoning_effort(
@@ -135,7 +135,7 @@ def capabilities_from_openai_settings(
         wire_api,
         configured_effort,
         effort_levels,
-        getattr(settings, "default_reasoning_effort", ""),
+        settings.default_reasoning_effort,
     )
     dedicated_image_model = is_gpt_image_model(model)
     limitations: list[str] = []
@@ -147,8 +147,8 @@ def capabilities_from_openai_settings(
         tool_calling = False
         limitations.append(f"unsupported_openai_wire_api:{wire_api}")
     if (
-        str(getattr(settings, "context_window_source", "") or "") == "fallback"
-        and not bool(getattr(settings, "context_window_verified", False))
+        str(settings.context_window_source or "") == "fallback"
+        and not settings.context_window_verified
     ):
         limitations.append("context_window_fallback_unverified")
     return ProviderCapabilities(
@@ -162,7 +162,7 @@ def capabilities_from_openai_settings(
         supports_hosted_web_search=settings.supports_hosted_web_search,
         parallel_tool_calls=(
             False if dedicated_image_model
-            else getattr(settings, "parallel_tool_calls", None)
+            else settings.parallel_tool_calls
         ),
         json_mode=False if dedicated_image_model else None,
         reasoning_effort=False if dedicated_image_model else bool(effort_levels),
@@ -175,39 +175,17 @@ def capabilities_from_openai_settings(
         reasoning_effort_supported=(
             False if dedicated_image_model else bool(effort_levels)
         ),
-        context_window=max(0, getattr(settings, "context_window", 0) or 0),
-        context_window_source=str(
-            getattr(settings, "context_window_source", "") or ""
-        ),
-        context_window_verified=bool(
-            getattr(settings, "context_window_verified", False)
-        ),
-        max_context_window=max(
-            0,
-            getattr(settings, "max_context_window", 0) or 0,
-        ),
-        max_context_window_source=str(
-            getattr(settings, "max_context_window_source", "") or ""
-        ),
-        max_context_window_verified=bool(
-            getattr(settings, "max_context_window_verified", False)
-        ),
-        max_output_tokens=max(
-            0,
-            getattr(settings, "max_output_tokens", 0) or 0,
-        ),
-        max_output_tokens_source=str(
-            getattr(settings, "max_output_tokens_source", "") or ""
-        ),
-        max_output_tokens_verified=bool(
-            getattr(settings, "max_output_tokens_verified", False)
-        ),
-        default_reasoning_effort=str(
-            getattr(settings, "default_reasoning_effort", "") or ""
-        ),
-        default_reasoning_summary=str(
-            getattr(settings, "default_reasoning_summary", "") or ""
-        ),
+        context_window=max(0, settings.context_window or 0),
+        context_window_source=str(settings.context_window_source or ""),
+        context_window_verified=bool(settings.context_window_verified),
+        max_context_window=max(0, settings.max_context_window or 0),
+        max_context_window_source=str(settings.max_context_window_source or ""),
+        max_context_window_verified=bool(settings.max_context_window_verified),
+        max_output_tokens=max(0, settings.max_output_tokens or 0),
+        max_output_tokens_source=str(settings.max_output_tokens_source or ""),
+        max_output_tokens_verified=bool(settings.max_output_tokens_verified),
+        default_reasoning_effort=str(settings.default_reasoning_effort or ""),
+        default_reasoning_summary=str(settings.default_reasoning_summary or ""),
         vision=False if dedicated_image_model else "image" in settings.input_modalities if settings.input_modalities else None,
         native_pdf=False if dedicated_image_model else None,
         image_generation=True if dedicated_image_model else None,
@@ -313,7 +291,7 @@ def capabilities_for_adapter(adapter: Any) -> ProviderCapabilities:
 
     settings = getattr(adapter, "_settings", None)
     if isinstance(settings, LLMSettings):
-        provider = str(getattr(settings, "provider", "custom") or "custom")
+        provider = str(settings.provider or "custom")
         return capabilities_from_openai_settings(settings, provider=provider)
 
     model_definition = getattr(adapter, "_model", None)
@@ -329,6 +307,7 @@ def capabilities_for_adapter(adapter: Any) -> ProviderCapabilities:
             streaming=True,
             tool_calling=True,
             supports_hosted_web_search=getattr(model_definition, "supports_hosted_web_search", None),
+            vision="image" in model_definition.input if model_definition.input else None,
             reasoning_effort=bool(getattr(model_definition, "reasoning", False)),
             reasoning_effort_levels=tuple(
                 getattr(model_definition, "reasoning_effort_levels", ()) or ()

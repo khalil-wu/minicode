@@ -7,8 +7,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { externalPeerEnvironment } = require("./test-peer-env");
 
 test("real Electron cold argv, late subscription, ack and responsive cleanup", { timeout: 60000 }, async () => {
+  const peer = await externalPeerEnvironment();
   let receive;
   const stages = [];
   const reported = new Promise((resolve) => { receive = resolve; });
@@ -75,7 +77,8 @@ test("real Electron cold argv, late subscription, ack and responsive cleanup", {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => { receive(JSON.parse(body)); response.end("ok"); });
     } else if (request.url === "/readyz") {
-      response.end("ready");
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ ready: true, desktop_bridge_fingerprint: peer.fingerprint }));
     } else {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
       response.end(html);
@@ -84,7 +87,7 @@ test("real Electron cold argv, late subscription, ack and responsive cleanup", {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-cold-link-oracle-"));
-  const env = { ...process.env, MINICODE_USER_DATA_DIR: userData, MINICODE_SKIP_BACKEND: "1", MINICODE_API_BASE_URL: origin, MINICODE_WS_BASE_URL: origin.replace("http:", "ws:"), MINICODE_FRONTEND_URL: origin, MINICODE_BACKEND_STARTUP_TIMEOUT_MS: "10000" };
+  const env = { ...process.env, ...peer.env, MINICODE_USER_DATA_DIR: userData, MINICODE_SKIP_BACKEND: "1", MINICODE_API_BASE_URL: origin, MINICODE_WS_BASE_URL: origin.replace("http:", "ws:"), MINICODE_FRONTEND_URL: origin, MINICODE_BACKEND_STARTUP_TIMEOUT_MS: "10000" };
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(require("electron"), [__dirname, "minicode://conversation/cold-oracle"], { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";

@@ -28,7 +28,7 @@ async def emergency_compact(state: AgentState, context: ContextBuilder) -> bool:
     summary = await context.full_compact(restore_state=state)
     if summary:
         logger.info("[ErrorWithholding] Emergency compaction succeeded")
-    return bool(summary)
+    return bool(summary) or (isinstance(context, ContextBuilder) and context.token_budget_enabled)
 
 
 async def strip_historical_media(state: AgentState, context: ContextBuilder) -> bool:

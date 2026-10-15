@@ -66,3 +66,28 @@ test("a failed restart retains the original failure surface and propagates the r
   assert.equal(audit.context.startupFailureWindow, failureWindow);
   assert.equal(audit.getWindow(), null);
 });
+
+test("window-binding bridge failure reaches startup recovery and retry proves the bridge before backend launch", async () => {
+  const startupSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8")
+    .match(/async function attemptAppStartup\(source = "startup"\) \{[\s\S]*?\n\}/)[0];
+  const calls = [];
+  let bridgeAvailable = false;
+  const context = { startupRetryInFlight: false, rollbackPreparationInProgress: false, desktopCleanupFailed: false, appendDesktopLog() {}, process: { env: {} }, EMBEDDED_BROWSER_TOKEN: "private-bridge-token", MANAGE_BACKEND: true,
+    backendSidecar: { resetStopRequested() {} },
+    embeddedBrowserBridge: { async start() { calls.push("bridge"); if (!bridgeAvailable) throw new Error("Binding listener unavailable"); return "http://127.0.0.1:43123"; } },
+    launchManagedBackend: async () => {
+      assert.equal(context.process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT, "http://127.0.0.1:43123");
+      assert.equal(context.process.env.MINICODE_EMBEDDED_BROWSER_TOKEN, "private-bridge-token"); calls.push("backend");
+    },
+    windowManager: { createMainWindow: async () => calls.push("window") },
+    serializeError: (error) => ({ message: error.message }),
+    createStartupFailureWindow: async (error) => { assert.equal(error.message, "Binding listener unavailable"); calls.push("error-surface"); },
+    closeStartupFailureWindow: () => calls.push("close-error"),
+  };
+  const startup = vm.runInNewContext(`${startupSource}\nattemptAppStartup;`, context);
+  assert.equal(await startup(), false);
+  assert.deepEqual(calls, ["bridge", "error-surface"]);
+  bridgeAvailable = true;
+  assert.equal(await startup("startup-retry"), true);
+  assert.deepEqual(calls, ["bridge", "error-surface", "bridge", "backend", "window", "close-error"]);
+});

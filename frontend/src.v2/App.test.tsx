@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
 
 const lifecycle = vi.hoisted(() => ({ close: vi.fn(), failSettings: false, pendingSettings: null as Promise<void> | null }));
@@ -35,6 +35,7 @@ vi.mock("./shell/WorkbenchShell", () => ({ WorkbenchShell: () => {
 import { useAppStore } from "./stores";
 import { App } from "./App";
 
+beforeEach(() => { vi.spyOn(navigator, "language", "get").mockReturnValue("zh-CN"); });
 afterEach(() => { cleanup(); lifecycle.failSettings = false; lifecycle.pendingSettings = null; vi.restoreAllMocks(); });
 
 it("lets a different overlay open after a previous route's rendering failure", async () => {

@@ -32,11 +32,20 @@ class ConversationQueryClaim:
     generation: int
 
 
+@dataclass(frozen=True)
+class ConversationTransition:
+    conversation_id: str
+    owner_id: str
+    generation: int
+    replacing_claim: ConversationQueryClaim | None = None
+
+
 class ConversationQueryGuardRegistry:
     """Synchronous QueryGuard registry keyed by durable conversation id."""
 
     def __init__(self) -> None:
         self._states: dict[str, _QueryState] = {}
+        self._transitions: dict[str, ConversationTransition] = {}
         # Admission is synchronous by contract, but REST/scheduler hosts may
         # call it from different worker threads. Guard the check-and-transition
         # as one atomic operation so two entry points cannot both observe idle.
@@ -54,7 +63,7 @@ class ConversationQueryGuardRegistry:
             return ConversationQueryClaim("", owner_id, 0)
         with self._lock:
             state = self._states.setdefault(conversation_id, _QueryState())
-            if state.status == "running":
+            if state.status == "running" or conversation_id in self._transitions:
                 return None
             state.status = "running"
             state.generation += 1
@@ -64,6 +73,55 @@ class ConversationQueryGuardRegistry:
                 owner_id=owner_id,
                 generation=state.generation,
             )
+
+    def try_transition(
+        self, conversation_id: str, *, owner_id: str, replacing_owner_id: str = "",
+    ) -> ConversationTransition | None:
+        """Reserve regeneration while its own old query drains.
+
+        The old query keeps its generation until its actual borrowers release it.
+        Other entry points cannot start in the gap before the replacement query.
+        """
+        with self._lock:
+            state = self._states.setdefault(conversation_id, _QueryState())
+            if conversation_id in self._transitions:
+                return None
+            replacing_claim = None
+            if state.status == "running":
+                if state.owner_id != replacing_owner_id:
+                    return None
+                replacing_claim = ConversationQueryClaim(conversation_id, state.owner_id, state.generation)
+            transition = ConversationTransition(conversation_id, owner_id, state.generation + 1, replacing_claim)
+            self._transitions[conversation_id] = transition
+            return transition
+
+    def transition_ready(self, transition: ConversationTransition) -> bool:
+        with self._lock:
+            return (self._transitions.get(transition.conversation_id) == transition
+                    and self._states[transition.conversation_id].status == "idle")
+
+    def handoff(self, transition: ConversationTransition, *, owner_id: str) -> ConversationQueryClaim:
+        """Transfer the reserved mutation directly to its replacement query."""
+        with self._lock:
+            state = self._states[transition.conversation_id]
+            if self._transitions.get(transition.conversation_id) != transition or state.status != "idle":
+                raise RuntimeError("Conversation transition has not finished draining its previous query")
+            state.status = "running"
+            state.owner_id = owner_id
+            state.generation = transition.generation
+            self._transitions.pop(transition.conversation_id)
+            return ConversationQueryClaim(transition.conversation_id, owner_id, transition.generation)
+
+    def release_transition(self, transition: ConversationTransition) -> bool:
+        with self._lock:
+            if self._transitions.get(transition.conversation_id) != transition:
+                return False
+            self._transitions.pop(transition.conversation_id)
+            return True
+
+    def has_transition(self, conversation_id: str) -> bool:
+        with self._lock:
+            return conversation_id in self._transitions
 
     def end(self, claim: ConversationQueryClaim) -> bool:
         if not claim.conversation_id:
@@ -142,6 +200,7 @@ def conversation_query_guards() -> ConversationQueryGuardRegistry:
 
 __all__ = [
     "ConversationQueryClaim",
+    "ConversationTransition",
     "ConversationQueryGuardRegistry",
     "conversation_query_guards",
 ]

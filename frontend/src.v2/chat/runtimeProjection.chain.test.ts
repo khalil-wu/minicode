@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";

@@ -6,7 +6,7 @@ import { useAppStore } from "../stores";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { FooterRow } from "./FooterRow";
 import { uploadComposerFiles } from "./uploads";
-import { showConfirm } from "../overlays/DialogService";
+import { showChoice, showConfirm } from "../overlays/DialogService";
 import { handleSessionEvent } from "../chat/sessionEvents";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
@@ -44,6 +44,7 @@ vi.mock("./uploads", () => ({
 
 vi.mock("../overlays/DialogService", () => ({
   showConfirm: vi.fn(),
+  showChoice: vi.fn(),
 }));
 
 vi.mock("../overlays/ToastContainer", () => ({
@@ -143,6 +144,9 @@ describe("FooterRow permission picker", () => {
       permissionMode: "auto",
       agentMode: "build",
       currentModel: "gpt-5",
+      defaultModelSelection: null,
+      modelSelectionMode: null,
+      availableModelOptions: [],
       currentProvider: "openai",
       currentProviderId: "openai_official",
       currentProviderBaseUrl: "https://api.openai.com/v1",
@@ -166,7 +170,7 @@ describe("FooterRow permission picker", () => {
       lastUsage: null,
       isStreaming: false,
       runtimeSession: null,
-      runtimeCapabilities: null,
+      runtimeCapabilities: { permission: { available_modes: ["confirm", "auto", "plan", "bypass"] } },
     });
   });
 
@@ -177,14 +181,17 @@ describe("FooterRow permission picker", () => {
     vi.unstubAllGlobals();
   });
 
-  it("opens the hidden file input from the attach button and uploads selected files", () => {
+  it("opens the add menu before choosing files and uploads selected files", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ plugins: [] }), {status:200})));
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
-    const attach = screen.getByRole("button", { name: "添加附件" });
+    const attach = screen.getByRole("button", { name: "添加文件等内容" });
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const clickSpy = vi.spyOn(input, "click").mockImplementation(() => {});
 
     fireEvent.click(attach);
+    expect(clickSpy).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("menuitem", { name: "文件" }));
     expect(clickSpy).toHaveBeenCalledTimes(1);
 
     const files = [
@@ -296,31 +303,31 @@ describe("FooterRow permission picker", () => {
     expect(usageRequests()).toHaveLength(1);
   });
 
-  it("shows all permission choices with distinct icons and concise descriptions", () => {
+  it("groups the actual non-full permissions and shows Full access after the default option", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("权限：自动"));
+    fireEvent.click(screen.getByTitle("更改权限"));
 
     expect(document.querySelector(".mc-dropdown-menu.composer-picker-menu")).toBeTruthy();
-    expect(screen.getByText("询问")).toBeTruthy();
-    expect(screen.getAllByText("自动").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("option").map(option => option.getAttribute("aria-label"))).toEqual(["请求批准", "完全访问"]);
     expect(screen.getByText("完全访问")).toBeTruthy();
     expect(screen.queryByText("Ask before file and network actions")).toBeNull();
     expect(screen.queryByText("Auto read, search, and edit workspace files")).toBeNull();
     expect(screen.queryByText("Use files, network, edits, and commands without prompts")).toBeNull();
-    expect(screen.getByText("规划")).toBeTruthy();
-    expect(screen.getByRole("option", { name: "询问" }).querySelector(".lucide-hand")).toBeTruthy();
+    expect(screen.queryByText("规划")).toBeNull();
+    expect(screen.getByRole("option", { name: "请求批准" }).querySelector(".lucide-hand")).toBeTruthy();
     expect(screen.getByRole("option", { name: "完全访问" }).querySelector(".lucide-shield-alert")).toBeTruthy();
-    expect(screen.getByText("敏感操作前请求确认")).toBeTruthy();
+    expect(screen.getByText("编辑外部文件和使用互联网时始终询问")).toBeTruthy();
     expect(screen.queryByText("Accept")).toBeNull();
     expect(screen.queryByText("Auto-accept file edits, ask for commands")).toBeNull();
   });
 
-  it("switches the conversation into Plan permission mode", async () => {
+  it("keeps an existing read-only permission in the default group without changing agent Plan", async () => {
+    useAppStore.setState({ permissionMode: "plan", agentMode: "build" });
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("权限：自动"));
-    fireEvent.click(screen.getByText("规划"));
+    fireEvent.click(screen.getByTitle("更改权限"));
+    fireEvent.click(screen.getByRole("option", { name: "请求批准" }));
 
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "conversation.permission_mode.set",
@@ -328,6 +335,7 @@ describe("FooterRow permission picker", () => {
       source: "frontend.ui",
       conversation_id: "conv-footer",
     }, "conversation.permission_mode.set"));
+    expect(useAppStore.getState().agentMode).toBe("build");
   });
 
   it("asks for confirmation before switching to bypass", async () => {
@@ -338,7 +346,7 @@ describe("FooterRow permission picker", () => {
     confirmSpy.mockResolvedValue(true);
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("权限：自动"));
+    fireEvent.click(screen.getByTitle("更改权限"));
     fireEvent.click(screen.getByText("完全访问"));
 
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
@@ -352,7 +360,7 @@ describe("FooterRow permission picker", () => {
     await act(async () => accept({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "",
       data: { conversation_id: "conv-footer", mode: "bypass" } }));
     expect(useAppStore.getState().permissionMode).toBe("bypass");
-    expect(screen.getByTitle("权限：完全访问")).toBeTruthy();
+    expect(screen.getByTitle("更改权限")).toBeTruthy();
   });
 
   it("keeps the current mode when the bypass confirmation is cancelled", async () => {
@@ -361,7 +369,7 @@ describe("FooterRow permission picker", () => {
     confirmSpy.mockResolvedValue(false);
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("权限：自动"));
+    fireEvent.click(screen.getByTitle("更改权限"));
     fireEvent.click(screen.getByText("完全访问"));
 
     await waitFor(() => {
@@ -375,7 +383,7 @@ describe("FooterRow permission picker", () => {
 
     fireEvent(document, new CustomEvent("open-permission-menu"));
 
-    expect(screen.getByText("询问")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "请求批准" })).toBeTruthy();
     expect(screen.getByText("完全访问")).toBeTruthy();
   });
 
@@ -399,8 +407,8 @@ describe("FooterRow permission picker", () => {
 
     fireEvent(document, new CustomEvent("open-model-menu"));
 
-    expect(screen.getByText("gpt-5")).toBeTruthy();
-    expect(screen.getByText("配置模型…")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "5" })).toBeTruthy();
+    expect(screen.queryByText("配置模型…")).toBeNull();
   });
 
   it("does not show stale fallback models for unknown custom gateways in the model menu", () => {
@@ -421,10 +429,10 @@ describe("FooterRow permission picker", () => {
     expect(screen.getAllByText("mimo-v2.5-pro")).toHaveLength(2);
     expect(screen.queryByText("gpt-5.5")).toBeNull();
     expect(screen.queryByText("gpt-5.4")).toBeNull();
-    expect(screen.getByText("配置模型…")).toBeTruthy();
+    expect(screen.queryByText("配置模型…")).toBeNull();
   });
 
-  it("sends model changes through the shared websocket outbox", () => {
+  it("waits for the model result through the shared websocket outbox", async () => {
     useAppStore.setState({
       currentModel: "deepseek-v4-flash",
       currentProvider: "custom",
@@ -436,19 +444,20 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     fireEvent(document, new CustomEvent("open-model-menu"));
-    fireEvent.click(screen.getByText("gpt-5"));
+    fireEvent.click(screen.getByRole("option", { name: "5" }));
 
-    expect(sendClientCommand).toHaveBeenCalledWith({
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "llm.model.set",
       conversation_id: "conv-footer",
       model: "gpt-5",
-    });
+      selection_mode: "model",
+    }, "model.set"));
   });
 
-  it("opens provider settings from Configure without closing an open settings dialog", async () => {
+  it("offers configuration when no models are available and retains an open settings dialog", async () => {
     useAppStore.setState({
-      currentModel: "deepseek-v4-flash",
-      availableModels: ["deepseek-v4-flash", "gpt-5"],
+      currentModel: "",
+      availableModels: [],
       settingsOpen: true,
       settingsTab: "general",
     });
@@ -469,7 +478,7 @@ describe("FooterRow permission picker", () => {
     fireEvent.click(screen.getByTitle("gpt-5"));
 
     expect(document.querySelector(".mc-dropdown-menu.composer-picker-menu")).toBeTruthy();
-    expect(screen.getByText("gpt-5-mini")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "5 Mini" })).toBeTruthy();
   });
 
   it("keeps runtime sandbox metadata out of the permission control", () => {
@@ -483,7 +492,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    expect(screen.getByTitle("权限：自动")).toBeTruthy();
+    expect(screen.getByTitle("更改权限")).toBeTruthy();
     expect(screen.queryByText("Auto · Guarded · Net asks")).toBeNull();
     expect(screen.queryByText("app_layer")).toBeNull();
     expect(screen.queryByText(/Files:|Network:|Sandbox/)).toBeNull();
@@ -503,13 +512,11 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    expect((screen.getByTitle("权限：规划") as HTMLElement).style.color).toBe("var(--text-secondary)");
+    expect((screen.getByTitle("更改权限") as HTMLElement).style.color).toBe("var(--text-secondary)");
     // `max` is not among the provider's declared levels. Previously the pill
     // silently rendered the nearest extreme level (极高) as if it were the
     // configured value; it now names the real level and says it is unsupported.
-    expect(screen.getByTitle(
-      "模型推理强度：最大推理强度。当前 Provider 未声明支持该强度，请改选下方受支持的档位。",
-    ).tagName).toBe("BUTTON");
+    expect(screen.getByRole("button", { name: "模型与推理强度：5，最大（不支持）" }).getAttribute("title")).toBe("选择模型");
     expect(screen.getByRole("button", { name: "模型与推理强度：5，最大（不支持）" })).toBeTruthy();
   });
 
@@ -565,7 +572,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("模型推理强度：Provider 声明的推理强度：focused。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
     const slider = screen.getByRole("slider");
     expect(slider.getAttribute("max")).toBe("2");
     for (const [index, label] of ["低", "focused", "Ultra"].entries()) {
@@ -588,7 +595,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("模型推理强度：中等推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
     fireEvent.change(screen.getByRole("slider"), { target: { value: "3" } });
     fireEvent.pointerUp(screen.getByRole("slider"));
 
@@ -614,7 +621,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
-    fireEvent.click(screen.getByTitle("模型推理强度：Ultra 推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
     const slider = screen.getByRole("slider");
     expect(slider.getAttribute("aria-valuetext")).toBe("Ultra");
     expect(slider.getAttribute("max")).toBe("5");
@@ -627,7 +634,7 @@ describe("FooterRow permission picker", () => {
     expect(slider.getAttribute("aria-valuetext")).toBe("Ultra");
   });
 
-  it("describes Ultra as collaboration while retaining its canonical value and showing the actual model effort", () => {
+  it("keeps the Ultra value while the tooltip only offers the model choice", () => {
     useAppStore.setState({ currentModel: "gpt-6.1-sol", effortLevel: "ultra", runtimeCapabilities: { provider_capabilities: {
       model: "gpt-6.1-sol", reasoning_effort_supported: true,
       reasoning_effort_levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -635,7 +642,7 @@ describe("FooterRow permission picker", () => {
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
     const control = screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，Ultra" });
-    expect(control.title).toContain("主动多智能体协作；模型请求使用极高推理");
+    expect(control.title).toBe("选择模型");
     fireEvent.click(control);
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("Ultra");
     expect(screen.getByRole("slider").getAttribute("max")).toBe("5");
@@ -675,9 +682,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
-    const pill = screen.getByTitle(
-      "模型推理强度：最低推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。",
-    );
+    const pill = screen.getByRole("button", { name: /模型与推理强度：/ });
     expect(screen.getByRole("button", { name: "模型与推理强度：5，最低" })).toBeTruthy();
     expect(screen.queryByText("中（不支持）")).toBeNull();
 
@@ -705,7 +710,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow minimal sendState="idle" onSend={() => {}} />);
 
-    expect(screen.getByTitle("模型推理强度：中等推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /模型与推理强度：/ })).toBeTruthy();
   });
 
   it("commits a supported slider value once after dragging, not on every move", async () => {
@@ -717,7 +722,7 @@ describe("FooterRow permission picker", () => {
     expect(modelControl.querySelector('.composer-model-trigger-label')?.textContent).toBeTruthy();
     expect(modelControl.querySelector('.composer-model-trigger-effort')?.textContent).toBe("中");
     expect(screen.queryByRole("button", { name: "中", exact: true })).toBeNull();
-    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，中/ }));
     const slider = screen.getByRole("slider", { name: "推理强度" });
     fireEvent.change(slider, { target: { value: "2" } });
     fireEvent.change(slider, { target: { value: "3" } });
@@ -762,12 +767,11 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("listbox", { name: "推理档位" })).toBeNull();
     expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "gpt-5", exact: true })));
-    fireEvent.click(screen.getByRole("option", { name: "gpt-5.5", exact: true }));
-    expect(sendClientCommand).toHaveBeenCalledWith({ type: "llm.model.set", model: "gpt-5.5", conversation_id: "conv-footer" });
-    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "5", exact: true })));
+    fireEvent.click(screen.getByRole("option", { name: "5.5", exact: true }));
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({ type: "llm.model.set", model: "gpt-5.5", selection_mode: "model", conversation_id: "conv-footer" }, "model.set"));
     expect(screen.queryByRole("listbox")).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await waitFor(() => expect(screen.getByRole("slider")).toBe(document.activeElement));
   });
 
   it("uses one trigger for the model and reasoning picker and restores its focus", async () => {
@@ -792,7 +796,7 @@ describe("FooterRow permission picker", () => {
   it("closes the model list when keyboard focus moves to the next composer control", async () => {
     render(<FooterRow sendState="idle" onSend={() => {}} />);
     fireEvent.click(screen.getByTitle("gpt-5"));
-    const option = screen.getByRole("option", { name: "gpt-5", exact: true });
+    const option = screen.getByRole("option", { name: "5", exact: true });
     await waitFor(() => expect(document.activeElement).toBe(option));
     const next = screen.getByRole("button", { name: "配置听写" });
     act(() => next.focus());
@@ -805,7 +809,7 @@ describe("FooterRow permission picker", () => {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，中/ }));
     const slider = screen.getByRole("slider");
     fireEvent.change(slider, { target: { value: "2" } });
     fireEvent.pointerCancel(slider);
@@ -823,7 +827,7 @@ describe("FooterRow permission picker", () => {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByTitle(/模型推理强度：最大/));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，最大/ }));
     expect(screen.queryByRole("slider")).toBeNull();
     fireEvent.click(screen.getByRole("option", { name: "中" }));
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
@@ -838,14 +842,15 @@ describe("FooterRow permission picker", () => {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，中/ }));
     const slider = screen.getByRole("slider");
     fireEvent.change(slider, { target: { value: "0" } });
     fireEvent.pointerUp(slider);
-    expect(screen.getByTitle(/模型推理强度：低/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /模型与推理强度：.*，低/ })).toBeTruthy();
     fireEvent.change(slider, { target: { value: "2" } });
     fireEvent.pointerUp(slider);
-    expect(screen.getByTitle(/模型推理强度：高/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /模型与推理强度：.*，高/ })).toBeTruthy();
+    await waitFor(() => expect(replies).toHaveLength(2));
     await act(async () => {
       useAppStore.setState({ effortLevel: "low" });
       replies[0]({ type: "command.result", command: "effort", level: "success" });
@@ -866,10 +871,10 @@ describe("FooterRow permission picker", () => {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，中/ }));
     fireEvent.change(screen.getByRole("slider"), { target: { value: "2" } });
     fireEvent.pointerUp(screen.getByRole("slider"));
-    await waitFor(() => expect(screen.getByTitle(/模型推理强度：中等/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: /模型与推理强度：.*，中/ })).toBeTruthy());
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
   });
 
@@ -878,12 +883,13 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByRole("button", { name: "查看会话用量详情" })).toBeNull();
   });
 
-  it("resets to a declared medium level without inventing unsupported levels", () => {
+  it("does not offer a reset when no real project default selection is available", () => {
     useAppStore.setState({ effortLevel: "high", runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"] } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByTitle(/模型推理强度：高/));
-    fireEvent.click(screen.getByRole("button", { name: "恢复中等推理强度" }));
-    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ reasoning_effort: "medium" }), "effort");
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，高/ }));
+    expect(screen.queryByRole("button", { name: "恢复中等推理强度" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重置为默认" })).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
   it("shows the exact selected model name", () => {
@@ -919,5 +925,99 @@ describe("FooterRow permission picker", () => {
 
     expect(onStop).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "停止" })).toBeNull();
+  });
+
+  it("shows only the permission range resolved by managed requirements", () => {
+    useAppStore.setState({ permissionMode: "plan", runtimeCapabilities: { permission: { available_modes: ["plan"] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle("更改权限"));
+    expect(screen.getByRole("option", { name: "请求批准" }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("option", { name: "完全访问" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("被 requirements.toml 禁用")).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: "完全访问" }));
+    expect(showConfirm).not.toHaveBeenCalled();
+  });
+
+  it("confirms Full access again when selecting the current Full access option", async () => {
+    useAppStore.setState({ permissionMode: "bypass" });
+    vi.mocked(showConfirm).mockResolvedValueOnce(false);
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle("更改权限"));
+    fireEvent.click(screen.getByRole("option", { name: "完全访问" }));
+    await waitFor(() => expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "要开启完全访问吗？", danger: true })));
+    const details = vi.mocked(showConfirm).mock.calls[0][0].message;
+    render(<>{details}</>);
+    expect(screen.getByText("读取、创建、修改、上传或删除此计算机上任意位置的文件")).toBeTruthy();
+    expect(screen.getByText("运行命令、安装软件和更改系统设置")).toBeTruthy();
+    expect(screen.getByText("访问网站、发送数据并使用已启用的插件")).toBeTruthy();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("restores the authoritative project model and effort pair and clears the explicit selection", async () => {
+    const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as Parameters<typeof handleSessionEvent>[1];
+    const receive = (model: string, effort: string, mode: "default" | "model") => handleSessionEvent({
+      type: "llm.model.updated", conversation_id: "conv-footer", current_model: model, effective_reasoning_effort: effort,
+      model_selection_mode: mode, default_model_selection: { provider: "custom", model: "model-a", reasoning_effort: "low", conversation_id: "conv-footer", working_directory: useAppStore.getState().workingDirectory },
+      available_model_options: [{ model: "model-a", reasoning_effort_levels: ["low", "high"], default_reasoning_effort: "low" }],
+      available_models: ["model-a", "model-b"], provider: "custom", models_source: "configured",
+    }, buffers);
+    act(() => receive("model-b", "high", "model"));
+    useAppStore.setState({ runtimeCapabilities: { permission: { available_modes: ["confirm", "bypass"] },
+      provider_capabilities: { reasoning_effort_supported: true, reasoning_effort_levels: ["low", "high"] } }, draft: "unsaved draft" });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async () => {
+      receive("model-a", "low", "default");
+      return { type: "command.result", command: "model.set", level: "success", message: "", data: {} };
+    });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
+    fireEvent.click(screen.getByRole("button", { name: "重置为默认" }));
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({ type: "llm.model.set", selection_mode: "default", conversation_id: "conv-footer" }, "model.set"));
+    await waitFor(() => expect(useAppStore.getState()).toMatchObject({ currentModel: "model-a", effortLevel: "low", modelSelectionMode: "default", draft: "unsaved draft" }));
+    expect(screen.queryByRole("button", { name: "重置为默认" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    expect(screen.getByRole("option", { name: /默认/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByText("推荐模型集")).toBeNull();
+  });
+
+  it.each([true, false, null] as const)("uses the real Ultra and Full access choice %s", async (choice) => {
+    useAppStore.setState({ permissionMode: "bypass", effortLevel: "high", runtimeCapabilities: {
+      permission: { available_modes: ["plan", "bypass"] }, provider_capabilities: {
+        reasoning_effort_supported: true, reasoning_effort_levels: ["high", "ultra"],
+      },
+    } });
+    vi.mocked(showChoice).mockResolvedValueOnce(choice);
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
+    const slider = screen.getByRole("slider");
+    fireEvent.change(slider, { target: { value: "1" } });
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(showChoice).toHaveBeenCalledWith(expect.objectContaining({ title: "要将 Ultra 与完全访问搭配使用吗？", cancelDisabled: false })));
+    await act(async () => {});
+    if (choice === null) expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    else {
+      expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "llm.config.set", reasoning_effort: "ultra", conversation_id: "conv-footer" }), "effort");
+      if (choice === false) {
+        expect(sendClientCommandAwaitResult).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "conversation.permission_mode.set", mode: "plan" }), "conversation.permission_mode.set");
+        expect(useAppStore.getState().permissionMode).toBe("plan");
+      } else expect(useAppStore.getState().permissionMode).toBe("bypass");
+    }
+  });
+
+  it("does not apply an Ultra choice to a conversation selected during the permission acknowledgement", async () => {
+    useAppStore.setState({ permissionMode: "bypass", effortLevel: "high", runtimeCapabilities: { permission: { available_modes: ["confirm", "bypass"] },
+      provider_capabilities: { reasoning_effort_supported: true, reasoning_effort_levels: ["high", "ultra"] } } });
+    vi.mocked(showChoice).mockResolvedValueOnce(false);
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async () => {
+      useAppStore.setState({ conversationId: "other-task", effortLevel: "low" });
+      return { type: "command.result", command: "conversation.permission_mode.set", level: "success", message: "", data: {} };
+    });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：/ }));
+    const slider = screen.getByRole("slider");
+    fireEvent.change(slider, { target: { value: "1" } });
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(useAppStore.getState().effortLevel).toBe("low");
   });
 });

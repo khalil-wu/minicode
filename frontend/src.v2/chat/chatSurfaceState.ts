@@ -1,4 +1,5 @@
 import type { ArtifactPreview, ChatMessage, ContentBlock } from "../stores/types";
+import { projectSourceAssistantText } from "../lib/source-assistant-text";
 import { acknowledgeMessageUpdate, messageTopologyKey, streamingMessageUpdate } from "../lib/message-changes";
 import {
   getContentBlocks,
@@ -24,10 +25,12 @@ import type {
   ExecCellState,
   HistoryCellState,
   StatusNoticeCellState,
+  ContextCompactionCellState,
   StreamingAssistantTailCellState,
   ThinkingCellState,
   UserMessageCellState,
   CollaborationCellState,
+  TurnWorkItem,
 } from "./cells/cellTypes";
 import { isToolCallAwaitingApproval, isToolCallExecuting, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { shallow } from "zustand/shallow";
@@ -35,7 +38,7 @@ import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOu
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
-import { canonicalArtifactKind } from "../lib/artifact-projection";
+import { canonicalArtifactKind, recordHasImageArtifact } from "../lib/artifact-projection";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 
 type CommittedCellState = Exclude<
@@ -104,12 +107,13 @@ const outputLines = (value: string | undefined): string[] =>
   String(value || "").split(/\r?\n/).filter(Boolean).slice(-20);
 
 const commandFor = (record: ToolCallRecord): string => {
+  if (record.commandPresentation) return record.commandPresentation.command;
   const command = record.args?.command;
   if (typeof command === "string" && command.trim()) return command;
   // A pending tool call may arrive before its streamed arguments. displayHint is
   // the tool's label ("Run"), not a command, and printing it in the command slot
   // claims the agent is running a command called "Run".
-  return record.inputSummary || "准备命令…";
+  return record.inputSummary || "";
 };
 
 const exitCodeFor = (record: ToolCallRecord): number | undefined => {
@@ -129,22 +133,34 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
   // their combined compatibility preview, so using it as stdout while a typed
   // stderr stream exists renders stderr twice. Only fall back to the combined
   // preview (or the terminal summary) when no typed stream was recorded.
-  const hasTypedOutput = Boolean(record.stdoutPreview || record.stderrPreview);
-  const rawStdout = purifyToolErrorText(
-    hasTypedOutput ? record.stdoutPreview : record.outputPreview || record.summary,
-  );
+  const hasTypedOutput = record.stdoutPreview !== undefined || record.stderrPreview !== undefined;
+  // A native approval/cancellation receipt is model context, not OS stdout.
+  // Its original summary/error remains on the canonical/raw record.
+  const nativeBeforeExecutionTerminal = record.commandPresentation && record.executionStartedAt == null
+    && record.status !== "pending" && record.status !== "running";
+  const rawStdout = hasTypedOutput
+    ? record.stdoutPreview || ""
+    : nativeBeforeExecutionTerminal ? "" : getRecordOutputText(record);
   const stdout = hasTypedOutput || record.outputPreview
     ? rawStdout
     : rawStdout.replace(/^Exit code:\s*-?\d+(?:\s*\(failed\))?\s*/i, "").trimStart();
-  const stderr = purifyToolErrorText(record.stderrPreview);
+  const stderr = record.stderrPreview || "";
   return {
     kind: "exec",
     id: record.id,
     command: commandFor(record),
+    commandActions: record.commandPresentation && record.executionStartedAt == null
+      && record.status !== "pending" && record.status !== "running" ? undefined : record.commandActions,
+    commandPresentation: record.commandPresentation,
+    executionStartedAt: record.executionStartedAt,
     callSource: record.callSource,
-    cwd: typeof record.args?.cwd === "string" ? record.args.cwd : undefined,
+    cwd: record.commandPresentation?.cwd ?? (typeof record.args?.cwd === "string" ? record.args.cwd : undefined),
     background: record.args?.run_in_background === true,
-    status: record.status === "running" || record.status === "pending"
+    // Source's planned commandExecution is inProgress before approval. The
+    // record still retains waiting_approval and the actual execution clock.
+    status: record.commandPresentation && (record.status === "running" || record.status === "pending")
+      ? "running"
+      : record.status === "running" || record.status === "pending"
       ? isToolCallAwaitingApproval(record) ? "pending_approval" : isToolCallExecuting(record) ? "running" : "pending"
       : record.status === "success"
         ? "success"
@@ -158,8 +174,16 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     stderrPreview: outputLines(stderr),
     stdoutFull: stdout,
     stderrFull: stderr,
-    durationMs: record.durationMs,
+    outputArtifact: record.artifactId && !recordHasImageArtifact(record) ? {
+      artifactId: record.artifactId,
+      kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
+      summary: "完整命令输出",
+      mediaType: record.artifactMediaType || "text/plain",
+      bytes: record.artifactBytes,
+    } : undefined,
+    durationMs: record.commandPresentation && record.executionStartedAt == null ? undefined : record.durationMs,
     cleanupReceipt: record.cleanupReceipt,
+    needsApproval: isToolCallAwaitingApproval(record),
     // Completed commands stay as one-line process evidence. Their stdout is
     // available on demand, so test-run summaries do not flood the timeline.
     collapsed: true,
@@ -168,6 +192,22 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     segment: item?.segment,
     segmentClosed: item?.segmentClosed,
   };
+};
+
+const execCells = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellState[] => {
+  const execution = execCell(record, item);
+  const actions = execution.commandActions;
+  if (!actions || actions.length < 2) return [execution];
+  // One canonical command item can describe several parsed shell actions.
+  // Like Codex, each action references the same execution/output receipt.
+  return actions.map((action, index) => ({
+    ...execution,
+    id: `${record.id}:${index}`,
+    commandExecutionItemId: record.id,
+    originalCommand: execution.command,
+    command: action.command,
+    commandActions: [action],
+  }));
 };
 
 const targetPath = (record: ToolCallRecord): string => {
@@ -235,6 +275,7 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
   status: statusForActivity(item),
   collapsed: true,
   toolCallRecords: item.records,
+  outputText: item.outputText,
   progress: item.progress?.length
     ? {
         text: item.progress.at(-1)?.summary || item.progress.at(-1)?.message,
@@ -244,6 +285,7 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
         retryAfterMs: item.progress.at(-1)?.retryAfterMs,
         providerState: item.progress.at(-1)?.providerState,
         errorMessage: item.progress.at(-1)?.errorMessage,
+        detail: item.progress.at(-1)?.detail,
       }
     : undefined,
   skill: item.kind === "skill"
@@ -307,6 +349,13 @@ const projectProcessItem = (
   item: TurnActivityItem,
   message: ChatMessage,
 ): ProcessItemProjection => {
+  if (item.kind === "guardianReview" && item.review) return { cells: [{ kind: "guardian_review", id: item.id,
+    review: item.review, status: item.status === "running" ? "running" : "done", createdAt: item.startedAt ?? message.timestamp,
+    segment: item.segment, segmentClosed: item.segmentClosed }] };
+  if (item.kind === "guardianWarning") return { cells: [{ kind: "guardian_warning", id: item.id, message: item.content ?? "", createdAt: message.timestamp }] };
+  if (item.kind === "contextCompaction") return { cells: [{ kind: "context_compaction", id: item.id,
+    status: item.status === "running" ? "running" : item.status === "cancelled" ? "interrupted" : "completed",
+    source: item.source, createdAt: item.startedAt ?? message.timestamp, completedAt: item.finishedAt }] };
   if (item.source === "runtime") return { cells: [] };
   if (["reasoning", "processNote", "providerReasoning", "agentMessage"].includes(item.kind)) {
     if (!item.content) return { cells: [] };
@@ -324,16 +373,21 @@ const projectProcessItem = (
       segmentClosed: item.segmentClosed,
     }] };
   }
-  if (item.kind === "commandExecution" && item.records?.length) {
-    return { cells: item.records.map((record) => execCell(record, item)) };
+  if (item.outputText !== undefined) return { cells: [activityCell(item, message)] };
+  if (item.records?.length && (item.kind === "commandExecution" || item.records.every((record) => record.commandActions?.length))) {
+    return { cells: item.records.flatMap((record) => execCells(record.errorKind === "approval_rejected"
+      && item.automaticApprovalReviews?.some(review => review.status === "denied")
+      ? { ...record, commandActions: undefined } : record, item)) };
   }
   const collaboration = collaborationCells(item);
   if (collaboration.length > 0) {
-    return { cells: collaboration.map((cell) => ({
+    const rows: CommittedCellState[] = collaboration.map((cell) => ({
       ...cell,
       segment: item.segment,
       segmentClosed: item.segmentClosed,
-    })) };
+    }));
+    if (item.records?.some((record) => ["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status))) rows.push(activityCell(item, message));
+    return { cells: rows };
   }
   if (item.kind === "fileChange") {
     // Keep the authoritative edit/write lifecycle in the process trace for
@@ -369,13 +423,23 @@ const processCells = (
     if (!cacheMatches && images.length) projection.cells = projection.cells.map((cell) => {
       const ownedImages = cell.kind === "activity"
         ? (cell.toolCallRecords ?? []).flatMap((record) => imagesByCall.get(record.id) ?? [])
-        : cell.kind === "exec" ? imagesByCall.get(cell.id) ?? []
+        : cell.kind === "exec" ? imagesByCall.get(cell.commandExecutionItemId ?? cell.id) ?? []
         : [];
       return ownedImages.length && (cell.kind === "activity" || cell.kind === "exec") ? { ...cell, artifacts: ownedImages } : cell;
     });
     entries.set(item.id, { item, messageId: message.id, timestamp: message.timestamp, workspaceRoot, images, projection });
     processItemCache.set(anchor, entries);
-    cells.push(...projection.cells);
+    cells.push(...projection.cells.map(cell => {
+      if (!item.automaticApprovalReviews || (cell.kind !== "exec" && cell.kind !== "activity")) return cell;
+      const guardianDeclined = item.records?.some(record => record.errorKind === "approval_rejected")
+        && item.automaticApprovalReviews.some(review => review.status === "denied");
+      const withReviews = { ...cell, automaticApprovalReviews: item.automaticApprovalReviews, guardianDeclined,
+        ...(cell.kind === "activity" && item.guardianPatchFiles ? { guardianPatchFiles: item.guardianPatchFiles } : {}) };
+      // An approval rejection never created shell stdout. Retain the original
+      // model-facing receipt in its record; the actual review owns this detail.
+      return cell.kind === "exec" && guardianDeclined ? { ...withReviews,
+        commandActions: undefined, stdoutPreview: [], stderrPreview: [], stdoutFull: "", stderrFull: "" } : withReviews;
+    }));
     if (projection.diff) diffCells.push(projection.diff);
   }
   const overallDiff = aggregateDiffCells(diffCells, message.id, workspaceRoot);
@@ -458,15 +522,19 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     // An unsuccessful coordination request is an actual failed tool action,
     // not a child identity or a successful start. ActivityCell retains its
     // original result in the same expandable action row.
-    if (["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)) continue;
-    if (name === "send_message") {
-      const recipient = stringArg(record.args?.recipient) || "子智能体";
+    if (["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)
+      && !(name === "task" && record.delegations?.some((delegation) => delegation.started_at > 0))) continue;
+    if (name === "send_message" || name === "followup_task") {
+      const requestedRecipient = stringArg(name === "followup_task" ? record.args?.target : record.args?.recipient);
+      const parentMailbox = ["parent", "team-lead"].includes(requestedRecipient);
+      const recipients = parentMailbox ? [requestedRecipient]
+        : record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
       const content = (record.args.message as string | undefined) ?? "";
-      cells.push(collaborationCell(record, "sent_message", [{
+      cells.push(collaborationCell(record, "sent_message", recipients.map((recipient) => ({
         agentId: recipient,
         agentLabel: collaborationAgentLabel(recipient),
         content,
-      }]));
+      }))));
       continue;
     }
     if (name === "task_stop") {
@@ -479,6 +547,20 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       continue;
     }
     if (name !== "task") continue;
+    if (record.delegations) {
+      const entries = record.delegations.filter(delegation => delegation.started_at > 0).map(delegation => ({
+        agentId: delegation.agent_id, agentLabel: delegation.name,
+        agentIdentity: delegation.agent_path,
+        agentStartedAt: delegation.started_at,
+        agentStatus: delegation.status === "completed" ? "done" as const
+          : delegation.status === "failed" ? "error" as const
+          : delegation.status === "cancelled" || delegation.status === "interrupted" ? "cancelled" as const
+          : delegation.status === "partial" ? "partial" as const
+          : delegation.status === "blocked" ? "blocked" as const : "running" as const,
+      }));
+      if (entries.length) cells.push(collaborationCell(record, "delegated", entries));
+      continue;
+    }
     // TaskTool's actual triad-aligned batch field is ``parallel_tasks``.
     // ``subtasks`` never exists on the production schema and made the live
     // renderer miss successful parallel delegations despite unit tests passing.
@@ -571,12 +653,14 @@ const liveTail = (
       block.type === "text"
       && block.isStreaming === true
       && block.content.trim()
-      && !["pending", "commentary", "model_preamble", "post_tool", "runtime"].includes(String(block.source || ""))
+      && !["pending", "retained", "commentary", "model_preamble", "post_tool", "runtime"].includes(String(block.source || ""))
     ) {
+      const partialMarkdown = projectSourceAssistantText(block.content, block.source === "model_final" || block.source === "reply");
+      if (!partialMarkdown.trim()) continue;
       return {
         kind: "streaming_assistant_tail",
         id: block.itemId || `${message.id}-live-answer`,
-        partialMarkdown: block.content,
+        partialMarkdown,
         updatedAt: Date.now(),
       };
     }
@@ -589,6 +673,7 @@ function buildTurn(
   assistantMessage: ChatMessage | null,
   workspaceRoot: string,
   userTurnIsStreaming = false,
+  inputMessages: ReadonlyMap<string, ChatMessage> = EMPTY_INPUT_MESSAGES,
 ): ChatTurnState {
   if (!assistantMessage) {
     return {
@@ -599,7 +684,7 @@ function buildTurn(
       activeCell: null,
       finalAnswerCell: null,
       status: userTurnIsStreaming ? "streaming" : "completed",
-      startedAt: userMessage?.timestamp ?? Date.now(),
+      startedAt: undefined,
     };
   }
 
@@ -680,9 +765,19 @@ function buildTurn(
   if (
     (assistantMessage.terminalStatus === "failed"
       || (assistantMessage.terminalStatus === "partial" && Boolean(assistantMessage.failureMessage)))
-    && !imageProgress.some((progress) => progress.status === "failed")
-    && !committedCells.some((cell) => cell.kind === "activity" && cell.status === "failed")
-    && !committedCells.some((cell) => cell.kind === "exec" && cell.status === "failed")
+    // A failed tool is a separate item. It cannot account for a later model
+    // failure unless it carries that exact terminal message.
+    && !committedCells.some((cell) => {
+      const failure = assistantMessage.failureMessage?.trim();
+      if (!failure) return false;
+      if (cell.kind === "error") return cell.message.trim() === failure;
+      if (cell.kind === "exec" && cell.status === "failed") return cell.stderrFull?.trim() === failure || cell.stdoutFull?.trim() === failure;
+      return cell.kind === "activity" && cell.status === "failed" && (
+        cell.progress?.errorMessage?.trim() === failure
+        || cell.toolCallRecords?.some((record) => [record.userSummary, record.errorInfo?.user_message, record.errorInfo?.user_summary, getRecordOutputText(record)].some((text) => text?.trim() === failure))
+      );
+    })
+    && !imageProgress.some((progress) => progress.status === "failed" && progress.errorMessage?.trim() === assistantMessage.failureMessage?.trim())
   ) {
     const error: ErrorCellState = {
       kind: "error",
@@ -714,13 +809,42 @@ function buildTurn(
           : assistantMessage.terminalStatus === "interrupted"
             ? "interrupted"
             : "completed",
-    startedAt: userMessage?.timestamp ?? assistantMessage.timestamp,
+    startedAt: assistantMessage.runStartedAt,
     completedAt: assistantMessage.isStreaming
       ? undefined
       : assistantMessage.completedAt,
     durationMs: assistantMessage.durationMs,
     usage: assistantMessage.usage,
   };
+  if (projection.userInputs?.length) {
+    const workItems: TurnWorkItem[] = [];
+    let segmentStart = 0;
+    const workActivity = projection.activityItems.filter((item) =>
+      !item.progress?.some((progress) => progress.stage === "image_generation"),
+    );
+    const workToolIds = new Set(workActivity.flatMap((item) => item.records?.map((record) => record.id) ?? []));
+    const appendProcess = (segmentEnd: number | undefined, id: string) => {
+      const items = workActivity.filter((item) => (item.segment ?? 0) >= segmentStart
+        && (segmentEnd === undefined || (item.segment ?? 0) < segmentEnd));
+      const toolIds = new Set(items.flatMap((item) => item.records?.map((record) => record.id) ?? []));
+      const images = toolImages.filter((image) => image.toolCallId && workToolIds.has(image.toolCallId)
+        ? toolIds.has(image.toolCallId) : segmentEnd === undefined);
+      const cells = processCells(items, assistantMessage, workspaceRoot, images).filter((cell) => cell.kind !== "diff");
+      if (segmentEnd === undefined) cells.push(...committedCells.filter((cell): cell is ErrorCellState => cell.kind === "error"
+        && !cells.some((item) => item.id === cell.id)
+        && !workItems.some((item) => item.kind === "process" && item.cells.some((existing) => existing.id === cell.id))));
+      if (cells.length) workItems.push({ kind: "process", id, cells });
+    };
+    for (const input of projection.userInputs) {
+      appendProcess(input.segment, `before-input:${input.userMessageId}`);
+      const message = inputMessages.get(input.userMessageId);
+      const cell = userCell(message ?? null);
+      if (cell) workItems.push({ kind: "user", id: input.userMessageId, cell });
+      segmentStart = input.segment;
+    }
+    appendProcess(undefined, `after-input:${projection.userInputs.at(-1)!.userMessageId}`);
+    turn.workItems = workItems;
+  }
   return applyAuthoritativeTurnDiff([turn], assistantMessage.turnDiff)[0];
 }
 
@@ -795,6 +919,16 @@ type TurnCacheEntry = {
   isStreaming: boolean;
   workspaceRoot: string;
   turn: ChatTurnState;
+  inputMessages: ChatMessage[];
+};
+
+const EMPTY_INPUT_MESSAGES: ReadonlyMap<string, ChatMessage> = new Map();
+const EMPTY_INPUT_ROWS: ChatMessage[] = [];
+
+const referencedInputMessages = (messages: ChatMessage[]): Map<string, ChatMessage> => {
+  const ids = new Set(messages.flatMap((message) => message.role === "assistant"
+    ? getContentBlocks(message).flatMap((block) => block.type === "user_input" ? [block.userMessageId] : []) : []));
+  return new Map(messages.filter((message) => message.role === "user" && ids.has(message.id)).map((message) => [message.id, message]));
 };
 
 const turnProjectionCache = new WeakMap<object, TurnCacheEntry[]>();
@@ -837,6 +971,8 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
       }
     } else if ((kind === "tool_output" || kind === "tool") && block.type === "tool_call") {
       if (["tool_exec", "tool_wait"].includes(block.record.name)) return null;
+      // The single-index path cannot update one-to-many action cells.
+      if ((block.record.commandActions?.length ?? 0) > 1) return null;
       const index = positions.get(block.record.id);
       // Collaboration may project several rows, and file changes own an
       // aggregate diff. Those use the full projection with its grouping rules.
@@ -873,7 +1009,12 @@ function buildTurnMemoized(
   assistantMessage: ChatMessage | null,
   isStreaming: boolean,
   workspaceRoot: string,
+  inputMessages: ReadonlyMap<string, ChatMessage> = EMPTY_INPUT_MESSAGES,
 ): ChatTurnState {
+  const inputRows = assistantMessage
+    ? getContentBlocks(assistantMessage).flatMap((block) => block.type === "user_input" && inputMessages.has(block.userMessageId)
+      ? [inputMessages.get(block.userMessageId)!] : []) : EMPTY_INPUT_ROWS;
+  const hasInputBoundary = Boolean(assistantMessage && getContentBlocks(assistantMessage).some((block) => block.type === "user_input"));
   const anchor = (assistantMessage ?? userMessage) as object | null;
   if (anchor) {
     const entries = turnProjectionCache.get(anchor) ?? [];
@@ -881,16 +1022,18 @@ function buildTurnMemoized(
       (entry) => entry.userMessage === userMessage
         && entry.assistantMessage === assistantMessage
         && entry.isStreaming === isStreaming
-        && entry.workspaceRoot === workspaceRoot,
+        && entry.workspaceRoot === workspaceRoot
+        && entry.inputMessages.length === inputRows.length
+        && entry.inputMessages.every((message, index) => message === inputRows[index]),
     );
     if (cached) return cached.turn;
     const update = assistantMessage && streamingMessageUpdate(assistantMessage);
-    const incremental = update && assistantMessage && isStreaming
+    const incremental = update && assistantMessage && isStreaming && !hasInputBoundary
       ? updateTurnCells(buildTurnMemoized(userMessage, update.base, isStreaming, workspaceRoot), assistantMessage)
       : null;
-    const turn = incremental ?? buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage);
+    const turn = incremental ?? buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage, inputMessages);
     if (turn.status === "streaming" && !isStreaming) turn.status = "completed";
-    entries.push({ userMessage, assistantMessage, isStreaming, workspaceRoot, turn });
+    entries.push({ userMessage, assistantMessage, isStreaming, workspaceRoot, turn, inputMessages: inputRows });
     // A message normally has at most two states (live and settled). Bound the
     // cache defensively if a caller toggles streaming repeatedly.
     if (entries.length > 3) entries.splice(0, entries.length - 3);
@@ -900,17 +1043,24 @@ function buildTurnMemoized(
     if (assistantMessage) acknowledgeMessageUpdate(assistantMessage);
     return turn;
   }
-  return buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage);
+  return buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage, inputMessages);
 }
 
-const statusNotice = (message: ChatMessage): StatusNoticeCellState => ({
+const statusNotice = (message: ChatMessage): StatusNoticeCellState | ContextCompactionCellState => {
+  const compaction = message.blocks?.find(block => block.type === "process" && block.itemKind === "context_compaction");
+  if (compaction?.type === "process") return { kind: "context_compaction", id: compaction.id,
+    status: compaction.status === "running" ? "running" : compaction.status === "interrupted" ? "interrupted" : "completed",
+    source: compaction.source, createdAt: compaction.startedAt ?? compaction.timestamp, completedAt: compaction.finishedAt };
+  return {
   kind: "status_notice",
   id: `notice-${message.id}`,
   tone: message.failureMessage ? "danger" : "info",
   title: message.systemNoticeTitle || (message.failureMessage ? "运行失败" : "系统通知"),
   message: message.content || message.failureMessage || undefined,
+  processing: message.systemNoticeProcessing,
   createdAt: message.timestamp,
-});
+  };
+};
 
 const isQuietSystemNotice = (message: ChatMessage): boolean =>
   message.role === "system" && message.id === "system-guidelines-updated";
@@ -924,26 +1074,28 @@ export function projectMessagesToTurns(
   workspaceRoot = "",
 ): ChatTurnState[] {
   const turns: ChatTurnState[] = [];
+  const inputMessages = referencedInputMessages(messages);
+  const rows = inputMessages.size ? messages.filter((message) => !inputMessages.has(message.id)) : messages;
+  let latestVisibleIndex = rows.length - 1;
+  while (latestVisibleIndex >= 0 && isHiddenTimelineMessage(rows[latestVisibleIndex])) latestVisibleIndex -= 1;
   let index = 0;
-  while (index < messages.length) {
-    const message = messages[index];
+  while (index < rows.length) {
+    const message = rows[index];
     if (isHiddenTimelineMessage(message)) {
       index += 1;
       continue;
     }
     if (message.role === "user") {
-      const nextMessage = messages[index + 1];
+      const nextMessage = rows[index + 1];
       const assistant = nextMessage?.role === "assistant" && !isHiddenTimelineMessage(nextMessage)
         ? nextMessage
         : null;
       const turnOwnsLiveStream = Boolean(
-        isStreaming && (
-          !assistant
-          || assistant.isStreaming
-          || assistant.isThinkingStreaming
-        ),
+        isStreaming && (assistant
+          ? assistant.isStreaming || assistant.isThinkingStreaming
+          : index === latestVisibleIndex && !message.queueState && !message.steeredIntoMessageId),
       );
-      turns.push(buildTurnMemoized(message, assistant, turnOwnsLiveStream, workspaceRoot));
+      turns.push(buildTurnMemoized(message, assistant, turnOwnsLiveStream, workspaceRoot, inputMessages));
       index += assistant ? 2 : 1;
       continue;
     }
@@ -953,6 +1105,7 @@ export function projectMessagesToTurns(
         message,
         Boolean(isStreaming && (message.isStreaming || message.isThinkingStreaming)),
         workspaceRoot,
+        inputMessages,
       ));
       index += 1;
       continue;
@@ -975,20 +1128,22 @@ export function projectMessagesToTurns(
 
 const projectedTurnStarts = (messages: ChatMessage[]): number[] => {
   const starts: number[] = [];
+  const inputMessages = referencedInputMessages(messages);
+  const rows = messages.map((message, index) => ({ message, index })).filter((row) => !inputMessages.has(row.message.id));
   let index = 0;
-  while (index < messages.length) {
-    const message = messages[index];
+  while (index < rows.length) {
+    const message = rows[index].message;
     if (isHiddenTimelineMessage(message)) {
       index += 1;
       continue;
     }
     if (message.role === "user") {
-      starts.push(index);
-      const nextMessage = messages[index + 1];
+      starts.push(rows[index].index);
+      const nextMessage = rows[index + 1]?.message;
       index += nextMessage?.role === "assistant" && !isHiddenTimelineMessage(nextMessage) ? 2 : 1;
       continue;
     }
-    if (message.role === "assistant" || message.role === "system") starts.push(index);
+    if (message.role === "assistant" || message.role === "system") starts.push(rows[index].index);
     index += 1;
   }
   return starts;

@@ -49,6 +49,7 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
             ["git", *args],
             cwd=str(cwd),
             env=sanitized_git_env(),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

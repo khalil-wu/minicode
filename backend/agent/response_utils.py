@@ -84,6 +84,7 @@ def append_assistant_history(
     *,
     phase: str = "",
     provider_items: list[dict[str, Any]] | None = None,
+    answer_source: str = "",
 ) -> None:
     """Append through the canonical context history contract."""
-    ctx.append_assistant(content, phase=phase, provider_items=provider_items)
+    ctx.append_assistant(content, phase=phase, provider_items=provider_items, answer_source=answer_source)

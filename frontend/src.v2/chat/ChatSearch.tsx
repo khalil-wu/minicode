@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -13,6 +14,7 @@ interface ChatSearchProps {
 }
 
 export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
+  const { t: tr } = useI18n();
   const conversationId = useAppStore((state) => state.conversationId);
   const historyPage = useAppStore((state) => conversationId ? state.conversationHistoryPages[conversationId] : undefined);
   const unloadedToolMessageId = useAppStore((state) => state.messages.find((message) => (message.toolPage?.remaining ?? 0) > 0)?.id);
@@ -164,7 +166,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
   return (
     <div
       role="search"
-      aria-label="在对话中搜索"
+      aria-label={tr("在对话中搜索")}
       className="chat-pane-search"
       style={{
         display: "flex",
@@ -184,8 +186,8 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
           setQuery(e.target.value);
         }}
         onKeyDown={handleKeyDown}
-        placeholder="在对话中搜索…"
-        aria-label="搜索对话内容"
+        placeholder={tr("在对话中搜索…")}
+        aria-label={tr("搜索对话内容")}
         className="chat-search-input"
         style={{
           flex: 1,
@@ -213,14 +215,14 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         >
           {matchCount > 0
             ? `${currentIndex}/${matchCount}`
-            : "无匹配项"}
+            : tr("无匹配项")}
         </span>
       )}
       <button
         type="button"
         onClick={() => findNext(true)}
-        title="上一个匹配项（Shift + Enter）"
-        aria-label="上一个匹配项"
+        title={tr("上一个匹配项（Shift + Enter）")}
+        aria-label={tr("上一个匹配项")}
         disabled={matchCount === 0}
         style={btnStyle}
         onMouseEnter={(e) =>
@@ -235,8 +237,8 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
       <button
         type="button"
         onClick={() => findNext(false)}
-        title="下一个匹配项（Enter）"
-        aria-label="下一个匹配项"
+        title={tr("下一个匹配项（Enter）")}
+        aria-label={tr("下一个匹配项")}
         disabled={matchCount === 0}
         style={btnStyle}
         onMouseEnter={(e) =>
@@ -251,8 +253,8 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
       <button
         type="button"
         onClick={onClose}
-        title="关闭搜索（Escape）"
-        aria-label="关闭搜索"
+        title={tr("关闭搜索（Escape）")}
+        aria-label={tr("关闭搜索")}
         style={btnStyle}
         onMouseEnter={(e) =>
           (e.currentTarget.style.background = "var(--surface-hover)")
@@ -264,16 +266,16 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         <X size={16} aria-hidden="true" />
       </button>
       <div className="chat-search-scope" style={{ flexBasis: "100%", display: "flex", justifyContent: "space-between", gap: 10, fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
-        <span>搜索已加载的正文与工具记录{historyPage?.hasMore || unloadedToolMessageId ? " · 还有更早历史未检索" : ""}</span>
+        <span>{tr("搜索已加载的正文与工具记录")}{historyPage?.hasMore || unloadedToolMessageId ? tr(" · 还有更早历史未检索") : ""}</span>
         {historyPage?.hasMore && conversationId && <button type="button" disabled={historyPage.loading}
           onClick={() => void loadEarlierConversationMessages(conversationId)}
           style={{ border: 0, background: "transparent", color: "var(--accent-primary)", padding: 0, whiteSpace: "nowrap" }}>
-          {historyPage.loading ? "正在加载…" : "载入更早历史继续搜索"}
+          {historyPage.loading ? tr("正在加载…") : tr("载入更早历史继续搜索")}
         </button>}
         {unloadedToolMessageId && conversationId && <button type="button" disabled={loadingTools} onClick={() => {
           setLoadingTools(true);
           void loadEarlierToolItems(conversationId, unloadedToolMessageId).finally(() => setLoadingTools(false));
-        }} style={{ border: 0, background: "transparent", color: "var(--accent-primary)", padding: 0, whiteSpace: "nowrap" }}>{loadingTools ? "正在加载…" : "载入更早工具记录"}</button>}
+        }} style={{ border: 0, background: "transparent", color: "var(--accent-primary)", padding: 0, whiteSpace: "nowrap" }}>{loadingTools ? tr("正在加载…") : tr("载入更早工具记录")}</button>}
       </div>
     </div>
   );

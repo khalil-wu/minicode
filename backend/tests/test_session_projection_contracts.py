@@ -104,14 +104,13 @@ def _runtime_snapshot(conversation: ConversationRecord) -> dict[str, Any]:
         "running_tasks": [],
         "task_summary": {"total": 0, "running": 0},
         "capabilities": {"provider_capabilities": capabilities},
-        "provider_capabilities": capabilities,
         "sandbox_status": {"probe_status": "ready"},
         "mcp": {"connected": 0, "servers": []},
     }
 
 
 def test_provider_capability_projection_is_strict_json() -> None:
-    payload = _runtime_snapshot(_conversation())["provider_capabilities"]
+    payload = _runtime_snapshot(_conversation())["capabilities"]["provider_capabilities"]
 
     assert payload["reasoning_effort_levels"] == ["low", "high"]
     assert payload["limitations"] == ["test-only"]
@@ -287,6 +286,8 @@ def _conversation_list_session(versioned_listing: Any) -> WebSocketSession:
     session.send_payload = AsyncMock(return_value=True)
     session.conversation_repo = SimpleNamespace(
         list_conversations_with_revision=lambda: versioned_listing,
+        get_pinned_order=lambda _summaries: {"pinned_conversation_ids": [], "pinned_sort_mode": "manual"},
+        get_sidebar_order=lambda _summaries: {},
     )
     return session
 
@@ -495,6 +496,7 @@ class _FakeWebSocket:
 
 def _transport_session(tmp_path: Path) -> tuple[WebSocketSession, _FakeWebSocket]:
     session = object.__new__(WebSocketSession)
+    session.ws_manager = None
     websocket = _FakeWebSocket()
     session.session_id = "session-1"
     session.event_outbox = EventOutbox(

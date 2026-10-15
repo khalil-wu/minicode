@@ -39,6 +39,8 @@ vi.mock("../overlays/ToastContainer", () => ({
 }));
 
 import { useAppStore } from "../stores";
+import { emptyComposerDraft, flushComposerDrafts, loadComposerDrafts } from "../stores/composer-drafts";
+import { handleCommandResultEvent } from "../chat/commandResultEvents";
 import { buildPastedTextFile } from "./pastedText";
 import { cancelComposerUpload, retryComposerAttachment, uploadComposerFiles } from "./uploads";
 
@@ -48,6 +50,7 @@ describe("composer uploads", () => {
     mocks.uploadAttachment.mockReset();
     mocks.pushToast.mockReset();
     useAppStore.setState({
+      ...emptyComposerDraft(), workspaceComposerDrafts: {},
       conversationId: null,
       conversations: [],
       attachments: [],
@@ -155,6 +158,56 @@ describe("composer uploads", () => {
     expect(mocks.uploadAttachment).toHaveBeenCalledWith(
       "session-1", "", expect.any(File), expect.objectContaining({ workspaceRoot: "C:\\work\\original" }),
     );
+  });
+
+  it("keeps late main and side uploads with their owners across actual workspace switches", async () => {
+    const finishes: Array<(value: unknown) => void> = [];
+    mocks.uploadAttachment.mockImplementation(() => new Promise(resolve => { finishes.push(resolve); }));
+    useAppStore.getState().setWorkingDirectory("C:/work/a");
+    useAppStore.getState().setDraft("workspace A authored input");
+    uploadComposerFiles([new File(["A file"], "a.txt")]);
+    useAppStore.getState().setWorkingDirectory("C:/work/b");
+    useAppStore.getState().setDraft("workspace B authored input");
+    useAppStore.setState({ sideChats: { "side-b": { id: "side-b", workspaceRoot: "C:/work/b", messages: [],
+      isStreaming: false, draft: "side B authored input", attachments: [] } } });
+    uploadComposerFiles([new File(["side file"], "side.txt")], "side-b");
+    finishes[0]({ conversation_id: "owner-a", attachment: { artifact_id: "a-artifact", file_name: "a.txt", kind: "document" } });
+    finishes[1]({ conversation_id: "side-b", attachment: { artifact_id: "side-artifact", file_name: "side.txt", kind: "document" } });
+    await waitFor(() => expect(useAppStore.getState().conversationWorkbenchStates["owner-a"]?.attachments[0]?.status).toBe("ready"));
+    await waitFor(() => expect(useAppStore.getState().sideChats["side-b"].attachments?.[0]?.status).toBe("ready"));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: null, workingDirectory: "C:/work/b", draft: "workspace B authored input", attachments: [] });
+    expect(useAppStore.getState().conversationWorkbenchStates["owner-a"].draft).toBe("workspace A authored input");
+    expect(useAppStore.getState().sideChats["side-b"].draft).toBe("side B authored input");
+    expect(mocks.uploadAttachment.mock.calls.map(([, owner, , options]) => [owner, options.workspaceRoot])).toEqual([
+      ["", "C:/work/a"], ["side-b", "C:/work/b"],
+    ]);
+    await flushComposerDrafts();
+    expect((await loadComposerDrafts()).map(record => [record.owner.kind, record.owner.id, record.draft.draft])).toEqual(expect.arrayContaining([
+      ["conversation", "owner-a", "workspace A authored input"], ["workspace", "c:/work/b", "workspace B authored input"],
+      ["side", "side-b", "side B authored input"],
+    ]));
+  });
+
+  it("a backend-confirmed owner deletion aborts its upload and ignores an already arriving result", async () => {
+    let finish!: (value: unknown) => void;
+    let signal!: AbortSignal;
+    mocks.uploadAttachment.mockImplementation((_session, _owner, _file, options) => {
+      signal = options.signal;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    useAppStore.setState({ conversationId: "main", draft: "main stays", sideChats: { removed: {
+      id: "removed", workspaceRoot: "C:/side", messages: [], isStreaming: false, draft: "deleted input", attachments: [],
+    } } });
+    uploadComposerFiles([new File(["side file"], "side.txt")], "removed");
+    expect(handleCommandResultEvent({ type: "command.result", command: "conversation.delete", level: "success", message: "deleted",
+      data: { deleted: true, conversation_id: "removed" } })).toBe(true);
+    expect(signal.aborted).toBe(true);
+    finish({ conversation_id: "removed", attachment: { artifact_id: "late-file", file_name: "side.txt", kind: "document" } });
+    await flushComposerDrafts();
+    expect(useAppStore.getState().sideChats.removed).toBeUndefined();
+    expect(useAppStore.getState().conversationWorkbenchStates.removed).toBeUndefined();
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "main", draft: "main stays", attachments: [] });
+    expect((await loadComposerDrafts()).some(record => record.owner.id === "removed")).toBe(false);
   });
 
   it("does not restore a removed batch attachment when another upload creates the owner", async () => {

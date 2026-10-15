@@ -14,8 +14,14 @@ from backend.agent.parent_notification_outbox import (
     subscribe_parent_notification_enqueued,
 )
 from backend.agent.message import UserCommand
+from backend.atomic_io import await_task_despite_cancellation
 from backend.ws.utils import USER_INPUT_METADATA_KEYS
 from backend.agent.run_context import RunContext
+from backend.agent.runtime import (
+    AgentRuntime,
+    default_runtime_if_initialized,
+    subscribe_subagent_activity_changed,
+)
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
     conversation_query_guards,
@@ -28,6 +34,7 @@ from backend.async_cleanup import (
     cancel_and_drain_receipt,
     cancel_and_drain_to_completion,
     retain_cleanup_task,
+    to_thread_cancel_safe,
 )
 from backend.conversations.repository import CONVERSATION_DATA_DIR
 from backend.ws.durable_user_queue import DurableUserMessageQueue
@@ -64,7 +71,7 @@ class SessionRunManager:
         conversation_dir = getattr(conversation_repo, "_base_dir", None)
         queue_root = Path(conversation_dir or CONVERSATION_DATA_DIR).parent / "user-message-queue"
         queue_store = (
-            DurableUserMessageQueue(session_id="shared", root_dir=queue_root / "conversations")
+            DurableUserMessageQueue(session_id="shared", root_dir=queue_root / "conversations", shared_inputs=True)
             if session_id
             else None
         )
@@ -74,6 +81,13 @@ class SessionRunManager:
         )
         self._durable_queue = queue_store
         self._legacy_queue_paths = set(queue_root.glob("*.json"))
+        # A Stop archive can survive a failed first queue publish. Its window
+        # still participates in upgrade migration even without a hot JSON file.
+        self._legacy_queue_paths.update(
+            queue_root / f"{directory.name}.json"
+            for directory in (queue_root / "cancelled-inputs").glob("*")
+            if directory.is_dir()
+        )
         if queue_store is not None:
             try:
                 self._migrate_legacy_user_queues()
@@ -119,6 +133,17 @@ class SessionRunManager:
                 self._on_parent_notification_enqueued
             )
         )
+        self._unsubscribe_subagent_activity = subscribe_subagent_activity_changed(
+            self._on_subagent_activity_changed
+        )
+
+    def _on_subagent_activity_changed(self, runtime: AgentRuntime) -> None:
+        loop = self._notification_loop
+        if runtime is not default_runtime_if_initialized() or self._notification_wakes_closed or loop is None:
+            return
+        loop.call_soon_threadsafe(self._session.session_lifecycle.schedule_task_runtime_update)
+        if self._session.ws_manager is not None:
+            loop.call_soon_threadsafe(self._session.ws_manager.note_host_execution_activity, self._session)
 
     @property
     def durable_queue(self) -> DurableUserMessageQueue | None:
@@ -584,7 +609,7 @@ class SessionRunManager:
         self._persist_user_queues(queues={**self._user_message_queues, conversation_id: deque(commands)})
         return commands
 
-    def clear_user_message_queue(self, conversation_id: str) -> None:
+    def clear_user_message_queue(self, conversation_id: str, *, preserve_turn_input_queue: bool = False) -> None:
         self.queued_user_messages(conversation_id)
         queues = dict(self._user_message_queues)
         queues.pop(conversation_id, None)
@@ -596,9 +621,10 @@ class SessionRunManager:
         self.set_user_queue_paused(conversation_id, "")
         self._queue_dispatching.discard(conversation_id)
         self._queue_steering.discard(conversation_id)
-        queue = self._turn_input_queues.pop(conversation_id, None)
-        if queue is not None:
-            queue.seal_and_drain_commands()
+        if not preserve_turn_input_queue:
+            queue = self._turn_input_queues.pop(conversation_id, None)
+            if queue is not None:
+                queue.seal_and_drain_commands()
 
     def forget_conversation(self, conversation_id: str) -> None:
         """Drop all stopped runtime bookkeeping for a deleted conversation."""
@@ -698,7 +724,7 @@ class SessionRunManager:
         return bool(succeeded)
 
     def begin_queue_dispatch(self, conversation_id: str) -> bool:
-        if conversation_id in self._queue_dispatching:
+        if conversation_id in self._queue_dispatching or conversation_query_guards().has_transition(conversation_id):
             return False
         self._queue_dispatching.add(conversation_id)
         return True
@@ -856,14 +882,6 @@ class SessionRunManager:
             ),
         )
 
-    def publish_model_execution(self, conversation_id: str, snapshot: ModelExecutionSnapshot) -> asyncio.Task[Any] | None:
-        task = self.running_task_for(conversation_id)
-        context = self._run_contexts.get(conversation_id)
-        if task is None or context is None:
-            return None
-        context.model_execution = snapshot
-        return task
-
     def watch_conversation_notifications(self, conversation_id: str) -> None:
         """Bind one conversation to this session's CC-style queue subscriber."""
 
@@ -881,6 +899,25 @@ class SessionRunManager:
             # A durable item may predate this process/session, so first bind is
             # also a replay recheck rather than waiting for a fresh enqueue.
             self.request_parent_notification_wake(owner)
+
+    def notification_tasks_for(self, conversation_id: str) -> set[asyncio.Task[Any]]:
+        task = self._notification_wake_tasks.get(conversation_id)
+        return {task} if task is not None and not task.done() else set()
+
+    async def unwatch_conversation_notifications(self, conversation_id: str) -> None:
+        """Unload one core listener without discarding its durable user queue."""
+        self._watched_notification_conversations.discard(conversation_id)
+        self._notification_request_generation.pop(conversation_id, None)
+        self._notification_attempt_generation.pop(conversation_id, None)
+        self._notification_run_task_ids.pop(conversation_id, None)
+        release_parent_notification_wake(conversation_id, self._notification_wake_owner_token)
+        task = self._notification_wake_tasks.pop(conversation_id, None)
+        if task is not None and not task.done():
+            await cancel_and_drain_receipt(
+                [task], timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label=f"notification listener for {conversation_id}",
+                owner=self._retired_notification_wake_tasks,
+            )
 
     def recheck_watched_parent_notifications(self) -> None:
         """Recheck durable state after reconnect without trusting old signals."""
@@ -961,7 +998,7 @@ class SessionRunManager:
         ws_manager = self._session.ws_manager
         if ws_manager is None:
             return False
-        owner_session = ws_manager.get_session(owner_session_id)
+        owner_session = ws_manager.execution_host_for_session(owner_session_id)
         return bool(
             owner_session is not None
             and owner_session is not self._session
@@ -1026,6 +1063,7 @@ class SessionRunManager:
             return False
         return any(
             str(item.status or "pending") in {"pending", "delivered", "failed"}
+            and (item.kind != "mailbox_wake" or item.payload.get("delivery_mode", "trigger_turn") == "trigger_turn")
             and not self._notification_owned_by_other_live_session(
                 str(item.session_id or "")
             )
@@ -1064,6 +1102,7 @@ class SessionRunManager:
                 or conversation_id in self._queue_steering
                 or bool(self.queued_user_messages(conversation_id))
                 or conversation_id in self._inflight_user_messages
+                or conversation_query_guards().has_transition(conversation_id)
             ):
                 return
 
@@ -1124,6 +1163,7 @@ class SessionRunManager:
         if self._notification_wakes_closed:
             return
         self._notification_wakes_closed = True
+        self._unsubscribe_subagent_activity()
         unsubscribe = self._unsubscribe_parent_notifications
         self._unsubscribe_parent_notifications = None
         if callable(unsubscribe):
@@ -1204,10 +1244,26 @@ class SessionRunManager:
         seen_tasks: set[asyncio.Task[Any]] = set()
         seen_task_ids: set[str] = set()
         tasks_to_wait: set[asyncio.Task[Any]] = set()
+        persistence_tasks: set[asyncio.Task[None]] = set()
 
         # Capture and signal the concrete runs before awaiting cleanup. A
         # completed run may be replaced while its children are still draining.
         for cid in target_ids:
+            run_context = self._run_contexts.get(cid)
+            if run_context is not None and not run_context.cancel_reason:
+                run_context.cancel_reason = reason
+            persistence = run_context.user_cancel_persistence if run_context is not None else None
+            if reason == "user_interrupted":
+                stream = getattr(self._session, "_conversation_streams", {}).get(cid) or {}
+                stopped_message_id = str(stream.get("message_id") or self.run_task_ids.get(cid) or "")
+                if persistence is None:
+                    persistence = asyncio.create_task(to_thread_cancel_safe(
+                        self._persist_user_stop, cid, stopped_message_id, run_context, reason,
+                    ))
+                    if run_context is not None:
+                        run_context.user_cancel_persistence = persistence
+            if persistence is not None:
+                persistence_tasks.add(persistence)
             task_id = self.run_task_ids.get(cid)
             if task_id:
                 seen_task_ids.add(str(task_id))
@@ -1238,6 +1294,9 @@ class SessionRunManager:
             if active_task_id and active_task_id not in seen_task_ids:
                 seen_task_ids.add(str(active_task_id))
 
+        persistence_results = await await_task_despite_cancellation(
+            asyncio.gather(*persistence_tasks, return_exceptions=True),
+        )
         await await_with_deadline(
             self._session.cancel_pending_approvals(
                 reason=reason,
@@ -1260,7 +1319,17 @@ class SessionRunManager:
                 label="agent run cancellation",
             )
         self._session.session_lifecycle.schedule_task_runtime_update()
+        persistence_errors = [result for result in persistence_results if isinstance(result, Exception)]
+        if persistence_errors:
+            raise ExceptionGroup("Stop ended execution but its durable input state could not be saved", persistence_errors)
         return cancelled_any
+
+    def _persist_user_stop(
+        self, conversation_id: str, message_id: str, run_context: RunContext | None, reason: str,
+    ) -> None:
+        if run_context is not None and run_context.record_user_cancelled is not None:
+            run_context.record_user_cancelled(reason)
+        self.set_user_queue_paused(conversation_id, message_id)
 
     async def _cancel_run_tree(self, task_id: str, *, reason: str) -> None:
         from backend.agent.runtime import default_runtime

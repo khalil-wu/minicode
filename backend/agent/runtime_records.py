@@ -9,6 +9,7 @@ process-local coordination.
 from __future__ import annotations
 
 import time
+from time import monotonic
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -20,6 +21,8 @@ from backend.agent.public_projection import (
     project_public_agent_run,
     project_public_subagent_result,
     project_public_subagent_run,
+    subagent_execution_started_at,
+    subagent_workspace_root,
     project_public_swarm_message,
     project_public_swarm_task,
     project_public_swarm_task_output,
@@ -32,6 +35,7 @@ from backend.agent.public_projection import (
 # ---------------------------------------------------------------------------
 
 AgentRunStatus = Literal["running", "completed", "partial", "failed", "cancelled", "interrupted"]
+SubagentRunStatus = Literal["pending", "running", "completed", "partial", "failed", "cancelled", "interrupted"]
 AgentRunPhase = Literal["plan", "execute", "recover", "final"]
 AgentRole = Literal["primary", "subagent", "side_query", "background"]
 SwarmTaskStatus = Literal["pending", "in_progress", "blocked", "completed", "cancelled"]
@@ -58,6 +62,8 @@ class AgentRunRecord:
     budget: dict[str, Any] = field(default_factory=dict)
     started_at: int = field(default_factory=epoch_ms)
     completed_at: int | None = None
+    duration_ms: int | None = None
+    _started_monotonic: float | None = field(default=None, repr=False, compare=False)
     task_id: str = ""
     session_id: str = ""
     summary: str = ""
@@ -76,10 +82,21 @@ class AgentRunRecord:
     cleanup_completed_at: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result.pop("_started_monotonic")
+        if self.duration_ms is None:
+            result.pop("duration_ms")
+        return result
 
     def public_dict(self) -> dict[str, Any]:
-        return project_public_agent_run(asdict(self))
+        return project_public_agent_run(self.to_dict())
+
+    def elapsed_ms(self) -> int | None:
+        if self.duration_ms is not None:
+            return self.duration_ms
+        if self._started_monotonic is None:
+            return None
+        return max(0, int((monotonic() - self._started_monotonic) * 1000))
 
     def with_phase(self, phase: AgentRunPhase, *, summary: str = "") -> "AgentRunRecord":
         self.phase = phase
@@ -95,6 +112,7 @@ class AgentRunRecord:
         terminal_reason: str = "",
         error: str = "",
     ) -> "AgentRunRecord":
+        self.duration_ms = self.elapsed_ms()
         self.status = status
         self.phase = "final"
         self.completed_at = epoch_ms()
@@ -134,7 +152,7 @@ class SubagentRunRecord:
     waiting_on: str = ""
     iteration: int = 0
     last_progress_at: int = 0
-    status: AgentRunStatus = "running"
+    status: SubagentRunStatus = "running"
     tool_count: int = 0
     result_summary: str = ""
     checkpoint_id: str = ""
@@ -161,12 +179,32 @@ class SubagentRunRecord:
     awaiting_plan_approval: bool = False
     active_plan_request_id: str = ""
     is_idle: bool = False
+    parent_tool_call_id: str = ""
+    input_prompt: str = ""
+    accepted_at: int = field(default_factory=epoch_ms)
+
+    @property
+    def display_name(self) -> str:
+        return self.teammate_name or str(self.resume_config.get("task_name") or self.prompt_summary)
+
+    @property
+    def execution_started_at(self) -> int:
+        return subagent_execution_started_at({
+            "resume_config": self.resume_config, "iteration": self.iteration,
+            "tool_count": self.tool_count, "status": self.status,
+            "result_summary": self.result_summary, "started_at": self.started_at,
+        })
+
+    @property
+    def workspace_root(self) -> str:
+        return subagent_workspace_root({"resume_config": self.resume_config})
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "display_name": self.display_name, "execution_started_at": self.execution_started_at,
+                "workspace_root": self.workspace_root}
 
     def public_dict(self) -> dict[str, Any]:
-        return project_public_subagent_run(asdict(self))
+        return project_public_subagent_run(self.to_dict())
 
     def complete(self, status: AgentRunStatus = "completed", *, summary: str = "", tool_count: int = 0) -> "SubagentRunRecord":
         self.status = status
@@ -231,6 +269,8 @@ class SwarmMessageRecord:
     recipient_mailbox_epochs: dict[str, int] = field(default_factory=dict)
     created_at: int = field(default_factory=epoch_ms)
     seq: int = 0
+    # Messages written before this field existed always woke idle recipients.
+    delivery_mode: Literal["queue_only", "trigger_turn"] = "trigger_turn"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -296,9 +336,7 @@ class SwarmTaskRecord:
     seq: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["outputs"] = [output.to_dict() for output in self.outputs]
-        return data
+        return asdict(self)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -363,9 +401,7 @@ class SwarmTeamRecord:
         return f"team-lead@{self.team_name}"
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["members"] = [member.to_dict() for member in self.members]
-        return data
+        return asdict(self)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -393,9 +429,9 @@ def budget_snapshot(budget: TokenBudget | None) -> dict[str, Any]:
     if budget is None:
         return {}
     return {
-        "total": getattr(budget, "total", 0),
-        "tool_schemas": getattr(budget, "tool_schemas", 0),
-        "active_skills": getattr(budget, "active_skills", 0),
+        "total": budget.total,
+        "tool_schemas": budget.tool_schemas,
+        "active_skills": budget.active_skills,
     }
 
 
@@ -418,6 +454,7 @@ def _swarm_message_from_dict(data: dict[str, Any]) -> SwarmMessageRecord:
         } if isinstance(data.get("recipient_mailbox_epochs"), dict) else {},
         created_at=int(data.get("created_at") or epoch_ms()),
         seq=int(data.get("seq") or 0),
+        delivery_mode=data.get("delivery_mode", "trigger_turn"),
     )
 
 
@@ -479,10 +516,12 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
     return SubagentRunRecord(
         subagent_id=str(data.get("subagent_id") or ""),
         parent_run_id=str(data.get("parent_run_id") or ""),
+        parent_tool_call_id=str(data.get("parent_tool_call_id") or ""),
         agent_type=str(data.get("agent_type") or "general-purpose") or "general-purpose",
         role=str(data.get("role") or "subagent"),  # type: ignore[arg-type]
         write_scope_strategy=str(data.get("write_scope_strategy") or "workspace"),
         prompt_summary=str(data.get("prompt_summary") or ""),
+        input_prompt=str(data.get("input_prompt") or ""),
         background=bool(data.get("background", False)),
         task_id=str(data.get("task_id") or ""),
         session_id=str(data.get("session_id") or ""),
@@ -519,7 +558,8 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         tool_count=int(data.get("tool_count") or 0),
         result_summary=str(data.get("result_summary") or ""),
         checkpoint_id=str(data.get("checkpoint_id") or ""),
-        started_at=int(data.get("started_at") or epoch_ms()),
+        accepted_at=int(data.get("accepted_at", data.get("started_at", 0))),
+        started_at=int(data.get("started_at", 0)),
         completed_at=data.get("completed_at") if isinstance(data.get("completed_at"), int) else None,
         cleanup_pending=bool(data.get("cleanup_pending", False)),
         cleanup_reason=str(data.get("cleanup_reason") or ""),
@@ -588,8 +628,9 @@ def _agent_run_from_dict(data: dict[str, Any]) -> AgentRunRecord:
         phase=phase,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
         budget=dict(data.get("budget") or {}),
-        started_at=int(data.get("started_at") or epoch_ms()),
+        started_at=int(data["started_at"]) if data.get("started_at") is not None else epoch_ms(),
         completed_at=completed_at,
+        duration_ms=int(data["duration_ms"]) if data.get("duration_ms") is not None else None,
         task_id=str(data.get("task_id") or ""),
         session_id=str(data.get("session_id") or ""),
         summary=str(data.get("summary") or ""),

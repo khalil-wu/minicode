@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "../../stores";
 import { hydrateMessages } from "../transcriptHydration";
@@ -10,6 +10,22 @@ beforeEach(() => useAppStore.setState({ conversationId: "child-parent", workingD
 afterEach(cleanup);
 
 describe("child provider failure evidence", () => {
+  it("retains HTTP failure evidence from the persisted child record through the real disclosure", () => {
+    const detail = "HTTP=400 · code=controlled_fixture · type=invalid_request_error";
+    const messages = hydrateMessages([{
+      id: "failed-child", role: "assistant", content: "", timestamp: 1000, terminal_status: "failed",
+      blocks: [{ type: "progress", id: "provider:child:error", stage: "status", phase: "recover",
+        status: "failed", providerState: "failed", message: "提供商请求失败", visibility: "timeline",
+        errorMessage: "提供商请求失败", detail }],
+    }]);
+    const activity = projectMessagesToTurns(messages, false)[0].committedCells.find(cell => cell.kind === "activity")!;
+    const view = render(<ActivityCell cell={activity} conversationId="child-parent" />);
+    expect(view.container.textContent).toContain("提供商请求失败");
+    expect(view.container.textContent).not.toContain("HTTP=400");
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(view.container.textContent).toContain(detail);
+  });
+
   it("hydrates and renders the actual retry error while excluding normal provider handshakes", () => {
     const error = "stream closed before response.completed (request_timeout)";
     const retryMessage = "连接中断，正在重连（第 1/2 次）";

@@ -132,6 +132,30 @@ def reduce_hook_executions(
                 failed = True
             continue
 
+        if event_key in {"pre_compact", "post_compact"} and exit_code == 0:
+            # Source's compact output schema accepts only these universal fields,
+            # in camelCase. Invalid JSON is evidence, never a guessed control.
+            label = "PreCompact" if event_key == "pre_compact" else "PostCompact"
+            invalid = json_result is None and stdout.startswith(("{", "["))
+            if json_result is not None:
+                invalid = bool(set(json_result) - {"continue", "stopReason", "suppressOutput", "systemMessage"}) or any(
+                    name in json_result and not isinstance(json_result[name], bool)
+                    for name in ("continue", "suppressOutput")
+                ) or any(json_result.get(name) is not None and not isinstance(json_result[name], str)
+                         for name in ("stopReason", "systemMessage"))
+            if invalid:
+                errors.append(f"hook returned invalid {label} hook JSON output")
+                summaries[-1]["status"] = "failed"
+                failed = True
+                continue
+            if json_result is not None:
+                json_result = {"continue": json_result.get("continue", True),
+                    "stop_reason": json_result.get("stopReason") or "",
+                    "suppress_output": json_result.get("suppressOutput", False),
+                    "system_message": json_result.get("systemMessage") or ""}
+                if json_result["continue"] is False and execution_blocking_allowed and blocking_allowed:
+                    summaries[-1]["status"] = "stopped"
+
         event_matches = True
         if json_result is not None:
             actual_event = str(json_result.get("event") or "")
@@ -160,6 +184,8 @@ def reduce_hook_executions(
             elif common_decision == "block" and policy.json_can_block and execution_blocking_allowed:
                 decision = "deny"
                 reason = str(json_result.get("reason") or reason or "")
+            if decision == "allow" and not execution.permission_grant_allowed:
+                decision = ""
             if candidate_input is not None:
                 updated_input = candidate_input
             if decision and decision_rank.get(decision, 0) >= decision_rank[permission_decision]:
@@ -249,6 +275,8 @@ def reduce_hook_executions(
         elif exit_code != 0:
             error = stderr or stdout or f"Hook exited with status {exit_code}"
             errors.append(error)
+            if event_key in {"pre_compact", "post_compact"}:
+                failed = True
             if event_key == "worktree_create":
                 failed = True
 

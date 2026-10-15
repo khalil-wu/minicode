@@ -8,6 +8,11 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class ApprovalNotificationClaim:
+    claimed: bool = False
+
+
+@dataclass(slots=True)
 class TurnWaitState:
     """Authoritative session-owned state for turn interaction waits.
 
@@ -30,6 +35,7 @@ class TurnWaitState:
     provider_oauth_pending: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
     turn_input_queues: dict[str, Any] = field(default_factory=dict)
     interrupted_conversation_ids: set[str] = field(default_factory=set)
+    approval_notification_claims: dict[str, ApprovalNotificationClaim] = field(default_factory=dict)
 
     @classmethod
     def for_session(cls, session: Any) -> "TurnWaitState":
@@ -54,6 +60,7 @@ class TurnWaitState:
         key = str(request_id or "").strip()
         if not key:
             raise ValueError("waiter request id is required")
+        self.approval_notification_claim(key)
         if kind == "approval":
             self.pending_approvals[key] = future
         elif kind == "user_input":
@@ -65,10 +72,14 @@ class TurnWaitState:
         else:
             raise ValueError(f"unknown waiter kind: {kind}")
 
+    def approval_notification_claim(self, request_id: str) -> ApprovalNotificationClaim:
+        return self.approval_notification_claims.setdefault(request_id, ApprovalNotificationClaim())
+
     def remove_waiter(self, request_id: str) -> asyncio.Future[Any] | None:
         """Remove one waiter from every index and return its future."""
 
         key = str(request_id or "").strip()
+        self.approval_notification_claims.pop(key, None)
         future = self.pending_approvals.pop(key, None)
         for waiters in (
             self.pending_user_input,
@@ -105,3 +116,4 @@ class TurnWaitState:
         self.pending_user_input.clear()
         self.pending_elicitations.clear()
         self.provider_oauth_pending.clear()
+        self.approval_notification_claims.clear()

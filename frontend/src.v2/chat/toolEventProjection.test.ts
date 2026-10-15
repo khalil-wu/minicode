@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ServerEvent } from "../protocol/events";
 import { toolCallLocations } from "../lib/content-blocks";
@@ -10,7 +11,7 @@ import { projectMessagesToTurns } from "./chatSurfaceState";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
-vi.mock("./sendChatMessage", () => ({ resetSendDeduplication: vi.fn() }));
+vi.mock("./sendChatMessage", async load => ({ ...await load<typeof import("./sendChatMessage")>(), resetPendingUserMessagesForTests: vi.fn() }));
 
 const buffer = { push() {}, flush() {}, destroy() {} };
 const handlers = { textStreamBuffer: buffer, thinkingStreamBuffer: buffer };

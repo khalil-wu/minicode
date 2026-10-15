@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Monaco from "monaco-editor/editor/editor.api.js";
-import { registerEditorLanguageServices } from "./editorLanguageClient";
+import { registerEditorLanguageServices, requestEditorLanguage, releaseEditorLanguageClient } from "./editorLanguageClient";
 import { useAppStore } from "../stores";
 import { editorModelUri } from "./monacoLanguageServices";
 import { isCancellationError } from "monaco-editor/base/common/errors.js";
@@ -17,6 +17,7 @@ const captured = new Map<string, Monaco.languages.CompletionItemProvider>();
 const symbols = new Map<string, Monaco.languages.DocumentSymbolProvider>();
 let registration: Monaco.IDisposable;
 beforeEach(() => {
+  window.__MINICODE_RUNTIME__ = { windowOwnerId: "secondary-1", windowInstanceId: "native-language-window", windowBindingToken: "native-language-proof" };
   useAppStore.setState({ workingDirectory: "/cpp-editor-test" });
   const real = Monaco.languages.registerCompletionItemProvider;
   vi.spyOn(Monaco.languages, "registerCompletionItemProvider").mockImplementation((selector, provider) => {
@@ -30,16 +31,39 @@ beforeEach(() => {
   });
   registration = registerEditorLanguageServices(Monaco);
 });
-afterEach(() => {
+afterEach(async () => {
   registration.dispose();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
   Monaco.editor.getModels().forEach((model) => model.dispose());
+  await releaseEditorLanguageClient(Monaco);
   captured.clear();
   symbols.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  delete window.__MINICODE_RUNTIME__;
 });
 
 describe("native C/C++ Monaco provider bridge", () => {
+  it("proves the captured native instance on query, explicit model close and renderer release", async () => {
+    const model = Monaco.editor.createModel("value = 1", "python", Monaco.Uri.parse(editorModelUri("bound.py", "/cpp-editor-test")));
+    const bodies: Array<Record<string, unknown>> = [];
+    const proofs: Array<string | null> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      proofs.push(new Headers(init.headers).get("x-minicode-window-binding-token"));
+      return new Response(JSON.stringify({ result: [] }), { status: 200 });
+    }));
+    await requestEditorLanguage(Monaco, model, "hover");
+    model.dispose();
+    await vi.waitFor(() => expect(bodies.some(body => body.action === "close")).toBe(true));
+    await releaseEditorLanguageClient(Monaco);
+    expect(bodies.map(body => body.action ?? body.method)).toEqual(["hover", "close", "release"]);
+    for (const body of bodies) {
+      expect(body).toMatchObject({ window_owner_id: "secondary-1", window_instance_id: "native-language-window" });
+      expect(body).not.toHaveProperty("window_binding_token");
+    }
+    expect(proofs).toEqual(["native-language-proof", "native-language-proof", "native-language-proof"]);
+  });
   it("maps both LSP document-symbol result variants without inventing ranges", async () => {
     const model = Monaco.editor.createModel("class Ledger:\n    def total(self):\n        return 42\n", "python", Monaco.Uri.parse(editorModelUri("ledger.py", "/cpp-editor-test")));
     const range = { start: { line: 0, character: 0 }, end: { line: 2, character: 17 } };
@@ -126,5 +150,62 @@ describe("native C/C++ Monaco provider bridge", () => {
     model.pushEditOperations([], [{ range: result!.suggestions[0].range as Monaco.IRange, text: "include <iostream>" }], () => null);
     expect(model.getValue()).toBe("#include <iostream>");
     expect(header.getValue()).toBe("int unsaved_header_function();");
+  });
+
+  it("sends explicit close for a disposed model while retaining hidden owned buffers", async () => {
+    const discarded = Monaco.editor.createModel('value = "discarded"', "python", Monaco.Uri.parse(editorModelUri("a.py", "/cpp-editor-test")));
+    const reader = Monaco.editor.createModel("from a import value\nvalue", "python", Monaco.Uri.parse(editorModelUri("b.py", "/cpp-editor-test")));
+    const hidden = Monaco.editor.createModel('kept = "unsaved"', "python", Monaco.Uri.parse(editorModelUri("hidden.py", "/cpp-editor-test")));
+    const bodies: Array<Record<string, any>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ result: [] }), { status: 200 });
+    }));
+    await requestEditorLanguage(Monaco, reader, "hover");
+    const first = bodies.find((body) => body.method === "hover")!;
+    const discardedId = first.documents.find((document: any) => document.path === discarded.uri.fsPath).document_id;
+    discarded.dispose();
+    await vi.waitFor(() => expect(bodies.some((body) => body.action === "close" && body.document_ids.includes(discardedId))).toBe(true));
+    await requestEditorLanguage(Monaco, reader, "hover");
+    const last = bodies.filter((body) => body.method === "hover").at(-1)!;
+    expect(last.client_id).toBe(first.client_id);
+    expect(last.snapshot_revision).toBeGreaterThan(first.snapshot_revision);
+    expect(last.documents.map((document: any) => document.path)).toEqual(expect.arrayContaining([reader.uri.fsPath, hidden.uri.fsPath]));
+    expect(last.documents.some((document: any) => document.document_id === discardedId)).toBe(false);
+    expect(hidden.getValue()).toBe('kept = "unsaved"');
+  });
+
+  it("cancels an in-flight query when one of its context models is discarded", async () => {
+    const dependency = Monaco.editor.createModel('value = "old"', "python", Monaco.Uri.parse(editorModelUri("dependency.py", "/cpp-editor-test")));
+    const model = Monaco.editor.createModel("from dependency import value", "python", Monaco.Uri.parse(editorModelUri("dependent.py", "/cpp-editor-test")));
+    let querySignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (JSON.parse(init.body).action) return new Response("{}", { status: 200 });
+      querySignal = init.signal;
+      return await new Promise<Response>((_resolve, reject) => querySignal!.addEventListener("abort", () => reject(querySignal!.reason), { once: true }));
+    }));
+    const query = requestEditorLanguage(Monaco, model, "hover");
+    const cancelled = expect(query).rejects.toSatisfy(isCancellationError);
+    await vi.waitFor(() => expect(querySignal).toBeDefined());
+    dependency.dispose();
+    await cancelled;
+    expect(querySignal!.aborted).toBe(true);
+    expect(model.isDisposed()).toBe(false);
+  });
+
+  it("uses a new renderer client after release even when the same model remains owned", async () => {
+    const model = Monaco.editor.createModel("value = 1", "python", Monaco.Uri.parse(editorModelUri("retained.py", "/cpp-editor-test")));
+    const bodies: Array<Record<string, any>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ result: [] }), { status: 200 });
+    }));
+    await requestEditorLanguage(Monaco, model, "hover");
+    await releaseEditorLanguageClient(Monaco);
+    await requestEditorLanguage(Monaco, model, "hover");
+    const requests = bodies.filter((body) => body.method === "hover");
+    expect(requests[1].client_id).not.toBe(requests[0].client_id);
+    expect(requests[1].documents[0].document_id).not.toBe(requests[0].documents[0].document_id);
+    expect(model.getValue()).toBe("value = 1");
   });
 });

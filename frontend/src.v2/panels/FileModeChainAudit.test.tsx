@@ -90,8 +90,10 @@ describe("file mode projection chain", () => {
 
   it("only settles the loading query whose command id failed", () => {
     useAppStore.setState((state) => ({ gitChanges: { ...state.gitChanges, loading: true, workingTreeRequestId: "current-query" } }));
-    const error: ServerEvent = { type: "command.result", command: "diff.git_working_tree", level: "error", message: "not a repository", client_command_id: "old-query" };
+    const error: ServerEvent = { type: "command.result", command: "diff.git_working_tree", level: "error", message: "not a repository", client_command_id: "old-query", conversation_id: "owner", workspace_root: "C:/audit" };
     handleCommandResultEvent(error);
+    expect(useAppStore.getState().gitChanges.loading).toBe(true);
+    handleCommandResultEvent({ ...error, client_command_id: "current-query", workspace_root: "C:/foreign" });
     expect(useAppStore.getState().gitChanges.loading).toBe(true);
     handleCommandResultEvent({ ...error, client_command_id: "current-query" });
     expect(useAppStore.getState().gitChanges.loading).toBe(false);

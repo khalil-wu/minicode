@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dist = path.join(root, "dist");
+const dist = path.resolve(root, process.env.MINICODE_BUILD_OUTPUT || "dist");
 const assets = path.join(dist, "assets");
 const limits = {
   entry: 900 * 1024,

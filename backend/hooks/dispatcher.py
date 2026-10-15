@@ -91,6 +91,7 @@ class HookExecution:
     execution_failed: bool = False
     backgrounded: bool = False
     semantic_stdout: str | None = None
+    permission_grant_allowed: bool = True
 
     @cached_property
     def json_output(self) -> dict[str, Any] | None:
@@ -141,6 +142,8 @@ def select_handlers(
 async def execute_handlers(
     entries: Iterable[Any],
     execute: Callable[[Any], Awaitable[HookExecutionResult]],
+    *,
+    permission_grant_allowed: Callable[[Any], bool] = lambda entry: True,
 ) -> list[HookExecution]:
     """Run one matched batch concurrently, then restore config order."""
 
@@ -212,6 +215,7 @@ async def execute_handlers(
                     execution_failed=execution_failed,
                     backgrounded=backgrounded,
                     semantic_stdout=semantic_stdout,
+                    permission_grant_allowed=permission_grant_allowed(entry),
                 )
             )
             completion_order += 1

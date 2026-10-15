@@ -58,8 +58,19 @@ def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
         raise SchedulerServiceError("Task schedule must be a valid 5-field cron expression")
     if isolation not in {"worktree", "workspace"}:
         raise SchedulerServiceError("Task isolation must be 'worktree' or 'workspace'")
-    return dict(name=name, prompt=prompt, schedule=schedule, permission_mode=permission_mode,
-                conversation_id=str(data.get("conversation_id") or "").strip(), timezone=timezone, isolation=isolation)
+    configuration = dict(name=name, prompt=prompt, schedule=schedule, permission_mode=permission_mode,
+                         conversation_id=str(data.get("conversation_id") or "").strip(), timezone=timezone, isolation=isolation)
+    if "kind" in data:
+        if data["kind"] not in {"cron", "heartbeat"}:
+            raise SchedulerServiceError("Scheduled task kind must be 'cron' or 'heartbeat'")
+        if data["kind"] == "heartbeat" and not configuration["conversation_id"]:
+            raise SchedulerServiceError("A heartbeat requires its target conversation")
+        configuration["kind"] = data["kind"]
+    if "notification_policy" in data:
+        if data["notification_policy"] not in {None, "failed_runs_only"}:
+            raise SchedulerServiceError("Unknown scheduled task notification policy")
+        configuration["notification_policy"] = data["notification_policy"]
+    return configuration
 
 
 def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:

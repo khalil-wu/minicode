@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { selectableModelsForProvider } from "./provider-models";
 
 describe("selectableModelsForProvider", () => {
+  it.each(["configured", "extension"])("keeps the backend's actual %s catalog selectable", (source) => {
+    expect(selectableModelsForProvider(["audit-model-a", "audit-model-b"], "audit-model-a", "custom", source))
+      .toEqual(["audit-model-a", "audit-model-b"]);
+  });
+
+  it.each(["fallback", "unavailable", undefined])("keeps an unverified custom catalog scoped to the selected model: %s", (source) => {
+    expect(selectableModelsForProvider(["stale-model", "gateway-model"], "gateway-model", "custom", source)).toEqual(["gateway-model"]);
+  });
+
   it("keeps a discovered custom-provider model list selectable", () => {
     expect(selectableModelsForProvider(
       ["freebbe-fast", "freebbe-reasoning"],

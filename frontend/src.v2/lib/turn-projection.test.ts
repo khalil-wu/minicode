@@ -48,7 +48,7 @@ describe("projectTurn explicit event contract", () => {
       toolBlock({ id: "exec", name: "tool_exec", status, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", error: failure }) }),
       toolBlock({ id: "leaf", name: "read_file", status, summary: failure,
         callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
-      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" }, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", output: [failure] }) }),
+      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" }, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", error: failure, output: [] }) }),
     ];
     expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf"]);
     expect(projectTurn(blocks).hasFailure).toBe(true);
@@ -73,8 +73,42 @@ describe("projectTurn explicit event contract", () => {
       toolBlock({ id: "failed", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"failed-cell","status":"failed","error":"permission denied"}' }),
     ];
     expect(projectTurn(blocks).activityItems.flatMap(item => item.records?.map(record => record.id) ?? []))
-      .toEqual(["leaf", "standalone", "failed"]);
+      .toEqual(["leaf", "failed"]);
     expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(5);
+  });
+  it.each([
+    { cell_id: "cell", status: "completed", output: ["computed 42"] },
+    { cell_id: "cell", status: "completed", output: ['{"content":"file bytes","is_error":false}'], output_tool_call_ids: ["leaf"] },
+    { cell_id: "cell", status: "completed", artifact_id: "full-receipt", output_preview: '{"content":"file bytes... [truncated; full output in artifact] ...end"}' },
+    { cell_id: "cell", status: "running", output: ["Agent is running"], pending_tools: ["read_file"] },
+  ])("keeps execute and wait model receipts out of the trace regardless of truncation and forwarding (%j)", (receipt) => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", outputPreview: JSON.stringify(receipt) }),
+      toolBlock({ id: "leaf", name: "read_file", summary: "file bytes",
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", args: { cell_id: "cell" }, outputPreview: JSON.stringify(receipt) }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf"]);
+    expect(projectTurn([blocks[0]]).activityItems).toEqual([]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(3);
+    expect(blocks[0]).toMatchObject({ type: "tool_call", record: { outputPreview: JSON.stringify(receipt) } });
+  });
+  it("projects a real script failure without making successful console output a second transcript item", () => {
+    const blocks = [toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview: JSON.stringify({
+      cell_id: "cell", status: "failed", output: ["computed 42"], error: "TypeError: report is undefined",
+    }) })];
+    const projection = projectTurn(blocks);
+    expect(projection.activityItems).toHaveLength(1);
+    expect(projection.activityItems[0]).toMatchObject({ title: "运行", outputText: "TypeError: report is undefined", hasFailure: true });
+    expect(projection.activityItems[0].records?.[0].outputPreview).toContain("computed 42");
+  });
+  it("keeps a real failed cell diagnostic when the runtime truncated it into an artifact preview", () => {
+    const outputPreview = JSON.stringify({ cell_id: "cell", status: "failed", artifact_id: "full-failure",
+      output_preview: "TypeError: report is undefined\n... [truncated; full output in artifact] ...\nlast diagnostic" });
+    const projection = projectTurn([toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview })]);
+    expect(projection.activityItems).toHaveLength(1);
+    expect(projection.activityItems[0]).toMatchObject({ title: "运行", outputText: expect.stringContaining("TypeError"), hasFailure: true });
+    expect(projection.activityItems[0].records?.[0].outputPreview).toBe(outputPreview);
   });
   it.each(["running", "pending", "success"])("projects real nested file/command/search work without a %s execute wrapper", (status) => {
     const blocks = [

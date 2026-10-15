@@ -1,8 +1,10 @@
+import { useI18n, type Translate } from "../i18n";
 import { ClipboardCopy, Download, FileText, LoaderCircle, TriangleAlert } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { safeJsonParse } from "../lib/safe-parse";
 import { useAppStore } from "../stores";
+import { saveBlobFile } from "../lib/save-blob";
 import { getWebSocket } from "../hooks/useWebSocket";
 import {
   artifactResourceUrl,
@@ -16,6 +18,8 @@ import { fetchArtifactOriginal, fetchAttachmentOriginal } from "../protocol/api"
 import { pushToast } from "../overlays/ToastContainer";
 import { kindForMediaType } from "../lib/media-types";
 import { copyText } from "../lib/clipboard";
+import { openWorkspaceSourceFile } from "../workspace/openWorkspaceFolder";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 interface AttachmentDownloadTarget {
   artifactId: string;
@@ -61,7 +65,7 @@ const isSafePreviewDocumentUrl = (url: string): boolean => {
 const isSafePreviewImageArtifact = (
   mediaType?: string,
   url?: string,
-  source?: "artifact" | "attachment" | "workspace" | "local",
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local",
 ): boolean => isDisplayableImageMediaType(mediaType)
   && (source === "artifact" || source === "attachment" || isSafePreviewImageUrl(String(url || "")));
 
@@ -72,16 +76,20 @@ export const PreviewPanel = () => (
 );
 
 const ArtifactView = () => {
+  const { t: tr } = useI18n();
   const conversationId = useAppStore((state) => selectPreviewSurface(state).conversationId);
   const previewArtifact = useAppStore((state) => selectPreviewSurface(state).previewArtifact);
   const isConnected = useAppStore((state) => state.isConnected);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const [sourceView, setSourceView] = useState(false);
+  useEffect(() => setSourceView(false), [conversationId, previewArtifact?.artifactId]);
 
   if (!previewArtifact) {
-    return <ArtifactState icon={<FileText size={18} />} label="在对话中打开文件后，可在这里查看完整内容。" />;
+    return <ArtifactState icon={<FileText size={18} />} label={tr("在对话中打开文件后，可在这里查看完整内容。")} />;
   }
 
   const artifactUrl = previewArtifact.url ?? "";
-  const name = previewArtifact.name || "生成文件";
+  const name = previewArtifact.name || tr("生成文件");
   const downloadTarget = conversationId && (
     (previewArtifact.source === "attachment" && previewArtifact.hasNative)
     || previewArtifact.source === "artifact"
@@ -114,8 +122,8 @@ const ArtifactView = () => {
       key={`${previewArtifact.artifactId}:${artifactUrl}`}
       artifactId={previewArtifact.artifactId}
       conversationId={conversationId || undefined}
-      name={previewArtifact.name || "生成图片"}
-      sizeLabel={sizeLabel || previewArtifact.mediaType || "图片"}
+      name={previewArtifact.name || tr("生成图片")}
+      sizeLabel={sizeLabel || previewArtifact.mediaType || tr("图片")}
       mediaType={previewArtifact.mediaType}
       url={artifactUrl}
       source={previewArtifact.source}
@@ -131,10 +139,10 @@ const ArtifactView = () => {
     artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name} sizeLabel={sizeLabel}
     source={previewArtifact.source as "artifact" | "attachment"} isConnected={isConnected} downloadTarget={downloadTarget} />;
   if (previewArtifact.loading) {
-    return <ArtifactFrame name={name} sizeLabel="加载中"><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在加载附件预览" /></ArtifactFrame>;
+    return <ArtifactFrame name={name} sizeLabel={tr("加载中")}><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label={tr("正在加载附件预览")} /></ArtifactFrame>;
   }
   if (previewArtifact.error) {
-    return <ArtifactFrame name={name} sizeLabel="无法预览"><ArtifactState icon={<TriangleAlert size={18} />} label={previewArtifact.error} danger /></ArtifactFrame>;
+    return <ArtifactFrame name={name} sizeLabel={tr("无法预览")}><ArtifactState icon={<TriangleAlert size={18} />} label={previewArtifact.error} danger /></ArtifactFrame>;
   }
   if (imageView) return imageView;
   if (previewArtifact.url && normalizedMediaType === "application/pdf" && isSafePreviewDocumentUrl(previewArtifact.url)) return <ArtifactPdfView key={`${conversationId}:${previewArtifact.artifactId}`}
@@ -143,25 +151,31 @@ const ArtifactView = () => {
 
   const content = prettyContent(rawContent);
   const richExtracted = isRichExtractedPreview(normalizedMediaType);
+  const isMarkdown = normalizedMediaType === "text/markdown";
   const canCopy = hasContent && !isBinary && !contentIsDiagnostic;
   const copy = async () => {
-    if (await copyText(rawContent, "文件内容")) pushToast("文件内容已复制。", "success", 1600);
+    if (await copyText(rawContent, tr("文件内容"))) pushToast(tr("文件内容已复制。"), "success", 1600);
   };
-  const header = <ArtifactHeader artifactId={name} sizeLabel={previewTypeLabel(previewArtifact.mediaType, previewArtifact.kind, sizeLabel)} onCopy={canCopy ? () => void copy() : undefined} downloadTarget={downloadTarget} />;
+  const header = <ArtifactHeader artifactId={name} sizeLabel={previewTypeLabel(tr, previewArtifact.mediaType, previewArtifact.kind, sizeLabel)} onCopy={canCopy ? () => void copy() : undefined} downloadTarget={downloadTarget}
+    sourceAction={isMarkdown && canCopy ? { active: sourceView, onToggle: () => setSourceView((value) => !value) } : undefined}
+    openAction={previewArtifact.source === "workspace" && previewArtifact.sourcePath && previewArtifact.workspaceRoot ? {
+      label: workspaceRootsEqual(previewArtifact.workspaceRoot, workingDirectory) ? tr("打开文件") : tr("在来源工作区打开"),
+      onOpen: () => openWorkspaceSourceFile(previewArtifact.sourcePath!, previewArtifact.workspaceRoot),
+    } : undefined} />;
 
   if (isBinary) {
-    return <ArtifactFrame header={header}><ArtifactWarning message={warning} /><ArtifactState icon={<FileText size={18} />} label="不支持应用内预览。此文件是二进制文件，无法提取可显示文本。" /></ArtifactFrame>;
+    return <ArtifactFrame header={header}><ArtifactWarning message={warning} /><ArtifactState icon={<FileText size={18} />} label={tr("不支持应用内预览。此文件是二进制文件，无法提取可显示文本。")} /></ArtifactFrame>;
   }
   if (!hasContent || contentIsDiagnostic) {
-    return <ArtifactFrame header={header}><ArtifactWarning message={warning} danger /><ArtifactState icon={<FileText size={18} />} label={warning ? "附件内容暂时无法提取或预览。" : "没有可显示的文本内容。"} danger={Boolean(warning)} /></ArtifactFrame>;
+    return <ArtifactFrame header={header}><ArtifactWarning message={warning} danger /><ArtifactState icon={<FileText size={18} />} label={warning ? tr("附件内容暂时无法提取或预览。") : tr("没有可显示的文本内容。")} danger={Boolean(warning)} /></ArtifactFrame>;
   }
 
   return (
     <ArtifactFrame header={header}>
       {warning && <ArtifactWarning message={warning} />}
       {previewArtifact.preview && previewArtifact.preview !== rawContent && <div style={artifactNoticeStyle}>{previewArtifact.preview}</div>}
-      {previewArtifact.truncated && <div style={artifactNoticeStyle}>文件较大，仅显示前 {rawContent.length.toLocaleString()} 个字符。</div>}
-      {richExtracted ? <div style={artifactRichContentStyle}><MarkdownRenderer content={content} /></div> : <pre style={textContentStyle}>{content}</pre>}
+      {previewArtifact.truncated && <div style={artifactNoticeStyle}>{tr("文件较大，仅显示前") + " "}{rawContent.length.toLocaleString()} {tr("个字符。")}</div>}
+      {richExtracted && !sourceView ? <div style={artifactRichContentStyle}><MarkdownRenderer content={content} conversationId={conversationId} workspaceRoot={previewArtifact.source === "workspace" ? previewArtifact.workspaceRoot ?? "" : ""} /></div> : <pre style={textContentStyle}>{content}</pre>}
     </ArtifactFrame>
   );
 };
@@ -170,33 +184,35 @@ const ArtifactAudioView = ({ artifactId, conversationId, name, source, isConnect
   artifactId: string; conversationId?: string; name: string;
   source: "artifact" | "attachment"; isConnected: boolean; sizeLabel: string;
 }) => {
+  const { t: tr } = useI18n();
   const [failed, setFailed] = useState(false);
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const url = useMemo(() => artifactResourceUrl({ artifactId, conversationId, sessionId, source, isConnected }), [artifactId, conversationId, sessionId, source, isConnected]);
   useEffect(() => setFailed(false), [url]);
-  return <ArtifactFrame name={name} sizeLabel={sizeLabel ? `音频 · ${sizeLabel}` : "音频"}>
-    {!url ? <ArtifactState icon={<FileText size={18} />} label="连接恢复并关联会话后可播放音频。" /> :
+  return <ArtifactFrame name={name} sizeLabel={sizeLabel ? tr("音频 · {v0}", { v0: sizeLabel }) : tr("音频")}>
+    {!url ? <ArtifactState icon={<FileText size={18} />} label={tr("连接恢复并关联会话后可播放音频。")} /> :
       <div style={stateStyle}>
         <audio key={url} controls preload="metadata" src={url} aria-label={name} onError={() => setFailed(true)} />
-        {failed && <span role="status">此音频无法播放，请下载后使用本地播放器打开。</span>}
-        <AttachmentDownloadButton target={{ artifactId, conversationId: conversationId!, name, source }} label="下载音频" />
+        {failed && <span role="status">{tr("此音频无法播放，请下载后使用本地播放器打开。")}</span>}
+        <AttachmentDownloadButton target={{ artifactId, conversationId: conversationId!, name, source }} label={tr("下载音频")} />
       </div>}
   </ArtifactFrame>;
 };
 
 const ArtifactPdfView = ({ artifactId, conversationId, name, sizeLabel, source, url, isConnected, downloadTarget }: {
   artifactId: string; conversationId?: string; name: string; sizeLabel: string;
-  source?: "artifact" | "attachment" | "workspace" | "local"; url?: string; isConnected: boolean; downloadTarget?: AttachmentDownloadTarget;
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local"; url?: string; isConnected: boolean; downloadTarget?: AttachmentDownloadTarget;
 }) => {
+  const { t: tr } = useI18n();
   const [retryNonce, setRetryNonce] = useState(0);
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const freshUrl = useMemo(() => withPreviewCacheBust(artifactResourceUrl({
     artifactId, conversationId, sessionId, source, originalUrl: url, isConnected,
   }), retryNonce), [artifactId, conversationId, sessionId, source, url, isConnected, retryNonce]);
   return <ArtifactFrame name={name} sizeLabel={sizeLabel ? `PDF · ${sizeLabel}` : "PDF"} downloadTarget={downloadTarget}>
-    {freshUrl ? <Suspense fallback={<ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在准备 PDF 预览" />}>
-      <PdfAttachmentPreview url={freshUrl} name={name} onRetry={source === "artifact" || source === "attachment" || source === "workspace" ? () => setRetryNonce((value) => value + 1) : undefined} />
-    </Suspense> : <ArtifactState icon={<FileText size={18} />} label={!conversationId ? "PDF 未关联到会话，暂时无法预览。" : "连接恢复并关联会话后可预览 PDF。"} />}
+    {freshUrl ? <Suspense fallback={<ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label={tr("正在准备 PDF 预览")} />}>
+      <PdfAttachmentPreview url={freshUrl} name={name} onRetry={source === "artifact" || source === "attachment" || source === "workspace" || source === "browser" ? () => setRetryNonce((value) => value + 1) : undefined} />
+    </Suspense> : <ArtifactState icon={<FileText size={18} />} label={!conversationId ? tr("PDF 未关联到会话，暂时无法预览。") : tr("连接恢复并关联会话后可预览 PDF。")} />}
   </ArtifactFrame>;
 };
 
@@ -217,10 +233,11 @@ const ArtifactImageView = ({
   sizeLabel: string;
   mediaType?: string;
   url: string;
-  source?: "artifact" | "attachment" | "workspace" | "local";
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local";
   isConnected: boolean;
   downloadTarget?: AttachmentDownloadTarget;
 }) => {
+  const { t: tr } = useI18n();
   const [retryNonce, setRetryNonce] = useState(0);
   const [failed, setFailed] = useState(false);
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
@@ -243,28 +260,27 @@ const ArtifactImageView = ({
 
   if (!imageUrl || failed) {
     return (
-      <ArtifactFrame name={name} sizeLabel="无法预览" downloadTarget={downloadTarget}>
+      <ArtifactFrame name={name} sizeLabel={tr("无法预览")} downloadTarget={downloadTarget}>
         <ArtifactState
           icon={<TriangleAlert size={18} />}
           label={!conversationId && requiresConnection
-            ? "图片未关联到会话，暂时无法预览。"
+            ? tr("图片未关联到会话，暂时无法预览。")
             : requiresConnection && (!isConnected || !sessionId)
-              ? "连接恢复后可预览图片。"
-              : "图片加载失败。"}
+              ? tr("连接恢复后可预览图片。")
+              : tr("图片加载失败。")}
           danger={!requiresConnection || Boolean(imageUrl) || Boolean(conversationId && isConnected && sessionId)}
         />
         {imageUrl && (
           <button
             type="button"
-            aria-label="重试图片预览"
+            aria-label={tr("重试图片预览")}
             onClick={() => {
               setFailed(false);
               setRetryNonce((value) => value + 1);
             }}
             style={previewRetryButtonStyle}
           >
-            重试
-          </button>
+            {tr("重试")}</button>
         )}
       </ArtifactFrame>
     );
@@ -297,12 +313,15 @@ const ArtifactFrame = ({
   header?: ReactNode;
   downloadTarget?: AttachmentDownloadTarget;
   children: ReactNode;
-}) => (
+}) => {
+  const { t: tr } = useI18n();
+  return (
   <div style={frameStyle}>
-    {header ?? <ArtifactHeader artifactId={name || "生成文件"} sizeLabel={sizeLabel || ""} downloadTarget={downloadTarget} />}
+    {header ?? <ArtifactHeader artifactId={name || tr("生成文件")} sizeLabel={sizeLabel || ""} downloadTarget={downloadTarget} />}
     {children}
   </div>
 );
+};
 
 const ArtifactWarning = ({ message, danger = false }: { message: string; danger?: boolean }) =>
   message ? <div role="status" style={{ ...artifactNoticeStyle, color: danger ? "var(--state-danger)" : "var(--state-warning)" }}>{message}</div> : null;
@@ -311,21 +330,27 @@ const ArtifactState = ({ icon, label, danger = false }: { icon: ReactNode; label
   <div style={{ ...stateStyle, color: danger ? "var(--state-danger)" : "var(--text-muted)" }}>{icon}<span>{label}</span></div>
 );
 
-const ArtifactHeader = ({ artifactId, sizeLabel, onCopy, downloadTarget }: { artifactId: string; sizeLabel: string; onCopy?: () => void; downloadTarget?: AttachmentDownloadTarget }) => (
+const ArtifactHeader = ({ artifactId, sizeLabel, onCopy, downloadTarget, sourceAction, openAction }: { artifactId: string; sizeLabel: string; onCopy?: () => void; downloadTarget?: AttachmentDownloadTarget; sourceAction?: { active: boolean; onToggle: () => void }; openAction?: { label: string; onOpen: () => void } }) => {
+  const { t: tr } = useI18n();
+  return (
   <div style={headerStyle}>
     <span title={artifactId} style={headerNameStyle}>{artifactId}</span>
     <span style={{ color: "var(--text-muted)" }}>{sizeLabel}</span>
-    {onCopy && <button type="button" title="复制文件内容" aria-label="复制文件内容" onClick={onCopy} style={copyButtonStyle}><ClipboardCopy size={14} /></button>}
+    {sourceAction && <button type="button" aria-pressed={sourceAction.active} onClick={sourceAction.onToggle} style={sourceButtonStyle}>{sourceAction.active ? tr("查看预览") : tr("查看源代码")}</button>}
+    {openAction && <button type="button" aria-label={openAction.label} title={openAction.label} onClick={openAction.onOpen} style={sourceButtonStyle}>{tr("打开")}</button>}
+    {onCopy && <button type="button" title={tr("复制文件内容")} aria-label={tr("复制文件内容")} onClick={onCopy} style={copyButtonStyle}><ClipboardCopy size={14} /></button>}
     {downloadTarget && <AttachmentDownloadButton target={downloadTarget} />}
   </div>
 );
+};
 
-const AttachmentDownloadButton = ({ target, label = "下载原文件" }: { target: AttachmentDownloadTarget; label?: string }) => {
+const AttachmentDownloadButton = ({ target, label }: { target: AttachmentDownloadTarget; label?: string }) => {
+  const { t: tr } = useI18n();
   const [downloading, setDownloading] = useState(false);
   const download = async () => {
     const sessionId = getWebSocket()?.sessionId?.trim() || "";
     if (!sessionId) {
-      pushToast("连接已断开，重连后可下载原文件。", "error");
+      pushToast(tr("连接已断开，重连后可下载原文件。"), "error");
       return;
     }
     setDownloading(true);
@@ -333,22 +358,15 @@ const AttachmentDownloadButton = ({ target, label = "下载原文件" }: { targe
       const blob = await (
         target.source === "artifact" ? fetchArtifactOriginal : fetchAttachmentOriginal
       )(sessionId, target.conversationId, target.artifactId);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = target.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      await saveBlobFile(blob, target.name);
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "原文件下载失败。", "error");
+      pushToast(error instanceof Error ? error.message : tr("原文件下载失败。"), "error");
     } finally {
       setDownloading(false);
     }
   };
   return (
-    <button type="button" title={label} aria-label={label} disabled={downloading}
+    <button type="button" title={label ?? tr("下载原文件")} aria-label={label ?? tr("下载原文件")} disabled={downloading}
       onClick={() => void download()} style={copyButtonStyle}>
       {downloading ? <LoaderCircle size={14} className="animate-spin" /> : <Download size={14} />}
     </button>
@@ -368,14 +386,14 @@ const isRichExtractedPreview = (mediaType?: string): boolean => {
   return media === "text/markdown" || media.includes("wordprocessingml") || media.includes("msword") || media.includes("spreadsheetml") || media.includes("presentation") || media === "application/zip";
 };
 
-const previewTypeLabel = (mediaType?: string, kind?: string, size = ""): string => {
+const previewTypeLabel = (tr: Translate, mediaType?: string, kind?: string, size = ""): string => {
   const media = String(mediaType || "").toLowerCase();
-  let label = "文本";
-  if (kind === "binary" || media === "application/octet-stream") label = "二进制 · 不支持预览";
-  else if (media.includes("word")) label = "Word · 提取文本";
-  else if (media.includes("spreadsheet")) label = "Excel · 提取文本";
-  else if (media.includes("presentation") || kind === "presentation") label = "演示文稿 · 提取文本";
-  else if (media === "application/zip" || kind === "archive") label = "ZIP · 内容预览";
+  let label = tr("文本");
+  if (kind === "binary" || media === "application/octet-stream") label = tr("二进制 · 不支持预览");
+  else if (media.includes("word")) label = tr("Word · 提取文本");
+  else if (media.includes("spreadsheet")) label = tr("Excel · 提取文本");
+  else if (media.includes("presentation") || kind === "presentation") label = tr("演示文稿 · 提取文本");
+  else if (media === "application/zip" || kind === "archive") label = tr("ZIP · 内容预览");
   else if (media === "text/markdown") label = "Markdown";
   else if (media.includes("json")) label = "JSON";
   return size ? `${label} · ${size}` : label;
@@ -388,6 +406,7 @@ const stateStyle: CSSProperties = { flex: 1, minHeight: 0, display: "grid", plac
 const headerStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-page)", fontSize: "var(--text-xs)" };
 const headerNameStyle: CSSProperties = { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" };
 const copyButtonStyle: CSSProperties = { width: 26, height: 24, border: 0, borderRadius: "var(--radius-sm, 4px)", background: "transparent", color: "var(--text-muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" };
+const sourceButtonStyle: CSSProperties = { border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: "4px 8px", background: "var(--surface-base)", color: "var(--text-secondary)", font: "inherit", cursor: "pointer", whiteSpace: "nowrap" };
 const previewRetryButtonStyle: CSSProperties = { alignSelf: "center", marginBottom: 16, padding: "5px 12px", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-soft)", color: "var(--text-primary)", cursor: "pointer" };
 const artifactNoticeStyle: CSSProperties = { padding: "6px 10px", borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-muted)", fontSize: "var(--text-xs)" };
 const artifactRichContentStyle: CSSProperties = { flex: 1, minHeight: 0, overflow: "auto", padding: "14px 16px", background: "var(--surface-base)", color: "var(--text-primary)" };

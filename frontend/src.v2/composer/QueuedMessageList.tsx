@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { CornerDownLeft, Copy, MoreHorizontal, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -6,6 +7,7 @@ import type { ChatMessage } from "../stores/types";
 const NO_MESSAGES: ChatMessage[] = [];
 
 export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
+  const { t: tr } = useI18n();
   const messages = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.messages ?? NO_MESSAGES : state.messages);
   const conversationId = useAppStore((state) => ownerId ?? state.conversationId);
   const isStreaming = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.isStreaming : state.isStreaming);
@@ -71,7 +73,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
   return (
     <div
       className="queued-message-list"
-      aria-label="排队中的消息"
+      aria-label={tr("排队中的消息")}
       style={{ width: minimal ? "100%" : wide ? "var(--chat-code-composer-width)" : "var(--chat-composer-axis-width)" }}
     >
       {queued.map((message, index) => {
@@ -80,24 +82,24 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
         const displayNumber = (message.queuePosition ?? index + 1) + 1;
         return (
           <div className="queued-message-row" key={message.id}>
-            <span className="queued-message-number" aria-label={`队列第 ${displayNumber} 项`}>{displayNumber}</span>
+            <span className="queued-message-number" aria-label={tr("队列第 {count} 项", { count: displayNumber })}>{displayNumber}</span>
             <span className="queued-message-text" title={label}>{label}</span>
-            {message.queuePaused ? <span>已暂停</span> : null}
+            {message.queuePaused ? <span>{tr("已暂停")}</span> : null}
             <button
               type="button"
               className="queued-message-steer"
               onClick={() => sendQueueAction("user_message.queue.steer", message)}
-              title={message.queuePaused ? "发送这条消息并继续队列" : isStreaming ? "下一步用这条消息引导当前任务" : "发送这条消息"}
+              title={message.queuePaused ? tr("发送这条消息并继续队列") : isStreaming ? tr("下一步用这条消息引导当前任务") : tr("发送这条消息")}
             >
               <CornerDownLeft size={14} aria-hidden="true" />
-              <span>{message.queuePaused || !isStreaming ? "发送" : "引导"}</span>
+              <span>{message.queuePaused || !isStreaming ? tr("发送") : tr("引导")}</span>
             </button>
             <button
               type="button"
               className="queued-message-icon"
               onClick={() => sendQueueAction("user_message.queue.cancel", message)}
-              title="删除排队消息"
-              aria-label={`删除排队消息 ${displayNumber}`}
+              title={tr("删除排队消息")}
+              aria-label={tr("删除排队消息 {count}", { count: displayNumber })}
             >
               <Trash2 size={14} />
             </button>
@@ -107,8 +109,8 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
                 className="queued-message-icon"
                 ref={(node) => { if (node) menuTriggerRefs.current.set(message.id, node); else menuTriggerRefs.current.delete(message.id); }}
                 onClick={() => setMenuFor((current) => current === message.id ? null : message.id)}
-                title="更多排队消息操作"
-                aria-label={`排队消息 ${displayNumber} 的更多操作`}
+                title={tr("更多排队消息操作")}
+                aria-label={tr("排队消息 {count} 的更多操作", { count: displayNumber })}
                 aria-expanded={menuFor === message.id}
               >
                 <MoreHorizontal size={15} />
@@ -124,8 +126,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
                     }}
                   >
                     <Copy size={14} aria-hidden="true" />
-                    复制内容
-                  </button>
+                    {tr("复制内容")}</button>
                 </div>
               ) : null}
             </div>

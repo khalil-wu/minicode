@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
@@ -37,6 +38,13 @@ class ToolCallRecord(BaseModel):
     recoverable: bool = True
     projection: str | None = None
     model_observation: str | None = None
+    delegations: list[dict[str, Any]] = Field(default_factory=list)
+    command_actions: list[dict[str, str]] = Field(default_factory=list)
+    stdout_preview: str | None = None
+    stderr_preview: str | None = None
+    exit_code: int | None = None
+    recipient_id: str | None = None
+    recipient_ids: list[str] = Field(default_factory=list)
 
     # Internal evidence/diagnostics that stay out of the REST surface. The
     # drift-guard test pins this set against the internal dataclass fields.
@@ -67,10 +75,12 @@ class ToolCallRecord(BaseModel):
 
     @classmethod
     def from_internal(cls, record: Any) -> "ToolCallRecord":
+        from backend.conversations.public_projection import project_public_tool_call
+
         return cls(
             tool_name=record.tool_name,
             tool_call_id=record.tool_call_id,
-            tool_input=record.tool_input,
+            tool_input=deepcopy(record.tool_input),
             tool_output=record.tool_output,
             artifact_id=record.artifact_id,
             artifact_kind=record.artifact_kind,
@@ -83,6 +93,13 @@ class ToolCallRecord(BaseModel):
             recoverable=record.recoverable,
             projection=record.projection,
             model_observation=record.model_observation,
+            delegations=project_public_tool_call({"delegations": record.delegations})["delegations"],
+            command_actions=project_public_tool_call({"command_actions": record.command_actions}).get("commandActions", []),
+            stdout_preview=record.stdout_preview,
+            stderr_preview=record.stderr_preview,
+            exit_code=record.exit_code,
+            recipient_id=record.recipient_id,
+            recipient_ids=list(record.recipient_ids),
         )
 
 

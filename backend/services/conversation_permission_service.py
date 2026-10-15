@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.config import get_config_requirements
+from backend.config import AppConfig, get_config_requirements, load_config
+from backend.permissions.approval_policy import policy_for_mode
 from backend.config_requirements import RequirementViolation
 from backend.ws.utils import normalize_permission_mode
 
@@ -23,6 +24,7 @@ def plan_permission_mode_update(
     data: dict[str, Any],
     *,
     active_conversation_id: str = "",
+    config: AppConfig | None = None,
 ) -> PermissionModePlan:
     requested = normalize_permission_mode(str(data.get("mode") or data.get("permission_mode") or ""))
     source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
@@ -40,7 +42,9 @@ def plan_permission_mode_update(
         )
 
     try:
-        get_config_requirements().ensure_permission_mode(requested)
+        effective_config = config if config is not None else load_config(resolve_credentials=False)
+        requirements = effective_config.config_layer_stack.requirements if effective_config.config_layer_stack is not None else get_config_requirements()
+        requirements.ensure_permission_mode(requested, approval_policy=policy_for_mode(requested, effective_config.permissions.approval_policy))
     except RequirementViolation as exc:
         return PermissionModePlan(
             requested=requested,

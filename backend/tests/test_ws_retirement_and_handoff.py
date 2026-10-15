@@ -15,7 +15,7 @@ from backend.config import AppConfig, LLMSettings, PermissionSettings
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
-from backend.ws.stream_state import create_stream_state
+from backend.ws.stream_state import create_stream_state, get_stream_content_blocks
 
 
 class Socket:
@@ -284,7 +284,10 @@ async def test_old_cleanup_handoff_keeps_new_stream_and_captured_message_owner(m
     delta = AgentEvent.agent_message_delta('new output')
     delta.data.update(conversation_id=cid, message_id='assistant-new')
     await session.send_event(delta)
-    assert stream['content_blocks'][0]['content'] == 'new output'
+    public_blocks = get_stream_content_blocks(stream)
+    assert public_blocks[0]['content'] == 'new output'
+    assert all('_text_parts' not in block for block in public_blocks)
+    assert stream['message_id'] == 'assistant-new' and not stream['terminal_fenced']
     release_new.set()
     await new
     await drain_commands(session)

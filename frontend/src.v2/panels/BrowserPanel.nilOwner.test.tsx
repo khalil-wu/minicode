@@ -3,6 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { BrowserPanel } from "./BrowserPanel";
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 const native = vi.hoisted(() => ({
   list: vi.fn(), navigate: vi.fn(), bounds: vi.fn(),
@@ -14,6 +15,7 @@ vi.mock("../desktop/runtime", () => ({
   embeddedBrowserSetBounds: native.bounds,
   embeddedBrowserActivate: async () => true,
   onEmbeddedBrowserEvent: () => () => {},
+  onEmbeddedBrowserSettingsChanged: () => () => {},
 }));
 vi.mock("../components/BrandIcon", () => ({ BrandIcon: () => null }));
 

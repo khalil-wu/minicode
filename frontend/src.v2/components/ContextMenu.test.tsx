@@ -6,6 +6,27 @@ import { ContextMenu } from "./ContextMenu";
 afterEach(cleanup);
 
 describe("ContextMenu keyboard navigation", () => {
+  it("opens a submenu after separators with Right, navigates only that menu, and returns with Left", () => {
+    const close = vi.fn(), choose = vi.fn();
+    render(<ContextMenu position={{ x: 20, y: 20 }} onClose={close} items={[
+      { label: "Rename" }, { label: "", separator: true },
+      { label: "Open in", submenu: [{ label: "VS Code", onClick: choose }, { label: "File Explorer" }] },
+    ]} />);
+    const parent = screen.getByRole("menuitem", { name: "Open in" });
+    parent.focus();
+    fireEvent.keyDown(parent, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "VS Code" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "File Explorer" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    expect(screen.queryByRole("menuitem", { name: "VS Code" })).toBeNull();
+    expect(document.activeElement).toBe(parent);
+    expect(close).not.toHaveBeenCalled();
+    fireEvent.mouseEnter(parent);
+    fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
+    expect(close).toHaveBeenCalledOnce();
+    expect(choose).toHaveBeenCalledOnce();
+  });
   it("wraps through enabled items around separators and disabled actions", () => {
     render(<ContextMenu position={{ x: 0, y: 0 }} onClose={vi.fn()} items={[
       { label: "Unavailable", disabled: true }, { label: "First" },

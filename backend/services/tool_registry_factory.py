@@ -12,12 +12,14 @@ from backend.commands.catalog import get_builtin_command_catalog
 from backend.config import AppConfig, load_config
 from backend.mcp import MCP_MANAGER_UNSET
 from backend.permissions.checker import PermissionChecker
-from backend.tools.agent_tools import AskUserTool, BriefTool, ReadArtifactTool, TaskStatusTool, TaskStopTool, TaskTool
+from backend.tools.agent_tools import RequestUserInputTool, BriefTool, ReadArtifactTool, TaskStatusTool, TaskStopTool, TaskTool
 from backend.tools.agent_artifact_tools import PresentFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.browser_control_tool import BrowserControlTool
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.code_execution import ToolExecTool, ToolWaitTool
+from backend.tools.context_window_tools import GetContextRemainingTool, NewContextTool
+from backend.agent.context_window import ContextWindowConfig
 from backend.tools.file_tools import (
     EditFileTool,
     ListFilesTool,
@@ -25,11 +27,13 @@ from backend.tools.file_tools import (
     WriteFileTool,
 )
 from backend.tools.monitor_tool import MonitorTool
+from backend.tools.request_permissions import RequestPermissionsTool
 from backend.tools.notebook_tool import NotebookEditTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.search_tools import GrepFilesTool, GlobFilesTool
 from backend.tools.sleep_tool import SleepTool
 from backend.tools.swarm_tools import (
+    FollowupTaskTool,
     MessageListTool,
     SendMessageTool,
     TaskCreateTool,
@@ -73,7 +77,7 @@ def build_tool_registry(
       read_file / write_file / edit_file / list_files - file operations
       grep_files    - search
       run_command   - command execution
-      ask_user      - proactive questions
+      request_user_input - structured root-thread questions
       read_artifact - read artifact
       memory_list / memory_read / memory_search / memory_add_ad_hoc_note
 
@@ -88,6 +92,8 @@ def build_tool_registry(
     else:
         resolved_workspace_root = Path(workspace_root).expanduser().resolve()
     config_snapshot = config or load_config(cwd=resolved_workspace_root)
+    from backend.agent.token_budget_activation import prepare_token_budget_for_startup, resolve_context_window_config
+    config_snapshot = prepare_token_budget_for_startup(config_snapshot)
     registry = ToolRegistry()
 
     registry.register(ReadFileTool(artifact_store))
@@ -107,7 +113,12 @@ def build_tool_registry(
     registry.register(MonitorTool())
     registry.register(ReadTerminalTool())
 
-    registry.register(AskUserTool())
+    registry.register(RequestUserInputTool(default_mode_enabled=config_snapshot.feature_flags.enabled("default_mode_request_user_input")))
+    if config_snapshot.feature_flags.enabled("request_permissions_tool"):
+        registry.register(RequestPermissionsTool())
+    if config_snapshot.feature_flags.enabled("token_budget"):
+        registry.register(NewContextTool(resolve_context_window_config(config_snapshot)))
+        registry.register(GetContextRemainingTool())
     registry.register(BriefTool())
     registry.register(
         ReadArtifactTool(
@@ -117,6 +128,7 @@ def build_tool_registry(
     )
     registry.register(PresentFileTool())
     task_tool = TaskTool(
+        config_snapshot=config_snapshot,
         llm_provider=llm_provider,
         tool_registry_provider=lambda: registry,
         artifact_store=artifact_store,
@@ -133,6 +145,7 @@ def build_tool_registry(
     registry.register(TaskStatusTool())
     send_message_tool = SendMessageTool()
     registry.register(send_message_tool)
+    registry.register(FollowupTaskTool())
     registry.register(MessageListTool())
     registry.register(TaskCreateTool())
     registry.register(TaskListTool())

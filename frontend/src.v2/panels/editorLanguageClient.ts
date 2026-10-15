@@ -1,8 +1,9 @@
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
-import { CancellationError } from "monaco-editor/base/common/errors.js";
+import { CancellationError, isCancellationError } from "monaco-editor/base/common/errors.js";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, fetchWithTimeout, errorMessageFromResponseText } from "../protocol/api";
 import { workspacePathWithin } from "../lib/workspace-path";
+import { pushToast } from "../overlays/ToastContainer";
 
 type Position = { line: number; character: number };
 type Range = { start: Position; end: Position };
@@ -15,24 +16,169 @@ type Diagnostic = { range: Range; message: string; severity?: number; code?: str
 const serverLanguages = ["python", "yaml", "c", "cpp"];
 const isCpp = (language: string) => language === "c" || language === "cpp";
 
+type OwnedModel = {
+  model: Monaco.editor.ITextModel;
+  documentId: string;
+  language: string;
+  closed: boolean;
+  subscriptions: Monaco.IDisposable[];
+};
+type LanguageOwner = {
+  windowOwnerId: string;
+  windowInstanceId: string;
+  windowBindingToken: string;
+  clientId: string;
+  revision: number;
+  released: boolean;
+  models: WeakMap<Monaco.editor.ITextModel, OwnedModel>;
+  liveModels: Set<OwnedModel>;
+  pending: Set<{ controller: AbortController; models: OwnedModel[] }>;
+  closes: Set<string>;
+  closeFlight?: Promise<void>;
+  unload: () => void;
+};
+const languageOwners = new WeakMap<typeof Monaco, LanguageOwner>();
+
+async function sendLifecycle(owner: LanguageOwner, action: "close" | "release", documentIds: string[] = []): Promise<void> {
+  const response = await fetchWithTimeout(new URL("/api/workspace/language/lifecycle", apiBase()), {
+    method: "POST", keepalive: true, headers: authHeaders({ "content-type": "application/json", "x-minicode-window-binding-token": owner.windowBindingToken }),
+    body: JSON.stringify({ action, window_owner_id: owner.windowOwnerId, window_instance_id: owner.windowInstanceId,
+      client_id: owner.clientId, document_ids: documentIds }),
+  });
+  if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
+}
+
+async function flushClosedModels(owner: LanguageOwner): Promise<void> {
+  if (owner.released || owner.closes.size === 0) return;
+  if (owner.closeFlight) {
+    await owner.closeFlight;
+    return flushClosedModels(owner);
+  }
+  const flight = (async () => {
+    while (owner.closes.size > 0 && !owner.released) {
+      const closed = [...owner.closes];
+      await sendLifecycle(owner, "close", closed);
+      closed.forEach((id) => owner.closes.delete(id));
+    }
+  })();
+  owner.closeFlight = flight;
+  try { await flight; }
+  finally { owner.closeFlight = undefined; }
+  await flushClosedModels(owner);
+}
+
+async function releaseOwner(owner: LanguageOwner): Promise<void> {
+  owner.released = true;
+  owner.pending.forEach(({ controller }) => controller.abort(new CancellationError()));
+  window.removeEventListener("pagehide", owner.unload);
+  owner.liveModels.forEach((record) => record.subscriptions.forEach((subscription) => subscription.dispose()));
+  owner.liveModels.clear();
+  await sendLifecycle(owner, "release");
+}
+
+export async function releaseEditorLanguageClient(monaco: typeof Monaco): Promise<void> {
+  const owner = languageOwners.get(monaco);
+  if (owner) await releaseOwner(owner);
+}
+
+function languageOwner(monaco: typeof Monaco): LanguageOwner {
+  let owner = languageOwners.get(monaco);
+  if (!owner || owner.released) {
+    const clientId = crypto.randomUUID();
+    const created: LanguageOwner = {
+      windowOwnerId: window.__MINICODE_RUNTIME__?.windowOwnerId ?? "primary",
+      windowInstanceId: window.__MINICODE_RUNTIME__?.windowInstanceId ?? clientId, clientId,
+      windowBindingToken: window.__MINICODE_RUNTIME__?.windowBindingToken ?? crypto.randomUUID(),
+      revision: 0, released: false, models: new WeakMap(), liveModels: new Set(), pending: new Set(), closes: new Set(),
+      unload: () => { void releaseOwner(created).catch((error) => pushToast(String(error), "error")); },
+    };
+    window.addEventListener("pagehide", created.unload);
+    languageOwners.set(monaco, created);
+    owner = created;
+  }
+  return owner;
+}
+
+function retireModel(owner: LanguageOwner, record: OwnedModel): void {
+  record.closed = true;
+  record.subscriptions.forEach((subscription) => subscription.dispose());
+  owner.liveModels.delete(record);
+  owner.pending.forEach(({ controller, models }) => {
+    if (models.includes(record)) controller.abort(new CancellationError());
+  });
+  owner.closes.add(record.documentId);
+  void flushClosedModels(owner).catch((error) => pushToast(String(error), "error"));
+}
+
+function ownedModel(owner: LanguageOwner, model: Monaco.editor.ITextModel): OwnedModel {
+  if (model.isDisposed()) throw new CancellationError();
+  let record = owner.models.get(model);
+  if (record && record.language !== model.getLanguageId()) {
+    retireModel(owner, record);
+    owner.models.delete(model);
+    record = undefined;
+  }
+  if (record?.closed) throw new CancellationError();
+  if (!record) {
+    const created: OwnedModel = { model, documentId: crypto.randomUUID(), language: model.getLanguageId(), closed: false, subscriptions: [] };
+    created.subscriptions.push(model.onDidChangeContent(() => {
+      owner.pending.forEach(({ controller, models }) => {
+        if (models.includes(created)) controller.abort(new CancellationError());
+      });
+    }), model.onWillDispose(() => retireModel(owner, created)));
+    owner.models.set(model, created);
+    owner.liveModels.add(created);
+    record = created;
+  }
+  return record;
+}
+
 export const fromLspRange = (range: Range): Monaco.IRange => ({
   startLineNumber: range.start.line + 1, startColumn: range.start.character + 1,
   endLineNumber: range.end.line + 1, endColumn: range.end.character + 1,
 });
 
 export async function requestEditorLanguage<T>(monaco: typeof Monaco, model: Monaco.editor.ITextModel, method: string, position?: Monaco.IPosition, extra = {}, signal?: AbortSignal): Promise<T> {
+  const owner = languageOwner(monaco);
   const root = useAppStore.getState().workingDirectory;
   const documents = [model, ...monaco.editor.getModels().filter((candidate) => candidate !== model && (candidate.getLanguageId() === model.getLanguageId()
     || (isCpp(model.getLanguageId()) && isCpp(candidate.getLanguageId())))
     && candidate.uri.scheme === "file" && workspacePathWithin(candidate.uri.fsPath, root))];
-  const url = new URL("/api/workspace/language", apiBase());
-  url.searchParams.set("workspace_root", root);
-  const response = await fetchWithTimeout(url, { method: "POST", signal, headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ method, documents: documents.map((doc) => ({ path: doc.uri.fsPath, content: doc.getValue(), language: doc.getLanguageId() })),
-      line: (position?.lineNumber ?? 1) - 1, character: (position?.column ?? 1) - 1, ...extra }),
-  });
-  if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
-  return (await response.json()).result as T;
+  const records = documents.map((doc) => ownedModel(owner, doc));
+  const snapshot = documents.map((doc, index) => ({ document_id: records[index].documentId, model_version: doc.getVersionId(),
+    path: doc.uri.fsPath, content: doc.getValue(), language: doc.getLanguageId() }));
+  const revision = ++owner.revision;
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason ?? new CancellationError());
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const pending = { controller, models: records };
+  owner.pending.add(pending);
+  try {
+    // Disposal has its own message. It must reach didClose before another
+    // snapshot can use the discarded document's old language-server state.
+    await flushClosedModels(owner);
+    if (controller.signal.aborted || owner.released || records.some((record) => record.closed)) throw new CancellationError();
+    const url = new URL("/api/workspace/language", apiBase());
+    url.searchParams.set("workspace_root", root);
+    const response = await fetchWithTimeout(url, { method: "POST", signal: controller.signal,
+      headers: authHeaders({ "content-type": "application/json", "x-minicode-window-binding-token": owner.windowBindingToken }),
+      body: JSON.stringify({ method, window_owner_id: owner.windowOwnerId, window_instance_id: owner.windowInstanceId,
+        client_id: owner.clientId, snapshot_revision: revision, documents: snapshot,
+        line: (position?.lineNumber ?? 1) - 1, character: (position?.column ?? 1) - 1, ...extra }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      if (response.status === 409 && JSON.parse(body).detail?.code === "editor.document_stale") throw new CancellationError();
+      throw new Error(errorMessageFromResponseText(body, response.statusText));
+    }
+    const result = (await response.json()).result as T;
+    if (controller.signal.aborted || records.some((record, index) => record.closed || record.model.getVersionId() !== snapshot[index].model_version)) throw new CancellationError();
+    return result;
+  } finally {
+    owner.pending.delete(pending);
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.IDisposable {
@@ -136,7 +282,7 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
             severity: [monaco.MarkerSeverity.Error, monaco.MarkerSeverity.Warning, monaco.MarkerSeverity.Info, monaco.MarkerSeverity.Hint][(item.severity ?? 1) - 1],
           })));
         } catch (error) {
-          if (!current.signal.aborted && !model.isDisposed()) monaco.editor.setModelMarkers(model, "minicode-language", [{
+          if (!current.signal.aborted && !model.isDisposed() && !isCancellationError(error)) monaco.editor.setModelMarkers(model, "minicode-language", [{
             startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1, severity: monaco.MarkerSeverity.Warning,
             source: "语言服务", message: error instanceof Error ? error.message : String(error),
           }]);
@@ -151,6 +297,9 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
   };
   monaco.editor.getModels().forEach(observe);
   disposables.push(monaco.editor.onDidCreateModel(observe), monaco.editor.onDidChangeModelLanguage(({ model }) => {
+    const owner = languageOwners.get(monaco);
+    const record = owner?.models.get(model);
+    if (owner && record) { retireModel(owner, record); owner.models.delete(model); }
     modelSubscriptions.get(model)?.();
     monaco.editor.setModelMarkers(model, "minicode-language", []);
     observe(model);

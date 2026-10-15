@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { LoaderCircle, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
@@ -33,17 +34,18 @@ export const AttachmentStrip = ({ conversationId }: { conversationId?: string } 
 };
 
 const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment; onRemove: () => void }) => {
+  const { t: tr } = useI18n();
   const openPreview = () => openComposerAttachment(a);
 
   return (
     <div
-      title={attachmentTitle(a)}
+      title={attachmentTitle(a, tr)}
       className="composer-attachment-image"
       data-status={a.status}
     >
       <button
         type="button"
-        aria-label={`预览 ${a.name}`}
+        aria-label={tr("预览 {name}", { name: a.name })}
         onClick={openPreview}
         className="composer-attachment-image-preview"
       >
@@ -55,11 +57,11 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       {a.status === "uploading" && (
         <div
           role="status"
-          aria-label={`${uploadStatusLabel(a)} ${a.name}`}
+          aria-label={`${uploadStatusLabel(a, tr)} ${a.name}`}
           className="composer-attachment-image-upload"
         >
           <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
-          <span>{uploadStatusLabel(a)}</span>
+          <span>{uploadStatusLabel(a, tr)}</span>
           {a.uploadPhase !== "processing" ? (
             <span
               aria-hidden="true"
@@ -75,8 +77,8 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       {(a.status === "error" || a.error) && (
         <button
           type="button"
-          aria-label={`${a.name} ${a.status === "error" ? "上传失败" : "上传警告"}`}
-          title={a.error || (a.status === "error" ? "上传失败" : "上传警告")}
+          aria-label={tr("{name} {status}", { name: a.name, status: a.status === "error" ? tr("上传失败") : tr("上传警告") })}
+          title={a.error || (a.status === "error" ? tr("上传失败") : tr("上传警告"))}
           onClick={(event) => {
             event.stopPropagation();
             if (a.status === "error" && a.localFile) retryComposerAttachment(a.id);
@@ -87,7 +89,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           {a.status === "error" && a.localFile
             ? <RotateCcw size={12} aria-hidden="true" />
             : <TriangleAlert size={12} aria-hidden="true" />}
-          <span>{a.status === "error" ? "重试" : "警告"}</span>
+          <span>{a.status === "error" ? tr("重试") : tr("警告")}</span>
         </button>
       )}
       <button
@@ -96,7 +98,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           event.stopPropagation();
           onRemove();
         }}
-        aria-label={`移除 ${a.name}`}
+        aria-label={tr("移除 {name}", { name: a.name })}
         className="composer-attachment-image-remove"
       >
         <X size={14} />
@@ -106,12 +108,13 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
 };
 
 const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment; onRemove: () => void }) => {
-  const problem = a.error || (a.status === "error" ? "上传失败" : "");
+  const { t: tr } = useI18n();
+  const problem = a.error || (a.status === "error" ? tr("上传失败") : "");
   const canPreview = Boolean(a.artifactId || a.localFile || a.dataUrl);
 
   return (
     <div
-      title={attachmentTitle(a)}
+      title={attachmentTitle(a, tr)}
       className="composer-attachment-file"
       data-status={a.status}
       data-problem={problem ? a.status === "error" ? "error" : "warning" : undefined}
@@ -119,7 +122,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
       <button
         type="button"
         disabled={!canPreview}
-        aria-label={`预览 ${a.name}`}
+        aria-label={tr("预览 {name}", { name: a.name })}
         onClick={() => openComposerAttachment(a)}
         className="composer-attachment-file-preview"
       >
@@ -134,10 +137,10 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
       {a.status === "uploading" ? (
         <span
           role="status"
-          aria-label={`${uploadStatusLabel(a)} ${a.name}`}
+          aria-label={`${uploadStatusLabel(a, tr)} ${a.name}`}
           className="composer-attachment-meta"
         >
-          {uploadStatusLabel(a)}
+          {uploadStatusLabel(a, tr)}
         </span>
       ) : null}
       {a.inputSource === "pasted_text" && a.sourceCharCount ? (
@@ -158,8 +161,8 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
             event.stopPropagation();
             retryComposerAttachment(a.id);
           }}
-          aria-label={`重新上传 ${a.name}`}
-          title="重新上传"
+          aria-label={tr("重新上传 {name}", { name: a.name })}
+          title={tr("重新上传")}
           className="composer-attachment-action"
         >
           <RotateCcw size={14} />
@@ -171,7 +174,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           event.stopPropagation();
           onRemove();
         }}
-        aria-label={`移除 ${a.name}`}
+        aria-label={tr("移除 {name}", { name: a.name })}
         className="composer-attachment-action"
       >
         <X size={14} />
@@ -215,12 +218,12 @@ const openComposerAttachment = (attachment: ComposerAttachment): boolean => {
   });
 };
 
-const uploadStatusLabel = (attachment: ComposerAttachment): string =>
+const uploadStatusLabel = (attachment: ComposerAttachment, tr: Translate): string =>
   attachment.uploadPhase === "processing"
-    ? "处理中"
-    : `上传中 ${uploadPercent(attachment)}%`;
+    ? tr("处理中")
+    : tr("上传中 {percent}%", { percent: uploadPercent(attachment) });
 
-const attachmentTitle = (attachment: ComposerAttachment): string => {
+const attachmentTitle = (attachment: ComposerAttachment, tr: Translate): string => {
   if (attachment.error) return attachment.error;
-  return attachment.name || "附件";
+  return attachment.name || tr("附件");
 };

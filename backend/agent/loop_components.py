@@ -143,6 +143,7 @@ def build_agent_loop_components(
         session_policy=session_toolset_policy,
         metadata=metadata,
     )
+    issuing_snapshot = bootstrap.run_context.model_execution
     active_toolset_policy = effective_toolset_policy(
         base_policy=base_toolset_policy,
         tool_registry=tool_registry,
@@ -150,6 +151,13 @@ def build_agent_loop_components(
         requires_explicit_workspace=bootstrap.run_context.requires_explicit_workspace,
         workspace_root=bootstrap.workspace_root,
         permission_mode=str(tool_context.permission.mode or ""),
+        supports_search_tool=(
+            issuing_snapshot.model_info.supports_search_tool
+            if issuing_snapshot is not None and issuing_snapshot.model_info is not None
+            else issuing_snapshot.config.llm.supports_search_tool
+            if issuing_snapshot is not None
+            else getattr(getattr(tool_context.llm, "_settings", None), "supports_search_tool", False)
+        ),
         hosted_web_search=(
             callable(getattr(tool_context.llm, "supports_hosted_web_search", None))
             and tool_context.llm.supports_hosted_web_search()
@@ -275,6 +283,7 @@ def build_agent_loop_components(
         conversation_id=run_record.conversation_id,
         provider_lifecycle_runtime=bootstrap.run_context.lifecycle_runtime,
     )
+    bootstrap.run_context.responses_session_id = str(llm_request_metadata.get("session_id") or "")
     tracking_source = prompt_cache_tracking_source(
         run_record=run_record,
         session_id=bootstrap.session_id,

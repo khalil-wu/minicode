@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BrandIcon, resolveBrandIcon, resolveWebsiteBrandIcon, resolveWebsiteIcon, resolveWebsiteIconCandidates } from "./BrandIcon";
+import { BrandIcon, resolveBrandIcon, resolveWebsiteBrandIcon } from "./BrandIcon";
 
 // Vitest stubs CSS module imports, including ?raw. Load the same tracked
 // stylesheet sources explicitly for this DOM cascade regression.
@@ -40,13 +40,21 @@ describe("BrandIcon", () => {
     expect(view.container.querySelector('img')?.hasAttribute("data-icon-kind")).toBe(false);
   });
 
-  it("keeps a local website icon visible while the actual site's favicon is still pending", () => {
-    expect(resolveWebsiteIcon(undefined, "https://example.com/docs/start")).toBe(
-      "https://example.com/favicon.ico",
-    );
-    const { container } = render(<BrandIcon value="Example Docs" websiteUrl="https://example.com/docs" fallback="web" />);
+  it("loads the site's icon by hostname when a citation has only its article URL", () => {
+    const { container } = render(<BrandIcon value="VOA article" websiteUrl="https://www.voachinese.com/a/news/8209909.html" fallback="web" />);
     const image = container.querySelector<HTMLImageElement>(".brand-icon-remote")!;
-    expect(image.getAttribute("src")).toBe("https://example.com/favicon.ico");
+    expect(image.src).toBe("https://www.google.com/s2/favicons?domain=www.voachinese.com&sz=32");
+    expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
+    fireEvent.load(image);
+    expect(image.hidden).toBe(false);
+    expect(container.querySelector('[data-brand="website"] img')).toBe(image);
+    expect(container.querySelector("svg")).toBeNull();
+  });
+
+  it("keeps the local icon visible until a declared page icon actually loads", () => {
+    const { container } = render(<BrandIcon value="Example Docs" websiteUrl="https://example.com/docs" iconUrl="https://example.com/assets/site-icon.svg" fallback="web" />);
+    const image = container.querySelector<HTMLImageElement>(".brand-icon-remote")!;
+    expect(image.getAttribute("src")).toBe("https://example.com/assets/site-icon.svg");
     expect(image.hidden).toBe(true);
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
     fireEvent.load(image);
@@ -61,22 +69,16 @@ describe("BrandIcon", () => {
   ])("identifies a web source by its hostname, ignoring article text and tracking parameters: %s", (websiteUrl) => {
     const { container } = render(<BrandIcon value={`OpenAI Claude GitHub ${websiteUrl}`} websiteUrl={websiteUrl} fallback="web" />);
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
-    expect(container.querySelector<HTMLImageElement>(".brand-icon-remote")?.src).toBe(new URL("/favicon.ico", websiteUrl).toString());
+    expect(container.querySelector<HTMLImageElement>(".brand-icon-remote")?.src)
+      .toBe(`https://www.google.com/s2/favicons?domain=${new URL(websiteUrl).hostname}&sz=32`);
     expect(container.querySelector(".brand-icon-image")).toBeNull();
   });
 
-  it("retains the local icon through failed declared logos and site favicons", () => {
-    expect(resolveWebsiteIconCandidates("https://cdn.example.com/icon.svg", "https://example.com/docs")).toEqual([
-      "https://cdn.example.com/icon.svg",
-      "https://example.com/favicon.ico",
-    ]);
+  it("retains the local icon when a declared logo fails without guessing other resources", () => {
     const { container } = render(<BrandIcon value="Unknown MCP" iconUrl="https://cdn.example.com/icon.svg" websiteUrl="https://example.com/docs" />);
     const image = container.querySelector('.brand-icon-remote');
     expect(image).toBeTruthy();
     fireEvent.error(image as HTMLImageElement);
-    expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
-    expect(container.querySelector('.brand-icon-remote')?.getAttribute("src")).toBe("https://example.com/favicon.ico");
-    fireEvent.error(container.querySelector('.brand-icon-remote') as HTMLImageElement);
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
     expect(container.querySelector("img")).toBeNull();
   });

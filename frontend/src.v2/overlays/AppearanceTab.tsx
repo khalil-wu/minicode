@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { KeyboardEvent } from "react";
@@ -21,6 +22,7 @@ const THEMES = [
 ] as const;
 
 export const AppearanceTab = () => {
+  const { t } = useI18n();
   const themeMode = useAppStore((s) => s.themeMode);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
@@ -29,10 +31,10 @@ export const AppearanceTab = () => {
   return (
     <>
       <section className="settings-group settings-appearance-theme">
-        <h3 className="settings-group-title">视觉风格</h3>
+        <h3 className="settings-group-title">{t("视觉风格")}</h3>
         <div className="settings-card"><div className="settings-row settings-mode-row">
-        <div className="settings-row-copy"><div className="settings-row-title">模式</div></div>
-        <div className="settings-theme-grid" role="radiogroup" aria-label="应用主题" onKeyDown={onRadioGroupKeyDown}>
+        <div className="settings-row-copy"><div className="settings-row-title">{t("模式")}</div></div>
+        <div className="settings-theme-grid" role="radiogroup" aria-label={t("应用主题")} onKeyDown={onRadioGroupKeyDown}>
           {THEMES.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -43,7 +45,7 @@ export const AppearanceTab = () => {
               role="radio"
               aria-checked={themeMode === id}
               tabIndex={themeMode === id ? 0 : -1}
-              aria-label={label}
+              aria-label={t(label)}
               onClick={() => setThemeMode(id)}
             >
               <span className="settings-theme-preview" aria-hidden="true">
@@ -56,20 +58,20 @@ export const AppearanceTab = () => {
                 </span>
                 {themeMode === id && <span className="settings-theme-selected"><Check /></span>}
               </span>
-              <span className="sr-only"><Icon aria-hidden="true" />{label}</span>
+              <span className="sr-only"><Icon aria-hidden="true" />{t(label)}</span>
             </button>
           ))}
         </div>
         </div></div>
       </section>
 
-      <section className="settings-group">
-        <h3 className="settings-group-title">偏好设置</h3>
+      <EditorPreferencesSettings><section className="settings-group">
+        <h3 className="settings-group-title">{t("偏好设置")}</h3>
         <div className="settings-card">
           <div className="settings-row">
             <div className="settings-row-copy">
-              <div className="settings-row-title">减少动态效果</div>
-              <div className="settings-row-description">关闭界面动画和平滑滚动。</div>
+              <div className="settings-row-title">{t("减少动态效果")}</div>
+              <div className="settings-row-description">{t("关闭界面动画和平滑滚动。")}</div>
             </div>
             <div className="settings-row-control">
               <button
@@ -77,7 +79,7 @@ export const AppearanceTab = () => {
                 className="settings-toggle"
                 role="switch"
                 aria-checked={reducedMotion}
-                aria-label="减少动态效果"
+                aria-label={t("减少动态效果")}
                 data-active={reducedMotion ? "true" : "false"}
                 onClick={() => setReducedMotion(!reducedMotion)}
               >
@@ -86,8 +88,7 @@ export const AppearanceTab = () => {
             </div>
           </div>
         </div>
-      </section>
-      <EditorPreferencesSettings />
+      </section></EditorPreferencesSettings>
     </>
   );
 };

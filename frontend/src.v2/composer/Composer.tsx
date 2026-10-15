@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useI18n, type Translate } from "../i18n";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, X } from "lucide-react";
 import { useAppStore } from "../stores";
+import { pendingPlanImplementation, PlanImplementationPrompt } from "../chat/PlanImplementationPrompt";
+import { promptDraftKey } from "../stores/prompt-drafts";
 import { deriveSendState } from "../lib/send-state";
 import { sendChatMessage } from "../chat/sendChatMessage";
-import type { ComposerQuote, MessageAttachmentRef } from "../stores/types";
+import type { ComposerQuote, FollowUpBehavior, MessageAttachmentRef } from "../stores/types";
 import { ContextChipRegion } from "./ActionChipRegion";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { appendComposerTokenAnchor, composerTokenAtSelection, removeComposerToken, type ComposerSelection } from "./inputSelection";
 import { MenuOverlay } from "./MenuOverlay";
 import { FooterRow } from "./FooterRow";
+import { ProjectScopePicker } from "./ProjectScopePicker";
 import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
 import { QueuedMessageList } from "./QueuedMessageList";
 import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
@@ -27,19 +31,27 @@ import {
   parseRuntimeSlashInput,
   resolveRuntimeSlashMenuSelection,
   syncRuntimeSlashPanelForDraft,
-  shouldTokenizeRuntimeSlashCommand,
 } from "../lib/runtime-commands";
 import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-command";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
+import { uniqueMessageId } from "../stores/shared-helpers";
+import { composerWorkspaceKey } from "../stores/composer-drafts";
+import type { CommandResultEvent } from "../protocol/events";
+import { CodeReviewMenu, type CodeReviewOwner } from "./CodeReviewMenu";
+import { prepareCodeReview } from "../protocol/code-review";
+import type { CodeReviewOptions } from "../protocol/code-review-types";
+import { publishCodeReview } from "../chat/codeReview";
+import { GuardianApprovalMenu } from "./GuardianApprovalMenu";
+import { recentGuardianDenials } from "../chat/guardianApprovalState";
 
 let initialCatalogRequested = false;
 
-// Shared pre-send pipeline for both user messages and runtime slash messages:
+// Agent prompts and template slash commands share the context pipeline:
 // resolves the target conversation, uploads @mention/skill context attachments,
 // and guards against conversation switches mid-upload. Returns null when the
 // send must abort (a toast has already been shown).
-const buildOutgoingContext = async (requestedConversationId: string) => {
+const buildOutgoingContext = async (requestedConversationId: string, tr: Translate) => {
   const stateAtSend = useAppStore.getState();
   const targetConversationId = String(
     requestedConversationId || stateAtSend.conversationId || "",
@@ -66,7 +78,7 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
   } catch (error) {
     console.warn("Failed to build native context attachments:", error);
     pushToast(
-      error instanceof Error ? error.message : "上下文附件上传失败，请重试。",
+      error instanceof Error ? error.message : tr("上下文附件上传失败，请重试。"),
       "error",
       4500,
     );
@@ -78,11 +90,11 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
     && (currentState.conversationId !== stateAtSend.conversationId
       || !workspaceRootsEqual(currentState.workingDirectory, stateAtSend.workingDirectory))
   ) {
-    pushToast("会话或工作区已切换，本次发送已取消；请回到原输入后重试。", "warning", 4500);
+    pushToast(tr("会话或工作区已切换，本次发送已取消；请回到原输入后重试。"), "warning", 4500);
     return null;
   }
   if (nativeContext.notes) {
-    pushToast("部分上下文附件无法读取，已在消息中标明。", "warning", 4200);
+    pushToast(tr("部分上下文附件无法读取，已在消息中标明。"), "warning", 4200);
   }
   const resolvedConversationId = String(
     nativeContext.conversationId || targetConversationId,
@@ -92,7 +104,7 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
     && resolvedConversationId
     && resolvedConversationId !== targetConversationId
   ) {
-    pushToast("附件所属会话已变化，请切回原会话后重试。", "error", 4500);
+    pushToast(tr("附件所属会话已变化，请切回原会话后重试。"), "error", 4500);
     return null;
   }
   if (
@@ -100,7 +112,7 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
     && resolvedConversationId
     && !acceptAttachmentConversationOwner(resolvedConversationId)
   ) {
-    pushToast("附件已绑定到另一个会话，请切回该会话后发送。", "warning", 4500);
+    pushToast(tr("附件已绑定到另一个会话，请切回该会话后发送。"), "warning", 4500);
     return null;
   }
   const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
@@ -115,11 +127,13 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
 };
 
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
+  const { t: tr } = useI18n();
   const draft = useAppStore((s) => s.draft);
   const setDraft = useAppStore((s) => s.setDraft);
   const quotedMessage = useAppStore((s) => s.quotedMessage);
   const clearQuotedMessage = useAppStore((s) => s.clearQuotedMessage);
   const isStreaming = useAppStore((s) => s.isStreaming);
+  const emptyConversation = useAppStore((s) => s.messages.length === 0);
   const isConnected = useAppStore((s) => s.isConnected);
   const slashPanelOpen = useAppStore((s) => s.slashPanelOpen);
   const mentionPanelOpen = useAppStore((s) => s.mentionPanelOpen);
@@ -143,22 +157,36 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   ], s.conversationId));
   const hasPendingApproval = useAppStore((s) => !s.pendingConversationSwitchId && hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingDiffReview, ...s.diffReviewQueue,
+    ...[s.pendingAskUser, ...s.askUserQueue].filter(request => request?.requestUserInput || request?.elicitation),
   ], s.conversationId));
   const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
+  const conversationId = useAppStore(state => state.conversationId);
+  const messages = useAppStore(state => state.messages);
+  const agentMode = useAppStore(state => state.agentMode);
+  const promptDrafts = useAppStore(state => state.promptDrafts);
+  const planImplementation = useMemo(() => {
+    if (!conversationId || pendingConversationSwitchId) return null;
+    const plan = pendingPlanImplementation(messages, agentMode, isStreaming);
+    return plan && !promptDrafts[promptDraftKey({ conversationId, requestId: `implement-plan:${plan.turnId || plan.messageId}` })]?.planImplementationSettled ? plan : null;
+  }, [conversationId, pendingConversationSwitchId, messages, agentMode, isStreaming, promptDrafts]);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputSelectionRef = useRef<ComposerSelection>({ start: draft.length, end: draft.length });
   const [selectionRequest, setSelectionRequest] = useState<ComposerSelection>();
-  const submittingRef = useRef(false);
+  const submittingRef = useRef<object | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [menuFilter, setMenuFilter] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<string | null>(null);
+  const selectedSlashCommandRef = useRef(selectedSlashCommand);
+  selectedSlashCommandRef.current = selectedSlashCommand;
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [reviewOwner, setReviewOwner] = useState<CodeReviewOwner>();
+  const [guardianApprovalOwner, setGuardianApprovalOwner] = useState<{ conversationId: string; input: string; selectedCommand: string | null }>();
   const [historyItems, setHistoryItems] = useState<string[]>([]);
   // ArrowUp/ArrowDown recall cursor (cc useArrowKeyHistory): -1 = live draft,
   // 0..n-1 = position in most-recent-first history. savedDraft preserves the
@@ -167,6 +195,60 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const historySavedDraftRef = useRef("");
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
   const hasComposerAttachments = useAppStore((s) => s.attachments.length > 0);
+  const reviewPermissionPending = useAppStore(s => Boolean(s.conversationId && s.pendingPermissionModeChanges[s.conversationId]));
+  useEffect(() => { setReviewOwner(undefined); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
+  useEffect(() => { setGuardianApprovalOwner(undefined); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
+
+  const openGuardianApproval = () => {
+    const state = useAppStore.getState();
+    if (!state.conversationId || recentGuardianDenials(state.conversationId).length === 0) return;
+    setGuardianApprovalOwner({ conversationId: state.conversationId, input: state.draft, selectedCommand: selectedSlashCommandRef.current });
+    closeSlashPanel(); closeMentionPanel(); setSkillPanelOpen(false); setHistoryOpen(false); setMenuFilter("");
+  };
+  const finishGuardianApproval = () => {
+    const owner = guardianApprovalOwner!;
+    const state = useAppStore.getState();
+    if (state.conversationId === owner.conversationId && state.draft === owner.input
+      && selectedSlashCommandRef.current === owner.selectedCommand) {
+      if (parseRuntimeSlashInput(owner.input)?.commandLine === "/approve") setDraft("");
+      if (owner.selectedCommand === "/approve") setSelectedSlashCommand(null);
+    }
+    setGuardianApprovalOwner(undefined);
+  };
+
+  const openCodeReview = () => {
+    const state = useAppStore.getState();
+    setReviewOwner({ conversationId: state.conversationId || undefined, cwd: state.workingDirectory, input: state.draft, selectedCommand: selectedSlashCommandRef.current });
+    closeSlashPanel(); closeMentionPanel(); setSkillPanelOpen(false); setHistoryOpen(false); setMenuFilter("");
+  };
+
+  const dismissCodeReview = () => {
+    setReviewOwner(owner => owner ? { ...owner, dismissed: true } : undefined);
+    closeSlashPanel(); closeMentionPanel(); setSkillPanelOpen(false); setMenuFilter("");
+  };
+
+  const startCodeReview = (mode: "uncommitted" | "base-branch", options: CodeReviewOptions, branch?: string) => {
+    const owner = reviewOwner!;
+    return runSubmission(async () => {
+      const requestMessage = mode === "uncommitted" ? tr("请审阅未提交的更改")
+        : tr("请审阅 {from} 相对 {to} 的更改", { from: options.currentBranch, to: branch! });
+      const prepared = await prepareCodeReview(owner.conversationId, owner.cwd, mode, branch, undefined, requestMessage);
+      const state = useAppStore.getState();
+      if ((state.conversationId || "") !== (owner.conversationId || "") || !workspaceRootsEqual(state.workingDirectory, owner.cwd)) {
+        throw new Error(tr("工作区已变化，请重新选择审阅目标。"));
+      }
+      const userMessageId = uniqueMessageId("u");
+      let admittedOwner = owner.conversationId || "";
+      const sent = await sendChatMessage({ displayContent: prepared.requestMessage, backendContent: prepared.prompt,
+        conversationId: owner.conversationId, codeReview: prepared.scope, userMessageId, awaitAdmission: true,
+        onAdmission: event => { if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id; },
+      });
+      if (!sent) return;
+      clearSubmittedInput(owner.input, owner.conversationId || "", owner.cwd, owner.selectedCommand, admittedOwner);
+      publishCodeReview(prepared, admittedOwner, userMessageId);
+      setReviewOwner(undefined);
+    });
+  };
 
   useEffect(() => {
     if (!dragOver) return;
@@ -189,20 +271,21 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     };
   }, [dragOver]);
 
+  const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const sendState = submitting ? "sending" : deriveSendState({
-    hasContent: draft.trim().length > 0 || hasReadyAttachment,
+    hasContent: draft.trim().length > 0 || hasReadyAttachment || Boolean(selectedSlashCommand),
     isStreaming,
     isConnected,
-    hasModel: currentModel.trim().length > 0,
+    hasModel: activeSlashCommand === "/compact" || currentModel.trim().length > 0,
   });
   // Both work modes use the code-mode chat presentation. Mode-specific tools
   // remain separate; transcript and composer geometry do not change.
   const codeLayout = !minimal;
   const wideMode = false;
-  const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const commandModeActive = Boolean(activeSlashCommand && !slashPanelOpen);
 
   const openPromptHistory = useCallback(() => {
+    setReviewOwner(owner => owner ? { ...owner, dismissed: true } : undefined);
     closeSlashPanel();
     closeMentionPanel();
     setSkillPanelOpen(false);
@@ -255,9 +338,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       busyBehavior?: "queue" | "steer";
       quotedMessage?: ComposerQuote | null;
       skipLocalAppend?: boolean;
+      userMessageId?: string;
+      awaitAdmission?: boolean;
+      onAdmission?: (event: CommandResultEvent) => void;
+      onReceived?: () => void;
+      onRejected?: () => void;
     },
   ) => {
-    const outgoing = await buildOutgoingContext(options?.conversationId || "");
+    const outgoing = await buildOutgoingContext(options?.conversationId || "", tr);
     if (!outgoing) return false;
     const mergedAttachments = [...readyAttachments, ...outgoing.attachments];
     const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...outgoing.attachmentRefs];
@@ -278,6 +366,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       allowWhileStreaming: options?.allowWhileStreaming,
       busyBehavior: options?.busyBehavior,
       skipLocalAppend: options?.skipLocalAppend,
+      userMessageId: options?.userMessageId,
+      awaitAdmission: options?.awaitAdmission,
+      onAdmission: options?.onAdmission,
+      onReceived: options?.onReceived,
+      onRejected: options?.onRejected,
     });
   };
 
@@ -285,14 +378,29 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     displayContent: string;
     backendContent: string;
     skipLocalAppend: boolean;
-  }, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null }) => {
+  }, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null },
+    admission?: { userMessageId: string; onAdmission: (event: CommandResultEvent) => void; onReceived?: () => void },
+    busyBehavior: FollowUpBehavior = useAppStore.getState().followUpBehavior) => {
     const state = useAppStore.getState();
+    // Compaction acts on its conversation. Draft attachments, mentions and
+    // quoted text belong to the next agent prompt, not to this operation.
+    if (options.skipLocalAppend && parseRuntimeSlashInput(options.backendContent)?.command === "/compact") return sendChatMessage({
+      ...options,
+      conversationId: prepared?.conversationId || state.conversationId || undefined,
+      agentMode: state.agentMode,
+      allowWhileStreaming: state.isStreaming,
+      busyBehavior,
+      awaitAdmission: true,
+      ...admission,
+    });
     return sendUserMessage(options.displayContent, prepared?.attachments, {
       ...prepared,
       ...options,
       backendContent: [prepared?.quotedMessage ? formatQuotedMessageForBackend(prepared.quotedMessage) : "", options.backendContent].filter(Boolean).join("\n\n"),
       allowWhileStreaming: state.isStreaming,
-      busyBehavior: state.followUpBehavior,
+      busyBehavior,
+      awaitAdmission: true,
+      ...admission,
     });
   };
 
@@ -337,55 +445,122 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       mentions: state.selectedMentions,
       skills: state.selectedSkills,
       quotedMessage: state.quotedMessage,
-      selectedSlashCommand,
+      selectedSlashCommand: selectedSlashCommandRef.current,
     });
+  };
+
+  const clearSubmittedComposer = (fingerprint: string, originalOwner: string, workspace: string, userId: string, admittedOwner: string, historyContent?: string) => {
+    const state = useAppStore.getState();
+    const currentOwner = String(state.conversationId || "").trim();
+    const sameOwner = currentOwner === originalOwner || (!originalOwner && currentOwner === admittedOwner
+      && state.messages.some(message => message.id === userId));
+    if (sameOwner && workspaceRootsEqual(state.workingDirectory, workspace)
+      && composerFingerprint({ ...state, conversationId: originalOwner, workingDirectory: workspace }) === fingerprint) {
+      if (historyContent?.trim()) appendPromptHistory(workspace, historyContent);
+      resetComposer();
+    } else if (!sameOwner && admittedOwner) {
+      const saved = state.conversationWorkbenchStates[admittedOwner];
+      if (saved && composerFingerprint({ ...state, ...saved, conversationId: originalOwner, workingDirectory: workspace }) === fingerprint) {
+        for (const attachment of saved.attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
+        useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
+          [admittedOwner]: { ...saved, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
+        } }));
+      }
+    }
+    if (!originalOwner) {
+      const key = composerWorkspaceKey(workspace);
+      const saved = useAppStore.getState().workspaceComposerDrafts[key];
+      if (saved && composerFingerprint({ ...state, ...saved, conversationId: "", workingDirectory: workspace }) === fingerprint) {
+        useAppStore.setState(current => {
+          const drafts = { ...current.workspaceComposerDrafts }; delete drafts[key];
+          return { workspaceComposerDrafts: drafts };
+        });
+      }
+    }
+  };
+
+  const clearSubmittedInput = (input: string, originalOwner: string, workspace: string, selectedCommand: string | null, acceptedOwner: string) => {
+    const state = useAppStore.getState();
+    const currentOwner = String(state.conversationId || "").trim();
+    if ((currentOwner === originalOwner || (!originalOwner && currentOwner === acceptedOwner))
+      && workspaceRootsEqual(state.workingDirectory, workspace) && state.draft === input
+      && selectedSlashCommandRef.current === selectedCommand) {
+      setDraft("");
+      setSelectedSlashCommand(null);
+      closeSlashPanel();
+      setMenuFilter("");
+    } else if (originalOwner) {
+      const saved = state.conversationWorkbenchStates[originalOwner];
+      if (saved?.draft === input) useAppStore.setState(current => ({ conversationWorkbenchStates: {
+        ...current.conversationWorkbenchStates, [originalOwner]: { ...saved, draft: "" },
+      } }));
+    }
+    if (!originalOwner) {
+      const key = composerWorkspaceKey(workspace);
+      const saved = useAppStore.getState().workspaceComposerDrafts[key];
+      if (saved?.draft === input) useAppStore.setState(current => ({ workspaceComposerDrafts: {
+        ...current.workspaceComposerDrafts, [key]: { ...saved, draft: "" },
+      } }));
+    }
   };
 
   const runSubmission = async (action: () => Promise<void>) => {
     if (submittingRef.current) return;
-    submittingRef.current = true;
+    const submission = {};
+    submittingRef.current = submission;
     setSubmitting(true);
     try {
       await action();
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "消息发送失败，请重试。", "error", 4500);
+      pushToast(error instanceof Error ? error.message : tr("消息发送失败，请重试。"), "error", 4500);
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      if (submittingRef.current === submission) {
+        submittingRef.current = null;
+        setSubmitting(false);
+      }
     }
   };
 
   const submit = () => {
     if (hasPendingApproval) return;
-    return runSubmission(submitCurrentDraft);
+    return runSubmission(() => submitCurrentDraft(useAppStore.getState().followUpBehavior));
   };
 
-  const submitCurrentDraft = async () => {
+  const submitAlternateFollowUp = () => {
+    if (hasPendingApproval) return;
+    const behavior = useAppStore.getState().followUpBehavior === "queue" ? "steer" : "queue";
+    return runSubmission(() => submitCurrentDraft(behavior));
+  };
+
+  const submitCurrentDraft = async (busyBehavior: FollowUpBehavior) => {
     if (useAppStore.getState().pendingConversationSwitchId) return;
     if (sendState === "stop" && !draft.trim()) return;
     if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
-    const queueWhileStreaming = sendState === "queue";
     const content = selectedSlashCommand
       ? [selectedSlashCommand, draft.trim()].filter(Boolean).join(" ")
       : draft.trim();
 
     const slashInput = parseRuntimeSlashInput(content);
-    if (slashInput && !shouldTokenizeRuntimeSlashCommand(slashInput.commandLine.split(/\s/, 1)[0], useAppStore.getState().slashCommands)) {
-      for (const mention of slashInput.mentions) {
-        addSelectedMention(mention);
-      }
-      await executeSlashCommand(slashInput.commandLine);
+    if (slashInput?.commandLine === "/approve" && useAppStore.getState().slashCommands.find(command => command.name === "approve")?.source === "builtin") {
+      openGuardianApproval();
       return;
     }
-
+    if (slashInput?.commandLine === "/review" && useAppStore.getState().slashCommands.some(command => command.name === "review" && command.source === "builtin")) {
+      openCodeReview();
+      return;
+    }
+    if (slashInput?.command === "/compact") {
+      await executeSlashCommand(slashInput.commandLine, undefined, busyBehavior);
+      return;
+    }
     const composerAttachments = useAppStore.getState().attachments;
     const blockingAttachment = composerAttachments.find((a) => a.status !== "ready" || !a.attachment);
     if (blockingAttachment) {
       const message = blockingAttachment.status === "uploading"
-        ? `“${blockingAttachment.name}”仍在上传，请等待完成后发送。`
+        ? tr("“{name}”仍在上传，请等待完成后发送。", { name: blockingAttachment.name })
         : blockingAttachment.error
           ? `“${blockingAttachment.name}”${blockingAttachment.error}`
-          : `“${blockingAttachment.name}”上传失败，请移除或重试后发送。`;
+          : tr("“{name}”上传失败，请移除或重试后发送。", { name: blockingAttachment.name });
       pushToast(message, "warning", 3500);
       return;
     }
@@ -396,7 +571,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       !String(attachment.conversationId || "").trim()
     ));
     if (missingOwner) {
-      pushToast(`“${missingOwner.name}”没有绑定会话，请重新上传。`, "error", 4200);
+      pushToast(tr("“{name}”没有绑定会话，请重新上传。", { name: missingOwner.name }), "error", 4200);
       return;
     }
     const attachmentOwners = new Set(
@@ -405,7 +580,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         .filter(Boolean),
     );
     if (attachmentOwners.size > 1) {
-      pushToast("这些附件来自不同会话，请移除后在同一会话重新上传。", "error", 4500);
+      pushToast(tr("这些附件来自不同会话，请移除后在同一会话重新上传。"), "error", 4500);
       return;
     }
     const attachmentConversationId = [...attachmentOwners][0] || "";
@@ -415,7 +590,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       && currentConversationId
       && attachmentConversationId !== currentConversationId
     ) {
-      pushToast("附件属于另一个会话，请切回附件所在会话后发送。", "warning", 4500);
+      pushToast(tr("附件属于另一个会话，请切回附件所在会话后发送。"), "warning", 4500);
       return;
     }
     if (
@@ -423,7 +598,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       && !currentConversationId
       && !acceptAttachmentConversationOwner(attachmentConversationId)
     ) {
-      pushToast("附件已绑定到另一个会话，请切回该会话后发送。", "warning", 4500);
+      pushToast(tr("附件已绑定到另一个会话，请切回该会话后发送。"), "warning", 4500);
       return;
     }
     const sendConversationId = attachmentConversationId || currentConversationId;
@@ -449,14 +624,21 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     const finalContent = content;
     const composerStateAtSend = composerFingerprint();
+    const capturedComposer = useAppStore.getState();
+    const composerInputAtSend = useAppStore.getState().draft;
+    const selectedCommandAtSend = selectedSlashCommandRef.current;
     const conversationAtSend = String(useAppStore.getState().conversationId || "").trim();
     const workspaceAtSend = useAppStore.getState().workingDirectory;
+    const submittedUserMessageId = uniqueMessageId("u");
+    const submittedOperation = submittingRef.current;
+    let admittedConversationId = conversationAtSend;
+    const accepted: { result?: CommandResultEvent } = {};
     const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const displayContent = content;
 
     if (slashInput) {
       for (const mention of slashInput.mentions) addSelectedMention(mention);
-      await executeSlashCommand(slashInput.commandLine, { attachments: readyAttachments, attachmentRefs, conversationId: sendConversationId || undefined, quotedMessage });
+      await executeSlashCommand(slashInput.commandLine, { attachments: readyAttachments, attachmentRefs, conversationId: sendConversationId || undefined, quotedMessage }, busyBehavior);
       return;
     }
 
@@ -466,65 +648,95 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       displayContent,
       quotedMessage,
       backendContent: [quoteContext, finalContent].filter(Boolean).join("\n\n"),
-      allowWhileStreaming: queueWhileStreaming,
-      busyBehavior: useAppStore.getState().followUpBehavior,
-    })) return;
-    const stateAfterSend = useAppStore.getState();
-    const currentConversation = String(stateAfterSend.conversationId || "").trim();
-    const sameConversation = currentConversation === conversationAtSend;
-    // Upload/context preparation is asynchronous.  If the user edited the
-    // draft, changed attachments, or switched conversations while it was in
-    // flight, preserve the new composer state instead of clearing it.
-    if (sameConversation && composerFingerprint() === composerStateAtSend) {
-      if (finalContent.trim()) appendPromptHistory(workingDirectory, finalContent);
-      resetComposer();
-    } else if (!sameConversation && conversationAtSend) {
-      const savedComposer = stateAfterSend.conversationWorkbenchStates[conversationAtSend];
-      if (savedComposer && composerFingerprint({ ...stateAfterSend, ...savedComposer,
-        conversationId: conversationAtSend, workingDirectory: workspaceAtSend }) === composerStateAtSend) {
-        for (const attachment of savedComposer.attachments) {
-          if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
+      allowWhileStreaming: true,
+      busyBehavior,
+      awaitAdmission: true,
+      userMessageId: submittedUserMessageId,
+      onAdmission: event => {
+        accepted.result = event;
+        if (typeof event.data?.conversation_id === "string") admittedConversationId = event.data.conversation_id;
+      },
+      onReceived: () => {
+        clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId, admittedConversationId, finalContent);
+        if (submittingRef.current === submittedOperation) {
+          submittingRef.current = null;
+          setSubmitting(false);
         }
-        useAppStore.setState((state) => ({ conversationWorkbenchStates: {
-          ...state.conversationWorkbenchStates,
-          [conversationAtSend]: { ...savedComposer, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
-        } }));
-      }
+      },
+      onRejected: () => {
+        const state = useAppStore.getState();
+        if (state.messages.filter(message => message.role === "user").at(-1)?.id !== submittedUserMessageId) return;
+        if (state.draft || state.attachments.length || state.selectedMentions.length || state.selectedSkills.length
+          || state.quotedMessage || selectedSlashCommandRef.current || !workspaceRootsEqual(state.workingDirectory, workspaceAtSend)) return;
+        if (String(state.conversationId || "") !== conversationAtSend && String(state.conversationId || "") !== admittedConversationId) return;
+        useAppStore.setState({ draft: capturedComposer.draft, attachments: capturedComposer.attachments.map(attachment => ({ ...attachment,
+          ...(attachment.localFile && attachment.dataUrl?.startsWith("blob:") ? { dataUrl: URL.createObjectURL(attachment.localFile) } : {}),
+        })), selectedMentions: capturedComposer.selectedMentions, selectedSkills: capturedComposer.selectedSkills, quotedMessage: capturedComposer.quotedMessage });
+      },
+    })) return;
+    if (accepted.result?.data?.native_completion === "completed") {
+      clearSubmittedInput(composerInputAtSend, conversationAtSend, workspaceAtSend, selectedCommandAtSend, admittedConversationId);
+      return;
     }
+    clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId, admittedConversationId, finalContent);
   };
 
-  const executeSlashCommand = async (commandLine: string, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null }) => {
+  const executeSlashCommand = async (commandLine: string, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null },
+    busyBehavior: FollowUpBehavior = useAppStore.getState().followUpBehavior) => {
     const composerStateAtSend = composerFingerprint();
+    const originalState = useAppStore.getState();
+    const originalInput = originalState.draft;
+    const originalSelectedCommand = selectedSlashCommandRef.current;
+    const originalOwner = String(originalState.conversationId || "").trim();
+    const workspace = originalState.workingDirectory;
+    const userMessageId = uniqueMessageId("u");
+    const submittedOperation = submittingRef.current;
+    let admittedOwner = originalOwner;
+    let compactReceived = false;
+    const accepted: { result?: CommandResultEvent } = {};
     const result = await executeRuntimeSlashCommand(commandLine, {
       getState: useAppStore.getState,
       setState: useAppStore.setState,
       sendClientCommand,
-      sendChatMessage: (options) => sendRuntimeSlashMessage(options, prepared),
+      sendChatMessage: (options) => sendRuntimeSlashMessage(options, prepared, { userMessageId, onReceived: () => {
+        if (!options.skipLocalAppend || parseRuntimeSlashInput(commandLine)?.command !== "/compact") return;
+        compactReceived = true;
+        clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
+        if (submittingRef.current === submittedOperation) {
+          submittingRef.current = null;
+          setSubmitting(false);
+        }
+      }, onAdmission: event => {
+        accepted.result = event;
+        if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id;
+      } }, busyBehavior),
       sendUserMessage,
       confirmClear: async () => {
         const { showConfirm } = await import("../overlays/DialogService");
         return showConfirm({
-          title: "清空会话",
-          message: "清空当前会话视图中的全部消息？此操作无法撤销。",
-          confirmLabel: "清空",
+          title: tr("清空会话"),
+          message: tr("清空当前会话视图中的全部消息？此操作无法撤销。"),
+          confirmLabel: tr("清空"),
           danger: true,
         });
       },
     });
-    if (composerFingerprint() !== composerStateAtSend) return;
-    if (result.reset === "composer") {
-      resetComposer();
+    if (compactReceived) return;
+    if (accepted.result?.data?.native_completion === "completed") {
+      clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
+      return;
+    }
+    if (result.reset === "composer" || accepted.result?.data?.admitted === true || accepted.result?.data?.queued === true) {
+      clearSubmittedComposer(composerStateAtSend, originalOwner, workspace, userMessageId, admittedOwner);
       return;
     }
     if (result.reset === "input") {
-      setDraft("");
-      setSelectedSlashCommand(null);
-      closeSlashPanel();
-      setMenuFilter("");
+      clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
     }
   };
 
   const handleChange = (v: string, selection: ComposerSelection = { start: v.length, end: v.length }) => {
+    if (reviewOwner && v !== reviewOwner.input) setReviewOwner(undefined);
     if (historyOpen) setHistoryOpen(false);
     // Reset the history-recall cursor whenever the draft changes for a reason
     // other than a recall fill, so the next ArrowUp starts from the live draft.
@@ -538,6 +750,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   const refreshInputMenus = (v: string, selection: ComposerSelection) => {
     inputSelectionRef.current = selection;
+    if (reviewOwner && v === reviewOwner.input) return;
     if (selection.composing || selection.start !== selection.end) {
       closeMentionPanel(); closeSlashPanel(); setSkillPanelOpen(false); setMenuFilter(""); return;
     }
@@ -608,6 +821,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
 
     if (slashPanelOpen) {
+      if (value === "/approve" && useAppStore.getState().slashCommands.find(command => command.name === "approve")?.source === "builtin") {
+        openGuardianApproval();
+        return;
+      }
+      if (value === "/review" && useAppStore.getState().slashCommands.some(command => command.name === "review" && command.source === "builtin")) {
+        openCodeReview();
+        return;
+      }
       const selection = resolveRuntimeSlashMenuSelection(value, useAppStore.getState());
       if (selection.kind === "skill_picker") {
         setSelectedSlashCommand(null);
@@ -715,7 +936,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onDropCapture={() => setDragOver(false)}
         onDrop={handleDrop}
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
-        data-approval-replacement={hasPendingApproval ? "true" : "false"}
+        data-approval-replacement={hasPendingApproval || planImplementation ? "true" : "false"}
         data-command-mode={commandModeActive ? "true" : "false"}
         data-drag-over={dragOver ? "true" : "false"}
         data-empty={!draft.length && !hasComposerAttachments && !selectedSkills.length && !selectedMentions.length && !quotedMessage && !activeGoal && !activeSlashCommand
@@ -735,7 +956,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         }}
       >
       {!pendingConversationSwitchId && <InlineAgentPrompt />}
-      <div className="composer-input-region" hidden={hasPendingApproval}>
+      {!hasPendingPrompt && planImplementation && <PlanImplementationPrompt key={`${conversationId}:${planImplementation.messageId}`} owner={conversationId!} plan={planImplementation} />}
+      <div className="composer-input-region" hidden={hasPendingApproval || Boolean(planImplementation)}>
+      {!minimal && emptyConversation && !isStreaming && <ProjectScopePicker />}
       {activeGoal && <GoalBar />}
       <ContextChipRegion />
       <AttachmentStrip />
@@ -746,7 +969,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onSelectionChange={refreshInputMenus}
         selectionRequest={selectionRequest}
         onSubmit={submit}
-        menuOpen={slashPanelOpen || mentionPanelOpen || skillPanelOpen || historyOpen}
+        onAlternateSubmit={submitAlternateFollowUp}
+        isResponseInProgress={isStreaming}
+        menuOpen={Boolean(reviewOwner && !reviewOwner.dismissed) || slashPanelOpen || mentionPanelOpen || skillPanelOpen || historyOpen}
         onHistorySearch={openPromptHistory}
         onDropFiles={handleComposerFiles}
         minimal={minimal}
@@ -764,15 +989,19 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           const last = useAppStore.getState().selectedSkills.at(-1);
           if (last) removeSelectedSkill(last.name);
         }}
-        placeholder={selectedSlashCommand ? "补充指令…" : "描述任务或提出问题…"}
+        placeholder={selectedSlashCommand ? tr("补充指令…") : tr("随心输入")}
       />
       <MenuOverlay
-        open={!hasPendingApproval && (slashPanelOpen || mentionPanelOpen || skillPanelOpen)}
+        open={!hasPendingApproval && !guardianApprovalOwner && !(reviewOwner && !reviewOwner.dismissed) && (slashPanelOpen || mentionPanelOpen || skillPanelOpen)}
         kind={slashPanelOpen ? "slash" : skillPanelOpen ? "skill" : "mention"}
         filter={menuFilter}
         onSelect={handleMenuSelect}
         placement={minimal ? "below" : "above"}
       />
+      {reviewOwner && !reviewOwner.dismissed && !pendingConversationSwitchId && <CodeReviewMenu owner={reviewOwner} pending={submitting || reviewPermissionPending || !isConnected || !currentModel}
+        onClose={dismissCodeReview} onSelect={startCodeReview} />}
+      {guardianApprovalOwner && !pendingConversationSwitchId && <GuardianApprovalMenu conversationId={guardianApprovalOwner.conversationId}
+        onClose={() => setGuardianApprovalOwner(undefined)} onApproved={finishGuardianApproval} />}
       <FooterRow
         sendState={sendState}
         onSend={sendState === "stop" ? stopRun : submit}
@@ -802,6 +1031,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 };
 
 const GoalBar = () => {
+  const { t: tr } = useI18n();
   const goal = useAppStore((s) => s.activeGoal);
   const conversationId = useAppStore((s) => s.conversationId);
   if (!goal) return null;
@@ -820,15 +1050,15 @@ const GoalBar = () => {
         className="flex-none text-3xs font-bold uppercase"
         style={{ color: paused ? "var(--text-muted)" : "var(--accent-primary)" }}
       >
-        {paused ? "已暂停" : "目标"}
+        {paused ? tr("已暂停") : tr("目标")}
       </span>
       <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm" style={{ color: "var(--text-primary)" }} title={goal.text}>
         {goal.text}
       </span>
       <button
         type="button"
-        title={paused ? "继续目标" : "暂停目标"}
-        aria-label={paused ? "继续目标" : "暂停目标"}
+        title={paused ? tr("继续目标") : tr("暂停目标")}
+        aria-label={paused ? tr("继续目标") : tr("暂停目标")}
         className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction(paused ? "resume" : "pause")}
@@ -837,8 +1067,8 @@ const GoalBar = () => {
       </button>
       <button
         type="button"
-        title="清除目标"
-        aria-label="清除目标"
+        title={tr("清除目标")}
+        aria-label={tr("清除目标")}
         className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction("clear")}

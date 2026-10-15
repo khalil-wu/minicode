@@ -252,7 +252,8 @@ class TestToolErrorTaxonomy:
 
         assert info is not None
         assert info.error_kind == "execution_error"
-        assert info.user_summary == "工具执行失败。"
+        assert info.user_summary == ""
+        assert info.developer_detail == "Search failed: 407 Proxy Authentication Required"
 
     def test_does_not_infer_permission_denial_from_error_copy(self):
         info = classify_tool_issue(
@@ -266,7 +267,8 @@ class TestToolErrorTaxonomy:
 
         assert info is not None
         assert info.error_kind == "execution_error"
-        assert info.user_summary == "工具执行失败。"
+        assert info.user_summary == ""
+        assert "settings.json" in info.developer_detail
         assert info.projection == "error"
 
     def test_preserves_structured_permission_denial(self):
@@ -306,15 +308,15 @@ class TestDisplaySummaryGeneration:
             tool_registry=registry,
         )
 
-        assert summary == "Completed: Fetch documentation"
+        assert summary == "Fetch documentation"
 
     def test_terminal_status_uses_generic_registered_label(self):
         tc = self._tc("unknown_tool", {"secret": "not projected"})
 
-        assert display_summary_for_result(tc, ToolResult(content="Error"), status="failed") == "Failed: unknown_tool"
-        assert display_summary_for_result(tc, ToolResult(content="Denied"), status="blocked") == "Blocked: unknown_tool"
-        assert display_summary_for_result(tc, ToolResult(content="Stopped"), status="cancelled") == "Cancelled: unknown_tool"
-        assert display_summary_for_result(tc, ToolResult(content="Late"), status="timeout") == "Timed out: unknown_tool"
+        assert display_summary_for_result(tc, ToolResult(content="Error"), status="failed") == "unknown_tool"
+        assert display_summary_for_result(tc, ToolResult(content="Denied"), status="blocked") == "unknown_tool"
+        assert display_summary_for_result(tc, ToolResult(content="Stopped"), status="cancelled") == "unknown_tool"
+        assert display_summary_for_result(tc, ToolResult(content="Late"), status="timeout") == "unknown_tool"
 
     def test_result_display_summary_takes_precedence(self):
         tc = self._tc("web_search", {"query": "test"})

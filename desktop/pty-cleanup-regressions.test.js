@@ -40,14 +40,17 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
     killExitTimeoutMs: 1,
     forceKillExitTimeoutMs: 1,
     appendDesktopLog() {},
+    getWindowByInstanceId: () => ({ isDestroyed: () => false, webContents: { send() {} } }),
   });
-  const session = manager.spawnSession(__dirname, "owned-fixture");
-  assert.equal(await manager.killSession(session.session_id, "owned-fixture"), false);
-  assert.notEqual(manager.snapshotSession(session.session_id, 10, "owned-fixture"), null);
-  assert.equal(await manager.restartSession(session.session_id, "owned-fixture"), null);
+  const session = manager.spawnSession(__dirname, "owned-fixture", "fixture-window");
+  assert.equal(await manager.killSession(session.session_id, "owned-fixture", "fixture-window"), false);
+  assert.notEqual(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
+  assert.equal(await manager.restartSession(session.session_id, "owned-fixture", "fixture-window"), null);
   assert.equal(spawnCalls, 1);
   assert.equal(killCalls, 2);
+  await assert.rejects(manager.killAllSessions(), /Terminal cleanup did not finish/);
+  assert.equal(manager.listActiveSessions().length, 1);
   fakePty.kill = () => exitHandler({ exitCode: 0 });
-  assert.equal(await manager.killSession(session.session_id, "owned-fixture"), true);
-  assert.equal(manager.snapshotSession(session.session_id, 10, "owned-fixture"), null);
+  await manager.killAllSessions();
+  assert.equal(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
 });

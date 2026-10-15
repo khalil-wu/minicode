@@ -17,11 +17,11 @@ from typing import Any
 
 from backend.atomic_io import (
     atomic_write_bytes,
-    canonical_path_mapping_key,
     file_mutation_locks,
     run_blocking_io,
 )
 from backend.permissions.context import ToolExecutionContext
+from backend.permissions.grants import current_granted_permissions, permission_profile_allows_path
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.apply_patch_parser import (
     ApplyPatchError,
@@ -87,6 +87,25 @@ class ApplyPatchTool(BaseTool):
 
     def is_capability_available(self, context=None) -> bool:
         return context is None or context.mode != "plan"
+
+    def check_permission(self, args=None, context=None):
+        if context is None or context.workspace_root is None:
+            return None
+        paths = self.get_workspace_paths(args)
+        if paths and all(permission_profile_allows_path(
+            context.additional_permissions, path,
+            cwd=context.workspace_root, workspace_root=context.workspace_root, write=True,
+        ) for path in paths):
+            return PermissionLevel.CONFIRM if context.strict_auto_review else PermissionLevel.AUTO
+        return None
+
+    @staticmethod
+    def _resolve_patch_path(raw_path: str, context: ToolExecutionContext | None, bypass_mode: bool) -> Path:
+        granted_write = context is not None and context.workspace_root is not None and permission_profile_allows_path(
+            current_granted_permissions(context), raw_path,
+            cwd=context.workspace_root, workspace_root=context.workspace_root, write=True,
+        )
+        return _resolve_path(raw_path, context, allow_workspace_escape=bypass_mode or granted_write)
 
     def get_workspace_paths(self, args: dict[str, Any] | None = None) -> list[str]:
         """Expose every add/update/delete/move path to the central checker."""
@@ -192,46 +211,9 @@ class ApplyPatchTool(BaseTool):
         if isinstance(plans_or_error, str):
             return self._error_result(plans_or_error)
         plans = plans_or_error
-        metadata = (
-            context.metadata
-            if context is not None and isinstance(context.metadata, dict)
-            else {}
-        )
-        read_hashes = metadata.get("_read_file_hashes")
-        if not isinstance(read_hashes, dict):
-            read_hashes = {}
-        else:
-            # Migrate pre-canonical Windows keys before enforcing the explicit
-            # read contract. Keep the same dict object so later in-turn writes
-            # advance the session-owned hash state rather than a detached copy.
-            for plan in plans:
-                for path in filter(None, (plan.path, plan.move_to_path)):
-                    canonical_path_mapping_key(read_hashes, path)
-        unread_existing = [
-            plan.raw_path
-            for plan in plans
-            if any(
-                path is not None
-                and path.exists()
-                and _path_snapshot_key(path) not in read_hashes
-                for path in (plan.path, plan.move_to_path)
-            )
-        ]
-        if unread_existing:
-            return self._error_result(
-                "Read these existing file(s) before applying a patch: "
-                + ", ".join(unread_existing)
-            )
         expected_hashes = args.get("_expected_hashes")
         if not isinstance(expected_hashes, dict):
-            # Match CC's read-before-edit contract. Do not bless an existing
-            # target by hashing it immediately before the write; only hashes
-            # recorded by read_file (or an equivalent explicit read) may pass.
-            expected_hashes = self._snapshot_expected_hashes(
-                plans,
-                context,
-                read_time_hashes=read_hashes,
-            )
+            expected_hashes = self._snapshot_expected_hashes(plans)
             args["_expected_hashes"] = expected_hashes
         stale_error = self._review_snapshot_error(plans, expected_hashes)
         if stale_error:
@@ -279,6 +261,7 @@ class ApplyPatchTool(BaseTool):
             failure_reason = str(exc)
         finally:
             invalidate_workspace_file_caches(
+                changed_paths=tuple(path for plan in committed_changes for path in (plan.path, plan.move_to_path) if path is not None),
                 file_tree_changed=any(
                     plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
                     or plan.path.name == ".gitignore"
@@ -342,7 +325,7 @@ class ApplyPatchTool(BaseTool):
         bypass_mode: bool,
     ) -> "_ChangePlan | str":
         try:
-            path = _resolve_path(change.path, context, allow_workspace_escape=bypass_mode)
+            path = self._resolve_patch_path(change.path, context, bypass_mode)
         except PathTraversalError as exc:
             return str(exc)
 
@@ -403,7 +386,7 @@ class ApplyPatchTool(BaseTool):
         dest_raw = change.path
         if change.move_to:
             try:
-                dest_path = _resolve_path(change.move_to, context, allow_workspace_escape=bypass_mode)
+                dest_path = self._resolve_patch_path(change.move_to, context, bypass_mode)
             except PathTraversalError as exc:
                 return str(exc)
             move_guard = self._guard_path(change.move_to, dest_path, context)
@@ -440,28 +423,20 @@ class ApplyPatchTool(BaseTool):
     @staticmethod
     def _snapshot_expected_hashes(
         plans: list["_ChangePlan"],
-        context: ToolExecutionContext | None,
-        *,
-        read_time_hashes: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        """Build review hashes from explicit read-time observations only."""
-        meta = context.metadata if (context is not None and isinstance(context.metadata, dict)) else {}
-        hashes = read_time_hashes if isinstance(read_time_hashes, dict) else meta.get("_read_file_hashes")
-        if not isinstance(hashes, dict):
-            hashes = {}
-        else:
-            for plan in plans:
-                for path in filter(None, (plan.path, plan.move_to_path)):
-                    canonical_path_mapping_key(hashes, path)
+        """Bind approval to the same disk contents used to plan the patch.
+
+        Codex's patch verifier reads the current target itself. A previous
+        model read is not an admission requirement; an approved diff still
+        owns the exact contents reviewed before the execution boundary.
+        """
         expected: dict[str, str] = {}
         for plan in plans:
-            for path in filter(None, (plan.path, plan.move_to_path)):
-                key = _path_snapshot_key(path)
-                expected[key] = (
-                    str(hashes.get(key) or "")
-                    if path.exists()
-                    else "missing"
-                )
+            expected[_path_snapshot_key(plan.path)] = (
+                "missing" if plan.kind == ChangeKind.ADD else content_hash(plan.old_content)
+            )
+            if plan.move_to_path is not None and plan.move_to_path != plan.path:
+                expected[_path_snapshot_key(plan.move_to_path)] = "missing"
         return expected
 
     def _guard_path(self, raw_path: str, path: Path, context: ToolExecutionContext | None) -> str:
@@ -597,19 +572,12 @@ def build_apply_patch_diff_payload(
     context: ToolExecutionContext | None = None,
     *,
     expected_hashes: dict[str, str] | None = None,
-    read_time_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     plans = ApplyPatchTool().plan_changes(patch_text, context)
     if isinstance(plans, str):
         return None
     if expected_hashes is not None:
-        expected_hashes.update(
-            ApplyPatchTool._snapshot_expected_hashes(
-                plans,
-                context,
-                read_time_hashes=read_time_hashes,
-            )
-        )
+        expected_hashes.update(ApplyPatchTool._snapshot_expected_hashes(plans))
 
     return _plans_diff_payload(plans)
 

@@ -16,6 +16,7 @@ const {
   executeInstallTransaction,
   expectedRollbackDirectory,
   normalizeUpdateActivitySnapshot,
+  prepareRollbackData,
   readHealthState,
   resolveRollbackExecutable,
   validatedFeedUrl,
@@ -92,6 +93,8 @@ function emptyActivity(revision = 1) {
     uploadingAttachments: [],
     dirtyEditors: [],
     backgroundTasks: [],
+    pendingDrafts: [],
+    draftStates: [],
   };
 }
 
@@ -386,9 +389,65 @@ test("automatic rollback launches the backed-up executable and exits the failed 
     pending_version: "2.0.0",
     rollback_backup_dir: backupDirectory,
     rollback_executable_relative: executableName,
+  }, async () => {
+    assert.equal(app.releaseSingleInstanceLockCalled, false);
+    assert.equal(app.quitCalled, false);
+    return { ok: true, queue_count: 1, cancellation_count: 1, rewritten_count: 1 };
   });
 
   assert.equal(launched, true);
   assert.equal(app.releaseSingleInstanceLockCalled, true);
   assert.equal(app.quitCalled, true);
+});
+
+test("rollback preparation failure retains current user data and never releases ownership or launches old code", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-rollback-rejected-"));
+  const userData = path.join(root, "user-data");
+  fs.mkdirSync(userData, { recursive: true });
+  const draft = path.join(userData, "authored-draft.txt");
+  fs.writeFileSync(draft, "latest unsaved editor/composer content", "utf8");
+  const calls = [];
+  const app = { getPath: () => userData, getVersion: () => "new-version",
+    releaseSingleInstanceLock() { calls.push("release"); }, quit() { calls.push("quit"); } };
+  beginBootHealthCheck(app);
+  const backupDirectory = expectedRollbackDirectory(app, "old-version");
+  fs.mkdirSync(backupDirectory, { recursive: true });
+  fs.writeFileSync(path.join(backupDirectory, "MiniCode.exe"), "must never launch");
+  await assert.rejects(attemptAutomaticRollback(app, {
+    previous_version: "old-version", pending_version: "new-version", status: "recovery_required",
+    rollback_backup_dir: backupDirectory, rollback_executable_relative: "MiniCode.exe",
+  }, async () => { throw new Error("A live owner still holds the queue lease"); }), /live owner/);
+  assert.deepEqual(calls, []);
+  assert.equal(fs.readFileSync(draft, "utf8"), "latest unsaved editor/composer content");
+  assert.match(readHealthState(path.join(userData, "update-health.json")).rollback_error, /live owner/);
+});
+
+test("trusted rollback helper runs the current backend module with explicit state root and propagates its exit verdict", async () => {
+  const { EventEmitter } = require("node:events");
+  const { PassThrough } = require("node:stream");
+  const calls = [];
+  const spawnProcess = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      child.stdout.end('{"ok":true,"queue_count":1,"cancellation_count":1,"rewritten_count":1}\n');
+      child.emit("close", 0, null);
+    });
+    return child;
+  };
+  const stateRoot = path.resolve("中文 用户数据");
+  const backendRoot = path.resolve("current resources");
+  const receipt = await prepareRollbackData({ pythonCommand: "current-python", stateRoot, backendRoot }, spawnProcess);
+  assert.equal(receipt.ok, true);
+  assert.deepEqual(calls[0].args, ["-B", "-m", "backend.bootstrap.prepare_rollback", "--state-root", stateRoot]);
+  assert.equal(calls[0].options.cwd, backendRoot);
+  assert.equal(calls[0].options.env.PYTHONPATH, backendRoot);
+  assert.equal(calls[0].options.env.MINICODE_STATE_ROOT, stateRoot);
+  assert.equal(calls[0].options.windowsHide, true);
+  await assert.rejects(prepareRollbackData({ pythonCommand: "current-python", stateRoot, backendRoot }, () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    queueMicrotask(() => { child.stderr.end("disk full during atomic projection"); child.emit("close", 1, null); });
+    return child;
+  }), /disk full/);
 });

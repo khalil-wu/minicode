@@ -119,6 +119,7 @@ class LLMSettings:
     supports_custom_tools: bool = False
     responses_websocket: bool = False
     native_compaction: bool | None = None
+    comp_hash: str | None = None
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
     input_modalities: tuple[str, ...] = ()
@@ -131,6 +132,11 @@ class LLMSettings:
     thinking_budget: int = 0
     tool_mode: str = ""
     supports_hosted_web_search: bool | None = None
+    supports_experimental_context: bool = False
+    model_messages: Mapping[str, Any] | None = None
+    truncation_policy: Mapping[str, Any] | None = None
+    supports_image_detail_original: bool = False
+    supports_search_tool: bool = False
 
 
 @dataclass(frozen=True)
@@ -613,9 +619,26 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
         ).strip().lower()
         if default_reasoning_summary:
             metadata["default_reasoning_summary"] = default_reasoning_summary
-        for key in ("supports_custom_tools", "supports_hosted_web_search", "responses_websocket", "native_compaction", "parallel_tool_calls"):
+        for key in ("supports_custom_tools", "supports_hosted_web_search", "responses_websocket", "native_compaction", "parallel_tool_calls", "supports_experimental_context", "supports_image_detail_original", "supports_search_tool"):
             if isinstance(raw_metadata.get(key), bool):
                 metadata[key] = raw_metadata[key]
+        if "supports_experimental_context" in raw_metadata and not isinstance(raw_metadata["supports_experimental_context"], bool):
+            raise SettingsError(f"model_metadata.{model_id}.supports_experimental_context must be a boolean")
+        if "supports_search_tool" in raw_metadata and not isinstance(raw_metadata["supports_search_tool"], bool):
+            raise SettingsError(f"model_metadata.{model_id}.supports_search_tool must be a boolean")
+        if "model_messages" in raw_metadata:
+            from copy import deepcopy
+
+            value = raw_metadata["model_messages"]
+            if value is not None and not isinstance(value, Mapping):
+                raise SettingsError(f"model_metadata.{model_id}.model_messages must be an object")
+            metadata["model_messages"] = deepcopy(value)
+        if "truncation_policy" in raw_metadata:
+            from copy import deepcopy
+
+            metadata["truncation_policy"] = deepcopy(raw_metadata["truncation_policy"])
+        if "comp_hash" in raw_metadata:
+            metadata["comp_hash"] = raw_metadata["comp_hash"]
         for key in ("native_compaction", "supports_hosted_web_search"):
             if key in raw_metadata and raw_metadata[key] is None:
                 metadata[key] = None
@@ -661,6 +684,9 @@ def get_provider_model_metadata(
         terminal_id = model_id.rsplit("/", 1)[-1]
         declared = dict(catalog.get(terminal_id, {}))
     known = responses_model_catalog_entry(model_id)
+    from backend.llm.source_context_metadata import source_context_metadata
+
+    source_context = source_context_metadata(model_id.rsplit("/", 1)[-1])
     levels = _coerce_model_list(declared.get("reasoning_effort_levels"))
     if not levels and model_id == str(data.get("model") or "").strip():
         levels = _coerce_model_list(data.get("reasoning_effort_levels"))
@@ -714,6 +740,12 @@ def get_provider_model_metadata(
         "supports_hosted_web_search": declared.get("supports_hosted_web_search"),
         "responses_websocket": declared.get("responses_websocket", False),
         "native_compaction": declared.get("native_compaction"),
+        "comp_hash": declared.get("comp_hash", source_context.get("comp_hash")),
+        "supports_experimental_context": declared.get("supports_experimental_context", source_context.get("supports_experimental_context", False)),
+        "model_messages": declared.get("model_messages", source_context.get("model_messages")),
+        "truncation_policy": declared.get("truncation_policy", source_context.get("truncation_policy")),
+        "supports_image_detail_original": declared.get("supports_image_detail_original", source_context.get("supports_image_detail_original", False)),
+        "supports_search_tool": declared.get("supports_search_tool", source_context.get("supports_search_tool", False)),
         "model_instructions": declared.get("model_instructions", ""),
         "parallel_tool_calls": declared.get("parallel_tool_calls"),
         "input_modalities": tuple(declared.get("input", ())),
@@ -1865,11 +1897,18 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
             default_reasoning_effort=anthropic["default_reasoning_effort"],
             default_reasoning_summary=anthropic["default_reasoning_summary"],
             supports_custom_tools=model_metadata["supports_custom_tools"],
+            supports_experimental_context=model_metadata["supports_experimental_context"],
+            model_messages=model_metadata["model_messages"],
+            truncation_policy=model_metadata["truncation_policy"],
+            supports_image_detail_original=model_metadata["supports_image_detail_original"],
+            supports_search_tool=model_metadata["supports_search_tool"],
             supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
             responses_websocket=model_metadata["responses_websocket"],
             native_compaction=model_metadata["native_compaction"],
+            comp_hash=model_metadata["comp_hash"],
             model_instructions=model_metadata["model_instructions"],
             parallel_tool_calls=model_metadata["parallel_tool_calls"],
+            input_modalities=model_metadata["input_modalities"],
             tool_mode=model_metadata["tool_mode"],
             default_headers=tuple(anthropic["default_headers"]),
             auth_header=bool(anthropic["auth_header"]),
@@ -1917,11 +1956,18 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
             default_reasoning_effort=custom["default_reasoning_effort"],
             default_reasoning_summary=custom["default_reasoning_summary"],
             supports_custom_tools=model_metadata["supports_custom_tools"],
+            supports_experimental_context=model_metadata["supports_experimental_context"],
+            model_messages=model_metadata["model_messages"],
+            truncation_policy=model_metadata["truncation_policy"],
+            supports_image_detail_original=model_metadata["supports_image_detail_original"],
+            supports_search_tool=model_metadata["supports_search_tool"],
             supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
             responses_websocket=model_metadata["responses_websocket"],
             native_compaction=model_metadata["native_compaction"],
+            comp_hash=model_metadata["comp_hash"],
             model_instructions=model_metadata["model_instructions"],
             parallel_tool_calls=model_metadata["parallel_tool_calls"],
+            input_modalities=model_metadata["input_modalities"],
             tool_mode=model_metadata["tool_mode"],
             default_headers=tuple(custom["default_headers"]),
             auth_header=bool(custom["auth_header"]),
@@ -1970,11 +2016,18 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
         default_reasoning_effort=openai["default_reasoning_effort"],
         default_reasoning_summary=openai["default_reasoning_summary"],
         supports_custom_tools=model_metadata["supports_custom_tools"],
+        supports_experimental_context=model_metadata["supports_experimental_context"],
+        model_messages=model_metadata["model_messages"],
+        truncation_policy=model_metadata["truncation_policy"],
+        supports_image_detail_original=model_metadata["supports_image_detail_original"],
+            supports_search_tool=model_metadata["supports_search_tool"],
         supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
         responses_websocket=model_metadata["responses_websocket"],
         native_compaction=model_metadata["native_compaction"],
+        comp_hash=model_metadata["comp_hash"],
         model_instructions=model_metadata["model_instructions"],
         parallel_tool_calls=model_metadata["parallel_tool_calls"],
+        input_modalities=model_metadata["input_modalities"],
         tool_mode=model_metadata["tool_mode"],
         default_headers=tuple(openai["default_headers"]),
         auth_header=bool(openai["auth_header"]),

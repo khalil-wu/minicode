@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
@@ -96,13 +97,14 @@ const portFromUrl = (url: string): number | null => {
 };
 
 export const terminalSessionLabel = (
+  tr: Translate,
   session: TerminalSessionInfo,
   index: number,
   sessionCount: number,
 ): string => {
   const name = session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || "shell";
   const indexedName = sessionCount > 1 ? `${name} ${index + 1}` : name;
-  return session.terminalMode === "pipe" ? `${indexedName}（基础）` : indexedName;
+  return session.terminalMode === "pipe" ? tr("{v0}（基础）", { v0: indexedName }) : indexedName;
 };
 
 export const terminalExitCodeLabel = (exitCode: unknown): string =>
@@ -110,8 +112,8 @@ export const terminalExitCodeLabel = (exitCode: unknown): string =>
     ? String(exitCode)
     : "unknown";
 
-const terminalStatusLabel = (status: TerminalSessionInfo["status"]): string =>
-  status === "exited" ? "已退出" : "运行中";
+const terminalStatusLabel = (tr: Translate, status: TerminalSessionInfo["status"]): string =>
+  status === "exited" ? tr("已退出") : tr("运行中");
 
 /**
  * xterm.js 走 canvas 渲染，读不到 CSS 变量，故此处必须是字面量 —— 但取值不是
@@ -191,6 +193,7 @@ const terminalTheme = (isLight: boolean): Record<string, string> => (
 );
 
 export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) => {
+  const { t: tr } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XtermLike | null>(null);
   const fitRef = useRef<FitAddonLike | null>(null);
@@ -555,6 +558,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
           {
             type: "terminal.create",
             cwd,
+            shell: "system",
             conversation_id: ownerConversationId,
             workspace_root: useAppStore.getState().workingDirectory || undefined,
           },
@@ -1134,21 +1138,21 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
           onClick={() => void createSession()}
           className="w-6 h-6 inline-flex items-center justify-center border-0 bg-transparent cursor-pointer p-0"
           style={{ color: "var(--text-primary)", borderRadius: "var(--radius-sm, 6px)" }}
-          title="新建终端"
-          aria-label="新建终端"
+          title={tr("新建终端")}
+          aria-label={tr("新建终端")}
         >
           <Plus size={14} />
         </button>
         {terminalSessions.length > 0 && (
           <div
             role="tablist"
-            aria-label="终端会话"
+            aria-label={tr("终端会话")}
             className="flex flex-1 items-center gap-0.5 min-w-0 overflow-x-auto"
             style={{ scrollbarWidth: "thin" }}
           >
             {terminalSessions.map((session, index) => {
               const selected = session.id === activeTerminalSessionId;
-              const label = terminalSessionLabel(session, index, terminalSessions.length);
+              const label = terminalSessionLabel(tr, session, index, terminalSessions.length);
               return (
                 <div
                   key={session.id}
@@ -1165,7 +1169,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
                     type="button"
                     role="tab"
                     aria-selected={selected}
-                    title={`${label} - ${terminalStatusLabel(session.status)}`}
+                    title={`${label} - ${terminalStatusLabel(tr, session.status)}`}
                     onClick={() => useAppStore.getState().setActiveTerminalSession(session.id)}
                     className="h-7 pl-2 pr-1 inline-flex items-center gap-1.5 border-0 bg-transparent cursor-pointer whitespace-nowrap"
                     style={{
@@ -1184,8 +1188,8 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
                   </button>
                   <button
                     type="button"
-                    title={`删除终端 ${label}`}
-                    aria-label={`删除终端 ${label}`}
+                    title={tr("删除终端 {v0}", { v0: label })}
+                    aria-label={tr("删除终端 {v0}", { v0: label })}
                     disabled={terminatingSessionIds.has(session.id)}
                     aria-busy={terminatingSessionIds.has(session.id)}
                     onClick={(event) => {
@@ -1208,8 +1212,8 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
         {liveUrl && (
           <button
             type="button"
-            title={`在预览面板中打开 ${liveUrl}`}
-            aria-label={`在预览面板中打开 ${liveUrl}`}
+            title={tr("在预览面板中打开 {v0}", { v0: liveUrl })}
+            aria-label={tr("在预览面板中打开 {v0}", { v0: liveUrl })}
             onClick={() => {
               openWebInBrowser(liveUrl);
             }}
@@ -1230,18 +1234,18 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
             <ExternalLink size={14} />
           </button>
         )}
-        <IconButton label="刷新终端列表" onClick={() => void refreshSessions()}>
+        <IconButton label={tr("刷新终端列表")} onClick={() => void refreshSessions()}>
           <RotateCcw size={14} />
         </IconButton>
-        <IconButton label="复制选中的终端文本" onClick={() => void copyTerminalSelection()}>
+        <IconButton label={tr("复制选中的终端文本")} onClick={() => void copyTerminalSelection()}>
           <Copy size={14} />
         </IconButton>
-        <IconButton label="清空终端" onClick={() => void clearActiveTerminal()}>
+        <IconButton label={tr("清空终端")} onClick={() => void clearActiveTerminal()}>
           <Square size={14} />
         </IconButton>
         {activeSession?.status === "exited" && (
           <IconButton
-            label="重新启动终端"
+            label={tr("重新启动终端")}
             onClick={() => void restartSession(activeSession.id)}
           >
             <RotateCcw size={14} />

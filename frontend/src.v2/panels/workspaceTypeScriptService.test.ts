@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import { URI } from "monaco-editor/base/common/uri.js";
 import { typescript as ts } from "monaco-editor/languages/features/typescript/lib/typescriptServices.js";
@@ -288,4 +289,42 @@ describe("workspace TypeScript service", () => {
     expect(await service.getSemanticDiagnostics(modelUri("src/main.ts", nextRoot))).toEqual([]);
     expect(await service.getScriptText(uri("src/greet.ts"))).toBeUndefined();
   });
+});
+
+
+it("requests only native reachable dependency files while preserving package metadata and ambient types", async () => {
+  const sources = [{ path: "src/main.ts", content: 'import { value } from "library"; const label: string = value; ambient;' }];
+  const bodies = new Map([
+    [modelUri("node_modules/library/package.json"), '{"name":"library","types":"dist/public.d.ts"}'],
+    [modelUri("node_modules/library/dist/public.d.ts"), 'export { value } from "./value";'],
+    [modelUri("node_modules/library/dist/value.d.ts"), 'export declare const value: number;'],
+    [modelUri("node_modules/unrelated/index.d.ts"), 'declare const poisoned: true;'],
+    [modelUri("node_modules/@types/ambient/index.d.ts"), 'declare const ambient: string;'],
+  ]);
+  let extras = indexExtras(sources);
+  const metadata = JSON.parse(extras[WORKSPACE_TYPESCRIPT_METADATA_URI].content);
+  extras[WORKSPACE_TYPESCRIPT_METADATA_URI].content = JSON.stringify({ ...metadata, dependencyFileNames: [...bodies.keys()] });
+  const service = new WorkspaceTypeScriptService({ getMirrorModels: () => [] }, {
+    compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.NodeJs }, extraLibs: extras,
+  });
+  const loaded = new Set<string>();
+  for (;;) {
+    const requested = (await service.getDependencyFileRequests()).filter((uri) => !loaded.has(uri));
+    if (!requested.length) break;
+    const nextExtras = { ...extras };
+    for (const uri of requested) {
+      expect(bodies.has(uri)).toBe(true);
+      loaded.add(uri);
+      nextExtras[uri] = { version: 1, content: bodies.get(uri)! };
+    }
+    extras = nextExtras;
+    await service.updateExtraLibs(extras);
+  }
+  expect(loaded.has(modelUri("node_modules/unrelated/index.d.ts"))).toBe(false);
+  expect(loaded.has(modelUri("node_modules/@types/ambient/index.d.ts"))).toBe(true);
+  const diagnostics = await service.getSemanticDiagnostics(modelUri("src/main.ts"));
+  expect(diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: 2322 })]));
+  expect(diagnostics.some((issue) => [2304, 2307].includes(issue.code))).toBe(false);
+  expect(await service.getDefinitionAtPosition(modelUri("src/main.ts"), sources[0].content.lastIndexOf("value") + 2))
+    .toEqual(expect.arrayContaining([expect.objectContaining({ fileName: modelUri("node_modules/library/dist/value.d.ts") })]));
 });

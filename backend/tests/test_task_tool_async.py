@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -12,7 +14,7 @@ from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
 from backend.agent.state import ToolCallRecord
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, LLMSettings, PermissionSettings, TokenBudget
 from backend.llm.base import LLMAdapter, LLMMessage, StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -28,7 +30,7 @@ from backend.tools.agent_tools import (
 from backend.tools.registry import ToolRegistry
 from backend.tools.subagent_context import AgentExecutionProfile
 from backend.tools.toolsets import SESSION_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
-from backend.tools.swarm_tools import SendMessageTool
+from backend.tools.swarm_tools import FollowupTaskTool, SendMessageTool
 from backend.hooks.manager import HookResult
 
 
@@ -38,11 +40,24 @@ def _subagent_fence(runtime: AgentRuntime, subagent_id: str) -> dict[str, object
     return {"agent_path": record.agent_path, "mailbox_epoch": record.mailbox_epoch}
 
 
+class _FixtureLLM(LLMAdapter):
+    def __init__(self) -> None:
+        self._settings = LLMSettings(provider="openai", model="fixture-worker", api_key="offline-fixture",
+            base_url="https://fixture.invalid/v1", wire_api="chat", native_compaction=False, context_window=1_000_000)
+
+    async def stream_chat(self, messages, tools=None, metadata=None):
+        yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="fixture worker result", phase="final_answer")
+        yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    async def simple_chat(self, messages, **kwargs):
+        return "fixture worker result"
+
+
 def _task_tool() -> TaskTool:
     return TaskTool(
-        llm_provider=object(),
+        llm_provider=_FixtureLLM(),
         tool_registry_provider=ToolRegistry(),
-        artifact_store=object(),
+        artifact_store=ArtifactStore(storage_dir=Path(os.environ["MINICODE_STATE_ROOT"]) / "fixture-artifacts"),
         permission_checker_provider=lambda: PermissionChecker(PermissionSettings()),
     )
 
@@ -304,7 +319,7 @@ def test_parallel_task_can_run_explicitly_in_background(monkeypatch, tmp_path):
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-        ctx = ToolExecutionContext(
+        ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
             permission=PermissionContext(),
             session_id="session-parallel-default",
             task_id="parent-task",
@@ -323,7 +338,7 @@ def test_parallel_task_can_run_explicitly_in_background(monkeypatch, tmp_path):
             context=ctx,
         )
 
-        assert result.status == "running"
+        assert result.status == "accepted"
         assert "background subagents" in result.content
         await asyncio.wait_for(started.wait(), timeout=1)
         release.set()
@@ -349,7 +364,7 @@ def test_single_read_only_task_can_run_explicitly_in_background(monkeypatch, tmp
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-        ctx = ToolExecutionContext(
+        ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
             permission=PermissionContext(),
             session_id="session-single-default",
             task_id="parent-task",
@@ -370,7 +385,7 @@ def test_single_read_only_task_can_run_explicitly_in_background(monkeypatch, tmp
             timeout=0.25,
         )
 
-        assert result.status == "running"
+        assert result.status == "accepted"
         subagent_id = _subagent_id_from(result.content)
         await asyncio.wait_for(started.wait(), timeout=1)
         assert runtime.get_subagent_snapshot(subagent_id, include_result=False)["status"] == "running"
@@ -820,6 +835,9 @@ def test_subagent_approval_bridge_stops_at_parent_turn_deadline(monkeypatch, tmp
         decisions: list[dict[str, str]] = []
         parent_ids: list[str] = []
         bridge_wait_started: list[float] = []
+        bridge_decided_at: list[float] = []
+        bridge_started = asyncio.Event()
+        bridge_decided = asyncio.Event()
 
         async def emit(_event_type: str, _data: dict[str, Any]) -> None:
             return None
@@ -831,7 +849,10 @@ def test_subagent_approval_bridge_stops_at_parent_turn_deadline(monkeypatch, tmp
         async def fake_run_agent_loop(**kwargs):
             context.deadline_monotonic = time.monotonic() + 0.02
             bridge_wait_started.append(time.monotonic())
+            bridge_started.set()
             decisions.append(await kwargs["approval_handler"]("call_before_bridge"))
+            bridge_decided_at.append(time.monotonic())
+            bridge_decided.set()
             yield AgentEvent.agent_message_completed(
                 "Approval was rejected at the parent deadline.",
                 source="model_final",
@@ -849,17 +870,15 @@ def test_subagent_approval_bridge_stops_at_parent_turn_deadline(monkeypatch, tmp
             metadata={"run_id": "parent-run"},
             run_context=RunContext(agent_runtime=runtime),
         )
-        result = await asyncio.wait_for(
-            _task_tool()._run_single_subtask(
-                description="approval bridge deadline",
-                prompt="request approval",
-                agent_type="general-purpose",
-                context=context,
-            ),
-            timeout=1.0,
-        )
+        child = asyncio.create_task(_task_tool()._run_single_subtask(
+            description="approval bridge deadline", prompt="request approval",
+            agent_type="general-purpose", context=context,
+        ))
+        await asyncio.wait_for(bridge_started.wait(), 10)
+        await asyncio.wait_for(bridge_decided.wait(), 1)
+        result = await child
 
-        assert time.monotonic() - bridge_wait_started[0] < 0.5
+        assert bridge_decided_at[0] - bridge_wait_started[0] < 0.5
         assert result.status == "partial"
         assert decisions and decisions[0]["action"] == "reject"
         assert "parent turn's time budget expired" in decisions[0]["guidance"]
@@ -874,6 +893,8 @@ def test_subagent_parent_approval_answer_stops_at_parent_turn_deadline(monkeypat
         parent_ids: list[str] = []
         approval_started_at: list[float] = []
         approval_decided_at: list[float] = []
+        approval_started = asyncio.Event()
+        approval_decided = asyncio.Event()
         release = asyncio.Event()
 
         async def emit(event_type: str, _data: dict[str, Any]) -> None:
@@ -883,6 +904,7 @@ def test_subagent_parent_approval_answer_stops_at_parent_turn_deadline(monkeypat
         async def resistant_approve(tool_call_id: str) -> dict[str, str]:
             parent_ids.append(tool_call_id)
             approval_started_at.append(time.monotonic())
+            approval_started.set()
             try:
                 await release.wait()
             except asyncio.CancelledError:
@@ -899,6 +921,7 @@ def test_subagent_parent_approval_answer_stops_at_parent_turn_deadline(monkeypat
                 await kwargs["approval_handler"]("call_waiting_for_parent")
             )
             approval_decided_at.append(time.monotonic())
+            approval_decided.set()
             yield AgentEvent.agent_message_completed(
                 "Approval timed out without executing the command.",
                 source="model_final",
@@ -916,16 +939,16 @@ def test_subagent_parent_approval_answer_stops_at_parent_turn_deadline(monkeypat
             metadata={"run_id": "parent-run"},
             run_context=RunContext(agent_runtime=runtime),
         )
-        result = await asyncio.wait_for(
-            _task_tool()._run_single_subtask(
-                description="parent approval answer deadline",
-                prompt="request approval",
-                agent_type="general-purpose",
-                context=context,
-            ),
-            timeout=1.0,
-        )
-        release.set()
+        child = asyncio.create_task(_task_tool()._run_single_subtask(
+            description="parent approval answer deadline", prompt="request approval",
+            agent_type="general-purpose", context=context,
+        ))
+        try:
+            await asyncio.wait_for(approval_started.wait(), 10)
+            await asyncio.wait_for(approval_decided.wait(), 1)
+            result = await child
+        finally:
+            release.set()
         await asyncio.sleep(0.01)
 
         assert approval_decided_at[0] - approval_started_at[0] < 0.5
@@ -990,7 +1013,7 @@ def test_task_tool_emits_prompt_cache_fork_diagnostic_from_real_child_loop(tmp_p
     asyncio.run(_test_task_tool_emits_prompt_cache_fork_diagnostic_from_real_child_loop(tmp_path))
 
 
-def test_send_message_resumes_completed_agent_with_canonical_checkpoint(
+def test_followup_task_resumes_completed_agent_with_canonical_checkpoint(
     tmp_path,
     monkeypatch,
 ):
@@ -998,7 +1021,7 @@ def test_send_message_resumes_completed_agent_with_canonical_checkpoint(
     asyncio.run(_test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path))
 
 
-def test_send_message_resumes_agent_after_parent_turn_handoff(tmp_path, monkeypatch):
+def test_followup_task_resumes_agent_after_parent_turn_handoff(tmp_path, monkeypatch):
     monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
     asyncio.run(_test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path, handoff=True))
 
@@ -1098,9 +1121,21 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         runtime.start_run(run_id="later-parent", conversation_id="conversation-1")
         parent_context.metadata["run_id"] = "later-parent"
 
-    resumed = await SendMessageTool().execute(
+    queued = await SendMessageTool().execute(
+        {"recipient": subagent_id, "message": "Retain this queued detail until the next real turn."},
+        context=parent_context,
+    )
+    assert not queued.is_error
+    assert runtime.get_subagent(subagent_id).status == "completed"
+    assert runtime.get_subagent(subagent_id).mailbox_epoch == first_epoch
+    assert len(llm.calls) == 1
+    pending = runtime.list_swarm_messages(participant_id=subagent_id, conversation_id="conversation-1")
+    assert pending[-1].delivery_mode == "queue_only"
+    assert pending[-1].recipient_mailbox_epoch == first_epoch + 1
+
+    resumed = await FollowupTaskTool().execute(
         {
-            "recipient": subagent_id,
+            "target": subagent_id,
             "message": "Now check the recovery edge case.",
         },
         context=parent_context,
@@ -1126,7 +1161,8 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     resumed_messages = llm.calls[1]
     assert any("Inspect the parser and report once." in text for text in resumed_messages)
     assert resumed_messages.count("initial child result") == 1
-    assert resumed_messages[-1].endswith("Now check the recovery edge case.")
+    assert sum("Now check the recovery edge case." in message for message in resumed_messages) == 1
+    assert sum("Retain this queued detail until the next real turn." in message for message in resumed_messages) == 1
     assert "You are a general-purpose agent" not in resumed_messages[-1]
 
     final_transcript = runtime.load_agent_transcript(subagent_id)
@@ -1146,9 +1182,9 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     runtime._registry.discard(resumed_run.run_id, kind="run")
     assert runtime.get_subagent(subagent_id) is None
 
-    resumed_from_transcript = await SendMessageTool().execute(
+    resumed_from_transcript = await FollowupTaskTool().execute(
         {
-            "recipient": subagent_id,
+            "target": subagent_id,
             "message": "Finally check the checkpoint recovery path.",
         },
         context=parent_context,
@@ -1460,7 +1496,7 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
 
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-    ctx = ToolExecutionContext(
+    ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
         permission=PermissionContext(),
         session_id="session-1",
         task_id="parent-task",
@@ -1503,15 +1539,22 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     assert [item["user_visible"] for item in narration] == [True, False, True, False]
     assert not narration[1].get("detail")
     assert narration[1]["current_activity"] == "inspect files"
-    snapshots = [item["transcript_snapshot"] for item in narration]
-    assert [item["seq"] for item in snapshots] == sorted({item["seq"] for item in snapshots})
-    def process_rows(snapshot):
-        return [block for message in snapshot["messages"] for block in message.get("blocks", []) if block.get("type") == "process"]
-    assert process_rows(snapshots[0])[0]["id"] == "process-1"
-    assert process_rows(snapshots[0])[0]["status"] == "running"
-    assert process_rows(snapshots[1]) == []
-    assert [row["id"] for row in process_rows(snapshots[2])] == ["process-2"]
-    assert [row["id"] for row in process_rows(snapshots[3])] == ["process-2"]
+    deltas = [item["transcript_delta"] for item in narration]
+    assert [item["seq"] for item in deltas] == sorted({item["seq"] for item in deltas})
+    process_changes = [[event["payload"] for event in delta["events"]
+        if event["event_type"] == "system" and event["payload"].get("transcript_only")]
+        for delta in deltas]
+    assert process_changes[0][0]["item_id"] == "process-1"
+    assert process_changes[0][0]["status"] == "running"
+    assert process_changes[1][0]["item_id"] == "process-1" and process_changes[1][0]["status"] == "retracted"
+    assert process_changes[2][0]["item_id"] == "process-2"
+    assert process_changes[3][0]["item_id"] == "process-private"
+    assert process_changes[3][0]["visibility"] == "debug"
+    assert process_changes[3][0]["content"] == "Private provider bookkeeping"
+    terminal = next(data for kind, data in events if kind == "subagent.done")
+    visible_process = [block for message in terminal["transcript_snapshot"]["messages"]
+        for block in message.get("blocks", []) if block["type"] == "process"]
+    assert [row["id"] for row in visible_process] == ["process-2"]
     mailbox_events = [data for event_type, data in events if event_type == "subagent.event"]
     assert len(mailbox_events) == 1
     assert mailbox_events[0]["event"]["message"]["content"] == "FACT_1=value-17"
@@ -1657,7 +1700,7 @@ def test_subagent_push_transcript_is_monotonic_and_terminally_complete(
             description="inspect transcript",
             prompt="Inspect README.md and report.",
             agent_type="explore",
-            context=ToolExecutionContext(
+            context=ToolExecutionContext(tool_call_id="fixture-spawn",
                 permission=PermissionContext(),
                 session_id="session-transcript",
                 task_id="parent-task",
@@ -1668,19 +1711,26 @@ def test_subagent_push_transcript_is_monotonic_and_terminally_complete(
         )
 
         assert result.status == "completed"
-        progress = [
-            data for event_type, data in events
-            if event_type == "subagent.progress" and "transcript_snapshot" in data
-        ]
+        progress = [data for event_type, data in events if event_type == "subagent.progress"
+            and ("transcript_snapshot" in data or "transcript_delta" in data)]
         done = [data for event_type, data in events if event_type == "subagent.done"]
         assert progress
         assert len(done) == 1
 
-        snapshots = [item["transcript_snapshot"] for item in progress]
+        snapshots = [item["transcript_snapshot"] for item in progress if "transcript_snapshot" in item]
         snapshots.append(done[0]["transcript_snapshot"])
-        seqs = [snapshot["seq"] for snapshot in snapshots]
+        seqs = [item["transcript_snapshot"]["seq"] if "transcript_snapshot" in item else item["transcript_delta"]["seq"]
+            for item in progress] + [done[0]["transcript_snapshot"]["seq"]]
         assert seqs == sorted(seqs)
         assert len(set(seqs)) == len(seqs)
+        cursor = 0
+        for item in progress:
+            if "transcript_snapshot" in item:
+                cursor = item["transcript_snapshot"]["seq"]
+            else:
+                delta = item["transcript_delta"]
+                assert delta["base_seq"] == cursor and delta["seq"] > cursor
+                cursor = delta["seq"]
 
         running_tool = next(
             block["record"]
@@ -1699,15 +1749,11 @@ def test_subagent_push_transcript_is_monotonic_and_terminally_complete(
         )
         assert finished_tool["status"] == "success"
         assert finished_tool["outputPreview"] == "README contents"
-        live_answer = next(
-            block
-            for snapshot in snapshots[:-1]
-            for message in snapshot["messages"]
-            for block in message.get("blocks", [])
-            if block.get("type") == "text" and block.get("is_streaming") is True
-        )
-        assert live_answer["content"] == "Final"
-        assert live_answer["source"] == "model_final"
+        live_answer = next(event["payload"] for item in progress if "transcript_delta" in item
+            for event in item["transcript_delta"]["events"] if event["event_type"] == "progress"
+            and event["payload"].get("item_id") == "child-answer" and "content_delta" in event["payload"])
+        assert live_answer["content_delta"] == "Final" and live_answer["content_offset"] == 0
+        assert live_answer["source"] == "model_final" and live_answer["status"] == "running"
         assert any(
             message.get("role") == "assistant"
             and message.get("content") == "Final child answer"
@@ -1858,7 +1904,7 @@ async def _test_task_tool_can_start_background_subagent(monkeypatch, tmp_path):
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
 
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-    ctx = ToolExecutionContext(
+    ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
         permission=PermissionContext(),
         session_id="session-1",
         task_id="parent-task",
@@ -1880,7 +1926,7 @@ async def _test_task_tool_can_start_background_subagent(monkeypatch, tmp_path):
     )
 
     subagent_id = _subagent_id_from(result.content)
-    assert result.status == "running"
+    assert result.status == "accepted"
     assert "task_stop" in result.content
 
     await asyncio.wait_for(started.wait(), timeout=1)
@@ -2016,7 +2062,7 @@ async def _test_parent_run_cancels_background_subagent(monkeypatch, tmp_path):
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
 
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-    ctx = ToolExecutionContext(
+    ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
         permission=PermissionContext(),
         session_id="session-1",
         task_id="parent-task",
@@ -2029,6 +2075,7 @@ async def _test_parent_run_cancels_background_subagent(monkeypatch, tmp_path):
             "description": "slow check",
             "prompt": "slow check",
             "run_in_background": True,
+            "cancel_with_parent": True,
         },
         context=ctx,
     )
@@ -2070,7 +2117,7 @@ def test_task_tool_queues_independent_background_subagents_at_global_limit(monke
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-        ctx = ToolExecutionContext(
+        ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
             permission=PermissionContext(),
             metadata={"run_id": "parent-run"},
             run_context=RunContext(agent_runtime=runtime),
@@ -2084,7 +2131,7 @@ def test_task_tool_queues_independent_background_subagents_at_global_limit(monke
                 "run_in_background": True,
             }, context=ctx))
 
-        assert all(result.status == "running" for result in results)
+        assert all(result.status == "accepted" for result in results)
         await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         snapshot = runtime.list_runs(include_subagents=True)["subagents"]
         assert len([
@@ -2095,6 +2142,12 @@ def test_task_tool_queues_independent_background_subagents_at_global_limit(monke
             item for item in snapshot
             if item.get("status") == "pending" and item.get("background_task") == "queued"
         ]) == 2
+        for item in snapshot:
+            if item["status"] == "pending":
+                detail = runtime.get_subagent_snapshot(item["subagent_id"], include_result=False)
+                assert item["started_at"] == detail["started_at"] == 0
+                assert item["background_task"] == detail["background_task"] == "queued"
+                assert (item["agent_path"], item["mailbox_epoch"], item["accepted_at"]) == (detail["agent_path"], detail["mailbox_epoch"], detail["accepted_at"])
 
         release.set()
         for _ in range(500):
@@ -2142,7 +2195,7 @@ def test_single_foreground_subagent_waits_for_global_worker_slot(monkeypatch, tm
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-        ctx = ToolExecutionContext(
+        ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
             permission=PermissionContext(),
             metadata={"run_id": "parent-run"},
             run_context=RunContext(agent_runtime=runtime),
@@ -2157,7 +2210,7 @@ def test_single_foreground_subagent_waits_for_global_worker_slot(monkeypatch, tm
                 },
                 context=ctx,
             )
-            assert result.status == "running"
+            assert result.status == "accepted"
 
         await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         foreground_task = asyncio.create_task(
@@ -2216,6 +2269,86 @@ def test_terminal_subagent_commit_wakes_global_worker_slot_waiter(tmp_path):
     asyncio.run(run())
 
 
+def test_inventory_and_detail_keep_one_worker_state_without_inventory_store_reads(tmp_path, monkeypatch):
+    async def run() -> None:
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+        runtime.start_run(run_id="projection-parent", conversation_id="projection-owner")
+        runtime.start_run(run_id="other-parent", conversation_id="other-owner")
+        runtime.start_subagent(subagent_id="other-child", parent_run_id="other-parent", agent_type="explore", pending=True)
+        start, finish, cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        running, terminal = asyncio.Event(), asyncio.Event()
+        child_id = "projection-child"
+
+        async def worker():
+            await start.wait()
+            record = runtime.start_subagent(subagent_id=child_id, parent_run_id="projection-parent", agent_type="explore", background=True)
+            # Acquiring this worker's resources is not the execution milestone.
+            assert record.public_dict()["started_at"] == 0
+            runtime.update_subagent_resume_config(child_id,
+                {**record.resume_config, "execution_started_at": int(time.time() * 1000)},
+                agent_path=record.agent_path, mailbox_epoch=record.mailbox_epoch)
+            running.set()
+            await finish.wait()
+            fence = _subagent_fence(runtime, child_id)
+            runtime.store_subagent_result(child_id, status="completed", content="Projection result", **fence)
+            runtime.complete_subagent(child_id, "completed", **fence)
+            terminal.set()
+            await cleanup.wait()
+
+        task = asyncio.create_task(worker())
+        runtime.register_subagent_task(child_id, task, parent_run_id="projection-parent", parent_tool_call_id="projection-call",
+            agent_type="explore", background=True, pending=True, input_prompt="Original queued input")
+        runtime.start_subagent(subagent_id="projection-grandchild", parent_run_id=child_id, agent_type="explore", pending=True)
+        original = runtime.get_subagent_snapshot(child_id, include_result=False)
+        identity = {key: original[key] for key in ("subagent_id", "agent_path", "mailbox_epoch", "accepted_at")}
+        reads = []
+        read_result = runtime._swarm_store.get_subagent_result
+
+        def counted_result(subagent_id):
+            reads.append(subagent_id)
+            return read_result(subagent_id)
+
+        monkeypatch.setattr(runtime._swarm_store, "get_subagent_result", counted_result)
+
+        def compare(status, background_task):
+            reads.clear()
+            inventory = runtime.list_runs(conversation_id="projection-owner", include_subagents=True)["subagents"]
+            assert reads == []
+            assert {row["subagent_id"] for row in inventory} == {child_id, "projection-grandchild"}
+            listed = next(row for row in inventory if row["subagent_id"] == child_id)
+            detail = runtime.get_subagent_snapshot(child_id, include_result=False)
+            assert {key: listed[key] for key in identity} == {key: detail[key] for key in identity} == identity
+            assert listed["status"] == detail["status"] == status
+            assert listed["background_task"] == detail["background_task"] == background_task
+            assert listed.get("result_available", False) == detail["result_available"]
+            return detail
+
+        try:
+            queued = compare("pending", "queued")
+            assert queued["started_at"] == 0
+            start.set()
+            await running.wait()
+            assert compare("running", "running")["started_at"] > 0
+            finish.set()
+            await terminal.wait()
+            assert compare("completed", "running")["result_available"] is True
+            cleanup.set()
+            await task
+            compare("completed", "done")
+            assert runtime.release_subagent_task(child_id, expected_task=task)
+            assert "background_task" not in runtime.get_subagent_snapshot(child_id, include_result=False)
+            listed = next(row for row in runtime.list_runs(conversation_id="projection-owner", include_subagents=True)["subagents"] if row["subagent_id"] == child_id)
+            assert "background_task" not in listed
+        finally:
+            start.set()
+            finish.set()
+            cleanup.set()
+            await task
+            runtime.close(release_lease=True)
+
+    asyncio.run(run())
+
+
 def test_parallel_background_batch_runs_eight_with_four_workers_and_can_cancel_queued(monkeypatch, tmp_path):
     async def run() -> None:
         release = asyncio.Event()
@@ -2240,7 +2373,7 @@ def test_parallel_background_batch_runs_eight_with_four_workers_and_can_cancel_q
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-        ctx = ToolExecutionContext(
+        ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
             permission=PermissionContext(),
             metadata={"run_id": "parent-run"},
             run_context=RunContext(agent_runtime=runtime),
@@ -2270,6 +2403,11 @@ def test_parallel_background_batch_runs_eight_with_four_workers_and_can_cancel_q
             if item.get("status") == "pending" and item.get("background_task") == "queued"
         ]
         assert len(queued) == 4
+        for item in queued:
+            detail = runtime.get_subagent_snapshot(item["subagent_id"], include_result=False)
+            assert item["started_at"] == detail["started_at"] == 0
+            assert item["background_task"] == detail["background_task"] == "queued"
+            assert (item["agent_path"], item["mailbox_epoch"], item["accepted_at"]) == (detail["agent_path"], detail["mailbox_epoch"], detail["accepted_at"])
 
         queued_id = str(queued[-1]["subagent_id"])
         queued_status = await TaskStatusTool().execute({"subagent_id": queued_id}, context=ctx)
@@ -2327,7 +2465,7 @@ async def _test_task_tool_can_start_parallel_background_subagents(monkeypatch, t
     monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
 
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
-    ctx = ToolExecutionContext(
+    ctx = ToolExecutionContext(tool_call_id="fixture-spawn",
         permission=PermissionContext(),
         session_id="session-1",
         task_id="parent-task",
@@ -2356,7 +2494,7 @@ async def _test_task_tool_can_start_parallel_background_subagents(monkeypatch, t
     )
 
     subagent_ids = _subagent_ids_from(result.content)
-    assert result.status == "running"
+    assert result.status == "accepted"
     assert len(subagent_ids) == 2
     await asyncio.wait_for(all_started.wait(), timeout=1)
     assert any("inspect alpha" in prompt for prompt in prompts)

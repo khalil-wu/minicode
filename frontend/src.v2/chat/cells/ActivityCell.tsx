@@ -1,3 +1,5 @@
+import { GuardianReviewGlyph, GuardianToolReviews } from "./GuardianReviewCell";
+import { GuardianPatchCell } from "./GuardianPatchCell";
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil } from "lucide-react";
 import { Blocks } from "../../lib/icons";
@@ -58,12 +60,14 @@ import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "../tool-calls/renderers/ToolTextRenderer";
 import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { useProcessDisclosure } from "../../agent-loop/components/useProcessDisclosure";
+import { useI18n } from "../../i18n";
 
 /**
  * ActivityCell — compact action + original target, with evidence on disclosure.
  *
- * Success needs no second status label. Failures, partial completion,
- * interruptions and approvals remain visible without opening the details.
+ * Tool failures and partial results retain their actual evidence on disclosure.
+ * The compact row only shows the operation and its target.
  */
 export const ActivityCell = memo(function ActivityCell({
   cell,
@@ -76,6 +80,7 @@ export const ActivityCell = memo(function ActivityCell({
   conversationId?: string;
   workspaceRoot?: string;
 }) {
+  const { t } = useI18n();
   const developerMode = useAppStore((s) => s.viewMode === "verbose");
   const activeWorkspace = useAppStore((s) => s.workingDirectory);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
@@ -85,6 +90,7 @@ export const ActivityCell = memo(function ActivityCell({
   const browserRecords = records.filter(isBrowserRecord);
   const isBrowserAction = browserRecords.length > 0;
   const isFileChange = cell.activityKind === "fileChange";
+  const guardianReviewing = cell.automaticApprovalReviews?.some(review => review.status === "in_progress") === true;
   const isRead = cell.activityKind === "fileRead";
   const isWorkspaceSearch = cell.activityKind === "workspaceSearch";
   const isWorkspaceList = cell.activityKind === "workspaceList";
@@ -98,7 +104,7 @@ export const ActivityCell = memo(function ActivityCell({
   const status = activityCellStatus(presentationStatus);
   const isRunning = hasRecords ? records.some(isToolCallExecuting) : isRunningCellStatus(status);
   const fileChangeStats = useMemo(() => {
-    if (!isFileChange) return undefined;
+    if (!isFileChange || !records.some(record => record.diff)) return undefined;
     return records.reduce((stats, record) => {
       if (!record.diff) return stats;
       const diff = getToolDiffStats(record.diff);
@@ -111,7 +117,7 @@ export const ActivityCell = memo(function ActivityCell({
   const shouldAutoExpand = !cell.collapsed;
   const [expansionPreference, setIsExpanded, userToggled] = useTranscriptReadingPreference(`activity:${cell.id}`, shouldAutoExpand);
   const isExpanded = useTranscriptSearch() || expansionPreference;
-  const [copiedPatch, setCopiedPatch] = useState<string | null>(null);
+  const disclosure = useProcessDisclosure(isExpanded);
   const previousId = useRef(cell.id);
 
   useEffect(() => {
@@ -122,23 +128,15 @@ export const ActivityCell = memo(function ActivityCell({
 
   const isFailed = presentationStatus === "failed" || presentationStatus === "interrupted";
   const isPartial = presentationStatus === "partial";
-  const needsApproval = records.some(isToolCallAwaitingApproval);
-  const attentionLabel = needsApproval ? "等待批准"
-    : presentationStatus === "interrupted" ? "已中断"
-    : isPartial ? "部分完成"
-    : [
-    records.some((record) => record.status === "cancelled") ? "已中断" : "",
-    records.some((record) => record.status === "failed")
-      || (presentationStatus === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "失败" : "",
-    records.some((record) => record.status === "blocked") ? "已阻止" : "",
-    records.some((record) => record.status === "timeout") ? "超时" : "",
-    isPartial || records.some((record) => record.status === "partial") ? "部分完成" : "",
-  ].filter(Boolean).join(" · ");
+  const needsApproval = !guardianReviewing && records.some(isToolCallAwaitingApproval);
+  const attentionLabel = needsApproval ? t("等待批准")
+    : presentationStatus === "interrupted" ? t("已中断")
+    : records.some((record) => record.status === "cancelled") ? t("已中断") : "";
   const recordDetails = useMemo(
-    () => hasRecords
+    () => hasRecords && cell.outputText === undefined
       ? describeRecordDetails(records.filter(record => record.name !== "update_plan" && !isUserQuestionRecord(record) && (!isBrowserRecord(record) || records.length > 1)), developerMode)
       : [],
-    [records, developerMode, hasRecords],
+    [records, developerMode, hasRecords, cell.outputText],
   );
   const planRecords = useMemo(
     () => records.filter((record) => planUpdateSteps(record).length > 0),
@@ -160,7 +158,7 @@ export const ActivityCell = memo(function ActivityCell({
     }
     return [...images.values()];
   }, [records, cell.artifacts]);
-  const outputPreview = getOutputPreview(nonPlanRecords);
+  const outputPreview = cell.outputText ?? getOutputPreview(nonPlanRecords);
   const showOutputPreview = !isInlineAction
     && !isFileChange
     && !isFailed
@@ -178,11 +176,15 @@ export const ActivityCell = memo(function ActivityCell({
       return [{ record, target: showTargets ? target : "", output: visibleOutput }];
     });
   }, [isInlineAction, records]);
-  const name = readableTimelineTitle(cell);
+  const canonicalQuestions = records.length > 0 && records.every(record => record.name === "request_user_input");
+  const questionCount = canonicalQuestions ? records.reduce((count, record) => count + (Array.isArray(record.args.questions) ? record.args.questions.length : 0), 0) : 0;
+  const name = canonicalQuestions ? isRunning || presentationStatus === "pending" ? t("正在提问")
+    : records.some(record => ["failed", "blocked", "timeout"].includes(record.status)) ? t("提问")
+    : t("已询问 {v0} 个问题", { v0: questionCount }) : readableTimelineTitle(cell, t);
   const concreteToolTarget = records.length === 1
     ? recordInputTarget(records[0])
     : isBrowserAction ? [...new Set(browserRecords.map(recordInputTarget).filter(Boolean))].join(", ") : "";
-  const detailValue = hasRecords ? concreteToolTarget : cell.subtitle?.trim();
+  const detailValue = cell.outputText !== undefined ? "" : hasRecords ? concreteToolTarget : cell.subtitle?.trim();
   const detail = detailValue === name ? undefined : detailValue;
   const visibleRecordDetails = recordDetails.filter((row) => row.label !== name || row.target !== (detail || "") || row.lineInfo || row.count > 1);
   const showDetailRows = !isFileChange && !isInlineAction
@@ -193,6 +195,7 @@ export const ActivityCell = memo(function ActivityCell({
     [isFileChange, records],
   );
   const fetchBodyRecords = records.filter((record) => isWebFetchRecord(record) && record.artifactId);
+  const fullOutputRecords = records.filter((record) => record.artifactId && !recordHasImageArtifact(record) && !isWebFetchRecord(record));
   const browserDetails = browserRecords.flatMap((record) => {
     const output = getRecordOutputPreview(record);
     const rawError = purifyToolErrorText(record.stderrPreview || record.developerDetail || record.errorInfo?.developer_detail
@@ -209,7 +212,9 @@ export const ActivityCell = memo(function ActivityCell({
     const error = record.providerErrorType
       ? normalizeAgentErrorMessage(rawError, { includeProviderDetails: false })
       : normalizeToolErrorMessage(rawError);
-    return error.trim() ? [{ error, label: readableRecordLabel(record), record }] : [];
+    const originalDetail = normalizeToolErrorMessage(getRecordOutputPreview(record) || record.stderrPreview || record.developerDetail || record.errorInfo?.developer_detail || "");
+    const detail = originalDetail.trim() !== error.trim() ? originalDetail : "";
+    return error.trim() ? [{ error, detail, label: readableRecordLabel(record), record }] : [];
   });
   const hasChangeEvidence = isFileChange && changeDetails.length > 0;
   const hasInlineEvidence = isInlineAction && inlineDisclosureRecords.length > 0;
@@ -218,7 +223,8 @@ export const ActivityCell = memo(function ActivityCell({
     && !isInlineAction
     && (showDetailRows || showOutputPreview || questionRecords.length > 0);
   const progressError = cell.progress?.errorMessage?.trim();
-  const hasErrorEvidence = (!hasInlineEvidence && errorDetails.length > 0) || Boolean(progressError);
+  const progressDetail = cell.progress?.detail?.trim();
+  const hasErrorEvidence = (!hasInlineEvidence && errorDetails.length > 0) || Boolean(progressError || (isFailed && progressDetail));
   const hasSkillEvidence = Boolean(cell.skill?.reason || cell.skill?.content);
   const glyphKind = activityGlyphKind(cell.activityKind, records[0]);
   const useToolIcon = !isFileChange && cell.activityKind !== "genericTool";
@@ -248,11 +254,11 @@ export const ActivityCell = memo(function ActivityCell({
           0,
         ) || undefined,
   );
-  const canToggle = hasChangeEvidence || hasInlineEvidence || hasArtifactEvidence
+  const canToggle = Boolean(cell.automaticApprovalReviews?.length) || hasChangeEvidence || hasInlineEvidence || hasArtifactEvidence
     || hasGenericEvidence || hasErrorEvidence || hasSkillEvidence
     || fetchBodyRecords.length > 0 || browserDetails.length > 0
+    || fullOutputRecords.length > 0
     || Boolean(hasRecords && settledDuration);
-  const showUnifiedEvidence = isExpanded && canToggle;
 
   const cellStateClass = isRunning
     ? "activity-cell-running"
@@ -264,10 +270,48 @@ export const ActivityCell = memo(function ActivityCell({
         ? "activity-cell-partial"
         : "activity-cell-completed";
 
-  if (isProviderRequest && !progressError) return null;
+  if (isProviderRequest && !progressError && !(isFailed && progressDetail)) return null;
   if (hasRecords && records.every(isCodeModeRecord) && !records.some(record =>
     getRecordOutputText(record).trim() || record.userSummary || record.errorInfo?.user_message || record.errorInfo?.user_summary
   )) return null;
+
+  if (cell.outputText !== undefined) {
+    const outputLabel = presentationStatus === "interrupted" ? t("代码执行已中断") : cell.title;
+    return <div className={`activity-cell activity-cell-code-output ${cellStateClass}`} data-status={presentationStatus}>
+      <button type="button" className="activity-cell-main-button" aria-label={t(isExpanded ? "收起活动详情" : "展开活动详情")}
+        aria-expanded={isExpanded} onClick={() => { userToggled.current = true; setIsExpanded(value => !value); }}>
+        <span>{outputLabel}</span>{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+      </button>
+      {disclosure.mounted && <div ref={disclosure.element} aria-hidden={!isExpanded} style={{ pointerEvents: isExpanded ? "auto" : "none", overflow: "hidden" }}><pre className="activity-cell-expanded activity-cell-output-pre">{cell.outputText}</pre></div>}
+      {isExpanded && records.filter(record => record.artifactId).map(record => <button key={record.id} type="button" className="activity-cell-evidence-button" onClick={() => openArtifactPreview({
+        artifactId: record.artifactId!, kind: record.artifactKind || "text", mediaType: record.artifactMediaType,
+        name: t("完整输出"), conversationId: ownerConversationId,
+      })}>{t("查看完整输出")}</button>)}
+      {isExpanded && imageArtifacts.map(artifact => <ToolArtifactImage key={artifact.artifactId} artifact={artifact} conversationId={ownerConversationId} />)}
+    </div>;
+  }
+
+  // Codex user-input-response is a standalone question disclosure, while its
+  // pending userInput item is absent from the ordinary tool-activity list.
+  if (canonicalQuestions) {
+    const completed = !isRunning && !["pending", "pending_approval"].includes(presentationStatus);
+    return <div className="activity-cell activity-cell-user-input" data-status={presentationStatus}>
+      <div className="activity-cell-line">
+        {completed ? <button type="button" className="activity-cell-main-button" aria-expanded={isExpanded}
+          aria-label={name} onClick={() => { userToggled.current = true; setIsExpanded(value => !value); }}>
+          <span className="activity-cell-name">{name}</span>{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button> : <span className="activity-cell-name" data-processing="true">{name}</span>}
+      </div>
+      {completed && disclosure.mounted && <div ref={disclosure.element} aria-hidden={!isExpanded}
+        style={{ pointerEvents: isExpanded ? "auto" : "none", overflow: "hidden" }} className="activity-cell-expanded">
+        {questionRecords.map(record => <UserQuestionResult key={record.id} record={record} text={getRecordOutputText(record)} />)}
+      </div>}
+    </div>;
+  }
+
+  if (isFileChange && cell.guardianPatchFiles) {
+    return <GuardianPatchCell cell={cell} workspaceRoot={workingDirectory} />;
+  }
 
   return (
     <div
@@ -279,10 +323,11 @@ export const ActivityCell = memo(function ActivityCell({
       <div className="activity-cell-line">
         <button
           type="button"
-          aria-label={canToggle ? (isExpanded ? "收起活动详情" : "展开活动详情") : undefined}
+          aria-label={canToggle ? t(isExpanded ? "收起活动详情" : "展开活动详情") : undefined}
           aria-expanded={canToggle ? isExpanded : undefined}
           disabled={!canToggle}
           data-clickable={canToggle}
+          data-processing={isRunning && !isProviderRequest ? "true" : undefined}
           className="activity-cell-main-button"
           onClick={() => {
             if (!canToggle) return;
@@ -319,7 +364,7 @@ export const ActivityCell = memo(function ActivityCell({
           {isFileChange ? (
             <>
               <span className="activity-cell-name" data-failed={isFailed}>{name}</span>
-              {fileChangeTarget && <span className="activity-cell-file-change-target" title={fileChangeTarget}>{fileChangeTarget}</span>}
+              {fileChangeTarget && <span className="activity-cell-file-change-target" title={fileChangeTarget}>{fileLabel(fileChangeTarget)}</span>}
               {fileChangeStats && (
                 <span className="activity-cell-file-change-stats">
                   <RollingNumber value={fileChangeStats?.plus ?? 0} prefix="+" className="activity-cell-added" />
@@ -332,13 +377,13 @@ export const ActivityCell = memo(function ActivityCell({
               className="activity-cell-name"
               data-failed={isFailed}
             >
-              {progressError && isProviderRequest ? "错误详情" : name}
+              {progressError && isProviderRequest ? t("错误详情") : name}
             </span>
           )}
 
           {!isFileChange && detail && (
             <span className={`activity-cell-detail${isRead ? " activity-cell-read-target" : ""}`} title={detail}>
-              {detail}
+              {isRead ? fileLabel(detail) : detail}
             </span>
           )}
           {singleInlineDetail?.lineInfo && <span className="activity-cell-detail-meta">{singleInlineDetail.lineInfo}</span>}
@@ -346,6 +391,7 @@ export const ActivityCell = memo(function ActivityCell({
           {attentionLabel && (
             <span className="activity-cell-detail-meta" role="status">{attentionLabel}</span>
           )}
+          {Boolean(cell.automaticApprovalReviews?.length) && <GuardianReviewGlyph warning={cell.guardianDeclined} />}
 
           {isRunning && progressLabel && !isProviderRequest && progressLabel !== name && (
             <span className="activity-cell-progress">{progressLabel}</span>
@@ -367,37 +413,19 @@ export const ActivityCell = memo(function ActivityCell({
 
       {/* Disclosure is task evidence, not runtime provenance. Canonical call
           ids, source, script and raw envelopes remain in Inspector/replay. */}
-      {showUnifiedEvidence && (
-        <div className={[
+      {disclosure.mounted && canToggle && (
+        <div ref={disclosure.element} aria-hidden={!isExpanded} style={{ pointerEvents: isExpanded ? "auto" : "none" }} className={[
           "activity-cell-expanded",
           hasChangeEvidence ? "activity-cell-file-change-expanded" : "",
           hasInlineEvidence ? "activity-cell-tool-expanded" : "",
           hasArtifactEvidence ? "activity-cell-artifact-gallery" : "",
         ].filter(Boolean).join(" ")}>
+          <GuardianToolReviews reviews={cell.automaticApprovalReviews} declined={cell.guardianDeclined} />
           {hasSkillEvidence && <div className="activity-cell-skill-details">
             {cell.skill?.reason && <p>{cell.skill.reason}</p>}
             {cell.skill?.content && <div className="activity-cell-output-text tool-result-text">{cell.skill.content}</div>}
           </div>}
-          {hasChangeEvidence && changeDetails.map((change, index) => (
-            <div key={`${change.path}-${index}`} className="activity-cell-change-card">
-              <div className="activity-cell-change-card-header">
-                <span className="activity-cell-change-card-path" title={change.path}>{change.path}</span>
-                <span className="activity-cell-file-change-stats">
-                  <span className="activity-cell-added">+{change.additions}</span>
-                  <span className="activity-cell-removed">-{change.deletions}</span>
-                </span>
-                {change.patch && <button type="button" className="cell-action-btn activity-cell-copy-patch"
-                  aria-label={copiedPatch === `${cell.id}:${index}` ? "已复制修改" : "复制修改"}
-                  onClick={() => void navigator.clipboard.writeText(change.patch!).then(() => {
-                    setCopiedPatch(`${cell.id}:${index}`);
-                    window.setTimeout(() => setCopiedPatch(null), 1200);
-                  })}>
-                  {copiedPatch === `${cell.id}:${index}` ? <Check size={14} /> : <Copy size={14} />}
-                </button>}
-              </div>
-              {change.patch && <InlineDiff patch={change.patch} contextLines={1} />}
-            </div>
-          ))}
+          {hasChangeEvidence && changeDetails.map((change, index) => <ActivityChangeEvidence key={`${change.path}-${index}`} change={change} readingKey={`change:${cell.id}:${index}`} />)}
 
           {hasInlineEvidence && inlineDisclosureRecords.map(({ record, target, output }, index) => {
             const recordDetail = describeRecordDetail(record, developerMode);
@@ -443,7 +471,7 @@ export const ActivityCell = memo(function ActivityCell({
                 </div>
               ))}
               {showOutputPreview && nonPlanRecords.map((record) => {
-                const output = getRecordOutputPreview(record);
+                const output = cell.outputText ?? getRecordOutputPreview(record);
                 return output.trim() ? <ToolResultText key={record.id} record={record} text={output} className="activity-cell-output-pre" /> : null;
               })}
             </>
@@ -456,12 +484,12 @@ export const ActivityCell = memo(function ActivityCell({
                 <pre className="activity-cell-browser-detail-output tool-result-code" aria-label="JavaScript">{expression}</pre>
               </div>}
               {output.trim() && <div className="activity-cell-browser-detail-section">
-                {expression.trim() && <div className="activity-cell-browser-detail-label" aria-hidden="true">操作结果</div>}
-                <ToolResultText record={record} text={output} className="activity-cell-browser-detail-output" label="操作结果" />
+                {expression.trim() && <div className="activity-cell-browser-detail-label" aria-hidden="true">{t("操作结果")}</div>}
+                <ToolResultText record={record} text={output} className="activity-cell-browser-detail-output" label={t("操作结果")} />
               </div>}
               {error.trim() && <div className="activity-cell-browser-detail-section" data-error="true">
-                <div className="activity-cell-browser-detail-label" aria-hidden="true">错误详情</div>
-                <ToolResultText record={record} text={error} className="activity-cell-browser-detail-output" label="错误详情" error />
+                <div className="activity-cell-browser-detail-label" aria-hidden="true">{t("错误详情")}</div>
+                <ToolResultText record={record} text={error} className="activity-cell-browser-detail-output" label={t("错误详情")} error />
               </div>}
             </div>
           ))}
@@ -470,22 +498,28 @@ export const ActivityCell = memo(function ActivityCell({
           {hasErrorEvidence && (
             <div className="activity-cell-error-detail">
               {progressError && <pre className="activity-cell-error-pre" role="alert">{progressError}</pre>}
-              {errorDetails.map(({ error, label, record }, i) => (
+              {progressDetail && progressDetail !== progressError && <pre className="activity-cell-error-pre">{progressDetail}</pre>}
+              {errorDetails.map(({ error, detail, label, record }, i) => (
                 <div key={`error-${i}`} className="activity-cell-error-item">
                   {records.length > 1 && label && <div className="activity-cell-error-label">{label}</div>}
                   <ToolResultText record={record} text={error} className="activity-cell-error-pre" error />
+                  {detail && <ToolResultText record={record} text={detail} className="activity-cell-error-pre" error />}
                 </div>
               ))}
             </div>
           )}
-          {(fetchBodyRecords.length > 0 || settledDuration) && (
+          {(fetchBodyRecords.length > 0 || fullOutputRecords.length > 0 || settledDuration) && (
             <div className="activity-cell-evidence-footer">
               {fetchBodyRecords.map((record) => (
                 <button key={`fetch-body-${record.id}`} type="button" className="activity-cell-evidence-button" onClick={() => openArtifactPreview({
-                  artifactId: record.artifactId!, name: "页面正文", kind: "text",
+                  artifactId: record.artifactId!, name: t("页面正文"), kind: "text",
                   mediaType: record.artifactMediaType || "text/plain", conversationId: ownerConversationId,
-                })}>查看页面正文</button>
+                })}>{t("查看页面正文")}</button>
               ))}
+              {fullOutputRecords.map((record) => <button key={`full-output-${record.id}`} type="button" className="activity-cell-evidence-button" onClick={() => openArtifactPreview({
+                artifactId: record.artifactId!, name: t("完整输出"), kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
+                mediaType: record.artifactMediaType || "text/plain", conversationId: ownerConversationId,
+              })}>{t("查看完整输出")}</button>)}
               {settledDuration && <span className="activity-cell-detail-duration">{settledDuration}</span>}
             </div>
           )}
@@ -511,6 +545,7 @@ export function ToolArtifactImage({
   artifact: ArtifactPreview;
   conversationId: string;
 }) {
+  const { t } = useI18n();
   // The websocket handle is installed by an effect after the first render.
   // Subscribe to the connection projection so an already-mounted historical
   // cell rebuilds its signed artifact URL when that handle becomes available
@@ -539,13 +574,13 @@ export function ToolArtifactImage({
     reloadNonce,
   ), [artifactId, ownerConversationId, isConnected, reloadNonce, sessionId]);
   const label = readableToolLabel(artifact.summary);
-  const scopeMessage = !ownerConversationId
+  const scopeMessage = t(!ownerConversationId
     ? "截图未关联到会话，暂时无法预览。"
     : !isConnected || !sessionId
       ? "连接已断开，重连后可预览截图。"
       : !imageUrl
         ? "截图预览地址不可用。"
-        : "截图加载失败。";
+        : "截图加载失败。");
   const canOpen = Boolean(imageUrl);
 
   const open = () => {
@@ -576,7 +611,7 @@ export function ToolArtifactImage({
       <button
         type="button"
         className="activity-cell-artifact-button"
-        aria-label={`打开${label}`}
+        aria-label={t("打开{name}", { name: label })}
         aria-disabled={!canOpen}
         disabled={!canOpen}
         onClick={open}
@@ -605,7 +640,7 @@ export function ToolArtifactImage({
         <div className="activity-cell-artifact-error" role="status" aria-live="polite">
           <span>{scopeMessage}</span>
           <button type="button" className="activity-cell-artifact-retry" onClick={retry}>
-            重试
+            {t("重试")}
           </button>
         </div>
       )}
@@ -635,6 +670,32 @@ type ChangeDetail = {
   deletions: number;
 };
 
+function ActivityChangeEvidence({ change, readingKey }: { change: ChangeDetail; readingKey: string }) {
+  const { t } = useI18n();
+  const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(readingKey, false);
+  const expanded = useTranscriptSearch() || expansionPreference;
+  const [copied, setCopied] = useState(false);
+  return <div className="activity-cell-change-card">
+    <div className="activity-cell-change-card-header">
+      <button type="button" className="activity-cell-change-disclosure" aria-label={t("{action} {path} 的修改", { action: t(expanded ? "收起" : "展开"), path: change.path })} aria-expanded={expanded} disabled={!change.patch} onClick={() => {
+        userToggled.current = true;
+        setExpanded((value) => !value);
+      }}>
+        <span className="activity-cell-change-card-path" title={change.path}>{change.path}</span>
+        {change.patch && <ChevronRight size={14} className="mc-process-disclosure" data-expanded={expanded} />}
+      </button>
+      <span className="activity-cell-file-change-stats"><span className="activity-cell-added">+{change.additions}</span><span className="activity-cell-removed">-{change.deletions}</span></span>
+      {expanded && change.patch && <button type="button" className="cell-action-btn activity-cell-copy-patch" aria-label={t(copied ? "已复制修改" : "复制修改")} onClick={() => void navigator.clipboard.writeText(change.patch!).then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })}>
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>}
+    </div>
+    {expanded && change.patch && <InlineDiff patch={change.patch} contextLines={1} filePath={change.path} readingKey={`${readingKey}:diff`} />}
+  </div>;
+}
+
 function buildChangeDetails(records: ActivityToolRecord[]): ChangeDetail[] {
   const details: ChangeDetail[] = [];
 
@@ -657,8 +718,8 @@ function buildChangeDetails(records: ActivityToolRecord[]): ChangeDetail[] {
       continue;
     }
     const path = recordInputTarget(record);
-    if (path || record.diff) {
-      const stats = record.diff ? getToolDiffStats(record.diff) : { plus: 0, minus: 0 };
+    if (record.diff) {
+      const stats = getToolDiffStats(record.diff);
       details.push({
         path: path || "Edited file",
         patch: record.diff?.patch,
@@ -683,6 +744,7 @@ function DetailTarget({
   workspaceRoot: string;
   conversationId?: string;
 }) {
+  const { t } = useI18n();
   const text = target;
   if (!text.trim()) return null;
 
@@ -704,12 +766,13 @@ function DetailTarget({
   }
 
   if (targetKind === "file") {
+    if (!workspaceRoot) return <span className="activity-cell-detail-path" title={text}>{text}</span>;
     return (
       <button
         type="button"
         className="activity-cell-detail-path activity-cell-detail-link activity-cell-detail-link-file"
         title={text}
-        aria-label={`打开 ${text}`}
+        aria-label={t("打开 {path}", { path: text })}
         onClick={(event) => {
           event.stopPropagation();
           const store = useAppStore.getState();
@@ -737,12 +800,13 @@ function PlanUpdateDetail({
 }: {
   steps: PlanUpdateStep[];
 }) {
+  const { t } = useI18n();
   const completed = steps.filter((step) => step.status === "completed").length;
   return (
-    <div className="activity-cell-plan-detail" aria-label="更新后的计划">
+    <div className="activity-cell-plan-detail" aria-label={t("更新后的计划")}>
       <div className="activity-cell-plan-summary">
-        <span>更新后的计划</span>
-        <span>{completed}/{steps.length} 已完成</span>
+        <span>{t("更新后的计划")}</span>
+        <span>{t("{completed}/{total} 已完成", { completed, total: steps.length })}</span>
       </div>
       {steps.map((step, index) => {
         const Icon = step.status === "completed" ? Check : Circle;

@@ -31,7 +31,7 @@ def test_cc_alignment_tools_are_registered_with_expected_visibility(tmp_path) ->
         "task_stop",
         "send_message",
         "list_files",
-        "ask_user",
+        "request_user_input",
         "web_search",
         "web_fetch",
     } <= direct_names

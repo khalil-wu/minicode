@@ -21,7 +21,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_tools import TaskStatusTool, TaskTool
 from backend.tools.registry import ToolRegistry
-from backend.tools.swarm_tools import SendMessageTool
+from backend.tools.swarm_tools import FollowupTaskTool, SendMessageTool
 from backend.tools.toolsets import SESSION_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 
 
@@ -197,13 +197,17 @@ def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     registry.register(tool)
     events = []
     workers = []
+    register_subagent_task = runtime.register_subagent_task
+
+    def track_owned_worker(subagent_id, task, **kwargs):
+        result = register_subagent_task(subagent_id, task, **kwargs)
+        workers.append(task)
+        return result
+
+    runtime.register_subagent_task = track_owned_worker
 
     async def emit(event_type, payload):
         events.append((event_type, payload))
-        if event_type == "subagent.start":
-            worker = runtime._subagent_tasks.get(payload["subagent_id"])
-            if worker is not None:
-                workers.append(worker)
 
     context = ToolExecutionContext(
         permission=checker.build_context(mode="bypass"),
@@ -652,11 +656,19 @@ async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_c
     assert not result.is_error, result.content
     progress = [data for kind, data in startup_case.events if kind == "subagent.progress"]
     deltas = [data["transcript_delta"] for data in progress if "transcript_delta" in data]
-    assert len(deltas) >= 70
+    assert deltas and all(delta["kind"] == "events" for delta in deltas)
     assert all("transcript_snapshot" not in data for data in progress if "transcript_delta" in data)
     assert len([data for data in progress if "transcript_snapshot" in data]) < 8
-    assert deltas[0]["offset"] == len("观察😀并验证。")
-    assert deltas[-1]["offset"] == 79 * len("观察😀并验证。")
+    updates = [data for data in progress if "transcript_snapshot" in data or "transcript_delta" in data]
+    cursor = 0
+    for update in updates:
+        if "transcript_snapshot" in update:
+            cursor = update["transcript_snapshot"]["seq"]
+        else:
+            delta = update["transcript_delta"]
+            assert delta["base_seq"] == cursor and delta["seq"] > cursor
+            assert all(cursor < event["seq"] <= delta["seq"] for event in delta["events"])
+            cursor = delta["seq"]
     terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
     parent_id = startup_case.runtime.get_subagent(child_id).parent_run_id
     assert parent_id == "parent"
@@ -667,7 +679,142 @@ async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_c
     assert all({key: data[key] for key in execution} == execution for data in progress)
     assert {key: terminal[key] for key in execution} == execution
     assert terminal["transcript_snapshot"]["messages"][-1]["content"] == "观察😀并验证。" * 80
+    text_blocks = [block for block in terminal["transcript_snapshot"]["messages"][-1]["blocks"] if block["type"] == "text"]
+    streamed_ids = {event["payload"]["item_id"] for delta in deltas for event in delta["events"]
+                    if event["event_type"] in {"progress", "assistant"} and event["payload"].get("item_id")}
+    assert len({block["item_id"] for block in text_blocks}) == len(text_blocks)
+    assert {block["item_id"] for block in text_blocks} == streamed_ids
     assert len(json.dumps(startup_case.events, ensure_ascii=False)) < 200_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_wire", ["fixture_items", "responses_wire", "anonymous_parts", "responses_parts"])
+async def test_multiple_final_items_preserve_the_same_blocks_in_deltas_and_terminal_snapshot(startup_case, provider_wire, monkeypatch):
+    from backend.services.subagent_service import project_subagent_transcript_events
+    from backend.hooks.manager import HookEvent
+
+    distinct_items = provider_wire in {"fixture_items", "responses_wire"}
+    expected_reply = "Second." if distinct_items else "First.Second."
+    stop_candidates = []
+
+    async def accept_stop_candidate(**kwargs):
+        stop_candidates.append(kwargs["summary"])
+        return HookResult()
+
+    startup_case.hooks.has_hooks = lambda event: event == HookEvent.SUBAGENT_STOP
+    startup_case.hooks.run_subagent_stop.side_effect = accept_stop_candidate
+
+    class TwoFinalModel(_RecordingLLM):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="First.", phase="final_answer", item_id="answer-first" if distinct_items else "", lifecycle="end")
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Second.", phase="final_answer", item_id="answer-second" if distinct_items else "", lifecycle="end")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    if provider_wire.startswith("responses_"):
+        import json
+        import httpx
+        from backend.config import LLMSettings
+        from backend.services.llm_adapter_factory import build_wire_adapter
+        from backend.llm.openai_adapter import OpenAIAdapter
+
+        outputs = [{"type": "message", "id": item_id, "role": "assistant", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]}
+            for item_id, text in (("answer-first", "First."), ("answer-second", "Second."))]
+        if not distinct_items:
+            outputs = [{**outputs[0], "id": "answer-parts", "content": [item["content"][0] for item in outputs]}]
+        frames = []
+        for index, item in enumerate(outputs):
+            frames.append({"type": "response.output_item.added", "output_index": index, "item": {**item, "content": []}})
+            for content_index, part in enumerate(item["content"]):
+                frames.extend([
+                    {"type": "response.output_text.delta", "item_id": item["id"], "output_index": index, "content_index": content_index, "delta": part["text"]},
+                    {"type": "response.output_text.done", "item_id": item["id"], "output_index": index, "content_index": content_index, "text": part["text"]},
+                ])
+            frames.append({"type": "response.output_item.done", "output_index": index, "item": item})
+        frames.append({"type": "response.completed", "response": {"id": "two-final-response", "status": "completed",
+            "end_turn": True, "output": outputs, "usage": {"input_tokens": 20, "output_tokens": 6}}})
+
+        async def respond(request):
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                text="".join("data: " + json.dumps(frame) + "\n\n" for frame in frames))
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        def build_audit_transport(settings, **kwargs):
+            return OpenAIAdapter(settings, http_client=client)
+        monkeypatch.setattr("backend.services.llm_adapter_factory.build_wire_adapter", build_audit_transport)
+        model = build_audit_transport(LLMSettings(provider="openai", model="two-final-audit", api_key="offline-fixture",
+            base_url="https://two-final.invalid/v1", wire_api="responses", native_compaction=False, context_window=1_000_000))
+    else:
+        model = TwoFinalModel()
+    startup_case.tool._llm_provider = model
+    try:
+        child_id, result = await _launch(startup_case, "foreground")
+    finally:
+        if provider_wire.startswith("responses_"):
+            await model.aclose()
+            await client.aclose()
+    assert not result.is_error, result.content
+    terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
+    message = terminal["transcript_snapshot"]["messages"][-1]
+    assert message["content"] == expected_reply
+    blocks = [block for block in message["blocks"] if block["type"] == "text"]
+    assert [block["content"] for block in blocks] == (["First.", "Second."] if distinct_items else ["First.Second."])
+    assert all(block["source"] == "model_final" and block["status"] == "completed" and block["is_streaming"] is False for block in blocks)
+    raw_events = [event.to_dict() for event in startup_case.runtime.execution_journal(child_id).read_events()]
+    events = project_subagent_transcript_events(raw_events)
+    completed_items = [event["payload"] for event in events if event["event_type"] == "progress"
+                       and event["payload"].get("source") == "model_final" and event["payload"].get("status") == "completed"]
+    assert [block["item_id"] for block in blocks] == [item["item_id"] for item in completed_items]
+    accepted = next(event["payload"] for event in reversed(events) if event["event_type"] == "assistant")
+    assert accepted == {"content": expected_reply, "source": "model_final", "status": "completed", "item_id": blocks[-1]["item_id"]}
+    terminal_context = next(event["payload"]["context_snapshot"] for event in reversed(raw_events) if event["event_type"] == "assistant")
+    assert terminal_context["history"][-1]["content"] == expected_reply
+    collected = startup_case.runtime.get_subagent_snapshot(child_id)["result"]
+    assert collected["content"] == expected_reply
+    assert stop_candidates and all(candidate == expected_reply for candidate in stop_candidates)
+
+
+@pytest.mark.asyncio
+async def test_completed_teammate_callback_cannot_finish_the_resumed_pending_incarnation(startup_case):
+    case = startup_case
+    entered, release = asyncio.Event(), asyncio.Event()
+    resumptions = []
+    original_emit = case.context.emit_event
+
+    async def hold_resume_start(**kwargs):
+        entered.set()
+        await release.wait()
+        return HookResult()
+
+    async def resume_at_terminal(event_type, payload):
+        await original_emit(event_type, payload)
+        if event_type == "subagent.done" and payload["status"] == "completed" and not resumptions:
+            case.hooks.run_subagent_start.side_effect = hold_resume_start
+            # Register the next task before the completed worker's scheduled
+            # done callback runs. This is the real public resume operation.
+            resumptions.append(asyncio.create_task(case.tool.resume_background_subtask(
+                subagent_id=payload["subagent_id"], prompt="Continue the next audit turn.", context=case.context,
+            )))
+
+    case.context.emit_event = resume_at_terminal
+    try:
+        child_id, first = await _launch(case, "teammate")
+        assert not first.is_error, first.content
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await resumptions[0]
+        current = case.runtime.get_subagent(child_id)
+        assert current.status == "running" and current.mailbox_epoch == 2
+        assert case.model.calls == 1
+        assert [data["status"] for kind, data in case.events if kind == "subagent.done"] == ["completed"]
+        release.set()
+        await asyncio.gather(*case.workers)
+        finished = case.runtime.get_subagent(child_id)
+        assert finished.status == "completed" and finished.mailbox_epoch == 2
+        assert case.runtime._swarm_store.get_subagent(child_id) == finished.to_dict()
+        assert case.model.calls == 2
+    finally:
+        release.set()
+        await asyncio.gather(*resumptions, *case.workers, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -709,6 +856,11 @@ async def test_child_headers_follow_resolved_and_captured_step_model_instead_of_
     assert (progress["model"], progress["provider"], progress["reasoning_effort"]) == ("actual-child-step", "openai", "high")
     assert (terminal["model"], terminal["provider"], terminal["reasoning_effort"]) == ("actual-child-step", "openai", "high")
     record = startup_case.runtime.get_subagent("metadata-child")
+    assert start["started_at"] == start["record"]["started_at"] == start["delegation"]["started_at"] > 0
+    assert record.execution_started_at == start["started_at"]
+    assert record.started_at <= record.execution_started_at <= record.completed_at
+    assert terminal["completed_at"] == record.completed_at
+    assert start["record"]["workspace_root"] == record.public_dict()["workspace_root"] == str(startup_case.workspace)
     assert record.model == record.resume_config["model"] == "actual-child-step"
     assert record.reasoning_effort == record.resume_config["reasoning_effort"] == "high"
     assert startup_case.context.model_execution.model == "new-parent-selection"
@@ -722,7 +874,7 @@ def _assert_terminal(case, subagent_id: str, status: str, epoch: int = 1):
     assert case.runtime._swarm_store.get_subagent(subagent_id) == record.to_dict()
     assert case.runtime._swarm_store.get_subagent_result(subagent_id) == result.to_dict()
     assert [event_type for event_type, _payload in case.events] == [
-        "subagent.start", "subagent.done"
+        "subagent.done"
     ]
     done = case.events[-1][1]
     assert done["status"] == done["record"]["status"] == done["result"]["status"] == status
@@ -730,6 +882,8 @@ def _assert_terminal(case, subagent_id: str, status: str, epoch: int = 1):
     assert done["mailbox_epoch"] == epoch
     assert done["result"]["iterations"] == 0
     assert done["result"]["tool_call_count"] == 0
+    assert record.execution_started_at == done["started_at"] == done["delegation"]["started_at"] == 0
+    assert done["record"]["started_at"] == 0
     return record, result
 
 
@@ -831,7 +985,7 @@ def test_cancellation_during_start_hook_finishes_the_owned_incarnation(startup_c
             subagent_id, _launch_result = await _launch(case, delivery)
             worker = case.workers[-1]
         await asyncio.wait_for(entered.wait(), timeout=5)
-        subagent_id = case.events[0][1]["subagent_id"]
+        subagent_id = next(reversed(case.runtime._subagents))
         worker.cancel()
         with pytest.raises(asyncio.CancelledError):
             await worker
@@ -875,7 +1029,7 @@ def test_late_startup_exit_does_not_overwrite_a_new_incarnation(startup_case, ca
         assert case.runtime.get_subagent(subagent_id).to_dict() == replacement.to_dict()
         assert case.runtime._subagent_results.get(subagent_id) is None
         assert case.runtime._swarm_store.get_subagent_result(subagent_id) is None
-        assert [event_type for event_type, _payload in case.events] == ["subagent.start"]
+        assert case.events == []
         assert case.model.calls == 0
 
     asyncio.run(run())
@@ -1016,8 +1170,8 @@ def test_named_teammate_resume_keeps_identity_membership_and_permission(startup_
         assert initial.status == "completed"
         assert initial.teammate_name == "alice"
         case.runtime._subagent_task_metadata.pop(subagent_id, None)
-        sent = await SendMessageTool().execute({
-            "recipient": "alice", "message": "Continue the audit with the same identity."
+        sent = await FollowupTaskTool().execute({
+            "target": "alice", "message": "Continue the audit with the same identity."
         }, context=case.context)
         assert not sent.is_error, sent.content
         assert await case.runtime.wait_for_subagent(subagent_id, timeout=5)

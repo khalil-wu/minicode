@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef } from "react";
 import { loadEarlierToolItems } from "../historyPagination";
 import type {
   ChatTurnState,
@@ -16,12 +16,13 @@ import {
   ErrorCell,
   ExecCell,
   StatusNoticeCell,
+  ContextCompactionCell,
+  GuardianReviewCell,
+  GuardianWarningCell,
   ThinkingCell,
   UserMessageCell,
 } from "../cells";
 import { useAppStore } from "../../stores";
-import { sendClientCommand } from "../../protocol/ws-outbox";
-import { buildInterruptCommand } from "../../lib/interrupt-command";
 import { knownFilePathsForCell } from "../cells/activityCellHelpers";
 import { TranscriptReadingContext, turnReadingState } from "../transcriptReadingState";
 
@@ -32,6 +33,7 @@ export const ChatTurn = memo(function ChatTurn({
   wide = false,
   defaultProcessExpanded,
   isTranscriptMode = false,
+  allowFileRevert = !isTranscriptMode,
   conversationId,
   workspaceRoot,
 }: {
@@ -39,6 +41,7 @@ export const ChatTurn = memo(function ChatTurn({
   wide?: boolean;
   defaultProcessExpanded?: boolean;
   isTranscriptMode?: boolean;
+  allowFileRevert?: boolean;
   /** Conversation that owns artifacts in this transcript.  This is explicit
    * because transcript cells can be rendered while another conversation is
    * active (for example, a child-agent replay). */
@@ -47,19 +50,22 @@ export const ChatTurn = memo(function ChatTurn({
   workspaceRoot?: string;
 }) {
   const committedCells = turn.committedCells;
-  const readingState = useMemo(() => conversationId ? turnReadingState(conversationId, turn.id) : null, [conversationId, turn.id]);
-  const [loadingTools, setLoadingTools] = useState(false);
+  const readingState = useMemo(() => conversationId ? turnReadingState(conversationId, turn.id) : new Map<string, unknown>(), [conversationId, turn.id]);
+  const loadingTools = useRef(false);
+  const hasMoreHistory = Boolean(turn.toolPage?.remaining && conversationId);
+  const loadHistory = useCallback(() => {
+    if (!conversationId || !turn.toolPage?.remaining || loadingTools.current) return;
+    loadingTools.current = true;
+    void loadEarlierToolItems(conversationId, turn.id).finally(() => { loadingTools.current = false; });
+  }, [conversationId, turn.id, turn.toolPage]);
   const processDetailMode = useAppStore((state) => state.viewMode);
-  const stopActiveRun = useCallback(() => {
-    const state = useAppStore.getState();
-    const command = buildInterruptCommand(state, conversationId);
-    sendClientCommand(command);
-  }, [conversationId]);
   const agentTurn = useMemo(() => {
     const projected = projectChatTurnToAgentLoop(turn, committedCells, processDetailMode);
     // The child provider receives its parent's dispatch as user input, but the
     // child work record must never present that dispatch as the human's bubble.
-    return isTranscriptMode ? { ...projected, userCell: null } : projected;
+    return isTranscriptMode ? { ...projected, userCell: null,
+      workItems: projected.workItems?.filter((item) => item.kind === "process"),
+    } : projected;
   }, [turn, committedCells, processDetailMode, isTranscriptMode]);
   const resourceKey = turn.resourceKey ?? agentTurn.processCells;
   const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap(knownFilePathsForCell))], [resourceKey]);
@@ -69,8 +75,8 @@ export const ChatTurn = memo(function ChatTurn({
         <HistoryCellRenderer
           cell={cell}
           isActive={isActive}
-          onStopExecution={isTranscriptMode ? undefined : stopActiveRun}
           isTranscriptMode={isTranscriptMode}
+          allowFileRevert={allowFileRevert}
           conversationId={conversationId}
           workspaceRoot={workspaceRoot}
           knownFilePaths={knownFilePaths}
@@ -78,7 +84,7 @@ export const ChatTurn = memo(function ChatTurn({
         />
       </div>
     ),
-    [conversationId, isTranscriptMode, stopActiveRun, workspaceRoot, knownFilePaths],
+    [conversationId, isTranscriptMode, allowFileRevert, workspaceRoot, knownFilePaths],
   );
 
   return (
@@ -88,16 +94,8 @@ export const ChatTurn = memo(function ChatTurn({
       wide={wide}
       renderCell={renderCell}
       defaultProcessExpanded={defaultProcessExpanded}
-      loadedToolItems={turn.toolPage ? turn.toolPage.total - turn.toolPage.remaining : undefined}
-      historyControl={turn.toolPage?.remaining && conversationId ? (
-        <button type="button" className="agent-loop-timeline-group-title" disabled={loadingTools}
-          onClick={() => {
-            setLoadingTools(true);
-            void loadEarlierToolItems(conversationId, turn.id).finally(() => setLoadingTools(false));
-          }}>
-          {loadingTools ? "正在加载更早的步骤…" : `加载更早的工具步骤（${turn.toolPage.remaining}）`}
-        </button>
-      ) : undefined}
+      hasMoreHistory={hasMoreHistory}
+      onLoadHistory={hasMoreHistory ? loadHistory : undefined}
     />
     </TranscriptReadingContext.Provider>
   );
@@ -108,8 +106,8 @@ export const ChatTurn = memo(function ChatTurn({
 export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   cell,
   isActive = false,
-  onStopExecution,
   isTranscriptMode = false,
+  allowFileRevert = !isTranscriptMode,
   conversationId,
   workspaceRoot,
   knownFilePaths,
@@ -117,8 +115,8 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
 }: {
   cell: HistoryCellState;
   isActive?: boolean;
-  onStopExecution?: () => void;
   isTranscriptMode?: boolean;
+  allowFileRevert?: boolean;
   conversationId?: string;
   workspaceRoot?: string;
   knownFilePaths?: string[];
@@ -131,20 +129,26 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
     case "status_notice":
       return <StatusNoticeCell cell={cell} />;
 
+    case "guardian_review": return <GuardianReviewCell cell={cell} />;
+    case "guardian_warning": return <GuardianWarningCell cell={cell} />;
+
+    case "context_compaction":
+      return <ContextCompactionCell cell={cell} />;
+
     case "thinking":
       return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} knownFilePaths={knownFilePaths} />;
 
     case "collaboration":
-      return <CollaborationCell cell={cell} conversationId={conversationId} />;
+      return <CollaborationCell cell={cell} conversationId={conversationId} isTranscriptMode={isTranscriptMode} />;
 
     case "activity":
       return <ActivityCell cell={cell} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "exec":
-      return <ExecCell cell={cell} isActive={isActive} conversationId={conversationId} onStop={isTranscriptMode ? undefined : onStopExecution} />;
+      return <ExecCell cell={cell} isActive={isActive} conversationId={conversationId} allowGuardianApproval={!isTranscriptMode} />;
 
     case "diff":
-      return <DiffCell cell={cell} showActions={!isTranscriptMode} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
+      return <DiffCell cell={cell} allowRevert={allowFileRevert} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "error":
       return <ErrorCell cell={cell} />;

@@ -25,6 +25,11 @@ from typing import Any, Literal
 TurnInputMode = Literal["steer"]
 
 
+def user_input_origin_from_trigger(trigger: str | None) -> Literal["user", "heartbeat"]:
+    """Match Source UserInputOrigin for one host-admitted input."""
+    return "heartbeat" if trigger == "automation_heartbeat_scheduled" else "user"
+
+
 class MailboxDeliveryPhase(str, Enum):
     """Which turn may consume newly arrived coordination messages."""
 
@@ -45,6 +50,7 @@ class TurnInput:
     target_message_id: str
     original_command: Any
     queued_at_ms: int
+    input_origin: Literal["user", "heartbeat"] = "user"
 
     @classmethod
     def from_command(
@@ -227,6 +233,14 @@ class TurnInputQueue:
             if self._phase is not MailboxDeliveryPhase.CURRENT_TURN:
                 return False
             self._phase = MailboxDeliveryPhase.NEXT_TURN
+            return True
+
+    def accept_mailbox_delivery_for_current_turn(self, turn_id: str) -> bool:
+        """A completed tool-call item reopens mail for this same active turn."""
+        with self._lock:
+            if self._phase is MailboxDeliveryPhase.SEALED or self._turn_id != turn_id:
+                return False
+            self._phase = MailboxDeliveryPhase.CURRENT_TURN
             return True
 
     def mailbox_deliverable(self, turn_id: str = "") -> bool:

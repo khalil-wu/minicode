@@ -8,7 +8,8 @@ const { atomicWriteTextSync } = require("./utils");
 
 let autoUpdater = null;
 let appRef = null;
-let getMainWindow = () => null;
+let getMainWindows = () => [];
+let getWindowRecord = () => null;
 let appendDesktopLog = () => {};
 let initialized = false;
 let healthFile = "";
@@ -16,13 +17,12 @@ let currentVersion = "";
 let updateHealth = {};
 let lastStatus = { status: "idle", sequence: 0 };
 let getActivePtySessions = () => [];
-let activitySnapshot = null;
-let activityReceivedAt = 0;
-let activityInvalidReason = "activity.uninitialized";
-const retiredActivityRendererIds = new Set();
+const windowActivities = new Map();
 const pendingActivityRequests = new Map();
 let installInFlight = false;
 let statusSequence = 0;
+let prepareRollback = null;
+let completeRollback = null;
 
 const UPDATE_ACTIVITY_FIELDS = [
   "activeTurns",
@@ -31,6 +31,8 @@ const UPDATE_ACTIVITY_FIELDS = [
   "uploadingAttachments",
   "dirtyEditors",
   "backgroundTasks",
+  "pendingDrafts",
+  "draftStates",
 ];
 const UPDATE_ACTIVITY_MAX_ITEMS = 1000;
 const UPDATE_ACTIVITY_MAX_ID_CHARS = 4096;
@@ -128,6 +130,7 @@ function buildUpdatePreflight({
   installLocked = false,
   activityStale = false,
   activityInvalid = "",
+  windowInstances = [],
 } = {}) {
   const checks = [];
   const version = String(readyVersion || "").trim();
@@ -159,6 +162,7 @@ function buildUpdatePreflight({
         ["uploadingAttachments", "attachment.uploading", "Attachments are still uploading."],
         ["dirtyEditors", "editor.dirty", "Editor tabs contain unsaved changes."],
         ["backgroundTasks", "task.running", "Background tasks are still running."],
+        ["pendingDrafts", "draft.pending", "Draft changes are still being saved or recovered."],
       ];
       for (const [field, code, message] of activityChecks) {
         const items = normalizedActivity[field];
@@ -192,6 +196,7 @@ function buildUpdatePreflight({
       Object.entries(normalizedActivity).filter(([key]) => !["revision", "rendererInstanceId"].includes(key)),
     ) : null,
     activePtys: normalizedPtys,
+    windowInstances: [...windowInstances].sort(),
   };
   const fingerprint = crypto
     .createHash("sha256")
@@ -207,8 +212,7 @@ function buildUpdatePreflight({
 
 function emit(status, detail = {}) {
   lastStatus = { status, sequence: ++statusSequence, ...detail };
-  const mainWindow = getMainWindow();
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  for (const mainWindow of getMainWindows()) {
     mainWindow.webContents.send("minicode:update:status", lastStatus);
   }
 }
@@ -329,53 +333,90 @@ function resolveRollbackExecutable(app, state) {
   return executable;
 }
 
-async function attemptAutomaticRollback(app, state) {
+async function prepareRollbackData({ pythonCommand, backendRoot, stateRoot }, spawnProcess = spawn) {
+  const environment = { ...process.env, MINICODE_STATE_ROOT: stateRoot,
+    PYTHONPATH: backendRoot, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
+  delete environment.PYTHONHOME;
+  const child = spawnProcess(pythonCommand, ["-B", "-m", "backend.bootstrap.prepare_rollback", "--state-root", stateRoot], {
+    cwd: backendRoot, env: environment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Rollback compatibility preparation failed (${signal || code}): ${stderr.trim() || stdout.trim()}`));
+    });
+  });
+  const receipt = JSON.parse(stdout.trim());
+  if (receipt.ok !== true) throw new Error("Rollback compatibility preparation did not confirm a committed projection.");
+  return receipt;
+}
+
+async function attemptAutomaticRollback(app, state, prepare = prepareRollback) {
   const executable = resolveRollbackExecutable(app, state);
   if (!executable) return false;
   updateHealth = {
     ...state,
     status: "recovery_required",
-    rollback_launch_started_at: new Date().toISOString(),
+    rollback_prepare_started_at: new Date().toISOString(),
   };
   writeHealthState(healthFile, updateHealth);
-  emit("rollback_launching", {
+  emit("recovery_required", {
     version: state.previous_version || "",
     failedVersion: state.pending_version || currentVersion,
   });
 
-  if (typeof app.releaseSingleInstanceLock === "function") {
-    app.releaseSingleInstanceLock();
-  }
   const environment = { ...process.env };
   delete environment.ELECTRON_RUN_AS_NODE;
   environment.MINICODE_ROLLBACK_FROM_VERSION = String(state.pending_version || currentVersion);
 
+  let lockReleased = false;
   try {
+    if (typeof prepare !== "function") throw new Error("Rollback preparation is unavailable.");
+    const receipt = await prepare(app, state);
+    updateHealth = { ...updateHealth, rollback_data_prepared_at: new Date().toISOString(), rollback_data_preparation: receipt,
+      rollback_launch_started_at: new Date().toISOString() };
+    writeHealthState(healthFile, updateHealth);
+    emit("rollback_launching", { version: state.previous_version || "", failedVersion: state.pending_version || currentVersion });
+    if (typeof app.releaseSingleInstanceLock === "function") {
+      app.releaseSingleInstanceLock();
+      lockReleased = true;
+    }
     const child = spawn(executable, [], {
       cwd: path.dirname(executable),
       detached: true,
       stdio: "ignore",
       env: environment,
-      windowsHide: false,
+      windowsHide: true,
     });
     await new Promise((resolve, reject) => {
       child.once("spawn", resolve);
       child.once("error", reject);
     });
     child.unref();
+    if (completeRollback) completeRollback();
     app.quit();
     return true;
   } catch (error) {
-    if (typeof app.requestSingleInstanceLock === "function") {
+    if (lockReleased && typeof app.requestSingleInstanceLock === "function") {
       app.requestSingleInstanceLock();
     }
+    updateHealth = { ...updateHealth, status: "recovery_required", rollback_error: error.message };
+    writeHealthState(healthFile, updateHealth);
     appendDesktopLog(`[updater] automatic rollback launch failed: ${error.message}`);
     emit("recovery_required", {
       version: currentVersion,
       previousVersion: state.previous_version || "",
       message: error.message,
     });
-    return false;
+    if (completeRollback) completeRollback();
+    throw error;
   }
 }
 
@@ -414,11 +455,14 @@ function beginBootHealthCheck(app) {
   return updateHealth;
 }
 
-async function init({ app, getMainWindow: nextGetMainWindow, logger, getActivePtySessions: nextGetActivePtySessions } = {}) {
+async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: nextGetWindowRecord, logger, getActivePtySessions: nextGetActivePtySessions, prepareRollback: nextPrepareRollback, completeRollback: nextCompleteRollback } = {}) {
   if (initialized) return false;
   initialized = true;
   appRef = app || null;
-  getMainWindow = typeof nextGetMainWindow === "function" ? nextGetMainWindow : getMainWindow;
+  prepareRollback = nextPrepareRollback;
+  completeRollback = nextCompleteRollback;
+  if (typeof nextGetMainWindows === "function") getMainWindows = nextGetMainWindows;
+  if (typeof nextGetWindowRecord === "function") getWindowRecord = nextGetWindowRecord;
   appendDesktopLog = typeof logger === "function" ? logger : appendDesktopLog;
   getActivePtySessions = typeof nextGetActivePtySessions === "function"
     ? nextGetActivePtySessions
@@ -549,82 +593,121 @@ function activityRequestIds(value) {
   }))];
 }
 
-function settleActivityRequests(requestIds, accepted) {
+function settleActivityRequests(windowInstanceId, requestIds, accepted) {
   for (const requestId of requestIds) {
     const pending = pendingActivityRequests.get(requestId);
-    if (!pending) continue;
+    if (!pending || pending.windowInstanceId !== windowInstanceId) continue;
     pendingActivityRequests.delete(requestId);
     clearTimeout(pending.timer);
     pending.resolve(Boolean(accepted));
   }
 }
 
-function invalidateActivity(reason = "activity.invalidated") {
-  activityInvalidReason = String(reason || "activity.invalidated");
-  activityReceivedAt = 0;
+function registerWindow(windowInstanceId) {
+  windowActivities.set(windowInstanceId, {
+    snapshot: null,
+    receivedAt: 0,
+    invalidReason: "activity.uninitialized",
+    retiredRendererIds: new Set(),
+  });
+}
+
+function invalidateActivity(windowInstanceId, reason = "activity.invalidated") {
+  const activity = windowActivities.get(windowInstanceId);
+  if (!activity) return;
+  activity.invalidReason = String(reason || "activity.invalidated");
+  activity.receivedAt = 0;
+  if (activity.snapshot) activity.retiredRendererIds.add(activity.snapshot.rendererInstanceId);
+  activity.snapshot = null;
   for (const [requestId, pending] of pendingActivityRequests.entries()) {
+    if (pending.windowInstanceId !== windowInstanceId) continue;
     pendingActivityRequests.delete(requestId);
     clearTimeout(pending.timer);
     pending.resolve(false);
   }
 }
 
-function updateActivity(value) {
+function unregisterWindow(windowInstanceId) {
+  invalidateActivity(windowInstanceId, "activity.renderer_closed");
+  windowActivities.delete(windowInstanceId);
+}
+
+function updateActivity(windowInstanceId, value) {
+  const activity = windowActivities.get(windowInstanceId);
+  if (!activity) return { accepted: false, revision: 0 };
   let requestIds = [];
   try {
     requestIds = activityRequestIds(value?.requestIds);
     const normalized = normalizeUpdateActivitySnapshot(value);
-    if (retiredActivityRendererIds.has(normalized.rendererInstanceId)) {
-      activityInvalidReason = "activity.retired_renderer";
-      settleActivityRequests(requestIds, false);
-      return { accepted: false, revision: activitySnapshot?.revision || 0 };
+    if (activity.retiredRendererIds.has(normalized.rendererInstanceId)) {
+      settleActivityRequests(windowInstanceId, requestIds, false);
+      return { accepted: false, revision: activity.snapshot?.revision || 0 };
     }
     if (
-      activitySnapshot
-      && normalized.rendererInstanceId !== activitySnapshot.rendererInstanceId
+      activity.snapshot
+      && normalized.rendererInstanceId !== activity.snapshot.rendererInstanceId
     ) {
-      retiredActivityRendererIds.add(activitySnapshot.rendererInstanceId);
-      while (retiredActivityRendererIds.size > 32) {
-        retiredActivityRendererIds.delete(retiredActivityRendererIds.values().next().value);
-      }
+      activity.retiredRendererIds.add(activity.snapshot.rendererInstanceId);
     }
-    const result = acceptUpdateActivitySnapshot(activitySnapshot, normalized);
+    const result = acceptUpdateActivitySnapshot(activity.snapshot, normalized);
     if (!result.accepted) {
-      activityInvalidReason = "activity.stale_revision";
-      settleActivityRequests(requestIds, false);
+      activity.invalidReason = "activity.stale_revision";
+      settleActivityRequests(windowInstanceId, requestIds, false);
       return { accepted: false, revision: result.snapshot.revision };
     }
-    activitySnapshot = result.snapshot;
-    activityReceivedAt = Date.now();
-    activityInvalidReason = "";
-    settleActivityRequests(requestIds, true);
+    activity.snapshot = result.snapshot;
+    activity.receivedAt = Date.now();
+    activity.invalidReason = "";
+    settleActivityRequests(windowInstanceId, requestIds, true);
     return { accepted: true, revision: result.snapshot.revision };
   } catch (error) {
-    activityInvalidReason = error instanceof Error ? error.message : String(error || "activity.invalid");
-    activityReceivedAt = 0;
-    settleActivityRequests(requestIds, false);
-    return { accepted: false, revision: activitySnapshot?.revision || 0 };
+    activity.invalidReason = error instanceof Error ? error.message : String(error || "activity.invalid");
+    activity.receivedAt = 0;
+    settleActivityRequests(windowInstanceId, requestIds, false);
+    return { accepted: false, revision: activity.snapshot?.revision || 0 };
   }
 }
 
 async function requestFreshActivitySnapshot() {
-  const mainWindow = getMainWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    invalidateActivity("activity.renderer_unavailable");
-    return false;
-  }
-  const requestId = crypto.randomUUID();
-  const acknowledged = new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      pendingActivityRequests.delete(requestId);
-      activityInvalidReason = "activity.request_timeout";
-      activityReceivedAt = 0;
-      resolve(false);
-    }, UPDATE_ACTIVITY_REQUEST_TIMEOUT_MS);
-    pendingActivityRequests.set(requestId, { resolve, timer });
+  const acknowledgements = getMainWindows().map((window) => {
+    const { windowInstanceId } = getWindowRecord(window);
+    const activity = windowActivities.get(windowInstanceId);
+    const requestId = crypto.randomUUID();
+    const acknowledged = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingActivityRequests.delete(requestId);
+        activity.invalidReason = "activity.request_timeout";
+        activity.receivedAt = 0;
+        resolve(false);
+      }, UPDATE_ACTIVITY_REQUEST_TIMEOUT_MS);
+      pendingActivityRequests.set(requestId, { resolve, timer, windowInstanceId });
+    });
+    window.webContents.send("minicode:update:activity:request", { requestId });
+    return acknowledged;
   });
-  mainWindow.webContents.send("minicode:update:activity:request", { requestId });
-  return acknowledged;
+  return (await Promise.all(acknowledgements)).every(Boolean);
+}
+
+function aggregateWindowActivity() {
+  const records = getMainWindows().map((window) => getWindowRecord(window));
+  const states = records.map(({ windowInstanceId }) => ({ windowInstanceId, activity: windowActivities.get(windowInstanceId) }));
+  const invalid = states.filter(({ activity }) => !activity?.snapshot || activity.invalidReason)
+    .map(({ windowInstanceId, activity }) => `${windowInstanceId}: ${activity?.invalidReason || "activity.uninitialized"}`);
+  const snapshots = states.filter(({ activity }) => activity?.snapshot);
+  const snapshot = snapshots.length > 0 ? {
+    revision: 1,
+    rendererInstanceId: "registered-windows",
+    runtimeReady: snapshots.every(({ activity }) => activity.snapshot.runtimeReady),
+    ...Object.fromEntries(UPDATE_ACTIVITY_FIELDS.map((field) => [field, snapshots.flatMap(({ windowInstanceId, activity }) =>
+      activity.snapshot[field].map((id) => JSON.stringify([windowInstanceId, id])),
+    )])),
+  } : null;
+  return {
+    activity: snapshot,
+    activityInvalid: invalid.join("; "),
+    activityStale: snapshots.some(({ activity }) => Date.now() - activity.receivedAt > UPDATE_ACTIVITY_STALE_MS),
+    windowInstances: records.map(({ windowInstanceId }) => windowInstanceId),
+  };
 }
 
 function preflightForCurrentState({ ignoreInstallLock = false } = {}) {
@@ -636,17 +719,12 @@ function preflightForCurrentState({ ignoreInstallLock = false } = {}) {
     ptyError = error instanceof Error ? error.message : String(error || "Unknown terminal query error");
   }
   return buildUpdatePreflight({
-    activity: activitySnapshot,
+    ...aggregateWindowActivity(),
     activePtys,
     ptyError,
     updateReady: Boolean(autoUpdater && appRef && downloadedUpdateVersion()),
     readyVersion: downloadedUpdateVersion(),
     installLocked: ignoreInstallLock ? false : installInFlight,
-    activityStale: Boolean(
-      activityReceivedAt
-      && Date.now() - activityReceivedAt > UPDATE_ACTIVITY_STALE_MS
-    ),
-    activityInvalid: activityInvalidReason,
   });
 }
 
@@ -747,6 +825,8 @@ module.exports = {
   download,
   updateActivity,
   invalidateActivity,
+  registerWindow,
+  unregisterWindow,
   preflight,
   install,
   markHealthy,
@@ -759,6 +839,7 @@ module.exports = {
   createRollbackBackup,
   resolveRollbackExecutable,
   attemptAutomaticRollback,
+  prepareRollbackData,
   normalizeUpdateActivitySnapshot,
   acceptUpdateActivitySnapshot,
   normalizeActivePtySessions,

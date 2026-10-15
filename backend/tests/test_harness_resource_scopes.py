@@ -25,6 +25,7 @@ def test_unrelated_windows_proceed_but_same_task_and_global_changes_wait():
             )
             instance = object.__new__(SessionCommandDispatcher)
             instance._session = session
+            instance._regeneration_transitions = {}
             async def handler(command):
                 entered.append((name, command.type))
                 if name == "a":

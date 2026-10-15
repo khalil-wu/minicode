@@ -68,10 +68,14 @@ jobs:
         run: python scripts/check-agent-kernel-boundaries.py
       - name: Check protocol sync
         run: python scripts/check-protocol-sync.py
+      - name: Check duplicate tools
+        run: python scripts/check-no-duplicate-tools.py
+      - name: Check module size limits
+        run: python scripts/check-large-files.py
       - name: Run backend and root tests
         run: |
           set -o pipefail
-          python -m pytest "${{ matrix.test_path }}" --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
+          python -m pytest "${{ matrix.test_path }}" -vv -o faulthandler_timeout=60 --tb=short --junitxml="pytest-${{ matrix.suite }}.xml" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
         if: failure()
         run: |

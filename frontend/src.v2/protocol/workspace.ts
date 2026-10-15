@@ -20,6 +20,11 @@ export interface WorkspaceProjectIndexFile extends WorkspaceFileResponse {
 export interface WorkspaceProjectIndex {
   workspace_root: string;
   files: WorkspaceProjectIndexFile[];
+  dependency_paths?: string[] | null;
+  revision?: number | null;
+  index_instance_id?: string | null;
+  base_revision?: number | null;
+  removed_paths?: string[];
   complete: boolean;
   issues: Array<{ path: string; status_code: number; message: string }>;
 }
@@ -102,8 +107,8 @@ export const readWorkspaceFile = async (path: string, workspaceRoot: string, sig
   return (await r.json()) as WorkspaceFileResponse;
 };
 
-export const readWorkspaceProjectIndex = async (workspaceRoot: string, includeDependencies = true, signal?: AbortSignal): Promise<WorkspaceProjectIndex> => {
-  const response = await fetchWithTimeout(ws("/project-index", workspaceRoot, { include_dependencies: includeDependencies }), { headers: authHeaders(), signal });
+export const readWorkspaceProjectIndex = async (workspaceRoot: string, includeDependencies = true, signal?: AbortSignal, previousRevision?: number, previousInstanceId?: string): Promise<WorkspaceProjectIndex> => {
+  const response = await fetchWithTimeout(ws("/project-index", workspaceRoot, { include_dependencies: false, include_dependency_paths: includeDependencies, previous_revision: previousRevision, previous_instance_id: previousInstanceId }), { headers: authHeaders(), signal });
   if (!response.ok) throw new Error(await errorMessageFromWorkspaceResponse(response));
   return await response.json() as WorkspaceProjectIndex;
 };

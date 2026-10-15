@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useLayoutEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   FilePlus2,
@@ -15,6 +16,7 @@ import {
   type WorkspaceTreeNode,
 } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { WorkspaceSearchPanel } from "../panels/WorkspaceSearchPanel";
 import type { FileTreeRevealRequest } from "../stores/types";
 import { isDesktop, fsListTree, fsSearchFiles, trustWorkspace } from "../desktop/runtime";
@@ -68,6 +70,8 @@ import {
 } from "../lib/workspace-path";
 
 export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
+  const { t: tr } = useI18n();
+  const globalSearchEnabled = useAppStore(s => capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true));
   const workspaceSearchOpen = useAppStore((state) => state.workspaceSearchOpen);
   const [tree, setTree] = useState<WorkspaceTreeNode | null>(null);
   const [isListScrolling, setIsListScrolling] = useState(false);
@@ -92,6 +96,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const density = "compact" as const;
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const conversationId = useAppStore((s) => s.conversationId);
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const pendingConversationCreateId = useAppStore((s) => s.pendingConversationCreateId);
   const openContextMenu = useCallback((menu: ContextMenuState) => {
     setContextMenu({ ...menu, workspaceRoot: workingDirectory });
   }, [workingDirectory]);
@@ -181,7 +188,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           } else if (isMissingWorkspaceError(result.reason)) {
             retainedExpanded.delete(path);
           } else {
-            directoryError ||= `无法加载 ${path}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`;
+            directoryError ||= tr("无法加载 {v0}：{v1}", { v0: path, v1: result.reason instanceof Error ? result.reason.message : String(result.reason) });
           }
         }
         if (isCurrent()) {
@@ -208,7 +215,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
               nextTree = replaceNodeChildren(nextTree, path, sortNodes(loaded.value.children ?? []));
             } else if (loaded.status === "rejected") {
               if (isMissingWorkspaceError(loaded.reason)) retainedExpanded.delete(path);
-              else directoryError ||= `无法加载 ${path}：${loaded.reason instanceof Error ? loaded.reason.message : String(loaded.reason)}`;
+              else directoryError ||= tr("无法加载 {v0}：{v1}", { v0: path, v1: loaded.reason instanceof Error ? loaded.reason.message : String(loaded.reason) });
             }
           }
           if (isCurrent()) {
@@ -220,21 +227,21 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             }
           }
         } else {
-          if (isCurrent()) setError("无法加载文件列表");
+          if (isCurrent()) setError(tr("无法加载文件列表"));
         }
       }
     } catch (err) {
       if (!isCurrent()) return;
       if (workingDirectory && isMissingWorkspaceError(err)) {
         setTree(null);
-        setError(`工作区文件夹不存在：${workingDirectory}`);
+        setError(tr("工作区文件夹不存在：{v0}", { v0: workingDirectory }));
       } else {
-        setError(err instanceof Error ? err.message : "无法加载文件列表");
+        setError(err instanceof Error ? err.message : tr("无法加载文件列表"));
       }
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [workingDirectory]);
+  }, [workingDirectory, tr]);
 
   useEffect(() => {
     if (!loading) {
@@ -264,7 +271,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       ));
       return isCurrent();
     } catch (err) {
-      if (isCurrent() && !isMissingWorkspaceError(err)) setError(err instanceof Error ? err.message : "无法加载文件列表");
+      if (isCurrent() && !isMissingWorkspaceError(err)) setError(err instanceof Error ? err.message : tr("无法加载文件列表"));
       return false;
     } finally {
       setLoadingPaths((current) => {
@@ -274,7 +281,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         return next;
       });
     }
-  }, [workingDirectory]);
+  }, [workingDirectory, tr]);
 
   const refreshChangedPaths = useCallback(async (changes: { path: string; event: string; timestamp: number }[]) => {
     const parents = Array.from(new Set(changes.map((change) => parentTreePath(
@@ -451,7 +458,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     }
   }, [fileChanges, refreshChangedPaths]);
 
-  useEffect(() => { if (workingDirectory) requestGitChanges(); }, [requestGitChanges, workingDirectory]);
+  useEffect(() => {
+    if (workingDirectory && !pendingConversationSwitchId && !pendingConversationCreateId) requestGitChanges();
+  }, [requestGitChanges, workingDirectory, conversationId, pendingConversationSwitchId, pendingConversationCreateId]);
 
   useEffect(() => {
     if (!toolbarMenuOpen) return;
@@ -510,7 +519,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         .catch((error: unknown) => {
           if (epoch !== searchEpochRef.current || !workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
           setSearchResults([]);
-          setSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
+          setSearchError(error instanceof Error ? error.message : tr("文件搜索失败，请重试。"));
         })
         .finally(() => {
           if (epoch === searchEpochRef.current) setSearchLoading(false);
@@ -521,10 +530,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   const createFile = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
-    const path = await showPrompt({ title: "新建文件", message: "输入相对工作区的文件路径", placeholder: "src/example.ts" });
+    const path = await showPrompt({ title: tr("新建文件"), message: tr("输入相对工作区的文件路径"), placeholder: "src/example.ts" });
     if (!path) return;
     if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
-      pushToast("工作区已切换，新建文件已取消；请在当前工作区重新选择。", "warning");
+      pushToast(tr("工作区已切换，新建文件已取消；请在当前工作区重新选择。"), "warning");
       return;
     }
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
@@ -532,16 +541,16 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       await writeWorkspaceFile(targetPath, "", workingDirectory);
       void refresh();
     } catch (error) {
-      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
+      await showAlert({ title: tr("创建失败"), message: error instanceof Error ? error.message : String(error) });
     }
   };
 
   const createFolder = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
-    const path = await showPrompt({ title: "新建文件夹", message: "输入相对工作区的文件夹路径", placeholder: "src/components" });
+    const path = await showPrompt({ title: tr("新建文件夹"), message: tr("输入相对工作区的文件夹路径"), placeholder: "src/components" });
     if (!path) return;
     if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
-      pushToast("工作区已切换，新建文件夹已取消；请在当前工作区重新选择。", "warning");
+      pushToast(tr("工作区已切换，新建文件夹已取消；请在当前工作区重新选择。"), "warning");
       return;
     }
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
@@ -549,7 +558,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       await createWorkspaceDirectory(targetPath, workingDirectory);
       void refresh();
     } catch (error) {
-      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
+      await showAlert({ title: tr("创建失败"), message: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -594,15 +603,14 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   if (loading && !tree) {
     return (
       <div style={{ padding: 12, color: "var(--text-muted)", fontSize: "var(--text-sm)", display: "grid", gap: 8 }}>
-        <div>{slowLoading ? "文件较多，仍在加载…" : "正在加载文件…"}</div>
+        <div>{slowLoading ? tr("文件较多，仍在加载…") : tr("正在加载文件…")}</div>
         {slowLoading && (
           <>
             <div style={{ fontSize: "var(--text-xs)", lineHeight: 1.45 }}>
-              大型工作区首次扫描会稍慢。你可以继续等待、重试，或切换到较小的文件夹。
-            </div>
+              {tr("大型工作区首次扫描会稍慢。你可以继续等待、重试，或切换到较小的文件夹。")}</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={refresh} style={refreshBtn}>重试</button>
-              {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>切换文件夹</button>}
+              <button onClick={refresh} style={refreshBtn}>{tr("重试")}</button>
+              {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>{tr("切换文件夹")}</button>}
             </div>
           </>
         )}
@@ -616,8 +624,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div style={{ padding: 12, fontSize: "var(--text-sm)" }}>
         <div role="alert" style={{ color: "var(--text-muted)", marginBottom: 8 }}>{error}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>打开文件夹</button>}
-          {!isMissingWorkspace && <button onClick={refresh} style={refreshBtn}>重试</button>}
+          {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>{tr("打开文件夹")}</button>}
+          {!isMissingWorkspace && <button onClick={refresh} style={refreshBtn}>{tr("重试")}</button>}
         </div>
       </div>
     );
@@ -633,7 +641,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   const renderToolbarMenu = () => (
     <div style={toolbarMenuWrapStyle}>
-      <button type="button" title="更多文件操作" aria-label="更多文件操作"
+      <button type="button" title={tr("更多文件操作")} aria-label={tr("更多文件操作")}
         ref={toolbarTriggerRef}
         aria-controls="file-tree-actions-menu" aria-expanded={toolbarMenuOpen} aria-haspopup="menu"
         onClick={(event) => { event.stopPropagation(); setToolbarMenuOpen((open) => !open); }}
@@ -644,14 +652,14 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         <div id="file-tree-actions-menu" ref={toolbarMenuRef} className="mc-dropdown-menu" role="menu" style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
           {isDesktop() && (
             <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void openWorkspaceFolder(); }} style={toolbarMenuItemStyle}>
-              <FolderOpen size={14} /><span>打开文件夹</span>
+              <FolderOpen size={14} /><span>{tr("打开文件夹")}</span>
             </button>
           )}
           <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
-            <FilePlus2 size={14} /><span>新建文件</span>
+            <FilePlus2 size={14} /><span>{tr("新建文件")}</span>
           </button>
           <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
-            <FolderPlus size={14} /><span>新建文件夹</span>
+            <FolderPlus size={14} /><span>{tr("新建文件夹")}</span>
           </button>
         </div>
       )}
@@ -671,12 +679,12 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       </div>
       {workspaceMenu && workspaceRootsEqual(workspaceMenu.path, workingDirectory) && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
       <div style={fileTreeToolbarStyle}>
-        <button type="button" className="mc-icon-button mc-icon-button-compact file-tree-action" aria-label="搜索项目内容" title="搜索项目内容 · Ctrl+Shift+F" onClick={() => useAppStore.getState().openWorkspaceSearch()}><Search size={14} /></button>
+        <button type="button" className="mc-icon-button mc-icon-button-compact file-tree-action" aria-label={tr("搜索项目内容")} title={tr("搜索项目内容 · Ctrl+Shift+F")} disabled={!globalSearchEnabled} onClick={() => useAppStore.getState().openWorkspaceSearch()}><Search size={14} /></button>
         <div style={fileTreeSearchStyle}>
           <Search size={14} aria-hidden="true" />
-          <input aria-label="搜索工作区文件" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" style={fileTreeSearchInputStyle} />
+          <input aria-label={tr("搜索工作区文件")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr("搜索文件")} style={fileTreeSearchInputStyle} />
         </div>
-        <button type="button" title="刷新文件" aria-label="刷新文件" onClick={() => { void refresh(); setSearchVersion((version) => version + 1); }} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
+        <button type="button" title={tr("刷新文件")} aria-label={tr("刷新文件")} onClick={() => { void refresh(); setSearchVersion((version) => version + 1); }} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
           <RefreshCw size={14} className={loading ? "animate-spin" : undefined} />
         </button>
         {renderToolbarMenu()}
@@ -684,7 +692,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       {error && (
         <div role="alert" style={{ padding: "8px 12px", fontSize: "var(--text-xs)", color: "var(--state-danger)", overflowWrap: "anywhere" }}>
           <div>{error}</div>
-          <button type="button" onClick={() => void refresh()} disabled={loading} style={refreshBtn}>重试</button>
+          <button type="button" onClick={() => void refresh()} disabled={loading} style={refreshBtn}>{tr("重试")}</button>
         </div>
       )}
       <div
@@ -695,7 +703,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           const row = (event.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
           if (row) { focusedTreePathRef.current = row.dataset.treePath!; syncTreeTabStops(); }
         }}
-        aria-label="文件资源管理器"
+        aria-label={tr("文件资源管理器")}
         className={`file-tree-scroll${isListScrolling ? " is-scrolling" : ""}`}
         style={fileTreeListStyle}
         onScroll={(event) => {
@@ -718,11 +726,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       >
       {hasQuery ? (
         searchLoading ? (
-          <div style={fileTreeEmptyStyle}>正在搜索工作区…</div>
+          <div style={fileTreeEmptyStyle}>{tr("正在搜索工作区…")}</div>
         ) : searchError ? (
           <div role="alert" style={{ ...fileTreeEmptyStyle, color: "var(--state-danger)" }}>
             <div>{searchError}</div>
-            <button type="button" onClick={() => setSearchVersion((version) => version + 1)} style={refreshBtn}>重试搜索</button>
+            <button type="button" onClick={() => setSearchVersion((version) => version + 1)} style={refreshBtn}>{tr("重试搜索")}</button>
           </div>
         ) : searchResults.length > 0 ? (
           searchResults.map((result) => (
@@ -737,7 +745,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             />
           ))
         ) : (
-          <div style={fileTreeEmptyStyle}>没有与“{query.trim()}”匹配的文件。</div>
+          <div style={fileTreeEmptyStyle}>{tr("没有与“")}{query.trim()}{tr("”匹配的文件。")}</div>
         )
       ) : children.length > 0 ? (
         children.map((node) => (
@@ -759,9 +767,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         ))
       ) : !hasQuery ? (
         <div style={fileTreeEmptyStyle}>
-          {workingDirectory ? "工作区为空" : "打开一个工作区文件夹以浏览文件。"}
+          {workingDirectory ? tr("工作区为空") : tr("打开一个工作区文件夹以浏览文件。")}
           {!workingDirectory && isDesktop() && (
-            <button type="button" onClick={() => void openWorkspaceFolder()} style={openWorkspaceButtonStyle}>打开文件夹</button>
+            <button type="button" onClick={() => void openWorkspaceFolder()} style={openWorkspaceButtonStyle}>{tr("打开文件夹")}</button>
           )}
         </div>
       ) : null}

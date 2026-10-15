@@ -1,4 +1,5 @@
 import type { ContentBlock } from "../stores/types";
+import { projectSourceAssistantText } from "./source-assistant-text";
 import {
   isCompletedAgentMessageBlock,
   isFinalAnswerBlock,
@@ -7,7 +8,7 @@ import {
 import { isTerminalToolCallStatus, isToolCallExecuting, type ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
 import { isProviderRequestProgress, providerProgressLabel } from "./provider-progress";
-import { codeModeOwnError, getRecordOutputText, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
+import { codeModeOwnError, commandActionKind, getRecordOutputText, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
 import {
   isProviderReasoning,
   isProviderReasoningSummary,
@@ -31,6 +32,9 @@ export type TurnActivityKind =
   | "browser"
   | "genericTool"
   | "skill"
+  | "guardianReview"
+  | "guardianWarning"
+  | "contextCompaction"
   | "progress";
 
 export type TurnActivityStatus =
@@ -50,12 +54,16 @@ export interface TurnActivityItem {
   blocks: ContentBlock[];
   status: TurnActivityStatus;
   content?: string;
+  outputText?: string;
   source?: string;
   phase?: string;
   providerReasoningType?: string;
   /** Legacy/untyped thinking is user-visible but intentionally collapsed. */
   collapsible?: boolean;
   itemKind?: string;
+  review?: import("../protocol/guardian-types").GuardianAssessment;
+  automaticApprovalReviews?: import("../protocol/guardian-types").GuardianAssessment[];
+  guardianPatchFiles?: string[];
   records?: ToolCallRecord[];
   progress?: Extract<ContentBlock, { type: "progress" }>[];
   startedAt?: number;
@@ -79,6 +87,8 @@ export interface TurnActivityItem {
 
 export interface TurnProjection {
   activityItems: TurnActivityItem[];
+  /** Source user items split activity while retaining the physical turn. */
+  userInputs?: Array<{ userMessageId: string; segment: number }>;
   finalAnswer: string;
   finalAnswerSource?: string;
   status: "streaming" | "completed" | "partial" | "failed" | "interrupted" | "empty";
@@ -110,17 +120,20 @@ const ACTIVITY_KINDS = new Set<TurnActivityKind>([
   "browser",
   "genericTool",
   "skill",
+  "guardianReview",
+  "guardianWarning",
+  "contextCompaction",
   "progress",
 ]);
 
 const toolStatus = (record: ToolCallRecord): TurnActivityStatus => {
   if (record.status === "success") return "completed";
-  if (!isTerminalToolCallStatus(record.status)) return isToolCallExecuting(record) ? "running" : "pending";
+  if (!isTerminalToolCallStatus(record.status)) return record.commandPresentation || isToolCallExecuting(record) ? "running" : "pending";
   return record.status;
 };
 
 export const activityStatusFromToolRecords = (records: ToolCallRecord[]): TurnActivityStatus => {
-  if (records.some(isToolCallExecuting)) return "running";
+  if (records.some(record => !isTerminalToolCallStatus(record.status) && record.commandPresentation || isToolCallExecuting(record))) return "running";
   if (records.some((record) => !isTerminalToolCallStatus(record.status))) return "pending";
   if (records.some((record) => record.status === "failed")) return "failed";
   if (records.some((record) => record.status === "timeout")) return "timeout";
@@ -138,6 +151,8 @@ export const activityStatusFromToolRecords = (records: ToolCallRecord[]): TurnAc
  * activityKind metadata independently.
  */
 export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivityKind => {
+  if (record.streamingAnnouncement) return "genericTool";
+  if (record.commandPresentation && record.executionStartedAt == null && isTerminalToolCallStatus(record.status)) return "commandExecution";
   const declared = String(record.activityKind || "").trim();
   const name = String(record.name || "").trim().toLowerCase();
   // A screenshot is a first-class browser result.  Persisted records from
@@ -147,6 +162,7 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   // before honoring the old declaration; otherwise the image may be visible
   // while the timeline still presents it as the wrong operation.
   if (isBrowserScreenshotRecord(record)) return "browser";
+  if (record.commandActions?.length) return commandActionKind(record.commandActions);
   // list_files historically arrived with the broad workspaceSearch metadata.
   // The operation name is the canonical discriminator for this one built-in,
   // so it must win before the broad declaration is accepted.
@@ -252,6 +268,7 @@ const thinkingKind = (
 
 const isVisibleActivity = (block: ContentBlock, includeHidden: boolean): boolean => {
   if (includeHidden) return true;
+  if (block.type === "tool_call" && block.record.streamingAnnouncement && !isTerminalToolCallStatus(block.record.status)) return false;
   const visibility = block.type === "tool_call"
     ? block.record.visibility
     : "visibility" in block
@@ -393,7 +410,7 @@ export function projectTurn(
   // CC keeps each max-output continuation as another assistant segment. Join
   // all completed/partial agent-message items so a recovered answer does not
   // visually lose the portion emitted before the output boundary.
-  const finalAnswer = finalBlocks.map((block) => block.content).join("");
+  const finalAnswer = finalBlocks.map((block) => projectSourceAssistantText(block.content, block.source === "model_final" || block.source === "reply")).join("");
   const finalAnswerSource = selectedFinal?.source;
   let activeThinkingIndex = -1;
   if (options.isThinkingStreaming) {
@@ -405,9 +422,50 @@ export function projectTurn(
       }
     }
   }
+  const attachedReviews = new Map<string, import("../protocol/guardian-types").GuardianAssessment[]>();
+  const attachedPatchFiles = new Map<string, string[]>();
+  const attachedIds = new Set<string>();
+  const reviewTargets = new Map(blocks.flatMap(block => block.type === "tool_call" && isVisibleActivity(block, false)
+    ? [[block.record.id, block.record] as const] : []));
+  for (const block of blocks) {
+    if (block.type !== "guardian_assessment") continue;
+    const review = block.review;
+    if (!review.target_item_id) continue;
+    const target = reviewTargets.get(review.target_item_id);
+    if (!target) continue;
+    const exec = ["run_command", "shell_command", "bash"].includes(target.name);
+    const patch = target.name === "apply_patch";
+    const mcp = target.name.startsWith("mcp__") || activityKindFromToolRecord(target) === "mcpToolCall";
+    if (!(exec || patch || mcp) || mcp && review.status === "denied") continue;
+    if (patch && review.action.type === "apply_patch") attachedPatchFiles.set(target.id, review.action.files);
+    attachedIds.add(review.id);
+    const reviews = attachedReviews.get(target.id) ?? [];
+    if (review.status !== "approved") reviews.push(review);
+    attachedReviews.set(target.id, reviews);
+  }
   const activityItems: TurnActivityItem[] = [];
+  const userInputs: Array<{ userMessageId: string; segment: number }> = [];
   let segment = 0;
   blocks.forEach((block, index) => {
+    if (block.type === "user_input") {
+      segment += 1;
+      userInputs.push({ userMessageId: block.userMessageId, segment });
+      return;
+    }
+    if (block.type === "guardian_assessment") {
+      if (block.review.status === "approved" || attachedIds.has(block.review.id)) return;
+      const review = block.review;
+      activityItems.push({ id: review.id, kind: "guardianReview", review, blocks: [block],
+        status: review.status === "in_progress" ? "running" : "completed", startedAt: review.started_at_ms,
+        finishedAt: review.completed_at_ms, hasFailure: false, hasPendingUserAction: false, segment });
+      if (review.status !== "in_progress") segment += 1;
+      return;
+    }
+    if (block.type === "guardian_warning") {
+      if (block.interruption) activityItems.push({ id: `guardian-warning:${index}`, kind: "guardianWarning", blocks: [block],
+        content: block.message, status: "info", hasFailure: false, hasPendingUserAction: false, segment });
+      return;
+    }
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
@@ -421,8 +479,10 @@ export function projectTurn(
         // agent surface. Standalone results and failed observations remain.
         if (targets.length > 0 && targets.every((id) => typeof id === "string" && delegatedAgentIds.has(id))) return;
       }
-      // Execute/wait are transport wrappers. Leaves own the visible action;
-      // a standalone wrapper contributes only actual output or error evidence.
+      // Execute/wait return model context, including text() and copies of
+      // nested results. They never create transcript output rows. Nested
+      // operations own the trace; an independent runtime failure still owns
+      // a diagnostic row, while the original receipts stay in history.
       if (!options.includeHiddenActivity && ["tool_exec", "tool_wait"].includes(block.record.name)) {
         const leaves = (block.record.name === "tool_exec" ? composedParents.get(block.record.id)
           : composedCells.get(String(block.record.args.cell_id || ""))) ?? [];
@@ -430,11 +490,12 @@ export function projectTurn(
         const independentError = ownError && !leaves.some((leaf) => [
           getRecordOutputText(leaf).trim(), leaf.userSummary?.trim(), leaf.errorInfo?.user_message?.trim(), leaf.errorInfo?.user_summary?.trim(),
         ].includes(ownError));
-        const evidence = getRecordOutputText(block.record).trim()
-          || block.record.userSummary || block.record.errorInfo?.user_message || block.record.errorInfo?.user_summary;
-        if ((leaves.length > 0 && !independentError) || !evidence) return;
+        if (independentError) {
+          activityItems.push({ ...projectToolBlock(block, segment), title: "运行", summary: "", outputText: ownError });
+        }
+        return;
       }
-      if (!block.record.temporaryRemoved) activityItems.push(projectToolBlock(block, segment));
+      if (!block.record.temporaryRemoved) activityItems.push({ ...projectToolBlock(block, segment), automaticApprovalReviews: attachedReviews.get(block.record.id), guardianPatchFiles: attachedPatchFiles.get(block.record.id) });
       return;
     }
     if (block.type === "progress") {
@@ -485,6 +546,14 @@ export function projectTurn(
     }
     if (block.type === "process") {
       if (block.status === "retracted") return;
+      if (block.itemKind === "context_compaction") {
+        activityItems.push({ id: block.id, kind: "contextCompaction", blocks: [block],
+          status: block.status === "running" ? "running" : block.status === "interrupted" ? "cancelled" : "completed",
+          itemKind: block.itemKind, source: block.source, startedAt: block.startedAt ?? block.timestamp,
+          finishedAt: block.finishedAt, hasFailure: false, hasPendingUserAction: false, segment, segmentClosed: false });
+        segment += 1;
+        return;
+      }
       if (!block.content.trim() || !isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       // Chat Completions models sometimes emit a bare "..." as a pre-tool
       // placeholder. It carries no user-facing progress and should not become
@@ -528,6 +597,13 @@ export function projectTurn(
         segment,
         segmentClosed: false,
       });
+      return;
+    }
+    if (block.type === "text" && block.source === "retained") {
+      if (block.content.trim()) {
+        segment += 1;
+        activityItems.push(narrationItem(block, index, segment, block.isStreaming ? "running" : "completed"));
+      }
       return;
     }
     if (block.type === "text" && block.isStreaming === true) {
@@ -603,6 +679,7 @@ export function projectTurn(
 
   return {
     activityItems,
+    ...(userInputs.length ? { userInputs } : {}),
     finalAnswer,
     finalAnswerSource,
     status,

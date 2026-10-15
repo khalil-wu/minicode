@@ -11,6 +11,8 @@ OpenAI 适配器（DESIGN.md §一 LLM Adapter）。
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import base64
 import binascii
 import asyncio
@@ -21,14 +23,14 @@ import mimetypes
 import re
 import time
 from dataclasses import replace
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from backend.config import LLMSettings
 from backend.llm.responses_websocket import (
@@ -719,6 +721,17 @@ def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
     before sending the provider payload.
     """
     call_id = str(message.tool_call_id or "")
+    if message.tool_search_output is not None:
+        return {"type": "tool_search_output", "call_id": call_id, "tools": deepcopy(message.tool_search_output)}
+    if message.history_notes_output is not None:
+        return {"type": "function_call_output", "call_id": call_id,
+            "output": deepcopy(message.history_notes_output)}
+    if message.code_mode_output is not None:
+        return {"type": "function_call_output", "call_id": call_id,
+            "output": deepcopy(message.code_mode_output)}
+    if message.mcp_output is not None:
+        return {"type": "function_call_output", "call_id": call_id,
+            "output": deepcopy(message.mcp_output)}
     output = str(message.content or "")
     status = ""
     match = _FUNCTION_CALL_RESULT_RE.match(output)
@@ -743,7 +756,7 @@ def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
             {
                 "type": "input_image",
                 "image_url": f"data:{media_type};base64,{data}",
-                "detail": "auto",
+                "detail": image.get("detail") or "high",
             }
         )
     # Match Pi/Codex Responses encoding: text-only function results stay a
@@ -813,7 +826,7 @@ def _instruction_text_from_responses_input(
 
 
 def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
-    """Build Chat Completions messages without replayed instruction snapshots."""
+    """Keep admitted developer updates and split the leading instruction prefix."""
     chat_messages: list[dict[str, Any]] = []
     leading_instructions: list[str] = []
     seen_instruction_blocks: set[str] = set()
@@ -827,6 +840,8 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             tool_images = []
         if _is_instruction_role(role):
             if not accepting_leading_instructions:
+                if role == "developer":
+                    chat_messages.append(message.to_openai_message())
                 continue
             content = _message_content_text(message.content).strip()
             if not content or content in seen_instruction_blocks:
@@ -837,12 +852,35 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
 
         accepting_leading_instructions = False
         chat_messages.append(message.to_openai_message())
-        if role == "tool" and message.images:
+        if role == "tool" and message.code_mode_output is not None:
+            media_parts = []
+            for item in message.code_mode_output:
+                if item["type"] == "input_image":
+                    media_parts.append({"type": "image_url", "image_url": {
+                        "url": item["image_url"], "detail": item["detail"]}})
+                elif item["type"] == "input_audio":
+                    metadata, data = item["audio_url"].split(",", 1)
+                    media_type = metadata[5:].split(";", 1)[0].lower()
+                    audio_format = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+                        "audio/vnd.wave": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3"}.get(media_type)
+                    if audio_format is None:
+                        raise ValueError(f"Chat Completions does not support native {media_type} audio tool output; use Responses")
+                    media_parts.append({"type": "input_audio", "input_audio": {"data": data, "format": audio_format}})
+            if media_parts:
+                tool_images.append({"role": "user", "content": media_parts})
+            continue
+        if role == "tool":
+            from backend.mcp.result_projection import mcp_output_images
+
+            native_images = mcp_output_images(message.mcp_output) if message.mcp_output is not None else message.images
+        else:
+            native_images = []
+        if native_images:
             # Chat tool messages accept text only. Keep every tool response
             # together, then supply its pixels as native user image content.
             tool_images.append(LLMMessage(
                 role="user", content=f"Image returned by {message.name or 'tool'} ({message.tool_call_id or ''}).",
-                images=message.images,
+                images=native_images,
             ).to_openai_message())
 
     chat_messages.extend(tool_images)
@@ -887,11 +925,12 @@ def _chat_payload_input_items(
 ) -> list[dict[str, Any]]:
     if not messages:
         return []
-    return [
-        message
-        for message in messages
-        if isinstance(message, dict) and not _is_instruction_role(message.get("role"))
-    ]
+    prefix_length = 0
+    for message in messages:
+        if not _is_instruction_role(message.get("role")):
+            break
+        prefix_length += 1
+    return messages[prefix_length:]
 
 
 def _split_responses_instructions(
@@ -899,9 +938,8 @@ def _split_responses_instructions(
 ) -> tuple[str, list[LLMMessage]]:
     """Split leading system/developer instructions from Responses input.
 
-    Restored transcripts may contain historical system/developer snapshots after
-    user turns. Those are not current instructions and must not be re-promoted
-    into the next request's top-level ``instructions``.
+    Later developer messages remain ordered API input. Raw historical system
+    messages are not re-promoted into the current instruction prefix.
     """
     instructions: list[str] = []
     seen_instruction_blocks: set[str] = set()
@@ -911,6 +949,8 @@ def _split_responses_instructions(
         role = str(message.role or "").strip().lower()
         if _is_instruction_role(role):
             if not accepting_leading_instructions:
+                if role == "developer":
+                    input_messages.append(message)
                 continue
             content = _message_content_text(message.content).strip()
             if content and content not in seen_instruction_blocks:
@@ -1006,8 +1046,7 @@ def _chat_explicit_prompt_cache_messages(
         return messages, False
     non_instruction_messages = [
         dict(message)
-        for message in messages
-        if not _is_instruction_role(message.get("role"))
+        for message in _chat_payload_input_items(messages)
     ]
     result: list[dict[str, Any]] = [
         {
@@ -1052,12 +1091,16 @@ def _responses_identity_headers(
         headers["session-id"] = session_id
     if thread_id:
         headers["thread-id"] = thread_id
+    if "x-codex-turn-metadata" in metadata:
+        headers["x-codex-turn-metadata"] = metadata["x-codex-turn-metadata"]
     for header_name in (
         "x-minicode-window-id",
         "x-minicode-turn-metadata",
         "x-minicode-parent-thread-id",
         "x-minicode-installation-id",
         "x-openai-subagent",
+        "x-codex-parent-thread-id",
+        "x-codex-window-id",
     ):
         value = _valid_http_header_value(metadata.get(header_name))
         if value is not None:
@@ -1087,11 +1130,20 @@ def _responses_side_client_metadata(
     metadata = {"session_id": session_id, "thread_id": thread_id}
     if turn_id:
         metadata["turn_id"] = turn_id
+    if options.source_responses_metadata is not None:
+        source = dict(options.source_responses_metadata)
+        metadata["x-codex-turn-metadata"] = json.dumps(source, ensure_ascii=True, separators=(",", ":"))
+        if "root_turn_id" in source:
+            metadata["root_turn_id"] = source["root_turn_id"]
+        if options.source_window_id is not None:
+            metadata["x-codex-window-id"] = options.source_window_id
+        if options.source_subagent_header is not None:
+            metadata["x-openai-subagent"] = options.source_subagent_header
     return metadata
 
 
 def _responses_client_metadata(
-    request_metadata: dict[str, str] | None,
+    request_metadata: dict[str, Any] | None,
 ) -> dict[str, str]:
     """Project MiniCode turn identity into Codex Responses client metadata.
 
@@ -1178,6 +1230,14 @@ def _responses_client_metadata(
             client_metadata[target] = value
     if is_non_root_agent and "x-openai-subagent" not in client_metadata:
         client_metadata["x-openai-subagent"] = "collab_spawn"
+    source_metadata = metadata.get("_source_responses_metadata")
+    if source_metadata is not None:
+        client_metadata["x-codex-turn-metadata"] = json.dumps(
+            source_metadata, ensure_ascii=True, separators=(",", ":"))
+        for key, value in source_metadata.items():
+            client_metadata[key] = json.dumps(value, ensure_ascii=True, separators=(",", ":")) if not isinstance(value, str) else value
+        if "parent_thread_id" in source_metadata:
+            client_metadata["x-codex-parent-thread-id"] = source_metadata["parent_thread_id"]
     return client_metadata
 
 
@@ -1198,11 +1258,14 @@ def _responses_normalize_function_arguments(value: Any) -> str:
 
 
 def _responses_function_call_input_item(tc: ToolCallEvent) -> dict[str, Any]:
+    if tc.native_type == "tool_search_call":
+        return {"type": "tool_search_call", "call_id": tc.id, "execution": "client", "arguments": deepcopy(tc.arguments)}
     return {
         "type": "function_call",
         "id": tc.id,
         "call_id": tc.id,
-        "name": tc.name,
+        "name": tc.native_name or tc.name,
+        **({"namespace": tc.native_namespace} if tc.native_namespace else {}),
         "arguments": _responses_normalize_function_arguments(tc.arguments),
     }
 
@@ -1396,6 +1459,16 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
         # Responses requires this field even when no public summary was emitted.
         result["summary"] = detached_summary
         return result
+    if item_type == "tool_search_call":
+        call_id = _get_attr_or_item(item, "call_id", None) or item_id
+        arguments = _responses_detach_provider_json(
+            _get_attr_or_item(item, "arguments", None)
+        )
+        if not call_id or not isinstance(arguments, dict):
+            raise ValueError("provider_error_type=protocol: Invalid Responses tool_search_call input")
+        return {"type": item_type, "id": item_id or call_id, "call_id": call_id,
+            "execution": _get_attr_or_item(item, "execution", "client"), "arguments": deepcopy(arguments),
+            **({"status": status} if status else {})}
     if item_type in {"function_call", "custom_tool_call"}:
         call_id = _get_attr_or_item(item, "call_id", None)
         name = _get_attr_or_item(item, "name", None)
@@ -1414,6 +1487,9 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
             "name": name,
             input_field: arguments,
         }
+        namespace = _get_attr_or_item(item, "namespace", None)
+        if namespace is not None:
+            result["namespace"] = namespace
         if status and item_type == "function_call":
             result["status"] = status
         return result
@@ -1444,6 +1520,10 @@ def _responses_tool_calls_from_provider_items(
     """Recover the authoritative final Responses function-call batch."""
     tool_calls: list[ToolCallEvent] = []
     for item in provider_items:
+        if item.get("type") == "tool_search_call":
+            if item.get("execution", "client") == "client":
+                tool_calls.append(ToolCallEvent(id=item["call_id"], name="tool_search", arguments=deepcopy(item["arguments"]), native_type="tool_search_call"))
+            continue
         if item.get("type") == "custom_tool_call":
             name = item["name"]
             if not custom_fields or name not in custom_fields:
@@ -1457,6 +1537,8 @@ def _responses_tool_calls_from_provider_items(
             continue
         call_id = item["call_id"]
         name = item["name"]
+        namespace = item.get("namespace", "")
+        runtime_name = f"{namespace}__{name}" if namespace and namespace != "functions" else name
         arguments_text = item["arguments"]
         arguments_repaired = False
         try:
@@ -1471,9 +1553,10 @@ def _responses_tool_calls_from_provider_items(
         tool_calls.append(
             ToolCallEvent(
                 id=call_id,
-                name=name,
+                name=runtime_name,
                 arguments=arguments,
                 arguments_repaired=arguments_repaired,
+                native_namespace=namespace, native_name=name,
             )
         )
     return tool_calls
@@ -2477,6 +2560,7 @@ class OpenAIAdapter(LLMAdapter):
             window = validate_compaction_window({
                 "type": NATIVE_COMPACTION_TYPE, "origin": responses_context_origin(base_url),
                 "model": str(sent["model"]), "response_id": data.get("id", ""), "output": data.get("output"),
+                "compaction_model_hash": settings.comp_hash,
             })
             context.record["compaction_output_items"] = len(window["output"])
             return LLMMessage(role="assistant", provider_items=[window])
@@ -2571,6 +2655,37 @@ class OpenAIAdapter(LLMAdapter):
             base_url=self._settings.base_url,
             declared=self._settings.supports_hosted_web_search,
         )
+
+    def _apply_model_request_options(self, payload: dict[str, Any], *, model: str, responses: bool, disable_reasoning: bool = False) -> None:
+        policy = self.model_request_policy()
+        if policy.model != model:
+            return
+        if responses and policy.reasoning_summary is not None:
+            reasoning = payload.setdefault("reasoning", {})
+            if policy.supports_reasoning_summary_parameter and policy.reasoning_summary != "none" and not disable_reasoning:
+                reasoning["summary"] = policy.reasoning_summary
+            else:
+                reasoning.pop("summary", None)
+            if not reasoning:
+                payload.pop("reasoning")
+        if policy.verbosity is not None:
+            if responses:
+                payload.setdefault("text", {})["verbosity"] = policy.verbosity
+            else:
+                payload["verbosity"] = policy.verbosity
+        if policy.final_output_json_schema is not None:
+            schema = {"name": "codex_output_schema", "strict": policy.final_output_json_schema_strict, "schema": policy.final_output_json_schema}
+            if responses:
+                payload.setdefault("text", {}).setdefault("format", {"type": "json_schema", **schema})
+            else:
+                payload.setdefault("response_format", {"type": "json_schema", "json_schema": schema})
+        tier = policy.service_tier_for_request(self.current_service_tier())
+        if tier is not None:
+            payload["service_tier"] = tier
+
+    def _model_prompt_cache_key(self, default: str, *, model: str) -> str:
+        policy = self.model_request_policy()
+        return policy.prompt_cache_key_override if policy.model == model and policy.prompt_cache_key_override is not None else default
 
     async def _create_responses_request(
         self,
@@ -3057,6 +3172,88 @@ class OpenAIAdapter(LLMAdapter):
                     self._remember_responses_turn_state(metadata, getattr(event, "headers", None))
                 yield event
 
+    async def guardian_classification_events(
+        self, request: dict[str, Any], *, headers: dict[str, str],
+        metadata: dict[str, Any] | None = None, cancel_event: asyncio.Event | None = None,
+        stream_idle_timeout: float = 300.0,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Send the Source classifier's tool-less request through its real transport.
+
+        The classifier owns model, instructions, native evidence and retry policy.
+        This boundary retains the original SSE delta strings for its first-token
+        decision instead of collecting or normalizing the parent answer stream.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        sent, request_headers = await self._prepare_http_request(request, metadata=metadata,
+            base_headers={**self._responses_headers(), **headers})
+        manager = _openai_http_stream(self._http_client, "POST", self._responses_url(),
+            headers=request_headers, json_payload=sent)
+        try:
+            try:
+                response = await asyncio.wait_for(manager.__aenter__(), stream_idle_timeout)
+                await emit_provider_lifecycle_response(metadata, response.status_code, response.headers)
+                await self._responses_http_raise_for_status(response)
+                events = iter_sse_data(response)
+                async with aclosing(events):
+                    while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise asyncio.CancelledError
+                        try:
+                            payload = await asyncio.wait_for(anext(events), stream_idle_timeout)
+                        except StopAsyncIteration:
+                            return
+                        if payload == "[DONE]":
+                            return
+                        yield json.loads(payload)
+            finally:
+                await manager.__aexit__(None, None, None)
+        except TimeoutError as error:
+            raise httpx.ReadTimeout("Luna Responses stream idle deadline elapsed") from error
+
+    async def guardian_classification_connection_setup(
+        self, *, headers: dict[str, str], metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve the classifier's concrete endpoint and handshake credentials."""
+        request_headers = await emit_provider_lifecycle_headers(metadata, {**self._responses_headers(), **headers})
+        url = urlparse(self._responses_url())
+        return {
+            "url": url._replace(scheme="wss" if url.scheme == "https" else "ws").geturl(),
+            "headers": request_headers,
+            "proxy": _proxy_url_for_base_url(self._responses_url(), self._settings.proxy_mode) or None,
+        }
+
+    async def guardian_classification_websocket_events(
+        self, request: dict[str, Any], *, socket: Any, headers: dict[str, str],
+        metadata: dict[str, Any] | None = None, cancel_event: asyncio.Event | None = None,
+        stream_idle_timeout: float = 300.0,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Send a full Source Snapshot request on its leased classifier socket.
+
+        No parent replay baseline, turn-state token or previous_response_id is
+        introduced. The sampler owns the lease until the raw response completes.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        sent, _ = await self._prepare_http_request(request, metadata=metadata, base_headers=headers)
+        try:
+            await socket.send(json.dumps({**sent, "type": "response.create"}, ensure_ascii=False, separators=(",", ":")))
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError
+                raw = await asyncio.wait_for(socket.recv(), stream_idle_timeout)
+                event = json.loads(raw)
+                if not isinstance(event, dict):
+                    raise ValueError("provider_error_type=protocol: Responses WebSocket event must be an object")
+                yield event
+                if event.get("type") in {"response.completed", "response.incomplete", "response.failed", "error", "response.error"}:
+                    return
+        except ConnectionClosed as error:
+            code = error.rcvd.code if error.rcvd is not None else 1006
+            raise httpx.ReadError(f"Luna Responses WebSocket connection closed before completion (WebSocket code {code})") from error
+        except TimeoutError as error:
+            raise httpx.ReadTimeout("Luna Responses stream idle deadline elapsed") from error
+
     # ══════════════════════════════════════════════════════════════
     #  Responses API 实现（wire_api="responses"）
     # ══════════════════════════════════════════════════════════════
@@ -3175,8 +3372,13 @@ class OpenAIAdapter(LLMAdapter):
 
         model = self._settings.model
         request_metadata = sanitize_llm_request_metadata(metadata)
+        if metadata is not None and "_source_responses_metadata" in metadata:
+            request_metadata["_source_responses_metadata"] = metadata["_source_responses_metadata"]
+        internal_source = metadata.get("internal_session_source") if metadata is not None else None
+        if internal_source is not None:
+            request_metadata["x-openai-subagent"] = internal_source
         client_metadata = _responses_client_metadata(request_metadata)
-        prompt_cache_key = _responses_prompt_cache_key(client_metadata)
+        prompt_cache_key = self._model_prompt_cache_key(_responses_prompt_cache_key(client_metadata), model=model)
         prompt_cache_enabled = True
         explicit_prompt_cache = bool(
             prompt_cache_enabled
@@ -3240,6 +3442,8 @@ class OpenAIAdapter(LLMAdapter):
         # explicitly.  ``mode=explicit`` disables the provider's implicit
         # breakpoint, so reserve it for genuinely standalone side queries.
         identity_headers = _responses_identity_headers(client_metadata)
+        if internal_source == "memory_consolidation":
+            identity_headers["x-openai-memgen-request"] = "true"
         if identity_headers:
             kwargs["extra_headers"] = identity_headers
         if prompt_cache_retention:
@@ -3261,6 +3465,7 @@ class OpenAIAdapter(LLMAdapter):
             kwargs["reasoning"] = reasoning_request
         if include_request:
             kwargs["include"] = include_request
+        self._apply_model_request_options(kwargs, model=model, responses=True)
 
         # Keep routing metadata through the concrete transport even when no
         # lifecycle hook is installed. It owns turn-scoped sticky state as
@@ -3385,6 +3590,9 @@ class OpenAIAdapter(LLMAdapter):
                 or ""
             ).strip()
             event_call_id = str(_get_attr_or_item(value, "call_id", "") or "").strip()
+            is_search = _get_attr_or_item(value, "type", "") == "tool_search_call"
+            if is_search and not event_call_id:
+                event_call_id = item_id
             slot = (
                 response_tool_items.get(event_call_id)
                 or response_tool_items.get(item_id)
@@ -3402,7 +3610,7 @@ class OpenAIAdapter(LLMAdapter):
                     "conflicting_function_call_done", event_type=event_type,
                     item_id=item_id, call_id=event_call_id,
                 )
-            name = str(
+            name = "tool_search" if is_search else str(
                 _get_attr_or_item(value, "name", "") or slot.get("name", "") or ""
             ).strip()
             if not name:
@@ -3421,6 +3629,11 @@ class OpenAIAdapter(LLMAdapter):
                     "unoffered_custom_tool", event_type=event_type, call_id=call_id,
                 )
             arguments_value = _get_attr_or_item(value, "input" if is_custom else "arguments", None)
+            if is_search:
+                arguments_value = json.dumps(
+                    _responses_detach_provider_json(arguments_value),
+                    ensure_ascii=False,
+                )
             if arguments_value is None or (not is_custom and arguments_value == ""):
                 arguments_value = slot.get("arguments", "") if is_custom else slot.get("arguments") or "{}"
             if not isinstance(arguments_value, str):
@@ -3450,7 +3663,9 @@ class OpenAIAdapter(LLMAdapter):
                     call_id=call_id,
                 )
 
-            shape = (name, _json_fingerprint(arguments))
+            native_namespace = _get_attr_or_item(value, "namespace", "") or slot.get("namespace", "")
+            runtime_name = f"{native_namespace}__{name}" if native_namespace and native_namespace != "functions" else name
+            shape = (runtime_name, _json_fingerprint(arguments))
             keys = [key for key in (call_id, item_id) if key]
             existing_shapes = {
                 finalized_response_tool_shapes[key]
@@ -3481,6 +3696,7 @@ class OpenAIAdapter(LLMAdapter):
                     "id": call_id,
                     "item_id": item_id,
                     "name": name,
+                    "namespace": native_namespace,
                     "arguments": arguments_value,
                 }
             )
@@ -3490,9 +3706,11 @@ class OpenAIAdapter(LLMAdapter):
             return (
                 ToolCallEvent(
                     id=call_id,
-                    name=name,
+                    name=runtime_name,
                     arguments=arguments,
                     arguments_repaired=arguments_repaired,
+                    native_type="tool_search_call" if is_search else "",
+                    native_namespace=native_namespace, native_name=name,
                 ),
                 None,
             )
@@ -4394,10 +4612,10 @@ class OpenAIAdapter(LLMAdapter):
                             content_kind="text",
                             lifecycle="start",
                         )
-                    elif item_type in {"function_call", "custom_tool_call"}:
+                    elif item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                         item_id = str(_get_attr_or_item(item, "id", "") or "").strip()
-                        call_id = str(_get_attr_or_item(item, "call_id", "") or "").strip()
-                        name = str(_get_attr_or_item(item, "name", "") or "").strip()
+                        call_id = str(_get_attr_or_item(item, "call_id", "") or (item_id if item_type == "tool_search_call" else "")).strip()
+                        name = "tool_search" if item_type == "tool_search_call" else str(_get_attr_or_item(item, "name", "") or "").strip()
                         key = call_id
                         if not call_id:
                             yield _responses_tool_protocol_error(
@@ -4421,6 +4639,11 @@ class OpenAIAdapter(LLMAdapter):
                             )
                             return
                         initial_arguments = _get_attr_or_item(item, "input" if item_type == "custom_tool_call" else "arguments", "")
+                        if item_type == "tool_search_call":
+                            initial_arguments = json.dumps(
+                                _responses_detach_provider_json(initial_arguments),
+                                ensure_ascii=False,
+                            )
                         slot = existing_slot or {
                             "id": call_id or item_id,
                             "item_id": item_id,
@@ -4432,6 +4655,7 @@ class OpenAIAdapter(LLMAdapter):
                                 "id": call_id or item_id,
                                 "item_id": item_id,
                                 "name": name or slot.get("name", ""),
+                                "namespace": _get_attr_or_item(item, "namespace", "") or "",
                                 "started": "true",
                             }
                         )
@@ -4443,11 +4667,13 @@ class OpenAIAdapter(LLMAdapter):
                         if item_id:
                             response_tool_items[item_id] = slot
                         if name:
+                            native_namespace = _get_attr_or_item(item, "namespace", "") or ""
+                            runtime_name = f"{native_namespace}__{name}" if native_namespace and native_namespace != "functions" else name
                             yield StreamEvent(
                                 type=StreamEventType.TOOL_CALL_START,
                                 tool_call_start=ToolCallStartEvent(
                                     id=call_id or item_id,
-                                    name=name,
+                                    name=runtime_name,
                                     index=response_tool_start_count,
                                 ),
                             )
@@ -4492,7 +4718,21 @@ class OpenAIAdapter(LLMAdapter):
                             type=StreamEventType.PROVIDER_ACTIVITY,
                             provider_activity=activity,
                         )
-                    if item_type in {"function_call", "custom_tool_call"}:
+                    if item_type == "message":
+                        # Message history has its own serializer; opaque replay
+                        # items deliberately exclude assistant messages.
+                        completed_message = _responses_provider_items_from_response(
+                            {"output": [item]}, include_messages=True,
+                        )[0]
+                        yield StreamEvent(
+                            type=StreamEventType.TEXT_CHUNK,
+                            phase=str(_get_attr_or_item(item, "phase", "") or ""),
+                            item_id=str(_get_attr_or_item(item, "id", "") or ""),
+                            content_kind="text",
+                            lifecycle="item_completed",
+                            provider_items=[completed_message],
+                        )
+                    if item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                         tool_call, protocol_error = finalize_response_function_call(
                             item,
                             event_type=event_type,
@@ -4616,9 +4856,15 @@ class OpenAIAdapter(LLMAdapter):
                             provider_activity=activity,
                         )
 
-                elif event_type == "response.completed":
+                elif event_type == "response.completed" or (
+                    event_type == "response.incomplete"
+                    and _response_finish_reason(getattr(event, "response", None)).strip().lower() == "interrupted"
+                ):
                     response_obj = getattr(event, "response", None)
-                    completed_response_end_turn = _get_attr_or_item(response_obj, "end_turn", None)
+                    completed_response_end_turn = (
+                        False if event_type == "response.incomplete"
+                        else _get_attr_or_item(response_obj, "end_turn", None)
+                    )
                     if not response_obj:
                         # A terminal frame with no response object carries no
                         # usage, finish_reason or output. Marking the stream
@@ -4718,13 +4964,13 @@ class OpenAIAdapter(LLMAdapter):
                     raw_done["safety"] = _provider_trace_safety(output_items)
                     for recovered_event in terminal_response_reasoning_events(
                         response_obj,
-                        recovered_from="response.completed",
+                        recovered_from=event_type,
                     ):
                         full_reasoning_summary += recovered_event.content
                         yield recovered_event
                     for recovered_event in terminal_response_text_events(
                         response_obj,
-                        recovered_from="response.completed",
+                        recovered_from=event_type,
                     ):
                         full_text += recovered_event.content
                         yield recovered_event
@@ -4995,7 +5241,7 @@ class OpenAIAdapter(LLMAdapter):
         client_metadata = _responses_side_client_metadata(side_options)
         prompt_cache_enabled = side_options is None or side_options.enable_prompt_cache
         prompt_cache_key = (
-            _responses_prompt_cache_key(client_metadata) if prompt_cache_enabled else ""
+            self._model_prompt_cache_key(_responses_prompt_cache_key(client_metadata), model=model) if prompt_cache_enabled else ""
         )
         explicit_prompt_cache = bool(
             prompt_cache_enabled
@@ -5087,6 +5333,8 @@ class OpenAIAdapter(LLMAdapter):
             if reasoning_request:
                 kwargs["reasoning"] = reasoning_request
 
+        self._apply_model_request_options(kwargs, model=model, responses=True,
+            disable_reasoning=side_options is not None and side_options.disable_reasoning)
         try:
             stream = await self._create_responses_request(
                 kwargs,
@@ -5239,8 +5487,10 @@ class OpenAIAdapter(LLMAdapter):
                     custom_call_ids.update(item["call_id"] for item in window["output"] if item["type"] == "custom_tool_call")
                 continue
             role = str(msg.role or "").strip().lower()
-            if role in {"system", "developer"}:
+            if role == "system":
                 continue
+            elif role == "developer":
+                result.append({"role": "developer", "content": _message_content_text(msg.content)})
             elif role == "user":
                 text_parts = msg.user_text_parts()
                 if msg.images or msg.documents or len(text_parts) > 1:
@@ -5255,7 +5505,7 @@ class OpenAIAdapter(LLMAdapter):
                             {
                                 "type": "input_image",
                                 "image_url": f"data:{media_type};base64,{data}",
-                                "detail": "auto",
+                                "detail": img.get("detail") or "auto",
                             }
                         )
                     for doc in msg.documents:
@@ -5288,26 +5538,26 @@ class OpenAIAdapter(LLMAdapter):
                     dict(item)
                     for item in (msg.provider_items or [])
                     if isinstance(item, dict)
-                    and (str(item.get("type") or "") in {"reasoning", "function_call", "message"}
+                    and (str(item.get("type") or "") in {"reasoning", "function_call", "tool_search_call", "message", "agent_message"}
                          or (self._settings.supports_custom_tools and item.get("type") == "custom_tool_call"))
                 ]
                 provider_function_call_ids = {
                     str(item.get("call_id") or item.get("id") or "")
                     for item in provider_items
-                    if item.get("type") in {"function_call", "custom_tool_call"}
+                    if item.get("type") in {"function_call", "custom_tool_call", "tool_search_call"}
                 }
                 custom_call_ids.update(
                     item["call_id"] for item in provider_items if item.get("type") == "custom_tool_call"
                 )
                 for item in provider_items:
-                    if item.get("type") in {"reasoning", "message"}:
+                    if item.get("type") in {"reasoning", "message", "agent_message"}:
                         # Repair history saved before empty summaries were kept.
                         # These are copied wire items, not mutations of history.
                         if item.get("type") == "reasoning":
                             item.setdefault("summary", [])
                         result.append(item)
                 assistant_text = _message_content_text(msg.content)
-                if assistant_text and not any(item.get("type") == "message" for item in provider_items):
+                if assistant_text and not any(item.get("type") in {"message", "agent_message"} for item in provider_items):
                     assistant_item: dict[str, Any] = {
                         "role": "assistant",
                         "content": assistant_text,
@@ -5317,7 +5567,7 @@ class OpenAIAdapter(LLMAdapter):
                         assistant_item["phase"] = phase[:40]
                     result.append(assistant_item)
                 for item in provider_items:
-                    if item.get("type") in {"function_call", "custom_tool_call"}:
+                    if item.get("type") in {"function_call", "custom_tool_call", "tool_search_call"}:
                         result.append(item)
                 if msg.tool_calls:
                     # Responses represents assistant text and function calls as
@@ -5343,11 +5593,25 @@ class OpenAIAdapter(LLMAdapter):
         """将 OpenAI function-calling 格式转换为 Responses API 格式。"""
         tools = canonicalize_tool_schemas(tools)
         result = []
+        namespaces: dict[str, dict[str, Any]] = {}
         for tool in tools:
             func = tool.get("function", {})
+            if func.get("name") == "tool_search":
+                result.append({"type": "tool_search", "execution": "client", "description": func["description"], "parameters": deepcopy(func["parameters"])})
+                continue
+            namespace = tool.get("_minicode_namespace")
+            destination = result
+            if namespace is not None:
+                if namespace["name"] not in namespaces:
+                    entry = {"type": "namespace", "name": namespace["name"],
+                        "description": namespace["description"], "tools": []}
+                    namespaces[namespace["name"]] = entry
+                    result.append(entry)
+                destination = namespaces[namespace["name"]]["tools"]
+            model_name = namespace["tool_name"] if namespace is not None else func["name"]
             if supports_custom_tools and "_minicode_freeform" in tool:
                 native = tool["_minicode_freeform"]
-                result.append({"type": "custom", "name": func["name"],
+                destination.append({"type": "custom", "name": model_name,
                                "description": native["description"], "format": native["format"]})
                 continue
             strict = bool(func.get("strict", False))
@@ -5361,10 +5625,10 @@ class OpenAIAdapter(LLMAdapter):
                     parameters = strict_parameters
                 else:
                     strict = False
-            result.append(
+            destination.append(
                 {
                     "type": "function",
-                    "name": func.get("name", ""),
+                    "name": model_name,
                     "description": func.get("description", ""),
                     "parameters": parameters,
                     "strict": strict,
@@ -5381,6 +5645,8 @@ class OpenAIAdapter(LLMAdapter):
         for tool in tools:
             normalized_tool = dict(tool)
             normalized_tool.pop("_minicode_freeform", None)
+            normalized_tool.pop("_minicode_output_schema", None)
+            normalized_tool.pop("_minicode_namespace", None)
             function_def = dict(normalized_tool.get("function", {}))
             # Preserve the tool's strict flag so OpenAI structured outputs are
             # requested for tools that declare strict=True (matching cc's
@@ -5903,7 +6169,7 @@ class OpenAIAdapter(LLMAdapter):
             else _responses_client_metadata(request_metadata)
         )
         prompt_cache_key = (
-            _responses_prompt_cache_key(cache_identity) if prompt_cache_enabled else ""
+            self._model_prompt_cache_key(_responses_prompt_cache_key(cache_identity), model=model) if prompt_cache_enabled else ""
         )
         explicit_prompt_cache = bool(
             prompt_cache_key
@@ -5968,6 +6234,8 @@ class OpenAIAdapter(LLMAdapter):
         )
         if thinking_control is not None:
             kwargs["thinking"] = thinking_control
+        self._apply_model_request_options(kwargs, model=model, responses=False,
+            disable_reasoning=side_options is not None and side_options.disable_reasoning)
         if request_metadata:
             kwargs["metadata"] = request_metadata
             kwargs["store"] = False
@@ -6034,7 +6302,18 @@ class OpenAIAdapter(LLMAdapter):
                         )
                     saw_done = True
                 elif event.type == StreamEventType.ERROR:
-                    raise RuntimeError(event.content or "Chat completion stream failed")
+                    failure = RuntimeError(event.content or "Chat completion stream failed")
+                    for key in (
+                        "status_code",
+                        "retry_after_seconds",
+                        "provider_error_type",
+                        "provider_error_code",
+                        "provider_error_schema_type",
+                    ):
+                        value = event.raw.get(key)
+                        if value is not None:
+                            setattr(failure, key, value)
+                    raise failure
 
             if not saw_done:
                 raise RuntimeError("Chat completion stream ended before DONE")

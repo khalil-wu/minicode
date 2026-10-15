@@ -403,7 +403,7 @@ describe("Composer goal bar", () => {
 
     render(<Composer />);
 
-    expect(screen.getByText("回复 助手")).toBeTruthy();
+    expect(screen.getByText(/回复\s*助手/)).toBeTruthy();
     expect(screen.getByText("上一条助手回复里比较长的内容")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Send" }));

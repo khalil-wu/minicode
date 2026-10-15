@@ -1,6 +1,6 @@
 "use strict";
 
-const { WebContentsView, app, dialog } = require("electron");
+const { WebContentsView, app, dialog, session } = require("electron");
 const net = require("node:net");
 const dns = require("node:dns").promises;
 const fs = require("node:fs");
@@ -13,13 +13,14 @@ const CONTROL_DEFAULT_MAX_CHARS = 20_000;
 const CONTROL_MAX_CHARS = 200_000;
 const API_IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024;
 
-let getMainWindow = () => null;
+let getWindowByInstanceId = () => null;
+let getMainWindows = () => [];
 let appendDesktopLog = () => {};
 let assessBrowserNavigationPolicy = null;
 let isOwnedPreviewUrl = () => false;
 let lookupHostAddresses = (host) => dns.lookup(host, { all: true, verbatim: true });
 let views = new Map();
-let activeViewId = null;
+const activeViewIds = new Map();
 const pendingNavigations = new Map();
 const configuredSessions = new WeakSet();
 const entriesByWebContentsId = new Map();
@@ -28,9 +29,12 @@ const SITE_PERMISSIONS = new Set(["clipboard-read", "geolocation", "media", "not
 let browserSettingsPath = "";
 let browserSettingsLoaded = false;
 let browserSettings = { downloadPolicy: "block", sitePermissions: {} };
+let browserHistory = null;
 
 function init(deps = {}) {
-  if (typeof deps.getMainWindow === "function") getMainWindow = deps.getMainWindow;
+  if (deps.browserHistory) browserHistory = deps.browserHistory;
+  if (typeof deps.getWindowByInstanceId === "function") getWindowByInstanceId = deps.getWindowByInstanceId;
+  if (typeof deps.getMainWindows === "function") getMainWindows = deps.getMainWindows;
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
   if (typeof deps.assessBrowserNavigationPolicy === "function") {
     assessBrowserNavigationPolicy = deps.assessBrowserNavigationPolicy;
@@ -85,6 +89,9 @@ function loadBrowserSettings() {
 function saveBrowserSettings(settings) {
   atomicWriteTextSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`);
   browserSettings = settings;
+  for (const window of getMainWindows()) {
+    window.webContents.send("minicode:embeddedBrowser:settingsChanged", browserSettings);
+  }
 }
 
 function getBrowserSettings(url = "") {
@@ -159,6 +166,16 @@ function requireConversationId(value) {
 
 function conversationIdFrom(payload = {}) {
   return requireConversationId(payload.conversation_id || payload.conversationId);
+}
+
+function requireWindow(windowInstanceId) {
+  const window = getWindowByInstanceId(windowInstanceId);
+  if (!window || window.isDestroyed()) throw new Error("Embedded browser window owner is unavailable.");
+  return window;
+}
+
+function viewKey(windowInstanceId, id) {
+  return JSON.stringify([windowInstanceId, id]);
 }
 
 function isAllowedNavigationUrl(value) {
@@ -310,14 +327,14 @@ async function assessNavigationTargetForRequest(value, conversationId = "", entr
 function requestApprovedNavigation(entry, url) {
   const origin = normalizeOrigin(url) || url;
   if (entry.pendingNavigationApprovals.has(origin)) return;
-  const request = pendingNavigations.get(entry.id);
+  const request = pendingNavigations.get(entry.key);
   const control = request?.control || {};
   entry.pendingNavigationApprovals.add(origin);
   void confirmNavigationUrl(url, entry.conversationId, entry, control)
     .then((navigation) => {
       control.signal?.throwIfAborted();
-      if (views.get(entry.id) !== entry || entry.view.webContents.isDestroyed()
-        || (request && pendingNavigations.get(entry.id) !== request)) {
+      if (views.get(entry.key) !== entry || entry.view.webContents.isDestroyed()
+        || (request && pendingNavigations.get(entry.key) !== request)) {
         throw new Error("Browser navigation was cancelled.");
       }
       if (navigation.privateNetworkApproved) entry.approvedPrivateOrigins.add(origin);
@@ -363,7 +380,8 @@ async function confirmNavigationUrl(value, conversationId = "", entry = null, co
     // that preview; another local/private target still needs its own decision.
     return { url, privateNetworkApproved: true };
   }
-  const owner = getMainWindow();
+  const owner = entry ? entry.window : control.window;
+  if (!owner || owner.isDestroyed()) throw new Error("Embedded browser window owner is unavailable.");
   const result = await dialog.showMessageBox(owner && !owner.isDestroyed() ? owner : undefined, {
     type: "warning",
     buttons: ["Cancel", "Open"],
@@ -431,7 +449,7 @@ function configureGuestSession(session) {
   session.setPermissionRequestHandler((webContents, permission, callback, details) => {
     callback(sitePermissionAllowed(webContents, permission, details?.requestingUrl, details));
   });
-  session.on("will-download", (event, item) => {
+  session.on("will-download", (event, item, webContents) => {
     const policy = browserSettings.downloadPolicy;
     if (policy === "block") {
       event.preventDefault();
@@ -442,8 +460,9 @@ function configureGuestSession(session) {
         title: "保存下载文件",
         defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename() || "download")),
       };
-      const owner = getMainWindow();
-      const savePath = owner && !owner.isDestroyed() ? dialog.showSaveDialogSync(owner, options) : dialog.showSaveDialogSync(options);
+      const owner = entriesByWebContentsId.get(webContents.id)?.window;
+      if (!owner || owner.isDestroyed()) { event.preventDefault(); return; }
+      const savePath = dialog.showSaveDialogSync(owner, options);
       if (!savePath) {
         event.preventDefault();
         return;
@@ -537,29 +556,33 @@ function targetState(entry) {
     title: state.title,
     url: state.url,
     faviconUrl: state.faviconUrl,
-    active: entry.id === activeViewId,
+    active: entry.id === activeViewIds.get(entry.windowInstanceId),
     loading: state.loading,
     canGoBack: state.canGoBack,
     canGoForward: state.canGoForward,
   };
 }
 
-function listTargets(conversationId) {
+function listTargets(conversationId, windowInstanceId) {
   const owner = requireConversationId(conversationId);
+  requireWindow(windowInstanceId);
   return Array.from(views.values())
-    .filter((entry) => entry.conversationId === owner)
+    .filter((entry) => entry.conversationId === owner && entry.windowInstanceId === windowInstanceId)
     .map(targetState);
 }
 
-function selectEntry(id, conversationId) {
+function selectEntry(id, conversationId, windowInstanceId) {
   const owner = requireConversationId(conversationId);
+  requireWindow(windowInstanceId);
+  const activeViewId = activeViewIds.get(windowInstanceId);
+  const activeEntry = views.get(viewKey(windowInstanceId, activeViewId));
   const requestedId = typeof id === "string" ? id.trim() : "";
   const entry = requestedId
-    ? views.get(assertViewId(requestedId))
+    ? views.get(viewKey(windowInstanceId, assertViewId(requestedId)))
     : (
-        activeViewId && views.get(activeViewId)?.conversationId === owner
-          ? views.get(activeViewId)
-          : Array.from(views.values()).find((candidate) => candidate.conversationId === owner)
+        activeEntry?.conversationId === owner
+          ? activeEntry
+          : Array.from(views.values()).find((candidate) => candidate.conversationId === owner && candidate.windowInstanceId === windowInstanceId)
       );
   if (!entry) throw new Error("No embedded browser tab is available. Open the browser panel first.");
   if (entry.conversationId !== owner) throw new Error("Embedded browser tab belongs to another conversation.");
@@ -764,17 +787,19 @@ const REGION_PICKER_SCRIPT = `new Promise((resolve) => {
 
 function emit(entry, type, extra = {}) {
   // Live callbacks from a disposed tab must not republish it after closure.
-  if (views.get(entry.id) !== entry) return;
-  const mainWindow = getMainWindow();
+  if (views.get(entry.key) !== entry) return;
+  const mainWindow = entry.window;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("minicode:embeddedBrowser:event", navigationState(entry, type, extra));
 }
 
-function activate(id, conversationId) {
-  const entry = selectEntry(id, conversationId);
+function activate(id, conversationId, windowInstanceId) {
+  const entry = selectEntry(id, conversationId, windowInstanceId);
   const requestedId = entry.id;
-  activeViewId = requestedId;
-  for (const entry of views.values()) syncViewPresentation(entry);
+  activeViewIds.set(windowInstanceId, requestedId);
+  for (const candidate of views.values()) {
+    if (candidate.windowInstanceId === windowInstanceId) syncViewPresentation(candidate);
+  }
   return true;
 }
 
@@ -782,6 +807,8 @@ function syncFrameCapture(entry) {
   const contents = entry.view.webContents;
   if (!entry.presented || entry.captureWaiters.size === 0 || entry.captureInFlight) return;
   entry.captureInFlight = true;
+  const backgroundThrottling = contents.getBackgroundThrottling();
+  contents.setBackgroundThrottling(false);
   // Resize and visibility reach Chromium asynchronously. Two actual animation
   // frames let the presented viewport paint before requesting its compositor
   // image; this does not poll or substitute another page's rendering.
@@ -795,12 +822,16 @@ function syncFrameCapture(entry) {
     .catch((error) => {
       for (const complete of Array.from(entry.captureWaiters)) complete(null, error);
     })
-    .finally(() => { entry.captureInFlight = false; syncFrameCapture(entry); });
+    .finally(() => {
+      if (!contents.isDestroyed()) contents.setBackgroundThrottling(backgroundThrottling);
+      entry.captureInFlight = false;
+      syncFrameCapture(entry);
+    });
 }
 
 function syncViewPresentation(entry) {
   const bounds = entry.view.getBounds();
-  entry.presented = entry.layoutBound && activeViewId === entry.id && bounds.width > 0 && bounds.height > 0;
+  entry.presented = entry.layoutBound && activeViewIds.get(entry.windowInstanceId) === entry.id && bounds.width > 0 && bounds.height > 0;
   entry.view.setVisible(entry.presented);
   syncFrameCapture(entry);
 }
@@ -864,6 +895,7 @@ function attachViewEvents(entry) {
     }
     entry.url = url;
     entry.faviconUrl = "";
+    if (browserHistory) entry.historyId = browserHistory.recordVisit(url, entry.title || "", entry.visitSource);
     emit(entry, "updated");
   });
   webContents.on("did-navigate-in-page", (_event, url) => {
@@ -873,11 +905,13 @@ function attachViewEvents(entry) {
       return;
     }
     entry.url = url;
+    if (browserHistory) entry.historyId = browserHistory.recordVisit(url, entry.title || "", entry.visitSource);
     emit(entry, "updated");
   });
   webContents.on("page-title-updated", (event, title) => {
     event.preventDefault();
     entry.title = title;
+    if (browserHistory) browserHistory.updateTitle(entry.historyId, title);
     emit(entry, "updated");
   });
   webContents.on("page-favicon-updated", (_event, favicons) => {
@@ -911,16 +945,20 @@ async function create(payload = {}, control = {}) {
   control.signal?.throwIfAborted();
   const { id, url } = payload;
   const conversationId = conversationIdFrom(payload);
+  const windowInstanceId = payload.window_instance_id;
+  const mainWindow = requireWindow(windowInstanceId);
   const requestedId = assertViewId(id);
-  let entry = views.get(requestedId);
-  const claimedOwner = entry?.conversationId || pendingNavigations.get(requestedId)?.conversationId;
+  const key = viewKey(windowInstanceId, requestedId);
+  let entry = views.get(key);
+  const claimedOwner = entry?.conversationId || pendingNavigations.get(key)?.conversationId;
   if (claimedOwner && claimedOwner !== conversationId) {
     throw new Error("Embedded browser tab id belongs to another conversation.");
   }
-  const request = { conversationId, control };
-  pendingNavigations.set(requestedId, request);
+  control = { ...control, window: mainWindow };
+  const request = { conversationId, windowInstanceId, control };
+  pendingNavigations.set(key, request);
   const assertCurrent = () => {
-    if (pendingNavigations.get(requestedId) !== request) throw new Error("Browser navigation was cancelled.");
+    if (pendingNavigations.get(key) !== request || mainWindow.isDestroyed()) throw new Error("Browser navigation was cancelled.");
   };
   try {
     const navigation = await confirmNavigationUrl(url, conversationId, entry, control);
@@ -928,10 +966,8 @@ async function create(payload = {}, control = {}) {
     assertCurrent();
     const requestedUrl = navigation.url;
     // Approval/DNS can yield; only this still-owned request may publish a view.
-    entry = views.get(requestedId);
+    entry = views.get(key);
     if (!entry) {
-      const mainWindow = getMainWindow();
-      if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Main window is unavailable.");
       const view = new WebContentsView({
         webPreferences: {
           contextIsolation: true,
@@ -944,6 +980,9 @@ async function create(payload = {}, control = {}) {
       const approvedPrivateOrigins = new Set();
       entry = {
         id: requestedId,
+        key,
+        windowInstanceId,
+        window: mainWindow,
         conversationId,
         view,
         url: requestedUrl,
@@ -958,7 +997,7 @@ async function create(payload = {}, control = {}) {
         captureWaiters: new Set(),
         captureInFlight: false,
       };
-      views.set(requestedId, entry);
+      views.set(key, entry);
       entriesByWebContentsId.set(view.webContents.id, entry);
       configureGuestSession(view.webContents.session);
       attachViewEvents(entry);
@@ -975,18 +1014,19 @@ async function create(payload = {}, control = {}) {
     }
     control.signal?.throwIfAborted();
     control.onSubmitted?.();
+    entry.visitSource = control.onSubmitted ? "agent" : "other";
     await entry.view.webContents.loadURL(requestedUrl);
     assertCurrent();
     return navigationState(entry, "updated");
   } finally {
-    if (pendingNavigations.get(requestedId) === request) pendingNavigations.delete(requestedId);
+    if (pendingNavigations.get(key) === request) pendingNavigations.delete(key);
   }
 }
 
 function setBounds(payload = {}) {
   const { id, x, y, width, height } = payload;
-  const entry = selectEntry(id, conversationIdFrom(payload));
-  const mainWindow = getMainWindow();
+  const entry = selectEntry(id, conversationIdFrom(payload), payload.window_instance_id);
+  const mainWindow = entry.window;
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   const content = mainWindow.getContentBounds();
   // getBoundingClientRect() is expressed in renderer CSS pixels. Electron View
@@ -1026,7 +1066,7 @@ function setBounds(payload = {}) {
 const navigate = create;
 
 async function clearSiteData(payload = {}) {
-  const entry = selectEntry(payload.id, conversationIdFrom(payload));
+  const entry = selectEntry(payload.id, conversationIdFrom(payload), payload.window_instance_id);
   const origin = normalizeOrigin(entry.view.webContents.getURL() || entry.url);
   if (!origin) return false;
   await entry.view.webContents.session.clearStorageData({
@@ -1041,13 +1081,45 @@ async function clearSiteData(payload = {}) {
   return true;
 }
 
+async function clearBrowsingData() {
+  const browserSession = session.fromPartition(DEFAULT_PARTITION);
+  await browserSession.clearStorageData();
+  await browserSession.clearCache();
+  browserHistory.clear();
+  loadBrowserSettings();
+  saveBrowserSettings({ ...browserSettings, sitePermissions: {} });
+  for (const entry of views.values()) entry.approvedPrivateOrigins.clear();
+  return true;
+}
+
+async function capture(payload) {
+  const entry = selectEntry(payload.id, conversationIdFrom(payload), payload.window_instance_id);
+  const contents = entry.view.webContents;
+  if (contents.getURL() !== payload.expectedUrl) throw new Error("浏览器页面已经变化，请重新选择批注位置。");
+  let image = await capturePresentedPage(entry, {});
+  if (contents.getURL() !== payload.expectedUrl) throw new Error("浏览器页面已经变化，请重新选择批注位置。");
+  if (payload.rect) {
+    const size = image.getSize();
+    const viewport = payload.viewport;
+    const x = Math.max(0, Math.floor(payload.rect.x * size.width / viewport.width));
+    const y = Math.max(0, Math.floor(payload.rect.y * size.height / viewport.height));
+    const right = Math.min(size.width, Math.ceil((payload.rect.x + payload.rect.width) * size.width / viewport.width));
+    const bottom = Math.min(size.height, Math.ceil((payload.rect.y + payload.rect.height) * size.height / viewport.height));
+    image = image.crop({ x, y, width: right - x, height: bottom - y });
+  }
+  const { width, height } = image.getSize();
+  return { data: image.toPNG().toString("base64"), mimeType: "image/png", width, height, url: contents.getURL() };
+}
+
 async function executeControlCommand(payload = {}, control = {}) {
   control.signal?.throwIfAborted();
   const submit = () => { control.signal?.throwIfAborted(); control.onSubmitted?.(); };
   const conversationId = conversationIdFrom(payload);
   const action = String(payload.action || "").trim().toLowerCase();
+  const windowInstanceId = payload.window_instance_id;
+  requireWindow(windowInstanceId);
   if (action === "discover" || action === "list_targets") {
-    return { ok: true, action, browser: "MiniCode Embedded Browser", targets: listTargets(conversationId) };
+    return { ok: true, action, browser: "MiniCode Embedded Browser", targets: listTargets(conversationId, windowInstanceId) };
   }
 
   if (action === "navigate") {
@@ -1056,21 +1128,21 @@ async function executeControlCommand(payload = {}, control = {}) {
     let entry;
     let alreadyNavigated = false;
     try {
-      entry = selectEntry(requestedTargetId, conversationId);
+      entry = selectEntry(requestedTargetId, conversationId, windowInstanceId);
     } catch (error) {
       if (requestedTargetId) throw error;
       const agentTabId = `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-      await navigate({ id: agentTabId, url, conversation_id: conversationId }, control);
-      entry = selectEntry(agentTabId, conversationId);
+      await navigate({ id: agentTabId, url, conversation_id: conversationId, window_instance_id: windowInstanceId }, control);
+      entry = selectEntry(agentTabId, conversationId, windowInstanceId);
       alreadyNavigated = true;
     }
-    if (!alreadyNavigated) await navigate({ id: entry.id, url, conversation_id: conversationId }, control);
+    if (!alreadyNavigated) await navigate({ id: entry.id, url, conversation_id: conversationId, window_instance_id: windowInstanceId }, control);
     if (control.requestPresentation) emit(entry, "presentation-requested");
     const waitMs = Math.max(0, Math.min(Number(payload.wait_ms) || 0, 5000));
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
     return { ok: true, action, target: targetState(entry) };
   }
-  const entry = selectEntry(payload.target_id, conversationId);
+  const entry = selectEntry(payload.target_id, conversationId, windowInstanceId);
   const webContents = entry.view.webContents;
   if (action === "screenshot") {
     submit();
@@ -1152,9 +1224,10 @@ async function executeControlCommand(payload = {}, control = {}) {
 
 function runNavigationAction(payload = {}) {
   const { id, action } = payload;
-  const entry = selectEntry(id, conversationIdFrom(payload));
+  const entry = selectEntry(id, conversationIdFrom(payload), payload.window_instance_id);
   const webContents = entry.view.webContents;
   const history = webContents.navigationHistory;
+  entry.visitSource = "other";
   if (action === "back" && history?.canGoBack?.()) history.goBack();
   else if (action === "forward" && history?.canGoForward?.()) history.goForward();
   else if (action === "reload") webContents.reload();
@@ -1169,14 +1242,14 @@ function closeEntry(entry) {
   for (const complete of Array.from(entry.captureWaiters)) {
     complete(null, new Error("Browser tab closed before screenshot presentation completed."));
   }
-  pendingNavigations.delete(requestedId);
-  const mainWindow = getMainWindow();
+  pendingNavigations.delete(entry.key);
+  const mainWindow = entry.window;
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.contentView.removeChildView(entry.view); } catch { /* already detached */ }
   }
-  views.delete(requestedId);
+  views.delete(entry.key);
   entriesByWebContentsId.delete(entry.view.webContents.id);
-  if (activeViewId === requestedId) activeViewId = null;
+  if (activeViewIds.get(entry.windowInstanceId) === requestedId) activeViewIds.delete(entry.windowInstanceId);
   if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("minicode:embeddedBrowser:event", {
@@ -1196,25 +1269,29 @@ function closeEntry(entry) {
 
 function close(payload = {}) {
   const owner = conversationIdFrom(payload);
+  const windowInstanceId = payload.window_instance_id;
+  requireWindow(windowInstanceId);
   const id = assertViewId(payload.id);
-  const pending = pendingNavigations.get(id);
-  if (pending && !views.has(id)) {
+  const key = viewKey(windowInstanceId, id);
+  const pending = pendingNavigations.get(key);
+  if (pending && !views.has(key)) {
     if (pending.conversationId !== owner) throw new Error("Embedded browser tab belongs to another conversation.");
-    pendingNavigations.delete(id);
+    pendingNavigations.delete(key);
     return true;
   }
-  const entry = selectEntry(id, owner);
+  const entry = selectEntry(id, owner, windowInstanceId);
   return closeEntry(entry);
 }
 
-function closeConversation(conversationId) {
+function closeConversation(conversationId, windowInstanceId) {
   const owner = requireConversationId(conversationId);
+  requireWindow(windowInstanceId);
   for (const [id, request] of pendingNavigations) {
-    if (request.conversationId === owner) pendingNavigations.delete(id);
+    if (request.conversationId === owner && request.windowInstanceId === windowInstanceId) pendingNavigations.delete(id);
   }
   let closed = 0;
   for (const entry of Array.from(views.values())) {
-    if (entry.conversationId !== owner) continue;
+    if (entry.conversationId !== owner || entry.windowInstanceId !== windowInstanceId) continue;
     if (closeEntry(entry)) closed += 1;
   }
   return closed;
@@ -1223,7 +1300,17 @@ function closeConversation(conversationId) {
 function disposeAll() {
   pendingNavigations.clear();
   for (const entry of Array.from(views.values())) closeEntry(entry);
-  activeViewId = null;
+  activeViewIds.clear();
+}
+
+function releaseWindow(windowInstanceId) {
+  for (const [key, request] of pendingNavigations) {
+    if (request.windowInstanceId === windowInstanceId) pendingNavigations.delete(key);
+  }
+  for (const entry of Array.from(views.values())) {
+    if (entry.windowInstanceId === windowInstanceId) closeEntry(entry);
+  }
+  activeViewIds.delete(windowInstanceId);
 }
 
 module.exports = {
@@ -1236,7 +1323,10 @@ module.exports = {
   close,
   closeConversation,
   clearSiteData,
+  clearBrowsingData,
+  capture,
   disposeAll,
+  releaseWindow,
   assertNavigationUrl,
   isAllowedNavigationUrl,
   assessNavigationTarget,

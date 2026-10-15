@@ -12,7 +12,6 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.registry import ToolRegistry
 from backend.tools.catalog import canonicalize_tool_schemas
-from backend.tools.tool_search import build_deferred_tools_prompt_block
 from backend.tools.toolsets import ToolsetPolicy
 from backend.llm.provider_contracts import normalize_tool_mode
 
@@ -103,6 +102,7 @@ def effective_toolset_policy(
     permission_mode: str,
     tool_mode: str = "code_mode",
     hosted_web_search: bool = False,
+    supports_search_tool: bool = False,
 ) -> ToolsetPolicy:
     """Build the one policy used by schema, discovery, and execution."""
 
@@ -119,11 +119,15 @@ def effective_toolset_policy(
     ):
         denied.update(workspace_bound_tool_names(tool_registry))
     policy = (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied)
+    if supports_search_tool and not any((spec := tool_registry.get_tool_spec(tool.name)).exposure in {"deferred", "deferred_model_only"}
+            and policy.is_available(spec) for tool in tool_registry.get_tools()):
+        policy = policy.with_disabled_tools({"tool_search"})
     mode = tool_mode if tool_registry.get_tool("tool_exec") is not None else "direct"
     return replace(
         policy,
         code_mode_only=mode == "code_mode_only",
         code_mode_enabled=mode != "direct",
+        supports_search_tool=supports_search_tool,
     )
 
 
@@ -186,15 +190,6 @@ def derive_turn_tool_schema_state(
         permission_context=permission_context,
         materialize_schema=False,
     ) if tool_registry is not None else []
-    deferred = ""
-    if "tool_search" in names and tool_registry is not None:
-        deferred = build_deferred_tools_prompt_block(
-            tool_registry,
-            toolset_policy=toolset_policy,
-            permission_checker=permission_checker,
-            permission_context=permission_context,
-            schema_views=views,
-        )
     reachable_mcp_tools = set()
     reachable_mcp_servers = None
     if tool_registry is not None:
@@ -214,6 +209,6 @@ def derive_turn_tool_schema_state(
         tool_names=names,
         runtime_guidance=build_tool_runtime_guidance(canonical_base_schemas, mcp_instructions,
             reachable_mcp_tools=reachable_mcp_tools, reachable_mcp_servers=reachable_mcp_servers),
-        deferred_tools_prompt_block=deferred,
+        deferred_tools_prompt_block="",
         derivation_key=derivation_key,
     )

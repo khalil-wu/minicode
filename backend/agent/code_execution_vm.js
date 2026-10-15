@@ -4,6 +4,7 @@
   const stringify = JSON.stringify, parse = JSON.parse;
   const then = Function.call.bind(Promise.prototype.then);
   const pending = new Map(), timers = new Map();
+  const resultSources = new WeakMap();
   let requests = [], output = [], updates = [], storage = Object.create(null);
   let sequence = 0, done = false, error = "", yielded = false, outputSize = 0;
   const EXIT = {};
@@ -25,36 +26,63 @@
       requests.push({ kind: "tool", id, name, args: detached });
     });
   }
-  function image(value) {
-    const artifact = typeof value?.artifact_id === "string" ? { artifact_id: value.artifact_id } : {};
-    const raw = typeof value === "string" ? value : value?.image_url;
+  const imageExpects = "image expects a non-empty image URL string, an object with image_url and optional detail, or a raw MCP image block";
+  const audioExpects = "audio expects a non-empty audio URL string, an object with audio_url, or a raw MCP audio block";
+  function detailValue(value) {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== "string") throw new TypeError("image detail must be a string when provided");
+    return value;
+  }
+  function mediaUrl(value, kind, expects) {
+    if (typeof value === "string") return value;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(expects);
+    const raw = value[`${kind}_url`];
     if (raw !== undefined) {
-      const match = /^data:(image\/[^;,]+);base64,([\s\S]+)$/.exec(raw);
-      if (!match) throw new TypeError("image() requires an image data URL");
-      emit({ kind: "image", media_type: match[1], data: match[2], ...artifact });
-    } else {
-      const mediaType = value?.media_type ?? value?.mimeType;
-      if (typeof value?.data !== "string" || !mediaType?.startsWith("image/")) throw new TypeError("image() requires {data, media_type} or an MCP image block");
-      emit({ kind: "image", media_type: mediaType, data: value.data, ...artifact });
+      if (typeof raw !== "string") throw new TypeError(expects);
+      return raw;
     }
+    if (typeof value.type !== "string") throw new TypeError(expects);
+    if (value.type !== kind) throw new TypeError(`${kind} only accepts MCP ${kind} blocks, got "${value.type}"`);
+    if (typeof value.data !== "string" || !value.data) throw new TypeError(`${kind} expected MCP ${kind} data`);
+    if (value.data.toLowerCase().startsWith("data:")) return value.data;
+    const mime = value.mimeType ?? value.mime_type;
+    return `data:${typeof mime === "string" && mime ? mime : "application/octet-stream"};base64,${value.data}`;
+  }
+  function image(value, detailOverride) {
+    const artifact = typeof value?.artifact_id === "string" ? { artifact_id: value.artifact_id } : {};
+    const override = detailValue(detailOverride);
+    const imageUrl = mediaUrl(value, "image", imageExpects);
+    if (!imageUrl) throw new TypeError(imageExpects);
+    const scheme = imageUrl.split(":", 1)[0].toLowerCase();
+    if (scheme === "http" || scheme === "https") throw new TypeError("Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead");
+    if (scheme !== "data" || !imageUrl.includes(":")) throw new TypeError("Tool call failed: invalid image output. Pass a base64 data URI instead");
+    const validDetails = ["auto", "low", "high", "original"];
+    const embedded = typeof value === "object" && value !== null && value.image_url !== undefined
+      ? detailValue(value.detail)
+      : validDetails.includes(value?._meta?.["codex/imageDetail"]) ? value._meta["codex/imageDetail"] : undefined;
+    const detail = (override ?? embedded ?? "high").toLowerCase();
+    if (!validDetails.includes(detail)) throw new TypeError("image detail must be one of: auto, low, high, original");
+    emit({ kind: "image", image_url: imageUrl, detail, ...artifact });
   }
   function audio(value) {
-    const raw = typeof value === "string" ? value : value?.audio_url;
-    if (raw !== undefined) {
-      const match = /^data:(audio\/[^;,]+);base64,([\s\S]+)$/.exec(raw);
-      if (!match) throw new TypeError("audio() requires an audio data URL");
-      emit({ kind: "audio", media_type: match[1], data: match[2] });
-    } else {
-      const mediaType = value?.media_type ?? value?.mimeType;
-      if (typeof value?.data !== "string" || !mediaType?.startsWith("audio/")) throw new TypeError("audio() requires {data, media_type} or an MCP audio block");
-      emit({ kind: "audio", media_type: mediaType, data: value.data });
-    }
+    const audioUrl = mediaUrl(value, "audio", audioExpects);
+    if (!audioUrl) throw new TypeError(audioExpects);
+    if (!/^data:/i.test(audioUrl)) throw new TypeError("Tool call failed: invalid audio output. Pass a base64 data URI instead");
+    emit({ kind: "audio", audio_url: audioUrl });
   }
   const globals = {
-    text(value) { emit({ kind: "text", text: typeof value === "string" ? value : stringify(value) ?? String(value) }); },
+    text(value) { emit({ kind: "text", text: value === null || ["undefined", "string", "boolean", "number", "bigint"].includes(typeof value) ? String(value) : stringify(value) ?? String(value),
+      ...(resultSources.has(value) ? { tool_call_id: resultSources.get(value) }
+        : Array.isArray(value) && value.length && value.every(item => resultSources.has(item))
+          ? { tool_call_ids: value.map(item => resultSources.get(item)) } : {}) }); },
     image,
     audio,
-    generatedImage(value) { image(value.image_url); output[output.length - 1].source = "image_generation"; if (value.output_hint) globals.text(value.output_hint); },
+    generatedImage(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("generatedImage expects an image generation result object");
+      if (value.output_hint !== undefined && typeof value.output_hint !== "string") throw new TypeError("generatedImage output_hint must be a string when provided");
+      image(value); output[output.length - 1].source = "image_generation";
+      if (value.output_hint !== undefined) globals.text(value.output_hint);
+    },
     notify(value) { globals.text(value); yielded = true; },
     yield_control() { yielded = true; return Promise.resolve(); },
     exit() { done = true; throw EXIT; },
@@ -100,7 +128,10 @@
           if (callback && !done) { try { callback(); } catch (value) { error = String(value?.stack || value); done = true; } }
         } else {
           const continuation = pending.get(reply.id); pending.delete(reply.id);
-          if (continuation && !done) continuation.resolve(reply.value);
+          if (continuation && !done) {
+            if (reply.value !== null && (typeof reply.value === "object" || typeof reply.value === "function")) resultSources.set(reply.value, reply.tool_call_id);
+            continuation.resolve(reply.value);
+          }
         }
       }
     } else if (operation === "abort") {

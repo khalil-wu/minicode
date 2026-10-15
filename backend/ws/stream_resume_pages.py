@@ -26,6 +26,7 @@ def stream_resume_pages(
         tool_states=tool_states[part * MAX_STREAM_RESUME_TOOLS:(part + 1) * MAX_STREAM_RESUME_TOOLS],
         turn_id=snapshot["turn_id"], phase=snapshot["phase"],
         stream_status=snapshot["stream_status"], event_seq=snapshot["event_seq"],
+        started_at=snapshot.get("started_at"),
         last_event_type=snapshot["last_event_type"],
         **({"snapshot_id": snapshot_id, "snapshot_part": part,
             "snapshot_complete": part == page_count - 1} if snapshot_id else {}),

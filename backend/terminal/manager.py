@@ -7,8 +7,10 @@ import inspect
 import logging
 import os
 import re
+import signal
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Coroutine
 
@@ -29,6 +31,7 @@ from backend.terminal.task_persistence import (
     cleanup_orphaned_tasks,
 )
 from backend.terminal.shell_commands import normalize_windows_shell_command
+from backend.terminal.stdin_authority import TerminalInputApproval, TerminalLaunchAuthority, StdinAuthorityError
 from backend.tools.base import MAX_TOOL_RESULT_BYTES, truncate_text_tail
 
 logger = logging.getLogger(__name__)
@@ -81,6 +84,13 @@ class BackgroundCommand:
     output_chars: int = 0
     output_file_redundant: bool = False
     effective_command: str = field(default="", repr=False)
+    argv: list[str] = field(default_factory=list, repr=False)
+    tty: bool = False
+    terminal_authority: TerminalLaunchAuthority | None = field(default=None, repr=False)
+    original_tool_call_id: str = ""
+    original_tool_args: dict[str, Any] = field(default_factory=dict, repr=False)
+    completion_hook_claimed: bool = False
+    command_completed: bool = False
     sandbox_policy: SandboxPolicy | None = field(default=None, repr=False)
     runner: SandboxRunner | None = field(default=None, repr=False)
     lifecycle: ExecutionLifecycle | None = field(default=None, repr=False)
@@ -167,6 +177,7 @@ class BackgroundCommand:
             "owner_task_id": self.owner_task_id,
             "parent_run_id": self.parent_run_id,
             "sandbox_backend": self.sandbox_backend,
+            "tty": self.tty,
             "output_path": self.output_path,
             "output_bytes": self.output_bytes,
             "output_length": self.output_chars,
@@ -235,6 +246,11 @@ class BackgroundCommandManager:
         effective_command: str = "",
         backgrounded: bool = True,
         stream_callback: Callable[[str], Any] | None = None,
+        argv: list[str] | None = None,
+        tty: bool = False,
+        terminal_authority: TerminalLaunchAuthority | None = None,
+        original_tool_call_id: str = "",
+        original_tool_args: dict[str, Any] | None = None,
     ) -> BackgroundCommand:
         """在后台执行命令，立即返回 BackgroundCommand。"""
         owner = str(conversation_id or "").strip()
@@ -306,6 +322,11 @@ class BackgroundCommandManager:
             sandbox_backend=sandbox_backend,
             output_path=str(task_output.path),
             effective_command=effective_command or command,
+            argv=list(argv or []),
+            tty=tty,
+            terminal_authority=terminal_authority,
+            original_tool_call_id=original_tool_call_id,
+            original_tool_args=deepcopy(original_tool_args or {"command": display_command}),
             sandbox_policy=sandbox_policy,
             task_output=task_output,
             lifecycle=ExecutionLifecycle(
@@ -508,6 +529,8 @@ class BackgroundCommandManager:
                     bg_cmd.command,
                     cwd=bg_cmd.cwd,
                     host_command=host_command,
+                    argv=bg_cmd.argv or None,
+                    tty=bg_cmd.tty,
                     process_started_callback=_process_started,
                     process_ready_callback=_process_ready,
                     keep_stdin_open=True,
@@ -556,6 +579,21 @@ class BackgroundCommandManager:
                 )
                 return
 
+            if result.execution_error:
+                bg_cmd.status = "failed"
+                bg_cmd.exit_code = result.exit_code
+                bg_cmd.completed_at = time.time()
+                if bg_cmd.output_chars == 0:
+                    if result.stdout:
+                        bg_cmd.append_live_output(result.stdout)
+                    if result.stderr:
+                        bg_cmd.append_live_output(result.stderr)
+                else:
+                    bg_cmd.append_live_output("\n" + result.execution_error)
+                bg_cmd.transition(phase="completed", status="failed",
+                                  error={"kind": "runtime_error", "message": result.execution_error})
+                return
+
             # The stream callback is the source of truth.  A startup failure can
             # return a final snapshot without ever opening a stream, so retain
             # that diagnostic only when no chunk was delivered.
@@ -582,6 +620,7 @@ class BackgroundCommandManager:
                     else {}
                 ),
             )
+            bg_cmd.command_completed = True
 
         except asyncio.CancelledError:
             bg_cmd.status = "cancelled"
@@ -625,6 +664,7 @@ class BackgroundCommandManager:
             bg_cmd.close_task_output()
             if bg_cmd.output_write_error and bg_cmd.status != "cancelled":
                 bg_cmd.status = "failed"
+                bg_cmd.command_completed = False
                 bg_cmd.exit_code = -1
                 bg_cmd.transition(
                     phase="completed",
@@ -640,19 +680,15 @@ class BackgroundCommandManager:
             # read/search observes the completed command rather than a stale
             # cache entry.  This is deliberately broad because shell syntax
             # is not safely parsed here.
-            try:
-                from backend.tools.file_tools_common import invalidate_workspace_file_caches
+            from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-                invalidate_workspace_file_caches(
-                    file_tree_changed=True,
-                    clear_file_state=True,
-                )
-            except Exception:
-                logger.debug(
-                    "workspace cache invalidation failed for background command %s",
-                    bg_cmd.command_id,
-                    exc_info=True,
-                )
+            # Admission captured the actual write authority, including extra
+            # writable roots and any full-disk-write grant.
+            invalidate_workspace_file_caches(
+                file_tree_changed=True,
+                clear_file_state=True,
+                mutation_policy=bg_cmd.sandbox_policy,
+            )
             await self._settle_cleanup(bg_cmd)
             await self._notify_completed_once(bg_cmd)
 
@@ -771,6 +807,14 @@ class BackgroundCommandManager:
         command = self.get_status(command_id, conversation_id=conversation_id)
         if command is None:
             raise KeyError(command_id)
+        lock = self._stdin_locks.setdefault(command_id, asyncio.Lock())
+        async with lock:
+            if self.get_status(command_id, conversation_id=conversation_id) is not command:
+                raise StdinAuthorityError("the terminal instance changed while this interaction was pending; submit it again")
+            return await self._wait_for_output(command, wait_ms=wait_ms, cursor=cursor, cancel_event=cancel_event)
+
+    async def _wait_for_output(self, command: BackgroundCommand, *, wait_ms: int,
+                               cursor: int | None, cancel_event: asyncio.Event | None) -> BackgroundCommand:
         deadline = asyncio.get_running_loop().time() + wait_ms / 1000
         while command.status == "running":
             command.output_changed.clear()
@@ -873,26 +917,69 @@ class BackgroundCommandManager:
         *,
         conversation_id: str,
         close_stdin: bool = False,
+        context: Any = None,
+        authorize_input: Callable[[TerminalInputApproval], Any] | None = None,
+        wait_ms: int = 0,
+        cursor: int | None = None,
     ) -> int:
         command = self.get_status(command_id, conversation_id=conversation_id)
         if command is None:
             raise KeyError(command_id)
-        if command.status != "running":
+        interacts = bool(chars) or close_stdin
+        interrupt = not command.tty and chars == "\x03"
+        if interacts and command.status != "running":
             raise RuntimeError(
                 f"Background command {command_id} is {command.status}; stdin is closed."
             )
         process = self._processes.get(command_id)
-        if process is None or process.returncode is not None or process.stdin is None:
+        if interacts and (process is None or process.returncode is not None or (not interrupt and process.stdin is None)):
             raise RuntimeError(
                 f"Background command {command_id} has no writable stdin channel."
             )
         payload = chars.encode("utf-8")
         lock = self._stdin_locks.setdefault(command_id, asyncio.Lock())
         async with lock:
+            if interacts:
+                self._verify_interaction_instance(command_id, command, process, conversation_id, interrupt=interrupt)
+            elif self.get_status(command_id, conversation_id=conversation_id) is not command:
+                raise StdinAuthorityError("the terminal instance changed while this interaction was pending; submit it again")
+            if context is not None and context.cancel_event is not None and context.cancel_event.is_set():
+                raise asyncio.CancelledError
+            if chars and context is not None and command.terminal_authority is not None:
+                from backend.tools.command_support import current_terminal_policy, stdin_approval_enabled
+
+                if stdin_approval_enabled(context) and not (not command.tty and chars == "\x03"):
+                    authority = command.terminal_authority
+                    current_policy = current_terminal_policy(context)
+                    intent = authority.review_requirement(current_policy, environment_id=context.environment_id)
+                    strict = context.permission.strict_auto_review or context.permission_grants.strict_auto_review_enabled(context.turn_id)
+                    if intent != "use_default" or strict:
+                        action = TerminalInputApproval(command.original_tool_call_id, context.tool_call_id,
+                            authority.environment_id, command_id, process.pid, chars, command.cwd,
+                            command.tty, intent, authority.additional_permissions, authority.approval_reason(intent))
+                        action.verify_reviewable()
+                        if authorize_input is None:
+                            raise StdinAuthorityError("terminal input requires approval but no approval channel is available")
+                        await authorize_input(action)
+                        self._verify_interaction_instance(command_id, command, process, conversation_id, interrupt=interrupt)
+            if context is not None and context.cancel_event is not None and context.cancel_event.is_set():
+                raise asyncio.CancelledError
             try:
-                if payload:
+                if interrupt:
+                    if os.name == "nt":
+                        reaped = await command.runner._kill_tree(process)
+                        if not reaped:
+                            command.cleanup_pending = True
+                            command.cleanup_reason = "process_tree_survived_interrupt"
+                            command.cleanup_requested_at = time.time()
+                            raise StdinAuthorityError("terminal input interrupt could not confirm the owned process tree exited")
+                    else:
+                        os.killpg(process.pid, signal.SIGINT)
+                elif payload:
                     process.stdin.write(payload)
                     await process.stdin.drain()
+                    if command.tty:
+                        await asyncio.sleep(0.1)
                 if close_stdin:
                     process.stdin.close()
                     await process.stdin.wait_closed()
@@ -900,7 +987,26 @@ class BackgroundCommandManager:
                 raise RuntimeError(
                     f"Background command {command_id} closed stdin before the write completed."
                 ) from exc
+            await self._wait_for_output(command, wait_ms=wait_ms, cursor=cursor,
+                                        cancel_event=context.cancel_event if context is not None else None)
         return len(payload)
+
+    def _verify_interaction_instance(self, command_id, command, process, conversation_id, *, interrupt=False):
+        if self.get_status(command_id, conversation_id=conversation_id) is not command or self._processes.get(command_id) is not process:
+            raise StdinAuthorityError("the terminal instance changed while this interaction was pending; submit it again")
+        if command.status != "running" or process.returncode is not None or (not interrupt and process.stdin is None):
+            raise StdinAuthorityError(f"Background command {command_id} is {command.status}; stdin is closed.")
+
+    def terminal_hook_payload(self, command_id: str, *, conversation_id: str, output: str) -> dict[str, Any]:
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            raise KeyError(command_id)
+        payload = {"command_id": command_id, "ready": False}
+        if not command.command_completed or command.status == "running" or command.cleanup_pending or command.completion_hook_claimed or not command.original_tool_call_id:
+            return payload
+        command.completion_hook_claimed = True
+        return {**payload, "ready": True, "tool_name": "Bash", "tool_use_id": command.original_tool_call_id,
+                "tool_input": {"command": command.command}, "output": output}
 
     async def _cancel_unscoped(self, command_id: str) -> bool:
         task = self._tasks.get(command_id)

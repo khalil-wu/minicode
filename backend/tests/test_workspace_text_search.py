@@ -24,7 +24,7 @@ def test_unicode_crlf_ranges_capture_groups_and_filters(tmp_path: Path):
     assert (first["offset"], first["length"], first["line"], first["column"], first["end_column"]) == (3, 3, 1, 4, 7)
     assert (second["offset"], second["line"], second["column"]) == (8, 2, 1)
     assert (third["offset"], third["column"]) == (19, 12)
-    assert first["groups"] == ["foo"]
+    assert first["groups"] == [{"offset": 3, "length": 3}]
     exact = search_workspace_text(service(tmp_path), WorkspaceTextSearchRequest(query="Foo", case_sensitive=True))
     assert exact["match_count"] == 1
 

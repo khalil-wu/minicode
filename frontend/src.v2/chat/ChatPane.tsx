@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useI18n } from "../i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
@@ -12,10 +13,10 @@ import { useAppStore } from "../stores";
 import { TranscriptSearchContext } from "./TranscriptSearchContext";
 
 export const ChatPane = () => {
+  const { t: tr } = useI18n();
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const messageContainerRef = useRef<HTMLDivElement>(null);
-  const composerContainerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
   const floating = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
@@ -25,9 +26,6 @@ export const ChatPane = () => {
   ));
   const hasMessages = useAppStore((state) => state.messages.length > 0);
   const showLoading = Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages);
-  useLayoutEffect(() => {
-    if (composerContainerRef.current) composerContainerRef.current.inert = Boolean(pendingConversationSwitchId);
-  }, [pendingConversationSwitchId]);
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
@@ -72,6 +70,7 @@ export const ChatPane = () => {
       ref={containerRef}
       className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
       data-switching={pendingConversationSwitchId ? "true" : "false"}
+      aria-busy={showLoading}
       style={{
         position: "relative",
         display: "grid",
@@ -84,7 +83,13 @@ export const ChatPane = () => {
         background: "var(--surface-base)",
       }}
     >
-        <div className="chat-pane-layout">
+        {showLoading && (
+          <div role="status" aria-live="polite" className="chat-pane-switch-status">
+            <LoaderCircle size={20} className="animate-spin" aria-hidden="true" />
+            <span className="sr-only">{tr("正在打开会话…")}</span>
+          </div>
+        )}
+        <div className="chat-pane-layout" style={showLoading ? { display: "none" } : undefined}>
         <div className="chat-pane-main">
           {showSearch && (
             <ChatSearch onClose={handleCloseSearch} containerRef={messageContainerRef} />
@@ -107,16 +112,10 @@ export const ChatPane = () => {
                 border: 0,
               }}
             >
-              正在恢复会话上下文、运行状态和工具记录…
-            </div>
+              {tr("正在恢复会话上下文、运行状态和工具记录…")}</div>
           )}
           <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
-            {showLoading ? (
-              <div role="status" aria-live="polite" className="chat-pane-switch-status">
-                <LoaderCircle size={20} className="animate-spin" aria-hidden="true" />
-                <span className="sr-only">正在打开会话…</span>
-              </div>
-            ) : (
+            {!showLoading && (
             <SafeBoundary fallback={<ChatErrorFallback />}>
               <TranscriptSearchContext.Provider value={showSearch}>
               <MessageList searchActive={showSearch} />
@@ -124,7 +123,7 @@ export const ChatPane = () => {
             </SafeBoundary>
             )}
           </div>
-          <div ref={composerContainerRef} className="chat-pane-composer-region" aria-disabled={Boolean(pendingConversationSwitchId)}>
+          <div className="chat-pane-composer-region">
             <TurnChangeSummary />
             <SafeBoundary fallback={<ComposerErrorFallback />}>
               <Composer />

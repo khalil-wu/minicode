@@ -19,6 +19,12 @@ def test_conversation_create_permission_mode_defaults_only_when_absent_or_blank(
         assert request.error_event is None
 
 
+def test_conversation_create_can_persist_a_main_task_without_activating_it() -> None:
+    assert parse_conversation_create_request({"conversation_type":"main", "activate":False}).activate is False
+    assert parse_conversation_create_request({"conversation_type":"main"}).activate is True
+    assert parse_conversation_create_request({"conversation_type":"side_chat", "activate":True}).activate is False
+
+
 def test_conversation_create_rejects_invalid_explicit_permission_mode() -> None:
     request = parse_conversation_create_request({"permission_mode": "unattended"})
 
@@ -53,6 +59,7 @@ def test_isolated_worktree_failure_does_not_leave_a_shared_success_record(
     conversation = SimpleNamespace(
         id="conv-isolation-failure",
         workspace_root=str(tmp_path),
+        execution_cwd=str(tmp_path),
         worktree_path="",
         git_isolated=True,
     )

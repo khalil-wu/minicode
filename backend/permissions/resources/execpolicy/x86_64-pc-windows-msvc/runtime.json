@@ -1,0 +1,19 @@
+{
+  "identity": "minicode-execpolicy",
+  "ok": true,
+  "protocol": 1,
+  "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "starlark": "0.14.2",
+  "target": "x86_64-pc-windows-msvc",
+  "source": "https://github.com/openai/codex",
+  "rust_toolchain": "1.95.0",
+  "input_sha256": "651d323123d4464401da6d3ea0749dc2afd0e54435a580a6963e76de9e20ac2e",
+  "cargo_lock_sha256": "eb6077c03261137ef7e9cb627ac447e23e3a8ffff5a905e412b7128e9bb668ce",
+  "files": {
+    "LICENSE.openai-codex": "aa5e89edcbbd01fc3fb188a527d8bdc0da5812305cab220c84348c14ea427288",
+    "minicode-execpolicy.exe": "82448962cf8c535b126defa5c20791a9ae0ca92af0dffe492096b47754c21ecc",
+    "NOTICE.openai-codex": "3c505dc54be731583470ef3584e5cb96d60df7add3e7e36294cf4dea8316a5cb",
+    "source-manifest.json": "87ca37dd4af51bfc337d8ab8b17817774afb71eb68dde9e92e7344939e3f4a00",
+    "THIRD_PARTY_NOTICES.txt": "c237e5acf0c741b2257a0ca4707998b425b41537587c7979bed166ed51e137bc"
+  }
+}

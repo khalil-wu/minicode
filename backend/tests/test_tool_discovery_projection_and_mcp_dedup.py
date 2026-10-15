@@ -59,7 +59,7 @@ def test_tool_search_success_is_debug_but_failure_is_timeline() -> None:
     call = ToolCallEvent(
         id="search-1",
         name="tool_search",
-        arguments={"query": "select:read_file"},
+        arguments={"query": "read_file"},
     )
 
     start = tool_call_start_event(
@@ -70,7 +70,7 @@ def test_tool_search_success_is_debug_but_failure_is_timeline() -> None:
     )
     success = store_result(
         call,
-        ToolResult(content='{"matches": []}'),
+        ToolResult(content="[]", tool_search_output=[]),
         ContextBuilder(),
         AgentState(user_message="find tools"),
         tool_registry=registry,

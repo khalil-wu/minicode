@@ -33,7 +33,15 @@ class ProtocolSocket(RecordingSocket):
 
     async def until(self, event_type, **fields):
         for _ in range(100):
-            payload = await asyncio.wait_for(self.events.get(), 5)
+            try:
+                payload = await asyncio.wait_for(self.events.get(), 5)
+            except TimeoutError as exc:
+                wire = [{key: event[key] for key in (
+                    "type", "seq", "conversation_id", "client_command_id", "command", "message_id", "run_id",
+                    "state", "status", "reason", "message", "error_type", "provider_error_type",
+                ) if key in event} for event in self.sent]
+                exc.add_note(json.dumps({"awaited_type": event_type, "awaited_fields": fields, "actual_wire": wire}, ensure_ascii=False))
+                raise
             if payload.get("type") == event_type and all(payload.get(key) == value for key, value in fields.items()):
                 return payload
         raise AssertionError(f"No {event_type} event with {fields}; actual wire: {self.sent}")
@@ -422,6 +430,7 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
 ):
     from backend.config_helpers import SETTINGS_FILE
     from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.agent.execution_journal import ExecutionJournal, execution_journal_owner, turn_input_rejection_id
 
     monkeypatch.setenv("OPENAI_MODEL", "gpt-6.1-sol")
     monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-6.1-sol")
@@ -569,9 +578,23 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             assert unavailable_error["recoverable"] is False
             assert unavailable_done["status"] == "failed" and unavailable_done["reason"] == "llm_initialization_failed"
             assert unavailable_done["failure_recoverable"] is False
+            unavailable_receipt = await socket.until("command.result", command="user_message", client_command_id="removed-provider-query")
+            assert unavailable_receipt["level"] == "error" and unavailable_receipt["message"] == unavailable_error["message"]
+            assert unavailable_receipt["data"]["admitted"] is False
+            assert unavailable_receipt["data"]["reason"] == "llm_initialization_failed"
             terminal = default_runtime().latest_main_run(removed.id)
             assert terminal.status == "failed" and terminal.terminal_reason == "llm_initialization_failed"
             assert terminal.error == unavailable_error["message"]
+            journal = default_runtime().execution_journal(execution_journal_owner(
+                "conversation", session.conversation_repo.store_instance_id(), removed.id,
+            ))
+            rejection_id = turn_input_rejection_id("removed-user", "removed-provider-query")
+            rejection = ExecutionJournal(journal.agent_id, base_dir=journal.base_dir).get_event(rejection_id)
+            assert rejection.payload["command"]["data"]["content"] == "Resume the retired provider"
+            assert rejection.payload["command"]["data"]["conversation_id"] == removed.id
+            assert rejection.payload["command"]["data"]["user_message_id"] == "removed-user"
+            assert rejection.payload["result"]["data"]["admitted"] is False
+            rejected_run_id = terminal.run_id
             assert session.conversation_repo.get_conversation(removed.id).transcript[0]["content"] == "Saved entry 0"
             assert len(adapters) == len(requests) == 2
             await socket.command("session.restore", last_seq=0, last_conversation_id=conversation_id)
@@ -621,5 +644,25 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             await socket.until("pong")
             assert session.is_connected
             assert [event for event in socket.sent if event["type"] == "error"] == [unavailable_error]
+            assert not session.run_manager.durable_client_commands.has_client_command("removed-provider-query")
+
+            # A new dispatcher has no dedup record for this id. The durable
+            # refusal still answers it without a second model run or error.
+            cold_socket = ProtocolSocket("session_rejected_input_replay")
+            cold_task = asyncio.create_task(main.websocket_endpoint(cold_socket))
+            try:
+                await cold_socket.until("llm.model.updated")
+                await cold_socket.command("user_message", content="Resume the retired provider", conversation_id=removed.id,
+                    client_command_id="removed-provider-query", user_message_id="removed-user", assistant_message_id="removed-assistant")
+                cold_receipt = await cold_socket.until("command.result", command="user_message", client_command_id="removed-provider-query")
+                for key in ("admitted", "reason", "user_message_id", "assistant_message_id", "run_id", "error_type", "provider_error_type", "recoverable"):
+                    assert cold_receipt["data"][key] == unavailable_receipt["data"][key]
+                await cold_socket.command("ping")
+                await cold_socket.until("pong")
+                assert not [event for event in cold_socket.sent if event["type"] == "error"]
+                assert default_runtime().latest_main_run(removed.id).run_id == rejected_run_id
+                assert len(adapters) == len(requests) == 3
+            finally:
+                await cold_socket.finish(cold_task)
         finally:
             await socket.finish(task)

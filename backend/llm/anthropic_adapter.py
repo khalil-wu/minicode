@@ -32,7 +32,6 @@ from backend.llm.base import (
     ToolCallEvent,
     ToolCallStartEvent,
     UsageInfo,
-    clamp_max_tokens_to_context,
     emit_provider_lifecycle_headers,
     emit_provider_lifecycle_response,
     sanitize_llm_request_metadata,
@@ -347,12 +346,9 @@ class AnthropicAdapter(LLMAdapter):
             if requested_max_tokens is not None
             else self._max_tokens
         )
-        max_output_tokens = clamp_max_tokens_to_context(
-            context_window=self._context_window,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_output_tokens,
-        )
+        # Prompt estimates decide when the harness attempts compaction. They
+        # cannot silently reduce the requested answer/thinking budget. A real
+        # context-window rejection drives the existing provider recovery.
 
         anthropic_tools = self._convert_tools_cached(tools or []) if tools else []
         cache_editing_state = (
@@ -483,11 +479,15 @@ class AnthropicAdapter(LLMAdapter):
             if self.capabilities.parallel_tool_calls is False:
                 kwargs["tool_choice"]["disable_parallel_tool_use"] = True
 
-        if side_options is not None and side_options.output_schema is not None:
+        output_schema = (
+            side_options.output_schema if side_options is not None
+            else self.model_request_policy().final_output_json_schema
+        )
+        if output_schema is not None:
             output_config = dict(kwargs.get("output_config") or {})
             output_config["format"] = {
                 "type": "json_schema",
-                "schema": side_options.output_schema,
+                "schema": output_schema,
             }
             kwargs["output_config"] = output_config
             extra_headers = dict(kwargs.get("extra_headers") or {})
@@ -711,6 +711,7 @@ class AnthropicAdapter(LLMAdapter):
 
                         event_type = str(event.get("type") or "")
                         if event_type == "ping":
+                            yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
                             continue
                         if saw_message_stop:
                             yield _anthropic_stream_protocol_error(
@@ -1881,7 +1882,7 @@ class AnthropicAdapter(LLMAdapter):
         # 第一遍：提取 system + 初步转换
         for msg in messages:
             if msg.role in {"system", "developer"}:
-                if accepting_leading_instructions and msg.content:
+                if (accepting_leading_instructions or msg.role == "developer") and msg.content:
                     system_parts.append(msg.content)
                 continue
 
@@ -1967,13 +1968,28 @@ class AnthropicAdapter(LLMAdapter):
                 )
 
             elif msg.role == "tool":
+                if msg.code_mode_output is not None:
+                    from backend.mcp.result_projection import mcp_output_images
+
+                    if any(item["type"] == "input_audio" for item in msg.code_mode_output):
+                        raise ValueError("Anthropic does not support native audio tool output; use Responses")
+                    tool_text = "\n".join(item["text"] for item in msg.code_mode_output if item["type"] == "input_text")
+                    tool_images = mcp_output_images(msg.code_mode_output)
+                elif msg.mcp_output is not None:
+                    from backend.mcp.result_projection import mcp_output_images, mcp_text_output
+
+                    tool_text = mcp_text_output(msg.mcp_output)
+                    tool_images = mcp_output_images(msg.mcp_output)
+                else:
+                    tool_text = msg.content
+                    tool_images = list(msg.images)
                 raw_messages.append(
                     {
                         "role": "tool_result",
                         "tool_use_id": msg.tool_call_id or "",
-                        "content": msg.content,
+                        "content": tool_text,
                         "is_error": bool(getattr(msg, "is_error", False)),
-                        "images": list(getattr(msg, "images", []) or []),
+                        "images": tool_images,
                     }
                 )
 

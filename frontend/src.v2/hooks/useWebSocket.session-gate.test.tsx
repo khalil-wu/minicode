@@ -167,7 +167,7 @@ const messagesFor = (conversationId: string) => {
 
 describe("session gate replay", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
     localStorage.clear();

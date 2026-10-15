@@ -577,6 +577,8 @@ class SandboxRunner:
         *,
         cwd: str | Path | None = None,
         host_command: str = "",
+        argv: list[str] | None = None,
+        tty: bool = False,
     ) -> tuple[str | list[str], SandboxCapability]:
         """Return an enforceable command wrapper or fail before process creation."""
         self._cleanup_sandbox_setup_state()
@@ -591,6 +593,8 @@ class SandboxRunner:
                 capability,
                 cwd=cwd,
                 host_command=host_command,
+                argv=argv,
+                tty=tty,
             )
         except Exception:
             self._cleanup_sandbox_setup_state()
@@ -810,12 +814,16 @@ class SandboxRunner:
         ]
         | None = None,
         preserve_full_output: bool = False,
+        argv: list[str] | None = None,
+        tty: bool = False,
     ) -> SandboxResult:
         try:
             wrapped_command, capability = self.prepare_command(
                 command,
                 cwd=cwd,
                 host_command=host_command,
+                argv=argv,
+                tty=tty,
             )
         except SandboxUnavailableError as exc:
             return SandboxResult(
@@ -857,7 +865,11 @@ class SandboxRunner:
                 "cwd": str(cwd) if cwd else None,
                 "env": env,
             }
-            if isinstance(wrapped_command, list):
+            if tty and capability.backend != "windows-elevated-wfp":
+                from backend.terminal.pty_process import spawn_pty
+
+                proc = await spawn_pty(wrapped_command, cwd=cwd, env=env)
+            elif isinstance(wrapped_command, list):
                 proc = await spawn_exec(*wrapped_command, **spawn_kwargs)
             else:
                 proc = await spawn_shell(wrapped_command, **spawn_kwargs)
@@ -1119,6 +1131,7 @@ class SandboxRunner:
                 stdout=stdout_capture.snapshot(),
                 stderr="\n".join(filter(None, (stderr_capture.snapshot(), str(exc)))),
                 exit_code=127 if proc is None and isinstance(exc, FileNotFoundError) else 1,
+                execution_error=str(exc),
                 stdout_total_bytes=stream_totals["stdout"],
                 stderr_total_bytes=stream_totals["stderr"],
                 cleanup_pending=not tree_reaped,
@@ -1197,18 +1210,21 @@ class SandboxRunner:
         cwd: str | Path | None = None,
         host_command: str = "",
         argv: list[str] | None = None,
+        tty: bool = False,
     ) -> str | list[str]:
         resolved = self._policy.resolve(cwd=cwd)
         if resolved.enforcement in {
             SandboxEnforcement.DISABLED,
             SandboxEnforcement.EXTERNAL,
         }:
-            return host_command or command
+            return list(argv) if argv is not None else host_command or command
+
+        shell_command = shlex.join(argv) if argv is not None else command
 
         if capability.backend == "bubblewrap":
             ready_path = self._prepare_synthetic_mount_targets(resolved)
             return _bubblewrap_command(
-                command,
+                shell_command,
                 resolved,
                 ready_path=ready_path,
                 mount_path_overrides=self._synthetic_mount_overrides,
@@ -1216,7 +1232,7 @@ class SandboxRunner:
 
         if capability.backend == "seatbelt":
             profile = _seatbelt_profile(resolved)
-            return f"sandbox-exec -p {_shell_quote(profile)} -- sh -c {_shell_quote(command)}"
+            return ["sandbox-exec", "-p", profile, "--", "sh", "-c", shell_command]
 
         if capability.backend in {"docker", "podman"}:
             self._prepare_synthetic_mount_targets(resolved)
@@ -1225,6 +1241,8 @@ class SandboxRunner:
                 capability.backend,
                 cwd=cwd,
                 resolved=resolved,
+                argv=argv,
+                tty=tty,
             )
 
         if capability.backend == "windows-elevated-wfp":
@@ -1261,6 +1279,7 @@ class SandboxRunner:
                 deny_read_paths=deny_read,
                 deny_write_paths=deny_write,
                 argv=argv,
+                tty=tty,
             )
             self._windows_private_desktop = desktop
             self._windows_native_temp_dir = private_temp
@@ -1455,6 +1474,8 @@ class SandboxRunner:
         *,
         cwd: str | Path | None,
         resolved: ResolvedSandboxPolicy,
+        argv: list[str] | None = None,
+        tty: bool = False,
     ) -> list[str]:
         _runtime, image, reason = _container_runtime()
         if not image:
@@ -1560,8 +1581,9 @@ class SandboxRunner:
                     flags=re.IGNORECASE if sys.platform == "win32" else 0,
                 )
         ready_file = self._sandbox_ready_file
+        powershell_command = (Path(argv[0]).stem in {"powershell", "pwsh"}) if argv is not None else sys.platform == "win32"
         if ready_file is not None:
-            if sys.platform == "win32":
+            if powershell_command:
                 container_command = (
                     "Set-Content -LiteralPath '/minicode-control-ready' "
                     "-NoNewline -Value 'ready'; "
@@ -1575,6 +1597,8 @@ class SandboxRunner:
         args = [
             engine,
             "run",
+            "-i",
+            *(["-t"] if tty else []),
             "--rm",
             "--init",
             "--pull=never",
@@ -1645,7 +1669,12 @@ class SandboxRunner:
         for key, value in self._policy.env_overrides.items():
             if key:
                 args.append(f"--env={key}={value}")
-        if sys.platform == "win32":
+        if argv is not None:
+            program = Path(argv[0]).stem
+            if program == "powershell":
+                program = "pwsh"
+            args.extend((image, program, *argv[1:-1], powershell_script(container_command) if powershell_command else container_command))
+        elif sys.platform == "win32":
             args.extend(
                 (
                     image,

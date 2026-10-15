@@ -11,7 +11,7 @@ describe("CollaborationCell agent navigation", () => {
     conversationId: "collaboration-owner",
     focusedSubagentId: null,
     rightStackTab: "tasks",
-    subagents: [{ id: "worker-a", agentPath: "/root/a", teammateName: "Ada", role: "explore", status: "running", objective: "审阅布局" }],
+    subagents: [{ id: "worker-a", agentPath: "/root/a", teammateName: "Ada", role: "explore", status: "running", startedAt: 1, objective: "审阅布局" }],
   }));
   afterEach(cleanup);
   const cell: CollaborationCellState = {
@@ -33,6 +33,21 @@ describe("CollaborationCell agent navigation", () => {
     act(() => useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => agent.id === "worker-a"
       ? { ...agent, teammateName: "Ada updated" } : agent) })));
     expect(screen.getByRole("button", { name: "打开子智能体：Ada updated" })).toBeTruthy();
+  });
+
+  it("keeps the dispatch identity while a saved ordinary worker snapshot arrives", () => {
+    useAppStore.setState({ subagents: [] });
+    const receipt = { ...cell, entries: [{ agentId: "ordinary", agentLabel: "parser_review", agentIdentity: "/root/parser_review", agentStatus: "running" as const }] };
+    const { container } = render(<CollaborationCell cell={receipt} conversationId="collaboration-owner" />);
+    const avatar = container.querySelector(".mc-agent-avatar")!;
+    const identity = avatar.getAttribute("data-identity-index");
+    expect(identity).not.toBeNull();
+    act(() => useAppStore.setState({ subagents: [{ id: "ordinary", agentPath: "/root/parser_review", displayName: "parser_review",
+      role: "explore", status: "running", objective: "Mutable explanation" }] }));
+    expect(screen.getByRole("button", { name: "打开子智能体：parser_review" })).toBeTruthy();
+    expect(avatar.getAttribute("data-identity-index")).toEqual(identity);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体：parser_review" }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("ordinary");
   });
 
   it("keeps delegation success separate from the child's live status and opens that child", () => {
@@ -88,7 +103,7 @@ describe("CollaborationCell agent navigation", () => {
       entries: [{ agentId: "worker-a", agentLabel: "Ada", content: "Secret worker instructions" }],
     }} conversationId="collaboration-owner" />);
     expect(container.querySelector("details")?.open).toBe(false);
-    fireEvent.click(screen.getByText("发送消息 · 失败"));
+    fireEvent.click(screen.getByText("发送消息"));
     expect(screen.getByRole("alert").textContent).toBe("消息发送失败，请重新连接");
     expect(screen.queryByRole("status")).toBeNull();
     expect(container.textContent).not.toContain("Secret worker instructions");
@@ -108,7 +123,7 @@ describe("CollaborationCell agent navigation", () => {
       error: "子任务启动失败", entries: [{ agentId: "worker-a", agentLabel: "布局任务", content: instructions }],
     }} conversationId="collaboration-owner" />);
     expect(container.querySelector("details")?.open).toBe(false);
-    fireEvent.click(screen.getByText("启动子智能体 · 失败"));
+    fireEvent.click(screen.getByText("启动子智能体"));
     expect(screen.getByRole("alert").textContent).toBe("子任务启动失败");
     expect(screen.queryByText("委派失败")).toBeNull();
     expect(screen.queryByText("开始工作")).toBeNull();
@@ -133,7 +148,7 @@ describe("CollaborationCell agent navigation", () => {
 
   it("pairs each real parallel start with its own glyph and name without exposing prompts", () => {
     useAppStore.setState((state) => ({ subagents: [...state.subagents,
-      { id: "worker-b", agentPath: "/root/b", teammateName: "Lin", role: "subagent", status: "running", objective: "实现解析器" }],
+      { id: "worker-b", agentPath: "/root/b", teammateName: "Lin", role: "subagent", status: "running", startedAt: 2, objective: "实现解析器" }],
     }));
     const { container } = render(<CollaborationCell cell={{ ...cell, entries: [
       ...cell.entries, { agentId: "worker-b", agentLabel: "解析器任务", content: "Implement all parser details" },
@@ -143,7 +158,7 @@ describe("CollaborationCell agent navigation", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toBe("Ada开始工作");
     expect(rows[1].textContent).toBe("Lin开始工作");
-    for (const row of rows) expect(row.querySelectorAll(".mc-agent-avatar-art")).toHaveLength(1);
+    for (const row of rows) expect(row.querySelectorAll(".mc-agent-avatar")).toHaveLength(1);
     expect(screen.getAllByText("开始工作")).toHaveLength(2);
     expect(screen.queryByText("Implement all parser details")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Lin" }));
@@ -151,7 +166,7 @@ describe("CollaborationCell agent navigation", () => {
   });
 
   it("keeps another conversation's real worker visible without opening it in the active conversation", () => {
-    useAppStore.setState({ conversationAgentStates: { archived: { subagents: [{ id: "worker-a", agentPath: "/root/a", teammateName: "Ada", role: "explore", status: "done" }], todos: [], agentProgress: [], plan: null } } });
+    useAppStore.setState({ conversationAgentStates: { archived: { subagents: [{ id: "worker-a", agentPath: "/root/a", teammateName: "Ada", role: "explore", status: "done", startedAt: 1 }], todos: [], agentProgress: [], plan: null } } });
     render(<CollaborationCell cell={cell} conversationId="archived" />);
     expect(screen.getByText("Ada")).toBeTruthy();
     expect(screen.getByText("开始工作")).toBeTruthy();
@@ -162,14 +177,15 @@ describe("CollaborationCell agent navigation", () => {
   it("preserves a successful start milestone and the same identity after the child completes", () => {
     const view = render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
     const avatar = view.container.querySelector(".mc-agent-avatar")!;
-    const identity = [avatar.getAttribute("data-glyph"), avatar.getAttribute("data-identity-color")];
-    const artwork = view.container.querySelector(".mc-agent-avatar-art")!.innerHTML;
+    const identity = avatar.getAttribute("data-identity-index");
+    const artwork = view.container.querySelector(".mc-agent-avatar-art")!.getAttribute("src");
+    expect(identity).not.toBeNull();
+    expect(artwork).toBeTruthy();
     act(() => useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "done" as const })) })));
     view.rerender(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
     expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada开始工作");
-    expect(avatar.getAttribute("data-glyph")).toBe(identity[0]);
-    expect(avatar.getAttribute("data-identity-color")).toBe(identity[1]);
-    expect(view.container.querySelector(".mc-agent-avatar-art")!.innerHTML).toBe(artwork);
+    expect(avatar.getAttribute("data-identity-index")).toBe(identity);
+    expect(view.container.querySelector(".mc-agent-avatar-art")!.getAttribute("src")).toBe(artwork);
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Ada" }));
     expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
   });
@@ -186,10 +202,41 @@ describe("CollaborationCell agent navigation", () => {
   });
 
   it("does not call a real queued identity started before the worker begins", () => {
-    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "pending" as const })) }));
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "pending" as const, startedAt: 0 })) }));
     render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
     expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
     expect(screen.queryByText("开始工作")).toBeNull();
+  });
+
+  it("keeps an actual start receipt after that child is queued for another turn", () => {
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "pending" as const, startedAt: 0 })) }));
+    render(<CollaborationCell cell={{ ...cell, entries: [{ ...cell.entries[0], agentStartedAt: 100 }] }} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada开始工作");
+  });
+
+  it("does not turn owned resources or a preflight failure into a started worker", () => {
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status: "error" as const, startedAt: 0 })) }));
+    render(<CollaborationCell cell={{ ...cell, entries: [{ ...cell.entries[0], agentStartedAt: 0, agentStatus: "error" }] }} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
+    expect(screen.queryByText("开始工作")).toBeNull();
+  });
+
+  it("retains the real execution start even when the child later fails", () => {
+    render(<CollaborationCell cell={{ ...cell, status: "failed", entries: [{ ...cell.entries[0], agentStartedAt: 100, agentStatus: "error" }] }} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada开始工作");
+  });
+
+  it("projects a child's actual parent message as a work record without inventing a parent avatar", () => {
+    const { container } = render(<CollaborationCell cell={{ ...cell, action: "sent_message", entries: [{ agentId: "parent", agentLabel: "parent", content: "Actual coordination content" }] }} conversationId="collaboration-owner" isTranscriptMode />);
+    expect(screen.getByText("已向父代理发送消息")).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container.querySelector(".mc-agent-avatar")).toBeNull();
+    expect(container.textContent).not.toContain("Actual coordination content");
+  });
+
+  it("does not create the child-only parent message row in the main conversation", () => {
+    render(<CollaborationCell cell={{ ...cell, action: "sent_message", entries: [{ agentId: "parent", agentLabel: "parent" }] }} conversationId="collaboration-owner" />);
+    expect(screen.queryByText("已向父代理发送消息")).toBeNull();
   });
 
   it.each(["running", "failed", "partial", "cancelled"] as const)("never converts a %s delegation into a successful start", (status) => {
@@ -202,10 +249,27 @@ describe("CollaborationCell agent navigation", () => {
     useAppStore.setState({ subagents: [] });
     render(<CollaborationCell cell={{ ...cell, entries: [{ agentId: "worker-a", agentLabel: "Editor question defaults",
       agentIdentity: "/root/editor_question_defaults", agentStatus: "done" }] }} conversationId="collaboration-owner" />);
-    expect(screen.getByText("开始工作")).toBeTruthy();
+    expect(screen.queryByText("开始工作")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Editor question defaults" }));
     expect(useAppStore.getState().focusedSubagentId).toBe("worker-a");
     expect(useAppStore.getState().subagents[0]).toMatchObject({ id: "worker-a", agentPath: "/root/editor_question_defaults", status: "done" });
+  });
+
+  it.each(["running", "done", "error"] as const)("does not invent a start from an untimed %s worker state", (status) => {
+    useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, status, startedAt: undefined })) }));
+    render(<CollaborationCell cell={cell} conversationId="collaboration-owner" />);
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada");
+  });
+
+  it.each(["failed", "partial", "cancelled"] as const)("keeps a %s parent-message attempt neutral with its real error in details", (status) => {
+    const { container } = render(<CollaborationCell cell={{ ...cell, action: "sent_message", status,
+      error: "Original mailbox error", entries: [{ agentId: "parent", agentLabel: "parent" }],
+    }} conversationId="collaboration-owner" isTranscriptMode />);
+    expect(screen.getByText("向父代理发送消息")).toBeTruthy();
+    expect(screen.queryByText("已向父代理发送消息")).toBeNull();
+    expect(container.querySelector("summary")?.textContent).toBe("发送消息");
+    fireEvent.click(screen.getByText("发送消息"));
+    expect(screen.getByRole("alert").textContent).toBe("Original mailbox error");
   });
 
   it("renders a real completion as a quiet identity, name and status row", () => {

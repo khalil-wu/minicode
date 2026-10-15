@@ -66,6 +66,36 @@ def test_turn_kernel_owns_runtime_start_and_idempotent_completion(tmp_path: Path
     assert kernel.run_record.status == "completed"
 
 
+@pytest.mark.parametrize("explicit", [None, "host-turn"])
+def test_turn_identity_does_not_use_assistant_message_projection(tmp_path, explicit):
+    metadata = {"assistant_message_id": "assistant-projection"}
+    if explicit is not None:
+        metadata["turn_id"] = explicit
+    kernel = _kernel(tmp_path, metadata=metadata)
+    expected = explicit or kernel.run_record.run_id
+    assert kernel.metadata["turn_id"] == expected
+    assert kernel.start_events()[0].data["turn_id"] == expected
+    assert expected != "assistant-projection"
+    kernel.complete_for_terminal_reason("completed")
+
+
+def test_turn_kernel_and_mailbox_consumer_share_the_same_turn_owner(tmp_path: Path) -> None:
+    from backend.agent.mailbox_delivery import _mailbox_deliverable
+
+    kernel = _kernel(tmp_path)
+    try:
+        assert _mailbox_deliverable(kernel.metadata, kernel.run_context)
+        assert kernel.observe_completed_assistant_item({
+            "role": "assistant", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "Finished."}],
+        })
+        assert not _mailbox_deliverable(kernel.metadata, kernel.run_context)
+        assert kernel.accept_mailbox_after_tool_item()
+        assert _mailbox_deliverable(kernel.metadata, kernel.run_context)
+    finally:
+        kernel.runtime.close(release_lease=True)
+
+
 def test_success_lifecycle_does_not_encode_an_empty_error_object() -> None:
     event = AgentEvent.agent_run_completed({
         "run_id": "run-completed",

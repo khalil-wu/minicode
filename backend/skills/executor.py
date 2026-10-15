@@ -3,18 +3,93 @@
 from __future__ import annotations
 
 import logging
+import json
+from pathlib import Path
 
 from backend.skills.manager import SkillManager
 from backend.skills.loader import SkillMeta
 
 logger = logging.getLogger(__name__)
+_SOURCE_MESSAGES = json.loads(Path(__file__).with_name("source-catalog-instructions.json").read_text(encoding="utf-8"))["messages"]
 
 # MiniCode uses one provider-neutral discovery contract. Provider wire formats
 # must not change harness instructions or Skill visibility.
 MINICODE_SKILL_BUDGET_CONTEXT_PERCENT = 0.02
 CHARS_PER_TOKEN = 4
-MINICODE_LAYER1_SUMMARY_MAX_CHARS = 16_000
+MINICODE_LAYER1_SUMMARY_MAX_CHARS = 8_000
 MINICODE_MAX_LISTING_DESC_CHARS = 1_024
+
+
+def utf8_prefix(value: str, maximum: int) -> str:
+    encoded = value.encode("utf-8")
+    end = min(len(encoded), maximum)
+    while 0 < end < len(encoded) and encoded[end] & 0xC0 == 0x80:
+        end -= 1
+    return encoded[:end].decode("utf-8")
+
+
+def _render_source_host_catalog(metas: list[SkillMeta], *, limit: int, token_budget: bool) -> str:
+    rank = {"builtin": 0, "managed": 1, "workspace": 2, "user": 3, "plugin": 4}
+    metas = sorted(metas, key=lambda meta: (rank.get(meta.source_level, 4), meta.name, str(meta.source_path)))
+    paths = [str(meta.source_path).replace("\\", "/") for meta in metas]
+    descriptions = [meta.description[:1021] + "..." if len(meta.description) > 1024 else meta.description for meta in metas]
+    cost = (lambda value: (len(value.encode("utf-8")) + 3) // 4) if token_budget else len
+    roots = list(dict.fromkeys(str(meta.alias_root).replace("\\", "/").rstrip("/") for meta in metas if meta.alias_root is not None))
+    aliases = {root: f"r{index}" for index, root in enumerate(roots)}
+    root_lines = [f"- `{alias}` = `{root}`" for root, alias in aliases.items()]
+    short_paths = []
+    for path in paths:
+        root = max((root for root in roots if path.startswith(root + "/")), key=len, default=None)
+        short_paths.append(aliases[root] + path[len(root):] if root is not None else path)
+    plain_intro = _SOURCE_MESSAGES["SKILLS_INTRO_WITH_SOURCE_LOCATORS"]
+    alias_intro = _SOURCE_MESSAGES["SKILLS_INTRO_WITH_HOST_ALIASES"]
+    plain_suffix = _SOURCE_MESSAGES["SKILLS_HOW_TO_USE_WITH_SOURCE_LOCATORS"]
+    alias_suffix = _SOURCE_MESSAGES["SKILLS_HOW_TO_USE_WITH_HOST_ALIASES"]
+    def row(index: int, description: str, locators: list[str]) -> str:
+        return f"- {metas[index].name}: {description} (file: {locators[index]})" if description else f"- {metas[index].name}: (file: {locators[index]})"
+    alias_overhead = max(0, cost("### Skill roots\n" + "\n".join(root_lines) + "\n" + alias_intro) - cost(plain_intro))
+    plain_cost = sum(cost(row(index, description, paths) + "\n") for index, description in enumerate(descriptions))
+    alias_cost = alias_overhead + sum(cost(row(index, description, short_paths) + "\n") for index, description in enumerate(descriptions))
+    aliased = bool(roots) and alias_cost < plain_cost
+    locators = short_paths if aliased else paths
+    available = max(0, limit - (alias_overhead if aliased else 0))
+    full_rows = [row(index, description, locators) for index, description in enumerate(descriptions)]
+    if sum(cost(line + "\n") for line in full_rows) <= available:
+        rendered = full_rows
+    else:
+        minimum = [row(index, "", locators) for index in range(len(metas))]
+        if sum(cost(line + "\n") for line in minimum) <= available:
+            allocations = [0] * len(metas)
+            used = sum(cost(line + "\n") for line in minimum)
+            while used < available:
+                changed = False
+                for index, description in enumerate(descriptions):
+                    count = allocations[index]
+                    if count == len(description):
+                        continue
+                    delta = cost(row(index, description[:count + 1], locators) + "\n") - cost(row(index, description[:count], locators) + "\n")
+                    if used + delta <= available:
+                        allocations[index] += 1
+                        used += delta
+                        changed = True
+                if not changed:
+                    break
+            rendered = [row(index, description[:allocations[index]], locators) for index, description in enumerate(descriptions)]
+        else:
+            rendered = []
+            used = 0
+            for line in minimum:
+                charged = cost(line + "\n")
+                if used + charged > available:
+                    break
+                rendered.append(line)
+                used += charged
+            logger.warning("Exceeded skills context budget. All skill descriptions were removed and %d additional skills were not included in the model-visible skills list.", len(metas) - len(rendered))
+    lines = ["## Skills", alias_intro if aliased else plain_intro]
+    if aliased:
+        lines.extend(["### Skill roots", *root_lines])
+    lines.extend(["### Available skills", *rendered, "### How to use skills", alias_suffix if aliased else plain_suffix])
+    return "\n" + "\n".join(lines) + "\n"
 
 
 class SkillExecutor:
@@ -29,51 +104,23 @@ class SkillExecutor:
         *,
         context_window_tokens: int | None = None,
     ) -> str:
-        """
-        构建 Layer 1 摘要（始终注入）。
-
-        Let the model discover available Skills before an exact SKILL.md is
-        selected and injected as contextual user input.
-
-        Args:
-            max_chars: Explicit metadata character budget. When omitted, use
-                MiniCode's context-window policy.
-
-        Returns:
-            Skill 摘要列表文本
-        """
-        metas = [
-            meta
-            for meta in self._manager.list_metas()
-            if meta.allow_implicit_invocation
-        ]
-        if not metas:
+        """Render Source host metadata separately from its full usage policy."""
+        metas = [meta for meta in self._manager.list_metas() if meta.allow_implicit_invocation]
+        if not metas or not self._manager.include_instructions:
             return ""
+        configured = self._manager.max_context_tokens
+        if max_chars is not None:
+            limit, token_budget = max(0, int(max_chars)), False
+            if limit == 0:
+                return ""
+        elif configured is not None:
+            limit, token_budget = min(configured, 10_000), True
+        elif context_window_tokens is not None and context_window_tokens > 0:
+            limit, token_budget = max(1, context_window_tokens * 2 // 100), True
+        else:
+            limit, token_budget = 8_000, False
+        return _render_source_host_catalog(metas, limit=limit, token_budget=token_budget)
 
-        budget = _minicode_skill_char_budget(
-            max_chars=max_chars,
-            context_window_tokens=context_window_tokens,
-        )
-        prefix = (
-            "\n\n## Skills\n"
-            "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator.\n"
-            "### Available skills\n"
-        )
-        suffix = (
-            "\n### How to use skills\n"
-            "- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.\n"
-            "- Missing/blocked: If a named skill is unavailable or its `SKILL.md` cannot be read, say so briefly and continue with the best fallback.\n"
-            "- After deciding to use a skill, read its `SKILL.md` completely before taking task actions. Resolve relative references against the directory containing that `SKILL.md`.\n"
-            "- Read every instruction or reference that the selected `SKILL.md` requires for the task. Load only relevant optional references and avoid unrelated or deep reference chasing.\n"
-            "- Prefer provided scripts, assets, and templates over recreating them. Normal tool permissions still apply.\n"
-            "- If multiple skills apply, use the smallest set that covers the request and state the order."
-        )
-        if budget <= len(prefix) + len(suffix):
-            return ""
-        summary = _format_minicode_skills_within_budget(
-            metas, max_chars=budget - len(prefix) - len(suffix)
-        )
-        return prefix + summary + suffix if summary else ""
 
 
 def _minicode_skill_char_budget(

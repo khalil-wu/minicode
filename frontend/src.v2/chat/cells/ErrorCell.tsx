@@ -28,9 +28,6 @@ export function ErrorCell({ cell }: { cell: ErrorCellState }) {
           <ErrorIcon size={16} strokeWidth={1.75} />
         </span>
         <span className={`error-cell-title error-cell-title-${tone}`}>{cell.title}</span>
-        {!cell.recoverable && (
-          <span className="error-cell-fatal-badge">不可恢复</span>
-        )}
       </div>
 
       {displayMessage && (

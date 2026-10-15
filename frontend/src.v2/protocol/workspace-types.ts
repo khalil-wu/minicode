@@ -15,6 +15,7 @@
 export type WorkspaceServerEventType =
   // File watcher
   | "file.changed"
+  | "workspace.project_index.invalidated"
   // Commands / artifacts
   | "command.result"
   | "command_output_chunk"
@@ -89,6 +90,12 @@ export interface FileChangedEvent extends WorkspaceOwnedEvent {
   path: string;
   event: string;
   timestamp?: string;
+}
+
+export interface WorkspaceProjectIndexInvalidatedEvent extends WorkspaceOwnedEvent {
+  type: "workspace.project_index.invalidated";
+  index_instance_id: string;
+  revision: number;
 }
 
 export interface CommandResultEvent {

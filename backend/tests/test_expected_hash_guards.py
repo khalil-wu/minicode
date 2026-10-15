@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
 from backend.agent.tool_batch_execution import (
     execute_tool_batch,
@@ -182,7 +184,7 @@ def test_same_turn_edits_use_hash_from_previous_successful_edit(tmp_path: Path) 
     assert target.read_text(encoding="utf-8") == "left = 10\nright = 20\n"
 
 
-def test_apply_patch_uses_read_time_hash_and_rejects_stale(tmp_path: Path) -> None:
+def test_apply_patch_uses_current_preview_and_rejects_change_after_review(tmp_path: Path) -> None:
     target = tmp_path / "c.py"
     original = "line1\nline2\n"
     target.write_text(original, encoding="utf-8")
@@ -207,10 +209,11 @@ def test_apply_patch_uses_read_time_hash_and_rejects_stale(tmp_path: Path) -> No
         patch,
         ctx,
         expected_hashes=expected,
-        read_time_hashes=ctx.metadata["_read_file_hashes"],
     )
     assert payload is not None
-    assert expected[key] == read_hash
+    assert expected[key] == content_hash("line1\nline2\nextra\n")
+    assert expected[key] != read_hash
+    target.write_text("line1\nline2\nextra\nchanged after approval\n", encoding="utf-8")
 
     result = asyncio.run(
         ApplyPatchTool().execute({"patch": patch, "_expected_hashes": expected}, ctx)
@@ -220,16 +223,19 @@ def test_apply_patch_uses_read_time_hash_and_rejects_stale(tmp_path: Path) -> No
         "changed on disk" in result.content.lower()
         or "re-read" in result.content.lower()
     )
+    assert target.read_text(encoding="utf-8") == "line1\nline2\nextra\nchanged after approval\n"
 
 
-def test_apply_patch_direct_execute_without_review_still_guards(tmp_path: Path) -> None:
+@pytest.mark.parametrize("previous_read", [False, True])
+def test_apply_patch_direct_execute_uses_current_hunk_without_preread(tmp_path: Path, previous_read: bool) -> None:
     target = tmp_path / "d.py"
     original = "alpha\n"
     target.write_text(original, encoding="utf-8")
     ctx = _ctx(tmp_path)
     read_hash = content_hash(original)
     key = canonical_file_path_key(target)
-    ctx.metadata["_read_file_hashes"][key] = read_hash
+    if previous_read:
+        ctx.metadata["_read_file_hashes"][key] = read_hash
     target.write_text("alpha\ntrail\n", encoding="utf-8")
 
     patch = (
@@ -241,11 +247,50 @@ def test_apply_patch_direct_execute_without_review_still_guards(tmp_path: Path) 
         "*** End Patch\n"
     )
     result = asyncio.run(ApplyPatchTool().execute({"patch": patch}, ctx))
-    assert result.is_error
-    assert (
-        "changed on disk" in result.content.lower()
-        or "re-read" in result.content.lower()
-    )
+    assert not result.is_error, result.content
+    assert target.read_text(encoding="utf-8") == "gamma\ntrail\n"
+
+
+@pytest.mark.parametrize("changed_during_approval", [False, True])
+def test_apply_patch_batch_without_preread_preserves_the_actual_approved_diff(tmp_path: Path, changed_during_approval: bool) -> None:
+    target = tmp_path / "approved.py"
+    target.write_text("alpha\n", encoding="utf-8")
+    patch = "*** Begin Patch\n*** Update File: approved.py\n@@\n-alpha\n+gamma\n*** End Patch"
+    call = ToolCallEvent(id="patch-no-preread", name="apply_patch", arguments={"patch": patch})
+    permission = PermissionContext(mode="confirm", approval_policy="on-request", workspace_root=tmp_path)
+    tool_ctx = ToolExecutionContext(permission=permission, workspace_root=tmp_path, metadata={"_read_file_hashes": {}})
+    registry = ToolRegistry()
+    registry.register(ApplyPatchTool())
+    approvals = []
+
+    async def approve(tool_call_id):
+        approvals.append(tool_call_id)
+        if changed_during_approval:
+            # The original hunk still matches; the approval owned the complete
+            # earlier diff, so the later user edit must survive untouched.
+            target.write_text("alpha\nuser edit during approval\n", encoding="utf-8")
+        return {"action": "approve"}
+
+    async def collect():
+        context = ContextBuilder(TokenBudget())
+        context.append_assistant_tool_calls([call])
+        return [event async for event in execute_tool_batch([call], ctx=context,
+            state=AgentState(user_message="apply this patch", iterations=1), tool_registry=registry,
+            permission_checker=PermissionChecker(PermissionSettings(require_diff_review=["apply_patch"]), tmp_path),
+            approval_handler=approve, skill_manager=None, permission_context=permission, tool_ctx=tool_ctx)]
+
+    events = asyncio.run(collect())
+    assert approvals == [call.id]
+    assert call.arguments == {"patch": patch}
+    assert len([event for event in events if event.type == "approval_request"]) == 1
+    result = next(event.data for event in events if event.type == "tool_result")
+    if changed_during_approval:
+        assert result["is_error"], result
+        assert "changed on disk after review" in result["developer_detail"]
+        assert target.read_text(encoding="utf-8") == "alpha\nuser edit during approval\n"
+    else:
+        assert result["status"] == "success", result
+        assert target.read_text(encoding="utf-8") == "gamma\n"
 
 
 def test_edit_file_allows_missing_expected_hash_on_existing(tmp_path: Path) -> None:

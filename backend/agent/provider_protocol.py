@@ -180,6 +180,26 @@ def provider_raw_for_projection(
         if safe_citations:
             projected["citations"] = safe_citations
 
+    memory_citation = raw.get("memory_citation")
+    if isinstance(memory_citation, Mapping):
+        entries: list[dict[str, Any]] = []
+        raw_entries = memory_citation.get("entries")
+        for entry in raw_entries[:512] if isinstance(raw_entries, list) else []:
+            if not isinstance(entry, Mapping):
+                continue
+            start = _safe_nonnegative_int(entry.get("line_start"))
+            end = _safe_nonnegative_int(entry.get("line_end"))
+            path = public_text(entry.get("path"), max_chars=2_048, single_line=True) if isinstance(entry.get("path"), str) else ""
+            if path and start is not None and start > 0 and end is not None and end >= start:
+                entries.append({
+                    "path": path, "line_start": start, "line_end": end,
+                    "note": public_text(entry.get("note"), max_chars=512, single_line=True) if isinstance(entry.get("note"), str) else "",
+                })
+        raw_ids = memory_citation.get("rollout_ids")
+        rollout_ids = public_string_list([value for value in raw_ids if isinstance(value, str)] if isinstance(raw_ids, list) else [], item_max_chars=256)
+        if entries or rollout_ids:
+            projected["memory_citation"] = {"entries": entries, "rollout_ids": rollout_ids}
+
     for source_key, target_key in (("usage", "usage"), ("raw_usage", "raw_usage")):
         usage = project_public_usage(raw.get(source_key))
         if usage:
@@ -773,12 +793,13 @@ def build_llm_request_metadata(
 ) -> dict[str, Any]:
     explicit = metadata.get("llm_request_metadata")
     remaining: dict[str, Any] = dict(explicit) if isinstance(explicit, dict) else {}
+    # Source window/agent metadata is authored by the admitted provider step.
+    remaining.pop("_source_responses_metadata", None)
+    remaining.pop("internal_session_source", None)
+    remaining.pop("parent_response_id", None)
     request: dict[str, Any] = {}
-    # ``assistant_message_id`` is the provider-facing turn correlation id used
-    # by the host when no explicit routing turn is supplied. Keep the durable
-    # runtime incarnation in ``run_id``. Codex carries an optional turn_id in
-    # its responses metadata; mapping the assistant message id onto that
-    # canonical turn field is MiniCode's own convention.
+    # Provider lineage shares the issuing turn with tools and public events.
+    # The assistant message id belongs only to the transcript projection.
     assistant_message_id = str(metadata.get("assistant_message_id") or "").strip()
 
     def pop_explicit(key: str, fallback: Any = "") -> Any:
@@ -841,7 +862,7 @@ def build_llm_request_metadata(
         or ""
     ).strip()
     canonical_turn_id = str(
-        pop_explicit("turn_id", assistant_message_id or effective_run_id) or ""
+        pop_explicit("turn_id", effective_run_id) or ""
     ).strip()
 
     if canonical_session_id:
@@ -893,6 +914,10 @@ def build_llm_request_metadata(
         )
     for key, value in remaining.items():
         request.setdefault(key, value)
+    if "internal_session_source" in metadata:
+        request["internal_session_source"] = metadata["internal_session_source"]
+    if "_source_responses_metadata" in metadata:
+        request["_source_responses_metadata"] = dict(metadata["_source_responses_metadata"])
     if provider_lifecycle_runtime is not None:
         request[LIFECYCLE_RUNTIME_METADATA_KEY] = provider_lifecycle_runtime
     return request

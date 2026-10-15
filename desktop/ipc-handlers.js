@@ -5,6 +5,8 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { ipcMain, dialog, shell, app } = require("electron");
 const { NATIVE_MENU_KEYS } = require("./menu-popup");
+const { openInTarget } = require("./open-targets");
+const nativeFileExtensions = require("./native-open-file-extensions.json");
 
 const {
   isHttpUrl,
@@ -216,8 +218,10 @@ function registerIpcHandlers() {
   const {
     setupWindowsSandbox,
     popupApplicationMenu,
-    getMainWindow,
+    getWindowForSender,
+    getWindowRecord,
     showDesktopNotification,
+    hideDesktopNotifications,
     dispatchDeepLink,
     attemptAppStartup,
     getDesktopLogPath,
@@ -234,11 +238,12 @@ function registerIpcHandlers() {
     setLastPickedWorkspaceRoot,
   } = ctx;
 
-  // Helper to safely get the main window
-  const getWin = () => {
-    const fn = typeof getMainWindow === "function" ? getMainWindow : () => null;
-    return fn();
-  };
+  const getWin = (event) => getWindowForSender(event.sender);
+  const getWindowInstanceId = (event) => getWindowRecord(getWin(event)).windowInstanceId;
+  const browserPayload = (event, payload) => ({
+    ...payload,
+    window_instance_id: getWindowInstanceId(event),
+  });
   const getStartupWin = () => {
     const fn = typeof ctx.getStartupFailureWindow === "function"
       ? ctx.getStartupFailureWindow
@@ -280,7 +285,7 @@ function registerIpcHandlers() {
   };
 
   const assertMainSender = (event, channel) => {
-    assertWindowSender(event, getWin(), channel);
+    assertWindowSender(event, getWin(event), channel);
   };
 
   const assertStartupSender = (event, channel) => {
@@ -304,20 +309,40 @@ function registerIpcHandlers() {
   // -----------------------------------------------------------------------
 
   ipcMain.on("minicode:runtime:get", withMainSender("minicode:runtime:get", (event) => {
-    event.returnValue = typeof ctx.getRuntimeConfig === "function"
-      ? ctx.getRuntimeConfig()
-      : null;
+    const win = getWin(event);
+    const record = getWindowRecord(win);
+    event.returnValue = { ...ctx.getRuntimeConfig(win), initialNavigation: record.initialNavigation };
   }));
 
-  ipcMain.handle("minicode:window:minimize", withMainSender("minicode:window:minimize", () => {
-    const win = getWin();
+  ipcMain.on("minicode:window:initialNavigation:consume", withMainSender("minicode:window:initialNavigation:consume", event => {
+    getWindowRecord(getWin(event)).initialNavigation = null;
+    event.returnValue = true;
+  }));
+
+  ipcMain.handle("minicode:window:openConversation", withMainSender("minicode:window:openConversation", async (_event, conversationId) => {
+    const win = await ctx.createNewWindow({ conversationId });
+    ctx.focusMainWindow(win);
+    const record = getWindowRecord(win);
+    return { windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId };
+  }));
+
+  ipcMain.on("minicode:window:unload:capture", withMainSender("minicode:window:unload:capture", (event) => {
+    event.returnValue = ctx.captureUnloadIntent(getWin(event));
+  }));
+  ipcMain.handle("minicode:window:unload:resume", withMainSender("minicode:window:unload:resume", (event, intentId) => {
+    return ctx.resumeUnload(getWin(event), intentId);
+  }));
+
+  ipcMain.handle("minicode:window:minimize", withMainSender("minicode:window:minimize", (event) => {
+    const win = getWin(event);
     if (!win || win.isDestroyed()) return false;
     win.minimize();
     return true;
   }));
+  ipcMain.handle("minicode:window:state", withMainSender("minicode:window:state", event => ({ isMaximized: getWin(event).isMaximized(), isFocused: getWin(event).isFocused() })));
 
-  ipcMain.handle("minicode:window:maximize", withMainSender("minicode:window:maximize", () => {
-    const win = getWin();
+  ipcMain.handle("minicode:window:maximize", withMainSender("minicode:window:maximize", (event) => {
+    const win = getWin(event);
     if (!win || win.isDestroyed()) return false;
     if (win.isMaximized()) {
       win.unmaximize();
@@ -327,11 +352,10 @@ function registerIpcHandlers() {
     return true;
   }));
 
-  ipcMain.handle("minicode:window:close", withMainSender("minicode:window:close", () => {
-    const win = getWin();
+  ipcMain.handle("minicode:window:close", withMainSender("minicode:window:close", (event) => {
+    const win = getWin(event);
     if (!win || win.isDestroyed()) return false;
-    win.close();
-    return true;
+    return ctx.requestCloseWindow(win, "button");
   }));
 
   // -----------------------------------------------------------------------
@@ -340,12 +364,76 @@ function registerIpcHandlers() {
 
   ipcMain.handle("minicode:notify", withMainSender("minicode:notify", (_event, payload) => {
     return typeof showDesktopNotification === "function"
-      ? showDesktopNotification(payload)
+      ? showDesktopNotification(payload, getWin(_event))
       : false;
   }));
+  ipcMain.handle("minicode:notifications:hide", withMainSender("minicode:notifications:hide", (_event, selector) => {
+    return hideDesktopNotifications(selector, getWin(_event));
+  }));
+  const preferencesSnapshot = async () => {
+    const fileOpenTargets = await Promise.all(ctx.desktopPreferences.fileOpenTargets().map(async ({ id, label, icon, iconPath, kind, hidden }) => {
+      const nativeIcon = iconPath ? await app.getFileIcon(iconPath, { size: "small" }) : null;
+      return { id, label, kind, hidden, icon: nativeIcon && !nativeIcon.isEmpty() ? nativeIcon.toDataURL() : icon };
+    }));
+    return { ...ctx.desktopPreferences.getPreferences(), systemLocale: app.getLocale(), fileOpenTargets,
+      terminalShellTargets: ctx.desktopPreferences.terminalShellTargets().map(({ id, label }) => ({ id, label })) };
+  };
+  ipcMain.handle("minicode:preferences:get", withMainSender("minicode:preferences:get", () => preferencesSnapshot()));
+  ipcMain.handle("minicode:preferences:set", withMainSender("minicode:preferences:set", async (_event, patch) => {
+    ctx.desktopPreferences.setPreferences(patch);
+    if ("localeOverride" in patch) ctx.onLocaleChanged();
+    const snapshot = await preferencesSnapshot();
+    for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    return snapshot;
+  }));
+  ipcMain.handle("minicode:preferences:chooseTaskDirectory", withMainSender("minicode:preferences:chooseTaskDirectory", async (event) => {
+    const result = await dialog.showOpenDialog(getWin(event), { title: "无项目任务文件夹", properties: ["openDirectory", "createDirectory"], defaultPath: ctx.desktopPreferences.getPreferences().defaultTaskDirectory });
+    if (result.canceled) return null;
+    const selected = fs.realpathSync(result.filePaths[0]);
+    ctx.desktopPreferences.setPreferences({ defaultTaskDirectory: selected });
+    const snapshot = await preferencesSnapshot();
+    for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    return snapshot;
+  }));
+  ipcMain.handle("minicode:browser:history", withMainSender("minicode:browser:history", (_event, query) => ctx.browserHistory.search(query)));
+  ipcMain.handle("minicode:browser:removeHistory", withMainSender("minicode:browser:removeHistory", (_event, ids) => ctx.browserHistory.remove(ids)));
+  ipcMain.handle("minicode:embeddedBrowser:clearBrowsingData", withMainSender("minicode:embeddedBrowser:clearBrowsingData", () => ctx.embeddedBrowserManager.clearBrowsingData()));
+  ipcMain.handle("minicode:embeddedBrowser:capture", withMainSender("minicode:embeddedBrowser:capture", (event, payload) => ctx.embeddedBrowserManager.capture(browserPayload(event, payload))));
+  ipcMain.handle("minicode:openPreferredPath", withMainSender("minicode:openPreferredPath", async (_event, target, line, options = {}) => {
+    const resolved = assertReadablePath(target, "File open target");
+    const workspaceRoot = options.workspaceRoot ? assertReadablePath(options.workspaceRoot, "File open workspace") : undefined;
+    let targetId = options.targetId ?? ctx.desktopPreferences.preferredFileOpenTarget(workspaceRoot);
+    if (targetId === "minicode") return { openInEditor: true, path: resolved };
+    if (options.targetId == null) {
+      if (fs.statSync(resolved).isDirectory()) targetId = "fileManager";
+      else if (nativeFileExtensions.includes(path.extname(resolved).slice(1).toLowerCase())) targetId = "system";
+    }
+    const opener = ctx.desktopPreferences.fileOpenTargets().find(item => item.id === targetId);
+    if (!opener) throw new Error("The selected file application is no longer installed.");
+    if (options.persistPreferredTargetPath) {
+      const preferredPath = assertReadablePath(options.persistPreferredTargetPath, "Preferred file open workspace");
+      ctx.desktopPreferences.setPreferredFileOpenTarget(preferredPath, targetId);
+      const snapshot = await preferencesSnapshot();
+      for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    }
+    await openInTarget(opener, resolved, line, options.column);
+    return { openInEditor: false, path: resolved };
+  }));
 
-  ipcMain.handle("minicode:pickDirectory", withMainSender("minicode:pickDirectory", async () => {
-    const owner = (() => { const w = getWin(); return w && !w.isDestroyed() ? w : undefined; })();
+  ipcMain.handle("minicode:saveFile", withMainSender("minicode:saveFile", async (event, filename, bytes) => {
+    if (typeof filename !== "string" || !filename.trim() || !(bytes instanceof Uint8Array)) {
+      throw new Error("Saving a file requires a filename and its original bytes.");
+    }
+    const result = await dialog.showSaveDialog(getWin(event), {
+      defaultPath: path.join(app.getPath("downloads"), path.basename(filename)),
+    });
+    if (result.canceled) return false;
+    await fs.promises.writeFile(result.filePath, bytes);
+    return true;
+  }));
+
+  ipcMain.handle("minicode:pickDirectory", withMainSender("minicode:pickDirectory", async (event) => {
+    const owner = getWin(event);
     const result = await dialog.showOpenDialog(owner, {
       properties: ["openDirectory"],
     });
@@ -355,9 +443,11 @@ function registerIpcHandlers() {
     return path.resolve(result.filePaths[0]);
   }));
 
-  ipcMain.handle("minicode:workspace:pickDirectory", withMainSender("minicode:workspace:pickDirectory", async () => {
-    const owner = (() => { const w = getWin(); return w && !w.isDestroyed() ? w : undefined; })();
+  ipcMain.handle("minicode:workspace:pickDirectory", withMainSender("minicode:workspace:pickDirectory", async (event) => {
+    const owner = getWin(event);
     const result = await dialog.showOpenDialog(owner, {
+      title: "新建或选择项目文件夹",
+      buttonLabel: "选择项目",
       properties: ["openDirectory"],
     });
     if (result.canceled || result.filePaths.length === 0) {
@@ -379,10 +469,7 @@ function registerIpcHandlers() {
     const cameFromNativePicker = isSamePath(resolved, lastPicked);
     const alreadyInsideTrustedRoot = isWithinTrustedWorkspace(resolved);
     if (!cameFromNativePicker && !alreadyInsideTrustedRoot) {
-      if (typeof appendDesktopLog === "function") {
-        appendDesktopLog(`[desktop] rejected renderer-requested workspace trust: ${resolved}`);
-      }
-      return "";
+      return restoreTrustedWorkspaceRoot(resolved);
     }
     return rememberTrustedWorkspaceRoot(resolved);
   }));
@@ -438,7 +525,7 @@ function registerIpcHandlers() {
     if (typeof target !== "string" || !target.trim()) {
       return false;
     }
-    return typeof dispatchDeepLink === "function" ? dispatchDeepLink(target) : false;
+    return typeof dispatchDeepLink === "function" ? dispatchDeepLink(target, getWin(_event)) : false;
   }));
 
   // -----------------------------------------------------------------------
@@ -475,7 +562,7 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:browser:captureScreenshot", withMainSender("minicode:browser:captureScreenshot", async (_event, endpoint, targetId) => {
     return typeof captureChromeTargetScreenshot === "function" ? captureChromeTargetScreenshot(endpoint, targetId) : null;
   }));
-  ipcMain.handle("minicode:browser:navigate", withMainSender("minicode:browser:navigate", async (_event, endpoint, targetId, url) => {
+  ipcMain.handle("minicode:browser:navigate", withMainSender("minicode:browser:navigate", async (event, endpoint, targetId, url) => {
     if (typeof navigateChromeTarget !== "function") {
       return null;
     }
@@ -486,7 +573,7 @@ function registerIpcHandlers() {
       const assessment = assessBrowserNavigationPolicy(url);
       targetUrl = assessment.url;
       if (assessment.requiresPrivateNetworkApproval) {
-        const owner = (() => { const w = getWin(); return w && !w.isDestroyed() ? w : undefined; })();
+        const owner = getWin(event);
         const result = await dialog.showMessageBox(owner, {
           type: "warning",
           buttons: ["Cancel", "Open"],
@@ -515,22 +602,22 @@ function registerIpcHandlers() {
 
   const embeddedBrowser = ctx.embeddedBrowserManager;
   ipcMain.handle("minicode:embeddedBrowser:create", withMainSender("minicode:embeddedBrowser:create", async (_event, payload) => {
-    return embeddedBrowser?.create(payload);
+    return embeddedBrowser?.create(browserPayload(_event, payload));
   }));
   ipcMain.handle("minicode:embeddedBrowser:list", withMainSender("minicode:embeddedBrowser:list", (_event, payload) => {
-    return embeddedBrowser?.listTargets(payload?.conversationId || payload?.conversation_id) ?? [];
+    return embeddedBrowser?.listTargets(payload?.conversationId || payload?.conversation_id, getWindowInstanceId(_event)) ?? [];
   }));
   ipcMain.handle("minicode:embeddedBrowser:activate", withMainSender("minicode:embeddedBrowser:activate", (_event, payload) => {
-    return embeddedBrowser?.activate(payload?.id, payload?.conversationId || payload?.conversation_id) ?? false;
+    return embeddedBrowser?.activate(payload?.id, payload?.conversationId || payload?.conversation_id, getWindowInstanceId(_event)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:setBounds", withMainSender("minicode:embeddedBrowser:setBounds", (_event, payload) => {
-    return embeddedBrowser?.setBounds(payload) ?? false;
+    return embeddedBrowser?.setBounds(browserPayload(_event, payload)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:navigate", withMainSender("minicode:embeddedBrowser:navigate", async (_event, payload) => {
-    return embeddedBrowser?.navigate(payload);
+    return embeddedBrowser?.navigate(browserPayload(_event, payload));
   }));
   ipcMain.handle("minicode:embeddedBrowser:runAction", withMainSender("minicode:embeddedBrowser:runAction", (_event, payload) => {
-    return embeddedBrowser?.runNavigationAction(payload) ?? false;
+    return embeddedBrowser?.runNavigationAction(browserPayload(_event, payload)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:inspect", withMainSender("minicode:embeddedBrowser:inspect", async (_event, payload) => {
     const action = payload?.kind === "network"
@@ -544,6 +631,7 @@ function registerIpcHandlers() {
       action,
       target_id: payload?.id,
       conversation_id: payload?.conversationId || payload?.conversation_id,
+      window_instance_id: getWindowInstanceId(_event),
     }) ?? { ok: false, value: [] };
   }));
   ipcMain.handle("minicode:embeddedBrowser:getSettings", withMainSender("minicode:embeddedBrowser:getSettings", (_event, payload) => {
@@ -553,13 +641,13 @@ function registerIpcHandlers() {
     return embeddedBrowser?.setBrowserSettings(payload) ?? { downloadPolicy: "block", origin: "", permissions: [] };
   }));
   ipcMain.handle("minicode:embeddedBrowser:clearSiteData", withMainSender("minicode:embeddedBrowser:clearSiteData", async (_event, payload) => {
-    return embeddedBrowser?.clearSiteData(payload) ?? false;
+    return embeddedBrowser?.clearSiteData(browserPayload(_event, payload)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:close", withMainSender("minicode:embeddedBrowser:close", (_event, payload) => {
-    return embeddedBrowser?.close(payload) ?? false;
+    return embeddedBrowser?.close(browserPayload(_event, payload)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:closeConversation", withMainSender("minicode:embeddedBrowser:closeConversation", (_event, conversationId) => {
-    return embeddedBrowser?.closeConversation(conversationId) ?? 0;
+    return embeddedBrowser?.closeConversation(conversationId, getWindowInstanceId(_event)) ?? 0;
   }));
 
   // -----------------------------------------------------------------------
@@ -681,56 +769,56 @@ function registerIpcHandlers() {
   // -----------------------------------------------------------------------
 
   ipcMain.handle("minicode:pty:spawn", withMainSender("minicode:pty:spawn", (_event, cwd, conversationId) => {
-    return ptyManager.spawnSession(cwd, conversationId);
+    return ptyManager.spawnSession(cwd, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:write", withMainSender("minicode:pty:write", (_event, sessionId, data, conversationId) => {
-    return ptyManager.writeToSession(sessionId, data, conversationId);
+    return ptyManager.writeToSession(sessionId, data, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:resize", withMainSender("minicode:pty:resize", (_event, sessionId, cols, rows, conversationId) => {
-    ptyManager.resizeSession(sessionId, cols, rows, conversationId);
+    ptyManager.resizeSession(sessionId, cols, rows, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:kill", withMainSender("minicode:pty:kill", (_event, sessionId, conversationId) => {
-    return ptyManager.killSession(sessionId, conversationId);
+    return ptyManager.killSession(sessionId, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:restart", withMainSender("minicode:pty:restart", (_event, sessionId, conversationId) => {
-    return ptyManager.restartSession(sessionId, conversationId);
+    return ptyManager.restartSession(sessionId, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:killConversation", withMainSender("minicode:pty:killConversation", (_event, conversationId, preserveHistory) => {
-    return ptyManager.killConversation(conversationId, preserveHistory === true);
+    return ptyManager.killConversation(conversationId, preserveHistory === true, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:list", withMainSender("minicode:pty:list", (_event, conversationId) => {
-    return ptyManager.listSessions(conversationId);
+    return ptyManager.listSessions(conversationId, undefined, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:snapshot", withMainSender("minicode:pty:snapshot", (_event, sessionId, maxChars, conversationId) => {
-    return ptyManager.snapshotSession(sessionId, maxChars, conversationId);
+    return ptyManager.snapshotSession(sessionId, maxChars, conversationId, getWindowInstanceId(_event));
   }));
 
   ipcMain.handle("minicode:pty:clear", withMainSender("minicode:pty:clear", (_event, sessionId, conversationId) => {
-    return ptyManager.clearSession(sessionId, conversationId);
+    return ptyManager.clearSession(sessionId, conversationId, getWindowInstanceId(_event));
   }));
 
-  ipcMain.handle("minicode:deepLink:pending", withMainSender("minicode:deepLink:pending", () => ctx.getPendingDeepLink()));
+  ipcMain.handle("minicode:deepLink:pending", withMainSender("minicode:deepLink:pending", (event) => ctx.getPendingDeepLink(getWin(event))));
 
   ipcMain.handle("minicode:deepLink:ack", withMainSender("minicode:deepLink:ack", (_event, id) => {
-    return typeof ctx.acknowledgeDeepLink === "function" ? ctx.acknowledgeDeepLink(id) : false;
+    return typeof ctx.acknowledgeDeepLink === "function" ? ctx.acknowledgeDeepLink(id, getWin(_event)) : false;
   }));
 
   ipcMain.handle("minicode:update:check", withMainSender("minicode:update:check", () => ctx.updater?.check?.() ?? false));
   ipcMain.handle("minicode:update:download", withMainSender("minicode:update:download", () => ctx.updater?.download?.() ?? false));
-  ipcMain.handle("minicode:update:activity", withMainSender("minicode:update:activity", (_event, payload) => ctx.updater?.updateActivity?.(payload) ?? { accepted: false, revision: 0 }));
+  ipcMain.handle("minicode:update:activity", withMainSender("minicode:update:activity", (_event, payload) => ctx.updater?.updateActivity?.(getWindowInstanceId(_event), payload) ?? { accepted: false, revision: 0 }));
   ipcMain.handle("minicode:update:preflight", withMainSender("minicode:update:preflight", () => ctx.updater?.preflight?.() ?? { allowed: false, checks: [], fingerprint: "", version: "" }));
   ipcMain.handle("minicode:update:install", withMainSender("minicode:update:install", (_event, payload) => ctx.updater?.install?.(payload) ?? { installed: false, reason: "unavailable" }));
   ipcMain.handle("minicode:update:status:get", withMainSender("minicode:update:status:get", () => ctx.updater?.getStatus?.() ?? { status: "idle" }));
 
   ipcMain.handle("minicode:pty:ackExit", withMainSender("minicode:pty:ackExit", (_event, sessionId, conversationId) => {
-    return ptyManager.acknowledgeExitedSession(sessionId, conversationId);
+    return ptyManager.acknowledgeExitedSession(sessionId, conversationId, getWindowInstanceId(_event));
   }));
 
   // -----------------------------------------------------------------------
@@ -757,7 +845,7 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:sandbox:setup", withMainSender("minicode:sandbox:setup", () => setupWindowsSandbox()));
   ipcMain.handle("minicode:menu:popup", withMainSender("minicode:menu:popup", (_event, key) => {
     if (!NATIVE_MENU_KEYS.has(key)) throw new TypeError("请选择文件、编辑、视图或帮助菜单。");
-    return popupApplicationMenu(key);
+    return popupApplicationMenu(key, getWin(_event));
   }));
 }
 

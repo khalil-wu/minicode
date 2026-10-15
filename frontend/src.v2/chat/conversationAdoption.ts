@@ -1,7 +1,8 @@
 import { useAppStore } from "../stores";
+import { composerWorkspaceKey } from "../stores/composer-drafts";
 
 /** Bind the optimistic first turn to the conversation created by the backend. */
-export const adoptGeneratedConversation = (conversationId?: string, messageId?: string) => {
+export const adoptGeneratedConversation = (conversationId?: string, messageId?: string, admittedUserMessageId?: string) => {
   const targetId = conversationId?.trim();
   const intentId = messageId?.trim();
   if (!targetId || !intentId) return;
@@ -11,17 +12,22 @@ export const adoptGeneratedConversation = (conversationId?: string, messageId?: 
     // The backend echoes the first send's optimistic assistant id. A restore
     // may have cleared its streaming flag before the admitted run starts.
     const intent = state.messages.find((message) => message.role === "assistant" && message.id === intentId);
-    if (!intent || intent.terminalStatus || intent.completedAt != null || intent.queueState === "queued") return state;
+    const admittedInput = admittedUserMessageId && state.messages.some(message => message.role === "user" && message.id === admittedUserMessageId);
+    if (!admittedInput && (!intent || intent.terminalStatus || intent.completedAt != null || intent.queueState === "queued")) return state;
     const messages = state.messages;
+    const streaming = admittedInput ? messages.some(message => message.isStreaming || message.isThinkingStreaming) : true;
     const conversations = state.conversations.some((conversation) => conversation.id === targetId)
       ? state.conversations
       : [{ id: targetId, title: "新会话", updatedAt: new Date().toISOString() }, ...state.conversations];
+    const workspaceComposerDrafts = { ...state.workspaceComposerDrafts };
+    delete workspaceComposerDrafts[composerWorkspaceKey(state.workingDirectory)];
     return {
+      workspaceComposerDrafts,
       conversationId: targetId,
       conversations,
       conversationMessages: { ...state.conversationMessages, [targetId]: messages },
-      conversationStreaming: { ...state.conversationStreaming, [targetId]: true },
-      isStreaming: true,
+      conversationStreaming: { ...state.conversationStreaming, [targetId]: streaming },
+      isStreaming: streaming,
     };
   });
 };

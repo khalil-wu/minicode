@@ -151,10 +151,20 @@ describe('InspectorTab control-plane refresh', () => {
     vi.stubGlobal('navigator', { clipboard: { writeText } });
     render(<InspectorTab />);
     fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Copy Trace' }));
+    fireEvent.click(screen.getByRole('button', { name: '复制调用记录' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
     expect(JSON.parse(writeText.mock.calls[0][0])).toMatchObject({ request_id: 'req-imported-copy' });
     vi.unstubAllGlobals();
+  });
+
+  it('opens the bottom terminal from the terminal inspector in chat mode', () => {
+    useAppStore.setState({ appMode: 'cowork', dockCollapsed: true, activeBottomTab: 'problems',
+      terminalSessions: [{ id: 'terminal-own', conversationId: 'conv-inspector', shell: 'powershell', cwd: 'C:/own' }],
+      inspectorFocus: { kind: 'terminal', id: 'terminal-own', conversationId: 'conv-inspector' } });
+    render(<InspectorTab />);
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
+    fireEvent.click(screen.getByRole('button', { name: '打开终端' }));
+    expect(useAppStore.getState()).toMatchObject({ activeBottomTab: 'terminal', dockCollapsed: false });
   });
 
   it('keeps unowned diagnostic evidence inspectable without adding it to current provider totals', () => {

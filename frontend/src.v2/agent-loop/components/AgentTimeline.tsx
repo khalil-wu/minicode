@@ -1,16 +1,25 @@
-import { memo, useEffect, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, PencilLine, TerminalSquare } from "../../lib/icons";
 import type { AgentLoopProcessCell } from "../projection/project-turn";
 import type { RenderAgentCell } from "./AgentTurn";
 import { withStableRenderKeys } from "./renderKeys";
+import { guardianActionSummary, GuardianReviewGlyph } from "../../chat/cells/GuardianReviewCell";
 import { ToolGlyph } from "../../chat/toolUtils";
 import {
   isWebFetchActivity,
+  commandActionKind,
+  commandActionTarget,
+  fileLabel,
+  readableTimelineTitle,
+  recordInputTarget,
 } from "../../chat/cells/activityCellHelpers";
 import { isProviderReasoningSummary } from "../../lib/provider-reasoning";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
 import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
+import { useProcessDisclosure } from "./useProcessDisclosure";
+import { useActivitySummary } from "./useActivitySummary";
+import { useI18n, type Translate, type TranslationKey, type Locale } from "../../i18n";
 
 type TimelineGroupKind = "work" | "thinking" | "narration" | "context" | "notice";
 type TimelineGroup = {
@@ -18,26 +27,7 @@ type TimelineGroup = {
   kind: TimelineGroupKind;
   cells: AgentLoopProcessCell[];
   segment?: number;
-  closed: boolean;
 };
-
-const needsAttention = (cell: AgentLoopProcessCell): boolean => {
-  if (cell.kind === "error") return true;
-  if (cell.kind === "thinking") return Boolean(cell.isStreaming);
-  return "status" in cell && ["running", "pending", "pending_approval", "failed", "partial", "blocked", "timeout"].includes(cell.status);
-};
-
-function visibleAttention(cells: AgentLoopProcessCell[]): Set<AgentLoopProcessCell> {
-  const visible = new Set<AgentLoopProcessCell>();
-  let failures = 0;
-  for (let index = cells.length - 1; index >= 0; index--) {
-    const cell = cells[index];
-    if (!needsAttention(cell)) continue;
-    const active = cell.kind === "thinking" || ("status" in cell && ["running", "pending", "pending_approval"].includes(cell.status));
-    if (active || failures++ < 4) visible.add(cell);
-  }
-  return visible;
-}
 
 export const isProcessNarration = (cell: AgentLoopProcessCell): boolean => cell.kind === "thinking"
   && !cell.collapsible && !["provider", "reasoning"].includes(cell.source);
@@ -46,19 +36,16 @@ const timelineGroupKind = (cell: AgentLoopProcessCell): TimelineGroupKind => {
   if (cell.kind === "thinking") {
     return isProcessNarration(cell) ? "narration" : "thinking";
   }
+  if (cell.kind === "guardian_review" && cell.review.status !== "in_progress" || cell.kind === "guardian_warning") return "notice";
+  if (cell.kind === "context_compaction") return "context";
   if (cell.kind === "status_notice" && /压缩|compac/i.test(`${cell.title} ${cell.message || ""}`)) return "context";
   if (cell.kind === "status_notice") return "notice";
   return "work";
 };
 
 const cellSegment = (cell: AgentLoopProcessCell): number | undefined => {
-  if (cell.kind === "activity" || cell.kind === "exec" || cell.kind === "thinking" || cell.kind === "collaboration") return cell.segment;
+  if (cell.kind === "activity" || cell.kind === "exec" || cell.kind === "thinking" || cell.kind === "collaboration" || cell.kind === "guardian_review") return cell.segment;
   return undefined;
-};
-
-const cellSegmentClosed = (cell: AgentLoopProcessCell): boolean => {
-  if (cell.kind === "activity" || cell.kind === "exec" || cell.kind === "thinking" || cell.kind === "collaboration") return Boolean(cell.segmentClosed);
-  return true;
 };
 
 const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
@@ -71,30 +58,37 @@ const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
     const joinsPrevious = previous?.kind === kind && (
       kind !== "work"
       || (segment !== undefined && previous.segment === segment
-        && cell.kind !== "collaboration" && workLabel(cell) !== undefined
-        && previous.cells.every((item) => item.kind !== "collaboration" && workLabel(item) !== undefined))
+        && cell.kind !== "collaboration" && (cell.kind === "guardian_review" || workLabel(cell) !== undefined)
+        && previous.cells[0].kind !== "collaboration" && (previous.cells[0].kind === "guardian_review" || workLabel(previous.cells[0]) !== undefined))
     );
     if (joinsPrevious) {
       previous.cells.push(cell);
-      previous.closed = previous.closed && cellSegmentClosed(cell);
     } else {
       const scope = `${kind}:${segment ?? cell.id}`;
       const ordinal = groupCounts.get(scope) ?? 0;
       groupCounts.set(scope, ordinal + 1);
-      groups.push({ key: `${scope}:${ordinal}`, kind, cells: [cell], segment, closed: cellSegmentClosed(cell) });
+      groups.push({ key: `${scope}:${ordinal}`, kind, cells: [cell], segment });
     }
   }
   return groups;
 };
 
-type WorkLabel = "Edit" | "Run" | "Read" | "List" | "Search" | "Fetch" | "Browse" | "Collaborate";
-const WORK_LABEL_CHROME: Record<WorkLabel, string> = {
-  Edit: "编辑", Run: "运行", Read: "读取", List: "查看目录", Search: "搜索", Fetch: "读取网页",
-  Browse: "浏览", Collaborate: "协作",
-};
+type WorkLabel = "Edit" | "Run" | "Read" | "List" | "Search" | "WebSearch" | "Fetch" | "Browse";
+const reviewingAction = (cell: AgentLoopProcessCell) => cell.kind === "activity" || cell.kind === "exec"
+  ? cell.automaticApprovalReviews?.find(review => review.status === "in_progress") : undefined;
+const WORK_COPY = {
+  Edit: ["编辑文件", "编辑了文件", "编辑了文件"], Run: ["运行命令", "运行了命令", "运行了命令"],
+  Read: ["读取文件", "已读取文件", "读取文件"], List: ["读取文件", "已读取文件", "读取文件"],
+  Search: ["读取文件", "已读取文件", "读取文件"], WebSearch: ["搜索网页", "已搜索网页", "搜索了网页"],
+  Fetch: ["读取网页", "已读取网页", "读取了网页"], Browse: ["浏览网页", "已浏览网页", "浏览了网页"],
+} as const satisfies Record<WorkLabel, readonly [TranslationKey, TranslationKey, TranslationKey]>;
 
 const workLabel = (cell: AgentLoopProcessCell): WorkLabel | undefined => {
-  if (cell.kind === "exec" || (cell.kind === "activity" && cell.activityKind === "commandExecution")) return "Run";
+  if (cell.kind === "exec") {
+    const kind = commandActionKind(cell.commandActions);
+    return kind === "fileRead" ? "Read" : kind === "workspaceSearch" ? "Search" : kind === "workspaceList" ? "List" : "Run";
+  }
+  if (cell.kind === "activity" && cell.activityKind === "commandExecution") return "Run";
   if (cell.kind === "diff" || (cell.kind === "activity" && cell.activityKind === "fileChange")) return "Edit";
   if (cell.kind === "activity" && cell.activityKind === "workspaceList") return "List";
   if (cell.kind === "activity" && cell.activityKind === "workspaceSearch") return "Search";
@@ -102,112 +96,149 @@ const workLabel = (cell: AgentLoopProcessCell): WorkLabel | undefined => {
   if (cell.kind === "activity" && isWebFetchActivity(cell)) return "Fetch";
   if (cell.kind === "activity" && cell.activityKind === "webSearch") {
     const names = (cell.toolCallRecords ?? []).map((record) => String(record.name || "").toLowerCase());
-    if (names.length > 0 && names.every((name) => /web_search|websearch/.test(name))) return "Search";
+    if (names.length > 0 && names.every((name) => /web_search|websearch/.test(name))) return "WebSearch";
   }
   if (cell.kind === "activity" && cell.activityKind === "browser") return "Browse";
-  if (cell.kind === "collaboration") return "Collaborate";
   return undefined;
 };
 
-const timelineGroupTitle = (group: TimelineGroup, live = false): string => {
-  if (group.kind === "context") {
-    const notice = group.cells.at(-1);
-    return notice?.kind === "status_notice" ? notice.title : "上下文压缩";
-  }
-  if (group.kind === "notice") return "状态";
+const timelineGroupTitle = (group: TimelineGroup, t: Translate, locale: Locale): string => {
   const labels: WorkLabel[] = [];
   for (const cell of group.cells) {
     const label = workLabel(cell);
-    if (label !== undefined && !labels.includes(label)) labels.push(label);
+    const summaryLabel = label === "List" || label === "Search" ? "Read" : label;
+    if (summaryLabel !== undefined && !labels.includes(summaryLabel)) labels.push(summaryLabel);
   }
-  const failedLabels = new Set(group.cells
-    .filter((cell) => cell.kind === "error" || ("status" in cell && cell.status === "failed"))
-    .map(workLabel));
-  const failed = failedLabels.size > 0;
-  const interrupted = group.cells.some((cell) => "status" in cell && ["partial", "cancelled", "interrupted"].includes(cell.status));
-  if (!live && group.cells.some((cell) => "status" in cell && ["pending", "pending_approval"].includes(cell.status))) {
-    return labels.map((label) => `${WORK_LABEL_CHROME[label]}${failedLabels.has(label) ? "失败" : ""}`).join(" · ");
-  }
-  if (labels.every((label) => ["Read", "List", "Search"].includes(label)) && !failedLabels.has(undefined)) {
-    return live ? "正在查看" : failed ? "查看失败" : interrupted ? "查看已中断" : "已查看";
-  }
-  if (labels.length === 1 && labels[0] === "Run" && !failedLabels.has(undefined)) {
-    const commandCount = group.cells.filter((cell) => workLabel(cell) === "Run").length;
-    return failed ? "运行失败" : interrupted ? "运行 · 已中断" : live ? `正在运行 ${commandCount} 条命令` : "运行了命令";
-  }
-  if (labels.length === 1 && labels[0] === "Edit" && !failedLabels.has(undefined)) {
-    return failed ? "编辑失败" : interrupted ? "编辑 · 已中断" : live ? "正在编辑文件" : "已编辑文件";
-  }
-  return `${labels.map((label) => `${WORK_LABEL_CHROME[label]}${failedLabels.has(label) ? "失败" : ""}`).join(" · ")}${failedLabels.has(undefined) && failedLabels.size === 1 ? " · 失败" : interrupted ? " · 已中断" : ""}`;
+  const summaryOrder: WorkLabel[] = ["Edit", "Read", "Run", "WebSearch", "Fetch", "Browse"];
+  labels.sort((left, right) => summaryOrder.indexOf(left) - summaryOrder.indexOf(right));
+  const captions = labels.map((label, index) => {
+    const [action, first, following] = WORK_COPY[label];
+    const operations = group.cells.filter((cell) => {
+      const kind = workLabel(cell);
+      return kind === label || label === "Read" && (kind === "List" || kind === "Search");
+    });
+    const statuses = operations.map((cell) => "status" in cell ? cell.status : "done");
+    const review = operations.map(reviewingAction).find(Boolean);
+    if (review) return guardianActionSummary(review, t);
+    const patchFiles = operations.flatMap(cell => cell.kind === "activity" ? cell.guardianPatchFiles ?? [] : []);
+    if (patchFiles.length && statuses.some(status => ["pending", "pending_approval"].includes(status))) return patchFiles.map(fileLabel).join(", ");
+    const actionLabel = locale === "en-US" ? t(action).toLowerCase() : t(action);
+    if (statuses.includes("pending_approval")) return t("等待批准{action}", { action: actionLabel });
+    if (statuses.includes("pending")) return t("准备{action}", { action: actionLabel });
+    let completed: TranslationKey = index === 0 ? first : following;
+    if (label === "Edit") {
+      const files = new Set(operations.flatMap(cell => cell.kind === "diff" ? cell.files.map(file => file.path)
+        : cell.kind === "activity" ? (cell.toolCallRecords ?? []).flatMap(record =>
+          record.diff?.files?.length ? record.diff.files.map(file => file.path) : [recordInputTarget(record)]).filter(Boolean)
+        : []));
+      if (files.size > 0) completed = files.size === 1 ? "编辑了一个文件" : index === 0 ? "编辑了文件" : "编辑了多个文件";
+    } else if (label === "Run") {
+      const commands = new Set(operations.flatMap(cell => cell.kind === "exec" ? [cell.id]
+        : cell.kind === "activity" ? (cell.toolCallRecords ?? []).map(record => record.id) : []));
+      if (commands.size === 1) completed = "运行了一条命令";
+    }
+    const caption = t(completed);
+    return locale === "en-US" && index > 0 ? caption.toLowerCase() : caption;
+  });
+  const statusBoundary = group.cells.some((cell) => "status" in cell
+    && ["pending", "pending_approval"].includes(cell.status));
+  if (!captions.length && group.cells[0].kind === "guardian_review") return guardianActionSummary(group.cells[0].review, t);
+  // Codex VO renders a FormattedList with type="unit": Chinese intentionally
+  // has no separator, while English uses the locale's comma-separated list.
+  return statusBoundary ? captions.join(" · ") : new Intl.ListFormat(locale, { type: "unit" }).format(captions);
 };
 
-const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNode => {
+const workGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNode => {
+  if (cell?.kind === "guardian_review") return <GuardianReviewGlyph />;
   if (!cell) return <TerminalSquare size={15} />;
-  if (cell.kind === "exec") return <TerminalSquare size={15} />;
+  if (reviewingAction(cell)) return <GuardianReviewGlyph />;
+  if (cell.kind === "exec") return <ToolGlyph kind={commandActionKind(cell.commandActions)} size={cell.commandPresentation ? 16 : 15} />;
   if (cell.kind === "activity") return <ToolGlyph kind={cell.activityKind} size={15} />;
   if (cell.kind === "diff") return <PencilLine size={15} />;
   return <TerminalSquare size={15} />;
 };
 
-function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDisclosure }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onUserDisclosure?: () => void }) {
+const liveWorkTitle = (cell: AgentLoopProcessCell, t: Translate): string => {
+  if (cell.kind === "guardian_review") return guardianActionSummary(cell.review, t);
+  const review = reviewingAction(cell);
+  if (review) return guardianActionSummary(review, t);
+  if (cell.kind === "exec") {
+    const kind = commandActionKind(cell.commandActions);
+    const action = t(kind === "fileRead" ? "正在读取" : kind === "workspaceSearch" ? "正在搜索" : kind === "workspaceList" ? "正在查看目录" : "正在运行");
+    const target = kind === "commandExecution" ? cell.command : commandActionTarget(cell.commandActions!);
+    return [action, target].filter(Boolean).join(" ");
+  }
+  if (cell.kind === "activity") {
+    const record = cell.toolCallRecords?.at(-1);
+    const target = record ? recordInputTarget(record) : cell.subtitle;
+    return [readableTimelineTitle(cell, t), target && cell.activityKind === "fileRead" ? fileLabel(target) : target].filter(Boolean).join(" ");
+  }
+  return t(cell.kind === "diff" ? "正在编辑文件" : "正在思考");
+};
+
+function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDisclosure, onHistoryStartReached }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onUserDisclosure?: () => void; onHistoryStartReached?: () => void }) {
+  const { t, locale } = useI18n();
   const searching = useTranscriptSearch();
-  const [visibleCount, setVisibleCount, userChangedWindow] = useTranscriptReadingPreference(`work-window:${group.key}`, 40);
-  const previousWindow = useRef({ first: group.cells[0]?.id, count: group.cells.length });
-  useEffect(() => {
-    const previous = previousWindow.current;
-    if (previous.first !== group.cells[0]?.id && group.cells.length > previous.count) {
-      userChangedWindow.current = true;
-      setVisibleCount((count) => count + group.cells.length - previous.count);
-      setExpanded(true);
-    }
-    previousWindow.current = { first: group.cells[0]?.id, count: group.cells.length };
-  }, [group.cells]);
-  const containsFailure = group.cells.some((cell) => cell.kind === "error"
-    || ((cell.kind === "exec" || cell.kind === "activity" || cell.kind === "collaboration")
-      && (cell.status === "failed" || cell.status === "partial")));
-  const defaultExpanded = containsFailure || (isRunning && !group.closed) || expandWorkGroups;
+  const defaultExpanded = expandWorkGroups;
   const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`work:${group.key}`, defaultExpanded);
   const expanded = searching || expansionPreference;
+  const disclosure = useProcessDisclosure(expanded);
   const detailId = useId();
+  const scrollList = useRef<HTMLDivElement>(null);
+  const scrollPosition = useRef({ firstId: group.cells[0].id, height: 0, top: 0 });
+  const [overflowBottom, setOverflowBottom] = useState(false);
+  const measureOverflow = useCallback(() => {
+    const list = scrollList.current!;
+    setOverflowBottom(list.scrollTop + list.clientHeight < list.scrollHeight);
+    scrollPosition.current.height = list.scrollHeight;
+    scrollPosition.current.top = list.scrollTop;
+  }, []);
+  useLayoutEffect(() => {
+    if (!expanded || !disclosure.mounted) return;
+    const list = scrollList.current!;
+    const previous = scrollPosition.current;
+    if (previous.firstId !== group.cells[0].id && group.cells.findIndex((cell) => cell.id === previous.firstId) > 0) {
+      list.scrollTop = previous.top + list.scrollHeight - previous.height;
+    }
+    scrollPosition.current.firstId = group.cells[0].id;
+    measureOverflow();
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(list);
+    for (const row of list.children) observer.observe(row);
+    return () => observer.disconnect();
+  }, [expanded, disclosure.mounted, group.cells, measureOverflow]);
   useEffect(() => {
     if (!userToggled.current) setExpanded(defaultExpanded);
   }, [defaultExpanded]);
-  const latestRunning = group.cells.filter((cell) => "status" in cell && cell.status === "running").at(-1);
+  const latestRunning = group.cells.filter((cell) => reviewingAction(cell) || "status" in cell && cell.status === "running").at(-1);
   const liveGroup = isRunning && Boolean(latestRunning);
-  const title = timelineGroupTitle(group, liveGroup);
-  const labels = group.cells.map(workLabel);
-  const groupGlyph = labels.includes("Edit")
-    ? <PencilLine size={15} />
-    : labels.includes("Run")
-      ? <TerminalSquare size={15} />
-      : (() => {
-          const firstActivity = group.cells.find((cell) => cell.kind === "activity");
-          return firstActivity?.kind === "activity"
-            ? <ToolGlyph kind={firstActivity.activityKind} size={15} />
-            : <TerminalSquare size={15} />;
-        })();
-  const attention = useMemo(() => visibleAttention(group.cells), [group.cells]);
-  const visibleCells = group.cells.filter((cell, index) => searching || index >= group.cells.length - visibleCount || attention.has(cell));
-  const hiddenCount = group.cells.length - visibleCells.length;
-  const hiddenFailures = group.cells.filter((cell, index) => index < group.cells.length - visibleCount && !attention.has(cell) && needsAttention(cell)).length;
-  const keyed = withStableRenderKeys(visibleCells);
+  const currentTitle = liveGroup ? liveWorkTitle(latestRunning!, t) : timelineGroupTitle(group, t, locale);
+  const summary = useActivitySummary(currentTitle, liveGroup ? latestRunning!.id : "summary", liveGroup);
+  const title = summary.title;
+  const summaryIconCell = group.cells.find((cell) => workLabel(cell) === "Edit")
+    ?? group.cells.find((cell) => ["Read", "List", "Search"].includes(workLabel(cell) || ""))
+    ?? group.cells[0];
+  const keyed = withStableRenderKeys(group.cells);
   return (
-    <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} aria-label={title}>
+    <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} data-processing={liveGroup} aria-label={title}>
       <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
         userToggled.current = true;
         onUserDisclosure?.();
         setExpanded((value) => !value);
       }}>
-        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{liveGroup ? latestWorkGlyph(latestRunning) : groupGlyph}</span>
+        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{workGlyph(liveGroup && summary.key !== "summary" ? group.cells.find((cell) => cell.id === summary.key) : summaryIconCell)}</span>
         <span className={liveGroup ? "agent-loop-timeline-group-live-title" : "agent-loop-timeline-group-label"} title={title}>{title}</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
           <ChevronRight size={14} className="mc-process-disclosure" data-expanded={expanded} />
         </span>
       </button>
-      {expanded && (
-        <div id={detailId} className="agent-loop-timeline-group-items">
-          {hiddenCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => { userChangedWindow.current = true; onUserDisclosure?.(); setVisibleCount((count) => count + 40); }}>显示更早的操作（{hiddenCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
+      {disclosure.mounted && (
+        <div ref={disclosure.element} className="agent-loop-timeline-group-disclosure" aria-hidden={!expanded} style={{ pointerEvents: expanded ? "auto" : "none" }}>
+        <div ref={scrollList} id={detailId} className="agent-loop-timeline-group-items" data-overflow-bottom={overflowBottom}
+          onScroll={() => { measureOverflow(); if (scrollList.current!.scrollTop === 0) onHistoryStartReached?.(); }}
+          onWheel={(event) => { if (event.deltaY < 0 && scrollList.current!.scrollTop === 0) onHistoryStartReached?.(); }}>
           {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
+        </div>
         </div>
       )}
     </section>
@@ -217,16 +248,17 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
 function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoopProcessCell, { kind: "thinking" }>; renderCell: RenderAgentCell }) {
   const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`thinking:${cell.id}`, false);
   const expanded = useTranscriptSearch() || expansionPreference;
+  const caption = cell.content.trim().split(/\r?\n/)[0];
   return (
     <section className="agent-loop-thinking-disclosure" data-thinking-expanded={expanded}>
       <button
         type="button"
         className="agent-loop-timeline-group-title agent-loop-thinking-toggle"
-        aria-label="Thinking"
+        aria-label={caption}
         aria-expanded={expanded}
         onClick={() => { userToggled.current = true; setExpanded((value) => !value); }}
       >
-        <span>Thinking</span>
+        <span>{caption}</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
@@ -240,28 +272,14 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
   );
 }
 
-export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, loadedToolItems, onUserDisclosure }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; loadedToolItems?: number; onUserDisclosure?: () => void }) {
-  const searching = useTranscriptSearch();
+export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, onUserDisclosure, onHistoryStartReached }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; onUserDisclosure?: () => void; onHistoryStartReached?: () => void }) {
   const groups = useMemo(() => groupTimelineCells(cells), [cells]);
-  const [visibleGroupCount, setVisibleGroupCount, userChangedWindow] = useTranscriptReadingPreference("timeline-window", 40);
-  const previouslyLoaded = useRef(loadedToolItems);
-  useEffect(() => {
-    if (loadedToolItems !== undefined && previouslyLoaded.current !== undefined && loadedToolItems > previouslyLoaded.current) {
-      userChangedWindow.current = true;
-      const added = loadedToolItems - previouslyLoaded.current;
-      setVisibleGroupCount((count) => count + added);
-    }
-    previouslyLoaded.current = loadedToolItems;
-  }, [loadedToolItems]);
-  const attention = useMemo(() => visibleAttention(cells), [cells]);
-  const visibleGroups = groups.filter((group, index) => searching || index >= groups.length - visibleGroupCount || group.cells.some((cell) => attention.has(cell)));
-  const hiddenGroupCount = groups.length - visibleGroups.length;
-  const hiddenFailures = groups.filter((group, index) => index < groups.length - visibleGroupCount && !group.cells.some((cell) => attention.has(cell)))
-    .reduce((sum, group) => sum + group.cells.filter(needsAttention).length, 0);
+  const firstWorkGroup = groups.find((group) => group.kind === "work");
   return (
-    <div className="chat-turn-process-stack agent-loop-timeline">
-      {hiddenGroupCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => { userChangedWindow.current = true; onUserDisclosure?.(); setVisibleGroupCount((count) => count + 40); }}>显示更早的处理过程（{hiddenGroupCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
-      {visibleGroups.map((group, groupIndex) => {
+    <div className="chat-turn-process-stack agent-loop-timeline" onWheelCapture={(event) => {
+      if (event.deltaY < 0 && !(event.target as Element).closest(".agent-loop-timeline-group-items")) onHistoryStartReached?.();
+    }}>
+      {groups.map((group) => {
         const keyed = withStableRenderKeys(group.cells);
         if (group.kind === "thinking") {
           return group.cells
@@ -274,22 +292,16 @@ export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, sh
               : renderCell({ key: cell.id, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
         if (group.kind === "work") {
-          if (group.cells.length > 1 && group.cells.some((cell) => workLabel(cell) !== undefined)) {
-            return <WorkGroup key={group.key} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} />;
+          const activeSingleItem = group.cells.length === 1 && isRunning
+            && "status" in group.cells[0] && group.cells[0].status === "running";
+          if ((group.cells.length > 1 || activeSingleItem) && group.cells.some((cell) => cell.kind === "guardian_review" || workLabel(cell) !== undefined)) {
+            const activeGroup = isRunning && group === groups.at(-1)
+              && group.cells.some((cell) => (cell.kind === "exec" || cell.kind === "activity" || cell.kind === "guardian_review") && cell.segmentClosed !== true);
+            return <WorkGroup key={group.key} group={group} renderCell={renderCell} isRunning={activeGroup} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} onHistoryStartReached={group === firstWorkGroup ? onHistoryStartReached : undefined} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
-        if (group.kind === "narration" || (group.kind !== "context" && group.cells.length === 1)) {
-          return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
-        }
-        return (
-          <section key={`timeline-group-${group.kind}-${groupIndex}`} className={`agent-loop-timeline-group agent-loop-timeline-group-${group.kind}`} data-group-kind={group.kind} aria-label={timelineGroupTitle(group)}>
-            <div className="agent-loop-timeline-group-title">{timelineGroupTitle(group)}</div>
-            <div className="agent-loop-timeline-group-items">
-              {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
-            </div>
-          </section>
-        );
+        return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
       })}
     </div>
   );

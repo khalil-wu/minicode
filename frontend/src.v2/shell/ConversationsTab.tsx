@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useI18n } from "../i18n";
+import { cloneElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Folder,
   FolderOpen,
@@ -7,12 +8,18 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { EmptyState } from "../components/EmptyState";
-import { isDesktop, revealPath } from "../desktop/runtime";
 import type { ConversationMeta } from "../stores/types";
+import type { ClientCommand, CommandResultEvent } from "../protocol/events";
+import { showConfirm } from "../overlays/DialogService";
+import { copyText } from "../lib/clipboard";
 import * as wsOutbox from "../protocol/ws-outbox";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 import { runtimePendingUserActionLabelForConversation } from "../lib/runtime-session";
 import { SessionRow } from "./SessionRow";
+import { PinnedConversationList } from "./PinnedConversationList";
+import { SidebarSortableList, type SidebarDragBinding } from "./SidebarSortableList";
+import { SidebarSortMenu } from "./SidebarSortMenu";
+import { orderSidebarItems } from "./sidebarOrder";
 import {
   sectionHeaderRowStyle,
   sessionListWrapStyle,
@@ -25,6 +32,24 @@ import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { fromMarkdown, markdownNodeText } from "../lib/markdown";
 import { setConversationArchived } from "../chat/archiveConversation";
+import { loadConversationMarkdown } from "../chat/conversationMarkdown";
+import { getWebSocket } from "../hooks/useWebSocket";
+
+// The menu invocation owns its reply even after the reader changes chats.
+const runMenuCommand = async (command: ClientCommand): Promise<CommandResultEvent | undefined> => {
+  try {
+    const result = await wsOutbox.sendClientCommandAwaitResult(command, command.type, {
+      silent: true, timeoutMs: command.type.startsWith("conversation.worktree.") ? wsOutbox.LONG_COMMAND_RESULT_TIMEOUT_MS : undefined,
+    });
+    if (!wsOutbox.commandResultSucceeded(result)) {
+      pushToast(result.message, "error", 6000);
+      return;
+    }
+    return result;
+  } catch (error) {
+    pushToast(error instanceof Error ? error.message : String(error), "error", 6000);
+  }
+};
 
 const CONVERSATION_UI_STATE_KEY = "minicode.sidebar.conversations.state";
 const CONVERSATION_UI_PERSIST_DELAY_MS = 140;
@@ -102,13 +127,14 @@ export const orderConversationTree = (items: EnrichedConversation[]): TreeConver
   return ordered;
 };
 
-const conversationWorkspacePath = (conversation: Pick<ConversationMeta, "workspaceRoot" | "worktreePath">): string => {
+const conversationWorkspacePath = (conversation: Pick<ConversationMeta, "workspaceRoot" | "worktreePath" | "projectId">): string => {
+  if (conversation.projectId !== undefined && conversation.projectId !== null) return conversation.projectId;
   const worktree = conversation.worktreePath?.trim();
   if (worktree) return worktree;
   return conversation.workspaceRoot?.trim() || "";
 };
 
-export const isWorkspaceConversation = (conversation: Pick<ConversationMeta, "workspaceRoot" | "worktreePath">): boolean =>
+export const isWorkspaceConversation = (conversation: Pick<ConversationMeta, "workspaceRoot" | "worktreePath" | "projectId">): boolean =>
   Boolean(conversationWorkspacePath(conversation));
 
 const workspaceGroupIdentity = (path: string | null | undefined): string => {
@@ -178,8 +204,15 @@ export const ConversationsTab = ({
   showRecent?: boolean;
   activityView?: boolean;
 }) => {
+  const { t: tr } = useI18n();
   const conversations = useAppStore((s) => s.conversations);
+  const pinnedConversationIds = useAppStore((s) => s.pinnedConversationIds);
+  const pinnedConversationSortMode = useAppStore((s) => s.pinnedConversationSortMode);
+  const sidebarOrder = useAppStore((s) => s.sidebarOrder);
+  const [pendingSortMode, setPendingSortMode] = useState<{ mode: "manual" | "updated_at" } | null>(null);
+  const sidebarSortMode = pendingSortMode?.mode ?? sidebarOrder?.sort_mode ?? "updated_at";
   const recentWorkspaces = useAppStore((s) => s.recentWorkspaces);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const isConnected = useAppStore((s) => s.isConnected);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
@@ -202,6 +235,7 @@ export const ConversationsTab = ({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(initialUiState.collapsedGroups);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [selectedRow, setSelectedRow] = useState<{ conversationId: string; rowId: string } | null>(null);
   const [workspaceMenu, setWorkspaceMenu] = useState<{ path: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -255,20 +289,20 @@ export const ConversationsTab = ({
     const labels = new Map<string, string>();
     for (const prompt of [pendingAskUser, ...askUserQueue]) {
       const id = prompt?.conversationId?.trim();
-      if (id && !labels.has(id)) labels.set(id, "等待回复");
+      if (id && !labels.has(id)) labels.set(id, tr("等待回复"));
     }
     for (const prompt of [pendingDiffReview, ...diffReviewQueue]) {
       const id = prompt?.conversationId?.trim();
-      if (id && !labels.has(id)) labels.set(id, "等待审阅");
+      if (id && !labels.has(id)) labels.set(id, tr("等待审阅"));
     }
     for (const prompt of [pendingApproval, ...approvalQueue]) {
       const id = prompt?.conversationId?.trim();
       if (id && !labels.has(id)) {
-        labels.set(id, `等待批准 ${readableToolLabel(prompt?.toolName || "")}`);
+        labels.set(id, tr("等待批准 {tool}", { tool: readableToolLabel(prompt?.toolName || "") }));
       }
     }
     return labels;
-  }, [pendingAskUser, askUserQueue, pendingDiffReview, diffReviewQueue, pendingApproval, approvalQueue]);
+  }, [pendingAskUser, askUserQueue, pendingDiffReview, diffReviewQueue, pendingApproval, approvalQueue, tr]);
 
   const enrichedConversations = useMemo(() => {
     return conversations.map((conversation) => {
@@ -297,30 +331,45 @@ export const ConversationsTab = ({
 
   const workspaceConversations = useMemo(() => {
     const opened = new Set(recentWorkspaces.map((workspace) => workspaceGroupIdentity(workspace.path)));
-    return filtered.filter((conversation) => isWorkspaceConversation(conversation)
+    return filtered.filter((conversation) => !conversation.pinned && isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
   }, [filtered, recentWorkspaces]);
   const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.map((workspace) => workspace.path)), [workspaceConversations, recentWorkspaces]);
   const orderedProjectGroups = useMemo(() => (
-    Array.from(projectGroups.entries(), ([projectKey, group]) => ({
+    orderSidebarItems(Array.from(projectGroups.entries(), ([projectKey, group]) => ({
       projectKey,
       group,
-      conversations: orderConversationTree(group.items),
-    }))
-  ), [projectGroups]);
-  const recentConversations = useMemo(() => [...filtered]
-    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
-    .slice(0, recentLimit).map((conversation) => ({ ...conversation, treeDepth: 0 })), [filtered, recentLimit]);
+      conversations: sidebarSortMode === "manual"
+        ? orderSidebarItems(orderConversationTree(group.items), sidebarOrder?.project_thread_orders[projectKey] ?? [], item => item.id)
+        : orderConversationTree([...group.items].sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""))),
+    })), sidebarOrder?.project_order ?? [], item => item.projectKey)
+  ), [projectGroups, sidebarOrder, sidebarSortMode]);
+  const pinnedConversations = useMemo(() => {
+    const positions = new Map(pinnedConversationIds.map((identifier, index) => [identifier, index]));
+    return filtered.filter(conversation => conversation.pinned)
+      .sort((left, right) => pinnedConversationSortMode === "updated_at"
+        ? (right.updatedAt || "").localeCompare(left.updatedAt || "")
+        : (positions.get(left.id) ?? pinnedConversationIds.length) - (positions.get(right.id) ?? pinnedConversationIds.length)
+          || (left.pinnedAt || "").localeCompare(right.pinnedAt || ""))
+      .map(conversation => ({ ...conversation, treeDepth: 0 }));
+  }, [filtered, pinnedConversationIds, pinnedConversationSortMode]);
+  const projectOptions = useMemo(() => recentWorkspaces.map(workspace => ({ id: workspaceGroupIdentity(workspace.path),
+    name: projectGroups.get(workspaceGroupIdentity(workspace.path))?.label ?? workspaceDisplayName(workspace.path, "Computer") })), [recentWorkspaces, projectGroups]);
+  const recentConversations = useMemo(() => {
+    const recent = filtered.filter(conversation => !conversation.pinned).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    return (sidebarSortMode === "manual" ? orderSidebarItems(recent, sidebarOrder?.recent_thread_ids ?? [], item => item.id) : recent)
+      .slice(0, recentLimit).map((conversation) => ({ ...conversation, treeDepth: 0 }));
+  }, [filtered, recentLimit, sidebarOrder, sidebarSortMode]);
   const activityGroups = useMemo(() => {
     if (!activityView) return [];
     const today = new Date();
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
     const groups: { key: string; label: string; items: TreeConversation[] }[] = [
-      { key: "priority", label: "优先级", items: [] },
-      { key: "today", label: "今天", items: [] },
-      { key: "yesterday", label: "昨天", items: [] },
-      { key: "earlier", label: "更早", items: [] },
+      { key: "priority", label: tr("优先级"), items: [] },
+      { key: "today", label: tr("今天"), items: [] },
+      { key: "yesterday", label: tr("昨天"), items: [] },
+      { key: "earlier", label: tr("更早"), items: [] },
     ];
     const ordered = [...filtered].sort((a, b) =>
       Number(b.sessionStatus !== "idle") - Number(a.sessionStatus !== "idle")
@@ -332,7 +381,7 @@ export const ConversationsTab = ({
       groups[group].items.push({ ...conversation, treeDepth: 0 });
     }
     return groups.filter((group) => group.items.length > 0);
-  }, [activityView, filtered, recentLimit]);
+  }, [activityView, filtered, recentLimit, tr]);
   const conversationsById = useMemo(
     () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
     [conversations],
@@ -341,23 +390,35 @@ export const ConversationsTab = ({
   // Read the active id through a ref so switching chats does not recreate the
   // row renderer and force every session row to rerender.
   const conversationIdRef = useRef(conversationId);
+  const selectedRowIdRef = useRef<string | null>(null);
   const renameStateRef = useRef({ renaming, renameValue });
-  const onSetConfirmDialogRef = useRef(onSetConfirmDialog);
   const onNavigateRef = useRef(onNavigate);
   conversationsRef.current = conversations;
   conversationIdRef.current = pendingConversationSwitchId || conversationId;
+  // A thread can be listed under its project and Recents. Codex routes the
+  // selection to the occurrence that opened it (sidebarThreadLocationId).
+  // A new/restored thread starts in its visible project row, or in Recents.
+  const selectedConversationId = conversationIdRef.current;
+  const visibleProject = !activityView && orderedProjectGroups.some(({ projectKey, conversations: projectConversations }) =>
+    !collapsedGroups.has(projectKey)
+    && (expandedProjects.has(projectKey) ? projectConversations : projectConversations.slice(0, 5))
+      .some((item) => item.id === selectedConversationId));
+  const defaultSelectedRowId = activityView
+    ? activityGroups.flatMap((group) => group.items.some((item) => item.id === selectedConversationId)
+      ? [`activity-${group.key}:${selectedConversationId}`] : [])[0] ?? null
+    : pinnedConversations.some(item => item.id === selectedConversationId) ? `pinned:${selectedConversationId}`
+      : visibleProject ? `project:${selectedConversationId}`
+      : showRecent && recentConversations.some((item) => item.id === selectedConversationId) ? `recent:${selectedConversationId}` : null;
+  selectedRowIdRef.current = selectedRow?.conversationId === selectedConversationId && !activityView
+    && (pinnedConversations.some(item => item.id === selectedConversationId) ? selectedRow.rowId.startsWith("pinned:")
+      : selectedRow.rowId.startsWith("project:") || selectedRow.rowId.startsWith("recent:"))
+    ? selectedRow.rowId : defaultSelectedRowId;
   renameStateRef.current = { renaming, renameValue };
-  onSetConfirmDialogRef.current = onSetConfirmDialog;
   onNavigateRef.current = onNavigate;
 
   useEffect(() => {
-    if (!menuFor) return;
-    const close = () => setMenuFor(null);
-    const closeOnEsc = (e: KeyboardEvent) => { if (e.key === "Escape") { close(); } };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", closeOnEsc);
-    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", closeOnEsc); };
-  }, [menuFor]);
+    setSelectedRow((previous) => previous?.conversationId === selectedConversationId ? previous : null);
+  }, [selectedConversationId]);
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = initialUiState.scrollTop;
@@ -371,21 +432,15 @@ export const ConversationsTab = ({
     persistPendingConversationUiState();
   }, [persistPendingConversationUiState]);
 
-  const cleanupWorktree = useCallback((id: string, force = false) => {
-    const conversation = conversationsRef.current.find((candidate) => candidate.id === id);
-    if (!conversation?.gitIsolated) return;
-    onSetConfirmDialogRef.current({
-      title: force ? "强制清理工作区" : "清理工作区",
-      message: force
-        ? "强制移除这个隔离会话工作区并丢弃本地更改吗？"
-        : "移除这个隔离会话工作区吗？如果存在本地更改，MiniCode 会再询问是否强制清理。",
-      confirmLabel: force ? "强制清理" : "清理",
-      danger: force,
-      onConfirm: () => { wsOutbox.sendClientCommand({ type: "conversation.worktree.cleanup", conversation_id: id, force }); },
-    });
-  }, []);
-
   const archiveConversation = useCallback(async (id: string, archived: boolean) => {
+    const state = useAppStore.getState();
+    const owner = state.conversations.find((conversation) => conversation.id === id)!;
+    const running = owner.sessionStatus === "running" || owner.sessionStatus === "waiting" || isConversationRunning({
+      conversationId: id, activeConversationId: state.conversationId, activeIsStreaming: state.isStreaming,
+      conversationStreaming: state.conversationStreaming,
+    });
+    if (archived && running && !await showConfirm({ title: tr("停止并归档此聊天？"),
+      message: tr("归档会停止所有正在进行的工作。你可以稍后在设置中恢复该聊天。"), confirmLabel: tr("停止并归档"), danger: true })) return;
     try {
       const result = await setConversationArchived(id, archived);
       if (!wsOutbox.commandResultSucceeded(result)) {
@@ -398,31 +453,46 @@ export const ConversationsTab = ({
         6000,
       );
     }
-  }, []);
+  }, [tr]);
 
-  const handleSwitch = useCallback((id: string) => {
+  const handleSwitch = useCallback((id: string, rowId: string) => {
     setMenuFor(null);
+    setSelectedRow({ conversationId: id, rowId });
     requestConversationSwitch(id);
     onNavigateRef.current?.();
   }, [requestConversationSwitch]);
 
-  const handoffWorktree = useCallback((id: string, target: "local" | "worktree") => {
-    wsOutbox.sendClientCommand({
-      type: "conversation.worktree.handoff.preflight",
-      conversation_id: id,
-      target,
+  const handoffWorktree = useCallback(async (id: string, target: "local" | "worktree") => {
+    const taskName = conversationsRef.current.find(conversation => conversation.id === id)?.title || id;
+    let result = await runMenuCommand({ type: "conversation.worktree.handoff.preflight", conversation_id: id, target });
+    if (!result) return;
+    let checks = (result.data?.checks ?? []) as Array<{ code: string; severity: string; message: string }>;
+    const dirty = checks.some(check => check.code === "source.dirty" && check.severity === "blocking");
+    if (!result.data?.allowed && dirty) {
+      if (!await showConfirm({ title: tr("检测到未提交改动"), message: tr("将已跟踪和未跟踪文件暂存，并在目标工作区恢复。发生冲突时暂存内容保留，可手动恢复。"), confirmLabel: tr("暂存后继续"), danger: true })) return;
+      result = await runMenuCommand({ type: "conversation.worktree.handoff.preflight", conversation_id: id, target, dirty_action: "stash" });
+      if (!result) return;
+      checks = (result.data?.checks ?? []) as Array<{ code: string; severity: string; message: string }>;
+    }
+    if (!result.data?.allowed) {
+      pushToast(checks.filter(check => check.severity === "blocking").map(check => check.message).join("\n") || result.message, "warning", 6000);
+      return;
+    }
+    const confirmed = await showConfirm({
+      title: target === "local" ? tr("将“{name}”移到本地检出？", { name: taskName }) : tr("将“{name}”移到隔离工作区？", { name: taskName }),
+      message: [target === "local" ? tr("移除干净的隔离工作区，并把本地检出切换到此任务分支。") : tr("为此任务创建干净、隔离的 Worktree。"), ...checks.filter(check => check.severity === "warning").map(check => check.message)].join("\n\n"),
+      confirmLabel: tr("移动任务"),
     });
-  }, []);
-  const revealConversationPath = useCallback((path?: string) => {
-    if (!path) return;
-    setMenuFor(null);
-    if (isDesktop()) void revealPath(path);
-  }, []);
+    if (!confirmed) return;
+    const completed = await runMenuCommand({ type: "conversation.worktree.handoff.execute", conversation_id: id, target,
+      fingerprint: result.data.fingerprint as string, dirty_action: result.data.dirty_action === "stash" ? "stash" : "block" });
+    if (completed) pushToast(completed.message, completed.data?.completed && completed.level !== "warning" ? "success" : "warning", 5000);
+  }, [tr]);
   const copyConversationPath = useCallback((path?: string) => {
     if (!path) return;
     setMenuFor(null);
-    void navigator.clipboard?.writeText(path);
-  }, []);
+    void copyText(path, tr("工作区路径"), tr("已复制工作区路径"));
+  }, [tr]);
   const startRename = useCallback((id: string, currentTitle: string, rowId = id) => {
     renameStateRef.current = { renaming: id, renameValue: currentTitle };
     setRenaming(id);
@@ -439,11 +509,8 @@ export const ConversationsTab = ({
   }, []);
   const commitRename = useCallback(() => {
     const current = renameStateRef.current;
-    const title = current.renameValue.trim();
-    if (!current.renaming || !title) {
-      cancelRename();
-      return;
-    }
+    const title = current.renameValue;
+    if (!current.renaming) return;
     const renamedConversationId = current.renaming;
     renameStateRef.current = { ...current, renaming: null };
     setRenaming(null);
@@ -482,30 +549,31 @@ export const ConversationsTab = ({
     const path = await openWorkspaceFolder();
     if (path) onNavigateRef.current?.();
   };
-  const cloneConversation = useCallback((id: string) => {
-    wsOutbox.sendClientCommand({ type: "conversation.clone", conversation_id: id, activate: false });
+  const copyConversationLink = useCallback((id: string) => {
+    void copyText(`minicode://conversation?conversation_id=${encodeURIComponent(id)}`, tr("复制深度链接"));
+  }, [tr]);
+  const setPinned = useCallback((id: string, pinned: boolean) => {
+    void runMenuCommand({ type: "conversation.pin.set", conversation_id: id, pinned });
   }, []);
-  const mergeConversation = useCallback((id: string) => {
-    const currentConversations = conversationsRef.current;
-    const conversation = currentConversations.find((item) => item.id === id);
-    const parent = conversation?.parentConversationId
-      ? currentConversations.find((item) => item.id === conversation.parentConversationId)
-      : undefined;
-    if (!conversation || !parent) return;
-    onSetConfirmDialogRef.current({
-      title: "合并会话分支",
-      message: `将“${conversation.title}”的新增消息快速合并到“${parent.title}”。如果父会话已分叉修改，后端会拒绝合并并保留两边内容。`,
-      confirmLabel: "合并",
-      onConfirm: () => wsOutbox.sendClientCommand({
-        type: "conversation.merge",
-        conversation_id: id,
-        target_conversation_id: parent.id,
-      }),
-    });
+  const setReadState = useCallback((id: string, hasUnreadTurn: boolean) => {
+    void runMenuCommand({ type: "conversation.read_state.set", conversation_id: id, has_unread_turn: hasUnreadTurn });
   }, []);
-  const exportConversation = useCallback((id: string) => {
-    wsOutbox.sendClientCommand({ type: "conversation.export", conversation_id: id, include_descendants: true });
+  const setProject = useCallback((id: string, projectId: string) => {
+    void runMenuCommand({ type: "conversation.project.set", conversation_id: id, project_id: projectId });
   }, []);
+  const copyConversationMarkdown = useCallback(async (id: string) => {
+    const state = useAppStore.getState();
+    const owner = state.conversations.find((conversation) => conversation.id === id)!;
+    const captured = { id: owner.id, title: owner.title, workspaceRoot: owner.executionCwd || owner.worktreePath || owner.workspaceRoot || "",
+      messages: state.getVisibleMessages(owner.id), historyPage: state.conversationHistoryPages[owner.id],
+      sessionId: getWebSocket()?.sessionId ?? "", messageCount: owner.messageCount };
+    try {
+      const markdown = await loadConversationMarkdown(captured);
+      if (markdown !== null) await copyText(markdown, tr("复制为 Markdown"));
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [tr]);
 
   const startWorkspaceConversation = (projectKey: string, group: WorkspaceConversationGroup) => {
     const workspaceRoot = group.path;
@@ -527,7 +595,7 @@ export const ConversationsTab = ({
       rowId={`${scene}:${conversation.id}`}
       conversation={conversationsById.get(conversation.id) ?? conversation}
       sessionStatus={conversation.sessionStatus}
-      active={conversation.id === conversationIdRef.current}
+      active={`${scene}:${conversation.id}` === selectedRowIdRef.current}
       menuOpen={menuFor === `${scene}:${conversation.id}`}
       renaming={renaming === conversation.id && renamingRow === `${scene}:${conversation.id}`}
       renameValue={renaming === conversation.id ? renameValue : ""}
@@ -539,50 +607,89 @@ export const ConversationsTab = ({
       onCancelRename={cancelRename}
       onSetRenameValue={handleRenameValueChange}
       onArchive={archiveConversation}
-      onClone={cloneConversation}
-      onMerge={mergeConversation}
-      onExport={exportConversation}
-      onCleanup={cleanupWorktree}
+      onCopyLink={copyConversationLink}
+      onCopyMarkdown={copyConversationMarkdown}
       onHandoff={handoffWorktree}
-      onReveal={revealConversationPath}
       onCopy={copyConversationPath}
+      onPin={setPinned} onReadState={setReadState} onProjectChange={setProject}
+      projectOptions={projectOptions}
+      currentProject={conversationWorkspacePath(conversation) ? workspaceGroupIdentity(conversationWorkspacePath(conversation)) : ""}
       treeDepth={conversation.treeDepth}
     />
   ), [
     archiveConversation,
     cancelRename,
-    cleanupWorktree,
-    cloneConversation,
+    copyConversationLink,
+    copyConversationMarkdown,
     commitRename,
     conversationsById,
     copyConversationPath,
-    exportConversation,
     handleRenameValueChange,
     handleSwitch,
     handoffWorktree,
     menuFor,
-    mergeConversation,
     renameValue,
     renaming,
     renamingRow,
-    revealConversationPath,
     startRename,
+    setPinned, setReadState, setProject, projectOptions,
   ]);
 
+  const selectSortMode = async (mode: "manual" | "updated_at") => {
+    const pending = { mode };
+    setPendingSortMode(pending);
+    try {
+      await runMenuCommand({ type: "sidebar.sort.set", mode,
+        project_thread_seeds: Object.fromEntries(orderedProjectGroups.slice(0, 5).map(({ group, conversations: items }) =>
+          [group.path, items.slice(0, 5).map(item => item.id)])) });
+    } finally { setPendingSortMode(current => current === pending ? null : current); }
+  };
+  const renderSortableThreads = (items: TreeConversation[], scope: "project" | "recent", projectId?: string) => {
+    const byId = new Map(items.map(item => [item.id, item]));
+    return <SidebarSortableList identifiers={items.map(item => item.id)} scope={scope}
+      ariaLabel={scope === "project" ? tr("项目中的聊天") : tr("最近聊天")}
+      disabled={sidebarSortMode !== "manual" || pendingSortMode !== null} renamingId={renaming}
+      renderRow={(identifier, binding) => cloneElement(renderSessionRow(byId.get(identifier)!, scope), binding)}
+      renderOverlay={identifier => renderSessionRow(byId.get(identifier)!, `${scope}-overlay`)}
+      onDragStart={() => setMenuFor(null)} onReorder={async (movedId, beforeId, visibleIds) => Boolean(await runMenuCommand({
+        type: projectId === undefined ? "sidebar.recent.reorder" : "sidebar.project.thread.reorder",
+        ...(projectId === undefined ? {} : { project_id: projectId }),
+        moved_conversation_id: movedId, before_conversation_id: beforeId, visible_conversation_ids: visibleIds,
+      }))} />;
+  };
+  const renderWorkspaceHeader = (projectKey: string, group: WorkspaceConversationGroup, binding?: SidebarDragBinding, overlay = false) => (
+    <div className="mc-workspace-group-header" data-active={!(pendingConversationSwitchId || conversationId) && workspaceGroupIdentity(group.path) === workspaceGroupIdentity(workingDirectory) ? "true" : undefined}
+      onContextMenu={overlay ? undefined : event => { event.preventDefault(); setWorkspaceMenu({ path: group.path, x: event.clientX, y: event.clientY }); }}>
+      <button type="button" ref={binding?.dragActivatorRef} {...binding?.dragAttributes} aria-label={group.label}
+        aria-expanded={!collapsedGroups.has(projectKey)} onClick={() => toggleGroup(projectKey)}
+        className="mc-workspace-group-toggle" style={taskSectionHeaderStyle}>
+        <span className="mc-workspace-folder-icon" aria-hidden="true">{collapsedGroups.has(projectKey)
+          ? <Folder className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-closed-${projectKey}`} />
+          : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}</span>
+        <span className="mc-workspace-label" title={group.path}>{group.label}</span>
+      </button>
+      {!overlay && <button type="button" className="mc-workspace-new-session" aria-label={tr("在 {name} 中新建任务", { name: group.label })}
+        title={tr("在 {name} 中新建任务", { name: group.label })} data-testid={`workspace-new-session-${projectKey}`}
+        onClick={() => startWorkspaceConversation(projectKey, group)}><SquarePen size={15} aria-hidden="true" /></button>}
+    </div>
+  );
+  const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
   const isEmpty = activityView ? filtered.length === 0
-    : projectGroups.size === 0 && (!showRecent || recentConversations.length === 0);
+    : pinnedConversations.length === 0 && projectGroups.size === 0 && (!showRecent || recentConversations.length === 0);
 
   return (
     <>
       <div className="mc-sidebar-project-heading" style={{ ...sectionHeaderRowStyle, padding: "9px 10px 5px" }}>
-        <span className="mc-sidebar-project-label">{activityView ? "活动" : "项目"}</span>
-        {!activityView && <button
+        <span className="mc-sidebar-project-label">{activityView ? tr("活动") : tr("项目")}</span>
+        {!activityView && <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+          <SidebarSortMenu section="projects" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} />
+          <button
           type="button"
           className="btn-ghost mc-icon-button mc-sidebar-project-add"
-          aria-label="添加项目"
-          title="添加项目"
+          aria-label={tr("添加项目")}
+          title={tr("添加项目")}
           onClick={() => void addProject()}
-        ><Plus size={15} aria-hidden="true" /></button>}
+        ><Plus size={15} aria-hidden="true" /></button></div>}
       </div>
       <div
         ref={listRef}
@@ -592,60 +699,45 @@ export const ConversationsTab = ({
       >
         {isEmpty && <EmptyState
           icon={<SquarePen size={22} />}
-          title={activityView ? "暂无任务活动" : "开始你的第一个任务"}
+          title={activityView ? tr("暂无任务活动") : tr("开始你的第一个任务")}
           action={<button type="button" onClick={() => {
-            createConversation({ appMode: "cowork" });
+            const state = useAppStore.getState();
+            createConversation({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) });
             onNavigate?.();
-          }}>新建任务</button>}
+          }}>{tr("新建任务")}</button>}
         />}
-        {!activityView && orderedProjectGroups.map(({ projectKey, group, conversations: orderedConversations }) => (
-          <section key={projectKey} aria-label={`工作区 ${group.label}`} style={taskSectionStyle}>
-            <div className="mc-workspace-group-header" onContextMenu={(event) => {
-              event.preventDefault();
-              setWorkspaceMenu({ path: group.path, x: event.clientX, y: event.clientY });
-            }}>
-              <button
-                type="button"
-                aria-label={group.label}
-                aria-expanded={!collapsedGroups.has(projectKey)}
-                onClick={() => toggleGroup(projectKey)}
-                className="mc-workspace-group-toggle"
-                style={taskSectionHeaderStyle}
-              >
-                <span className="mc-workspace-folder-icon" aria-hidden="true">
-                  {collapsedGroups.has(projectKey)
-                    ? <Folder className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-closed-${projectKey}`} />
-                    : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}
-                </span>
-                <span className="mc-workspace-label" title={group.path}>{group.label}</span>
-              </button>
-              <button
-                  type="button"
-                  className="mc-workspace-new-session"
-                  aria-label={`在 ${group.label} 中新建任务`}
-                  title={`在 ${group.label} 中新建任务`}
-                  data-testid={`workspace-new-session-${projectKey}`}
-                  onClick={() => startWorkspaceConversation(projectKey, group)}
-                >
-                  <SquarePen size={15} aria-hidden="true" />
-              </button>
-            </div>
-            {!collapsedGroups.has(projectKey) && (
-              <div className="mc-workspace-group-body">
+        {!activityView && pinnedConversations.length > 0 && <section aria-label={tr("已固定")} className="mc-sidebar-pinned">
+          <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("已固定")}</span></div>
+          <PinnedConversationList conversations={pinnedConversations} renderRow={renderSessionRow} renamingId={renaming}
+            onDragStart={() => setMenuFor(null)} onReorder={async (movedId, beforeId, visibleIds) => Boolean(await runMenuCommand({
+              type: "conversation.pin.reorder", moved_conversation_id: movedId, before_conversation_id: beforeId, visible_conversation_ids: visibleIds,
+            }))} />
+        </section>}
+        {!activityView && <SidebarSortableList identifiers={orderedProjectGroups.map(item => item.projectKey)} scope="projects" ariaLabel={tr("项目顺序")}
+          onDragStart={() => { setMenuFor(null); setWorkspaceMenu(null); }}
+          onReorder={async (movedId, beforeId, visibleIds) => Boolean(await runMenuCommand({ type: "sidebar.project.reorder",
+            moved_project_id: projectGroupsById.get(movedId)!.group.path,
+            before_project_id: beforeId === null ? null : projectGroupsById.get(beforeId)!.group.path,
+            visible_project_ids: visibleIds.map(identifier => projectGroupsById.get(identifier)!.group.path),
+          }))}
+          renderOverlay={identifier => {
+            const { projectKey, group } = projectGroupsById.get(identifier)!;
+            return renderWorkspaceHeader(projectKey, group, undefined, true);
+          }} renderRow={(identifier, binding) => {
+            const { projectKey, group, conversations: orderedConversations } = projectGroupsById.get(identifier)!;
+            return <section aria-label={tr("工作区 {name}", { name: group.label })} style={taskSectionStyle}>
+              {renderWorkspaceHeader(projectKey, group, binding)}
+              {!collapsedGroups.has(projectKey) && <div className="mc-workspace-group-body">
                 <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
-                  {(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5))
-                    .map((conversation) => renderSessionRow(conversation))}
-                  {orderedConversations.length > 5 && <button
-                    type="button"
-                    className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
-                    aria-expanded={expandedProjects.has(projectKey)}
-                    onClick={() => toggleProjectExpansion(projectKey)}
-                  >{expandedProjects.has(projectKey) ? "收起" : "展开显示"}</button>}
+                  {renderSortableThreads(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5), "project", group.path)}
+                  {orderedConversations.length > 5 && <button type="button" className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
+                    aria-expanded={expandedProjects.has(projectKey)} onClick={() => toggleProjectExpansion(projectKey)}>
+                    {expandedProjects.has(projectKey) ? tr("收起") : tr("展开显示")}</button>}
                 </div>
-              </div>
-            )}
-          </section>
-        ))}
+              </div>}
+            </section>;
+          }} />}
+
 
         {activityView && activityGroups.map((group) => <section key={group.key} aria-label={group.label} className="mc-sidebar-activity-group">
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{group.label}</span></div>
@@ -657,11 +749,12 @@ export const ConversationsTab = ({
             </div>;
           })}
         </section>)}
-        {activityView && filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>显示更多</button>}
-        {!activityView && showRecent && recentConversations.length > 0 && <section aria-label="最近" className="mc-sidebar-recents">
-          <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">最近</span></div>
-          <div className="mc-sidebar-recent-list">{recentConversations.map((conversation) => renderSessionRow(conversation, "recent"))}</div>
-          {filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>显示更多</button>}
+        {activityView && filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
+        {!activityView && showRecent && recentConversations.length > 0 && <section aria-label={tr("最近")} className="mc-sidebar-recents">
+          <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("最近")}</span>
+            <SidebarSortMenu section="chats" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} /></div>
+          <div className="mc-sidebar-recent-list">{renderSortableThreads(recentConversations, "recent")}</div>
+          {filtered.filter(conversation => !conversation.pinned).length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
         </section>}
       </div>
       {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}

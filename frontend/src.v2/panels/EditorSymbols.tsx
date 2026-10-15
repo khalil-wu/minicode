@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
@@ -13,6 +14,7 @@ export function EditorSymbols({ monaco, workspaceRoot, path, project, sourceFile
   monaco: typeof Monaco; workspaceRoot: string; path: string; project: boolean; onClose: () => void;
   sourceFiles: () => Array<{ uri: Monaco.Uri; content: string }>;
 }) {
+  const { t: tr } = useI18n();
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<SymbolRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,20 +55,20 @@ export function EditorSymbols({ monaco, workspaceRoot, path, project, sourceFile
   const open = (row: SymbolRow) => { useAppStore.getState().openEditorFile(row.path, undefined, { line: row.line, column: row.column, exact: true }); onClose(); };
   useEffect(() => { list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }); }, [selected]);
   return createPortal(<div className="mc-symbol-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section ref={dialog} className="mc-symbol-picker" role="dialog" aria-modal="true" aria-label={project ? "项目符号" : "文件大纲"} onKeyDown={(event) => {
+    <section ref={dialog} className="mc-symbol-picker" role="dialog" aria-modal="true" aria-label={project ? tr("项目符号") : tr("文件大纲")} onKeyDown={(event) => {
       if (event.key === "Escape") { event.stopPropagation(); onClose(); }
       else if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setSelected((value) => Math.max(0, Math.min(matches.length - 1, value + (event.key === "ArrowDown" ? 1 : -1)))); }
       else if (event.key === "Enter" && matches[selected]) { event.preventDefault(); open(matches[selected]); }
     }}>
-      <div className="mc-symbol-search"><Search size={16} /><input autoFocus value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }} aria-label="搜索符号" placeholder={project ? "搜索项目符号…" : "跳转到符号…"} /><button type="button" aria-label="关闭大纲" onClick={onClose}><X size={16} /></button></div>
-      <div className="mc-symbol-results" ref={list} role="listbox" aria-label="符号">
+      <div className="mc-symbol-search"><Search size={16} /><input autoFocus value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }} aria-label={tr("搜索符号")} placeholder={project ? tr("搜索项目符号…") : tr("跳转到符号…")} /><button type="button" aria-label={tr("关闭大纲")} onClick={onClose}><X size={16} /></button></div>
+      <div className="mc-symbol-results" ref={list} role="listbox" aria-label={tr("符号")}>
         {matches.map((row, index) => <button type="button" role="option" aria-selected={index === selected} key={row.path + ":" + row.line + ":" + index} onClick={() => open(row)} style={{ paddingLeft: 14 + (project ? 0 : row.depth * 14) }}>
           <Braces size={14} /><span><strong>{row.name}</strong><small>{project ? row.path.slice(workspaceRoot.length + 1) : row.detail}</small></span><small>{row.line}</small></button>)}
-        {loading && <p role="status">读取语言服务符号…</p>}
+        {loading && <p role="status">{tr("读取语言服务符号…")}</p>}
         {error && <p role="alert">{error}</p>}
-        {!loading && !error && !matches.length && <p>没有匹配的符号。</p>}
+        {!loading && !error && !matches.length && <p>{tr("没有匹配的符号。")}</p>}
       </div>
-      <footer>{project ? "已索引源码与打开的文档" : "当前文件"}<span>↑↓ 选择 · Enter 跳转 · Esc 关闭</span></footer>
+      <footer>{project ? tr("已索引源码与打开的文档") : tr("当前文件")}<span>{tr("↑↓ 选择 · Enter 跳转 · Esc 关闭")}</span></footer>
     </section>
   </div>, document.body);
 }

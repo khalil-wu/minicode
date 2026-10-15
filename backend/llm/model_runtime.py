@@ -30,6 +30,8 @@ from backend.config import (
     resolve_context_window_details,
 )
 from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_wire_value, reasoning_effort_wire_map
+from backend.llm.source_context_metadata import source_context_metadata
+from backend.llm.model_metadata import source_guardian_model_metadata, source_model_metadata_source
 from backend.llm.model_selection import (
     apply_model_thinking_level,
     clamp_model_thinking_level,
@@ -39,6 +41,7 @@ from backend.llm.model_selection import (
 )
 from backend.llm.provider_contracts import (
     ModelDefinition,
+    TokenBudgetAuthContext,
     ProviderAdapterSpec,
     ProviderDefinition,
     ProviderRegistrationError,
@@ -328,6 +331,67 @@ class ModelRuntime:
             and isinstance(credentials, Mapping)
             and credentials.get("type") == "oauth"
         )
+
+    def token_budget_auth_context(self, model: ModelDefinition | str) -> TokenBudgetAuthContext:
+        """Capture Source experimental-context facts without inferring an account."""
+        provider_id = model.provider if isinstance(model, ModelDefinition) else str(model)
+        provider = {**self._extension_providers.get(provider_id, {}), **self._model_configs.get(provider_id, {})}
+        credential = self._stored_credential(provider_id)
+        auth_mode = None
+        plan = None
+        if credential is not None:
+            if credential.get("type") == "api_key":
+                auth_mode = "api_key"
+            elif credential.get("type") == "oauth" and credential.get("auth_mode") == "chatgpt":
+                auth_mode = "chatgpt"
+                plan = credential.get("account_plan_type")
+        return TokenBudgetAuthContext(auth_mode=auth_mode, account_plan_type=plan,
+            supports_codex_backend_routes=_declared_boolean(provider.get("supports_codex_backend_routes"), field="supports_codex_backend_routes"),
+            requires_openai_auth=_declared_boolean(provider.get("requires_openai_auth"), field="requires_openai_auth"),
+            has_env_key=provider.get("env_key") is not None,
+            has_experimental_bearer_token=provider.get("experimental_bearer_token") is not None,
+            has_auth=provider.get("auth") is not None,
+            has_aws=provider.get("aws") is not None)
+
+    def history_notes_backend_enabled(self, model: ModelDefinition) -> bool:
+        """Source HistoryNotesExtension's provider and actual-auth gate.
+
+        Provider display configuration and a trusted login's API auth mode
+        are separate facts. API keys, model names and backend-looking URLs do
+        not establish a Codex service identity.
+        """
+        self.assert_active()
+        provider_id = model.provider
+        base = self._base_providers.get(provider_id, {})
+        configured = self._model_configs.get(provider_id, {})
+        extension = self._extension_providers.get(provider_id, {})
+        provider_name = (
+            _clean_text(extension.get("name"))
+            or _clean_text(configured.get("name"))
+            or _clean_text(base.get("name"))
+        )
+        credential = self._stored_credential(provider_id)
+        return (
+            provider_name == "OpenAI"
+            and self._oauth_provider(provider_id) is not None
+            and credential is not None
+            and credential.get("type") == "oauth"
+            and credential.get("auth_mode") in {
+                "chatgpt", "chatgptAuthTokens", "headers", "agentIdentity",
+                "personalAccessToken",
+            }
+        )
+
+    async def resolve_history_notes_backend_request(
+        self, model: ModelDefinition,
+    ) -> ProviderAdapterSpec:
+        """Resolve the service request through this provider's real auth owner."""
+        if not self.history_notes_backend_enabled(model):
+            raise ProviderRegistrationError("Codex backend authentication is unavailable")
+        await self.refresh_provider_auth(model.provider, publish_snapshot=False)
+        if not self.history_notes_backend_enabled(model):
+            raise ProviderRegistrationError("Codex backend authentication is unavailable")
+        return self.resolve_adapter_spec(model.provider, model.id)
 
     def _provider_auth_storage(self) -> Any:
         storage = getattr(self, "_auth_storage", None)
@@ -1920,7 +1984,7 @@ class ModelRuntime:
             tuple(str(item) for item in raw_input)
             if isinstance(raw_input, Sequence)
             and not isinstance(raw_input, (str, bytes, bytearray))
-            else ("text",)
+            else ()
         )
         raw_cost = definition.get("cost")
         raw_thinking_map = definition.get("thinking_level_map")
@@ -1949,10 +2013,21 @@ class ModelRuntime:
                 definition.get("responses_websocket"), field=f"Model {model_id}: responses_websocket",
             ),
             native_compaction=_declared_optional_boolean(definition.get("native_compaction"), field=f"Model {model_id}: native_compaction"),
+            comp_hash=definition.get("comp_hash", defaults.comp_hash if defaults is not None else source_context_metadata(model_id).get("comp_hash")),
+            supports_experimental_context=_declared_boolean(
+                definition.get("supports_experimental_context"), field=f"Model {model_id}: supports_experimental_context",
+                default=defaults.supports_experimental_context if defaults is not None else False),
+            supports_search_tool=_declared_boolean(definition.get("supports_search_tool"),
+                field=f"Model {model_id}: supports_search_tool", default=defaults.supports_search_tool if defaults is not None else source_context_metadata(model_id)["supports_search_tool"]),
+            extra={**dict(defaults.extra if defaults is not None else {**source_guardian_model_metadata(model_id), "model_messages": source_context_metadata(model_id)["model_messages"]}), **_extension_model_extra(definition)},
+            source_model_metadata=defaults.source_model_metadata if defaults is not None else source_model_metadata_source(model_id),
+            truncation_policy=definition.get("truncation_policy", defaults.truncation_policy if defaults is not None else source_context_metadata(model_id)["truncation_policy"]),
+            supports_image_detail_original=_declared_boolean(definition.get("supports_image_detail_original"),
+                field=f"Model {model_id}: supports_image_detail_original", default=defaults.supports_image_detail_original if defaults is not None else source_context_metadata(model_id)["supports_image_detail_original"]),
             model_instructions=_clean_text(definition.get("model_instructions")),
             parallel_tool_calls=_declared_optional_boolean(definition.get("parallel_tool_calls"), field=f"Model {model_id}: parallel_tool_calls"),
             tool_mode=normalize_tool_mode(definition.get("tool_mode")),
-            input=input_types or ("text",),
+            input=input_types,
             cost=(
                 dict(raw_cost)
                 if isinstance(raw_cost, Mapping)
@@ -2149,6 +2224,7 @@ class ModelRuntime:
                     native_compaction=_declared_optional_boolean(
                         override.get("native_compaction", model.native_compaction), field=f"Model {model.id}: native_compaction",
                     ),
+                    comp_hash=override.get("comp_hash", model.comp_hash),
                     model_instructions=(
                         _clean_text(override["model_instructions"])
                         if "model_instructions" in override else model.model_instructions
@@ -2208,6 +2284,15 @@ class ModelRuntime:
                         else model.max_output_tokens_verified
                     ),
                     headers=_merge_headers(model.headers, configured_headers),
+                    supports_experimental_context=_declared_boolean(
+                        override.get("supports_experimental_context"), field=f"Model {model.id}: supports_experimental_context",
+                        default=model.supports_experimental_context),
+                    extra={**dict(model.extra), **_extension_model_extra(override)},
+                    truncation_policy=override.get("truncation_policy", model.truncation_policy),
+                    supports_search_tool=_declared_boolean(override.get("supports_search_tool"),
+                        field=f"Model {model.id}: supports_search_tool", default=model.supports_search_tool),
+                    supports_image_detail_original=_declared_boolean(override.get("supports_image_detail_original"),
+                        field=f"Model {model.id}: supports_image_detail_original", default=model.supports_image_detail_original),
                 )
             )
         return tuple(result)
@@ -2296,7 +2381,7 @@ class ModelRuntime:
                 tuple(_clean_text(item) for item in raw_input if _clean_text(item))
                 if isinstance(raw_input, Sequence)
                 and not isinstance(raw_input, (str, bytes, bytearray))
-                else defaults.input if defaults is not None else ("text",)
+                else defaults.input if defaults is not None else ()
             )
             raw_context_window = model.get("context_window")
             declared_context_window = _declared_finite_number(
@@ -2397,7 +2482,7 @@ class ModelRuntime:
                         if isinstance(raw_thinking_map, Mapping)
                         else None
                     ),
-                    input=input_types or ("text",),
+                    input=input_types,
                     cost=dict(raw_cost) if isinstance(raw_cost, Mapping) else {},
                     context_window=context_window,
                     context_window_source=context_window_source,
@@ -2440,6 +2525,10 @@ class ModelRuntime:
                         model.get("native_compaction", defaults.native_compaction if defaults is not None else None),
                         field=f"Model {model_id}: native_compaction",
                     ),
+                    comp_hash=model.get("comp_hash", defaults.comp_hash if defaults is not None else source_context_metadata(model_id).get("comp_hash")),
+                    supports_experimental_context=_declared_boolean(
+                        model.get("supports_experimental_context"), field=f"Model {model_id}: supports_experimental_context",
+                        default=defaults.supports_experimental_context if defaults is not None else False),
                     model_instructions=(
                         _clean_text(model["model_instructions"]) if "model_instructions" in model
                         else defaults.model_instructions if defaults is not None else ""
@@ -2452,7 +2541,13 @@ class ModelRuntime:
                         model.get("tool_mode", defaults.tool_mode if defaults is not None else "")
                     ),
                     headers=headers,
-                    extra=_extension_model_extra(model),
+                    extra={**dict(defaults.extra if defaults is not None else {**source_guardian_model_metadata(model_id), "model_messages": source_context_metadata(model_id)["model_messages"]}), **_extension_model_extra(model)},
+                    source_model_metadata=defaults.source_model_metadata if defaults is not None else source_model_metadata_source(model_id),
+                    truncation_policy=model.get("truncation_policy", defaults.truncation_policy if defaults is not None else source_context_metadata(model_id)["truncation_policy"]),
+                    supports_search_tool=_declared_boolean(model.get("supports_search_tool"),
+                        field=f"Model {model_id}: supports_search_tool", default=defaults.supports_search_tool if defaults is not None else source_context_metadata(model_id)["supports_search_tool"]),
+                    supports_image_detail_original=_declared_boolean(model.get("supports_image_detail_original"),
+                        field=f"Model {model_id}: supports_image_detail_original", default=defaults.supports_image_detail_original if defaults is not None else source_context_metadata(model_id)["supports_image_detail_original"]),
                 )
             )
         return finalize(tuple(result))
@@ -2852,6 +2947,30 @@ class ModelRuntime:
         config = self._extension_providers.get(_clean_text(provider_id))
         return dict(config) if config is not None else None
 
+    def get_configured_provider_base_url(self, provider_id: str) -> str | None:
+        """Return explicit URL provenance before endpoint defaults/normalization.
+
+        Optional Decisions credentials depend on whether an override was
+        configured, including an explicit empty builtin setting. A resolved
+        endpoint cannot answer that question.
+        """
+        self.assert_active()
+        clean_id = _clean_text(provider_id)
+        for definitions in (self._extension_providers, self._model_configs):
+            config = definitions.get(clean_id)
+            if config is not None and "base_url" in config:
+                return config["base_url"]
+        if clean_id not in self._base_providers:
+            if clean_id in self._extension_providers or clean_id in self._model_configs:
+                return None
+            raise ProviderRegistrationError(f"Unknown provider '{clean_id}'")
+        from backend.config_helpers import _get_llm_section
+        settings = _get_llm_section(self._settings_snapshot).get(clean_id, {})
+        if "base_url" in settings:
+            return settings["base_url"]
+        environment_name = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL", "custom": "CUSTOM_BASE_URL"}[clean_id]
+        return os.environ.get(environment_name)
+
     def get_registered_provider_ids(self) -> tuple[str, ...]:
         return tuple(self._extension_providers)
 
@@ -3239,8 +3358,10 @@ class ModelRuntime:
             default_reasoning_summary=model.default_reasoning_summary,
             supports_custom_tools=model.supports_custom_tools,
             supports_hosted_web_search=model.supports_hosted_web_search,
+            supports_search_tool=model.supports_search_tool,
             responses_websocket=model.responses_websocket,
             native_compaction=model.native_compaction,
+            comp_hash=model.comp_hash,
             model_instructions=model.model_instructions,
             parallel_tool_calls=model.parallel_tool_calls,
             tool_mode=model.tool_mode,
@@ -3346,11 +3467,13 @@ class ModelRuntime:
             "default_reasoning_effort": str(metadata["default_reasoning_effort"]),
             "default_reasoning_summary": str(metadata["default_reasoning_summary"]),
             "supports_hosted_web_search": model.supports_hosted_web_search if model is not None else None,
+            "supports_search_tool": model.supports_search_tool if model is not None else False,
             "input_modalities": list(model.input) if model is not None else [],
             "declared_reasoning_effort_levels": list(model.reasoning_effort_levels) if model is not None else [],
             "thinking_budget": int(base.get("thinking_budget") or 0),
             "parallel_tool_calls": model.parallel_tool_calls if model is not None else None,
             "native_compaction": model.native_compaction if model is not None else None,
+            "comp_hash": model.comp_hash if model is not None else None,
         }
 
 

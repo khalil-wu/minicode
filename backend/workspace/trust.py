@@ -5,9 +5,23 @@ import os
 from pathlib import Path
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import atomic_write_text, file_mutation_locks
 
 
 TRUSTED_WORKSPACES_FILE = Path(DATA_ROOT) / "trusted_workspaces.json"
+
+
+def trust_created_task_directory(task_directory: Path) -> None:
+    """Register the actual directory minted by a projectless create operation."""
+    directory = task_directory.resolve()
+    with file_mutation_locks([TRUSTED_WORKSPACES_FILE]):
+        payload = json.loads(TRUSTED_WORKSPACES_FILE.read_text(encoding="utf-8")) if TRUSTED_WORKSPACES_FILE.exists() else []
+        roots = payload if isinstance(payload, list) else payload["roots"]
+        if any(directory.is_relative_to(Path(root).expanduser().resolve()) for root in roots):
+            return
+        roots.append(str(directory))
+        TRUSTED_WORKSPACES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(TRUSTED_WORKSPACES_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def trusted_workspace_roots() -> tuple[Path, ...]:

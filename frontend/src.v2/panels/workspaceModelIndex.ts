@@ -20,6 +20,7 @@ type OwnedModel = { model: Monaco.editor.ITextModel; listener: Monaco.IDisposabl
 export class WorkspaceModelIndex {
   private files = new Map<string, WorkspaceProjectIndexFile>();
   private diskKeys = new Set<string>();
+  private dependencyFileNames: string[] = [];
   private models = new Map<string, OwnedModel>();
   private pending = new Set<string>();
   private deletedOpenBuffers = new Set<string>();
@@ -148,12 +149,23 @@ export class WorkspaceModelIndex {
     this.flushChanges();
     const issues: Array<{ path: string; message: string }> = [];
     const sources: WorkspaceProjectIndexFile[] = [];
-    const next = new Map<string, WorkspaceProjectIndexFile>();
-    if (!includeDependencies) for (const [key, file] of this.files) if (isDependencyIndexPath(file.path)) next.set(key, file);
+    const next = snapshot.base_revision != null ? new Map(this.files) : new Map<string, WorkspaceProjectIndexFile>();
+    const nextDiskKeys = snapshot.base_revision != null ? new Set(this.diskKeys) : new Set<string>();
+    for (const path of snapshot.removed_paths ?? []) {
+      const key = this.key(this.uri(path));
+      next.delete(key);
+      nextDiskKeys.delete(key);
+    }
+    if (snapshot.dependency_paths != null) this.dependencyFileNames = snapshot.dependency_paths.map((path) => this.uri(path).toString());
+    if (!includeDependencies) for (const [key, file] of this.files) if (isDependencyIndexPath(file.path)) {
+      next.set(key, file); nextDiskKeys.add(key);
+    }
     for (const file of snapshot.files) {
       if (isIndexedSource(file)) {
         const warning = editorFileLimitReason(file.content, file.size_bytes ?? file.size);
         if (warning) {
+          const key = this.key(this.uri(file.path));
+          next.delete(key); nextDiskKeys.delete(key);
           issues.push({ path: file.path, message: warning });
           const tab = this.tabFor(file.path);
           if (tab && tab.content !== tab.original) {
@@ -167,10 +179,11 @@ export class WorkspaceModelIndex {
         }
         sources.push(file);
       }
-      next.set(this.key(this.uri(file.path)), file);
+      const key = this.key(this.uri(file.path));
+      next.set(key, file); nextDiskKeys.add(key);
     }
     this.files = next;
-    this.diskKeys = new Set(next.keys());
+    this.diskKeys = nextDiskKeys;
     for (const tab of this.store.getState().editorTabs) {
       if (this.eligibleTab(tab) && !this.diskKeys.has(this.key(this.uri(tab.path)))) {
         this.deletedOpenBuffers.add(tab.id);
@@ -222,6 +235,7 @@ export class WorkspaceModelIndex {
     this.flushChanges();
     let changed = false;
     for (const change of changes) {
+      if (isDependencyIndexPath(change.path)) this.files.delete(this.key(this.uri(change.path)));
       if (!/^(deleted|delete|removed|remove)$/i.test(change.event)) continue;
       const key = this.key(this.uri(change.path));
       this.diskKeys.delete(key);
@@ -242,7 +256,7 @@ export class WorkspaceModelIndex {
   publish(): void {
     const sourceFileNames = [...this.files.values()].filter(isIndexedSource).map((file) => this.uri(file.path).toString());
     const readOnlyFileNames = this.store.getState().editorTabs.filter((tab) => tab.readOnly).map((tab) => this.uri(tab.path).toString());
-    setWorkspaceTypeScriptFiles({ workspaceRoot: this.uri(".").toString(), sourceFileNames, readOnlyFileNames, caseSensitive: !isWindowsLikeWorkspacePath(this.workspaceRoot) },
+    setWorkspaceTypeScriptFiles({ workspaceRoot: this.uri(".").toString(), sourceFileNames, dependencyFileNames: this.dependencyFileNames, readOnlyFileNames, caseSensitive: !isWindowsLikeWorkspacePath(this.workspaceRoot) },
       [...this.files.values()].map((file) => ({ filePath: this.uri(file.path).toString(), content: file.content })));
   }
   resources(): Monaco.Uri[] { return [...this.models.values()].map(({ model }) => model.uri); }

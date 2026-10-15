@@ -120,8 +120,8 @@ def test_handoff_samples_one_local_checkout_once(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_projectless_activation_clears_the_real_session_workspace_scope(tmp_path):
-    conversation = SimpleNamespace(id="projectless", workspace_root="", worktree_path="")
-    session = SimpleNamespace(active_conversation_id="old", conversation_repo=SimpleNamespace(get_conversation=lambda _owner: conversation),
+    conversation = SimpleNamespace(id="projectless", workspace_root="", worktree_path="", execution_cwd="")
+    session = SimpleNamespace(active_conversation_id="old", conversation_repo=SimpleNamespace(get_conversation=lambda _owner: conversation, get_conversation_summary=lambda _owner: conversation),
                               refresh_tool_registry_if_mcp_changed=Mock())
     lifecycle = SessionLifecycle(session)
     lifecycle.workspace_root = tmp_path
@@ -149,12 +149,12 @@ async def test_connection_disposal_keeps_both_adopted_resources_and_accepts_no_s
 
 def test_permission_projection_keeps_the_requirement_source_and_violation(monkeypatch):
     violation = ValueError("managed policy disallows requested mode")
-    requirements = SimpleNamespace(resolve_permission_mode=lambda mode: (mode, None),
+    requirements = SimpleNamespace(resolve_permission_mode=lambda mode, **kwargs: (mode, None),
         source_for=lambda key: "managed" if key == "allowed_approval_policies" else "",
         approval_policy_for_mode=lambda _mode: "on-request", sandbox_mode_for_permission_mode=lambda _mode: "workspace-write")
     monkeypatch.setattr("backend.config.get_config_requirements", lambda: requirements)
     assert _managed_permission_projection("default") == ("default", "on-request", "workspace-write", "managed")
-    requirements.resolve_permission_mode = lambda mode: (mode, violation)
+    requirements.resolve_permission_mode = lambda mode, **kwargs: (mode, violation)
     with pytest.raises(ValueError, match="managed policy disallows requested mode"):
         _managed_permission_projection("default")
 

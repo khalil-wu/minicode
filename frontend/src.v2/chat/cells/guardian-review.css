@@ -1,0 +1,30 @@
+.guardian-review-cell { color: var(--text-secondary); }
+.guardian-review-action, .guardian-review-detail-button {
+  display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 0; border: 0;
+  color: inherit; background: none; font: inherit; text-align: left; cursor: pointer;
+}
+.guardian-review-action { width: 100%; min-height: 24px; }
+.guardian-review-action > span, .guardian-review-detail-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guardian-review-action > svg, .guardian-warning-cell > svg { flex-shrink: 0; }
+.guardian-review-details { padding-top: 4px; color: var(--text-secondary); }
+.guardian-review-details[data-high-risk="true"] .guardian-review-detail-button,
+.guardian-review-glyph-warning { color: var(--state-warning); }
+.guardian-review-chevron { flex-shrink: 0; opacity: 0; transition: opacity var(--duration-reveal) var(--easing-css-default), transform var(--duration-reveal) var(--easing-css-default); }
+.guardian-review-action:hover .guardian-review-chevron, .guardian-review-detail-button:hover .guardian-review-chevron,
+.guardian-review-chevron[data-expanded="true"] { opacity: 1; }
+.guardian-review-rationale { max-width: 80ch; margin: 0; padding-top: 4px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; }
+.guardian-warning-cell { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.guardian-warning-info { display: inline-flex; border: 0; background: none; padding: 0; color: inherit; cursor: pointer; }
+.guardian-command-denial { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; }
+.guardian-command-denial > p { margin: 0; }
+.guardian-manual-approval { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; }
+.guardian-manual-approval > p, .guardian-manual-approval > div > p { margin: 0; }
+.guardian-manual-approval > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.guardian-manual-approval > div > p { flex: 1; color: var(--text-secondary); }
+.guardian-manual-approval button { padding: 5px 10px; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--surface-raised); color: var(--text-primary); font: inherit; cursor: pointer; }
+.guardian-manual-approval button:disabled { opacity: .55; cursor: default; }
+.guardian-patch-cell { display: flex; flex-direction: column; gap: 8px; }
+.guardian-patch-header { display: inline-flex; gap: 6px; max-width: 100%; }
+.guardian-patch-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guardian-patch-header:hover .guardian-review-chevron { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .guardian-review-chevron { transition: none; } }

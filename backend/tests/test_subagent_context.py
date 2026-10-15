@@ -22,6 +22,7 @@ from backend.tools.subagent_context import (
     build_agent_execution_profile,
     build_subagent_permission_context,
     build_subagent_prompt,
+    execution_profile_for_background_resume,
     is_subagent_permission_context,
     resolve_agent_execution_profile,
     sanitize_subagent_runtime_metadata,
@@ -218,7 +219,7 @@ def test_teammate_toolset_keeps_sync_delegation_and_task_coordination() -> None:
     assert "task_status" in teammate_default
     assert "task_output" in teammate_default
     assert "team_create" in teammate_default
-    assert "ask_user" in teammate_default
+    assert "request_user_input" in teammate_default
     assert "enter_plan_mode" in teammate_default
     assert "exit_plan_mode" in teammate_default
     assert "exit_plan_mode" not in teammate_plan
@@ -496,6 +497,35 @@ def test_background_subagent_profile_denies_coordination_and_uses_positive_surfa
     )
 
 
+def test_foreground_resume_keeps_authorized_communication_and_exact_permission_owner(tmp_path) -> None:
+    original = build_agent_execution_profile()
+    resumed = execution_profile_for_background_resume(AgentExecutionProfile.from_mapping(original.to_dict()))
+    assert resumed.to_dict() == {**original.to_dict(), "delivery": "background"}
+    assert resumed.message_coordination and resumed.task_coordination
+    assert resumed.delegation == "none" and not resumed.agent_lifecycle
+    parent = ToolExecutionContext(permission=PermissionContext(
+        mode="confirm", approval_policy="on-request", sandbox_mode="read-only", workspace_root=tmp_path,
+        filesystem_constraints={"write_allowlist": ["allowed/**"], "denylist": ["secret/**"]},
+        tool_deny_rules=["web_fetch"], allow_unsandboxed_commands=False,
+    ))
+    before = build_subagent_permission_context("general-purpose", parent, read_only=True, execution_profile=original)
+    after = build_subagent_permission_context("general-purpose", parent, read_only=True, background=True, execution_profile=resumed)
+    assert after == before
+    assert "send_message" not in after.tool_deny_rules
+    assert "task" in after.tool_deny_rules and "web_fetch" in after.tool_deny_rules
+    assert after.filesystem_constraints == parent.permission.filesystem_constraints
+    assert subagent_toolset_policy(execution_profile=resumed) == subagent_toolset_policy(execution_profile=original)
+
+
+@pytest.mark.parametrize("profile", [build_agent_execution_profile(background=True), build_agent_execution_profile(team_mode=True)])
+def test_existing_async_and_persistent_resume_profiles_do_not_expand(profile) -> None:
+    restored = AgentExecutionProfile.from_mapping(profile.to_dict())
+    resumed = execution_profile_for_background_resume(restored)
+    assert resumed is restored
+    assert resumed.to_dict() == profile.to_dict()
+    assert subagent_toolset_policy(execution_profile=resumed) == subagent_toolset_policy(execution_profile=profile)
+
+
 def test_filesystem_constraints_parse_strings_and_reject_invalid_scalars() -> None:
     parent = ToolExecutionContext(
         permission=PermissionContext(
@@ -545,7 +575,7 @@ def test_tool_search_cannot_bridge_denied_tools_for_subagent() -> None:
         "task_stop",
         "send_message",
         "team_create",
-        "ask_user",
+        "request_user_input",
         "update_plan",
         "safe_deferred_tool",
     ]:
@@ -557,26 +587,27 @@ def test_tool_search_cannot_bridge_denied_tools_for_subagent() -> None:
         metadata={
             "_agent_state": state,
             "_agent_execution_profile": build_agent_execution_profile(background=False),
+            SESSION_TOOLSET_POLICY_METADATA_KEY: ToolsetPolicy(supports_search_tool=True),
         },
     )
     result = asyncio.run(
         ToolSearchTool(registry).execute(
             {
-                "query": "select:task_stop,send_message,team_create,ask_user,update_plan,safe_deferred_tool",
+                "query": "task_stop send_message team_create request_user_input update_plan safe_deferred_tool",
             },
             context=context,
         )
     )
 
     assert result.is_error is False
-    payload = json.loads(result.content)
-    match_names = set(payload["matches"])
+    match_names = {tool["name"] for namespace in result.tool_search_output for tool in namespace["tools"]}
     # Coordination messaging is intentionally available to ordinary
     # subagents; the parent/tree authorization check remains in SendMessage.
-    assert match_names == {"send_message", "safe_deferred_tool"}
-    # send_message is directly visible, so selecting it is a no-op; only the
-    # safe deferred tool enters the activation set.
-    assert payload["total_deferred_tools"] == 1
+    assert match_names == {"safe_deferred_tool"}
+    # Source search returns only deferred definitions. send_message remains
+    # directly visible under the child's actual capability policy.
+    child_policy = subagent_toolset_policy(permission_mode="bypass", execution_profile=build_agent_execution_profile(background=False))
+    assert child_policy.is_directly_visible(registry.get_tool_spec("send_message"))
     assert state.loaded_deferred_tools == {"safe_deferred_tool"}
 
 
@@ -625,7 +656,7 @@ def test_tool_search_uses_teammate_policy_instead_of_ordinary_subagent_policy() 
         ToolSearchTool(registry).execute(
             {
                 "query": (
-                    "select:task,task_create,task_status,exit_plan_mode,"
+                    "task task_create task_status exit_plan_mode "
                     "safe_deferred_tool"
                 )
             },
@@ -634,13 +665,12 @@ def test_tool_search_uses_teammate_policy_instead_of_ordinary_subagent_policy() 
                     mode="confirm",
                     source="teammate:implement",
                 ),
-                metadata={"_agent_state": default_state},
+                metadata={"_agent_state": default_state,
+                    SESSION_TOOLSET_POLICY_METADATA_KEY: ToolsetPolicy(supports_search_tool=True)},
             ),
         )
     )
-    default_payload = json.loads(default_result.content)
-
-    assert set(default_payload["matches"]) == {
+    assert {tool["name"] for namespace in default_result.tool_search_output for tool in namespace["tools"]} == {
         "task",
         "task_create",
         "safe_deferred_tool",
@@ -654,19 +684,18 @@ def test_tool_search_uses_teammate_policy_instead_of_ordinary_subagent_policy() 
     plan_state = AgentState(user_message="teammate plan discovery")
     plan_result = asyncio.run(
         ToolSearchTool(registry).execute(
-            {"query": "select:exit_plan_mode,task_status"},
+            {"query": "exit_plan_mode task_status"},
             context=ToolExecutionContext(
                 permission=PermissionContext(
                     mode="plan",
                     source="teammate:implement:required_plan",
                 ),
-                metadata={"_agent_state": plan_state},
+                metadata={"_agent_state": plan_state,
+                    SESSION_TOOLSET_POLICY_METADATA_KEY: ToolsetPolicy(supports_search_tool=True)},
             ),
         )
     )
-    plan_payload = json.loads(plan_result.content)
-
-    assert plan_payload["matches"] == ["exit_plan_mode"]
+    assert [tool["name"] for namespace in plan_result.tool_search_output for tool in namespace["tools"]] == ["exit_plan_mode"]
     assert plan_state.loaded_deferred_tools == {"exit_plan_mode"}
 
 

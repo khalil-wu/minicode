@@ -16,13 +16,21 @@ def live_sessions(session: "WebSocketSession") -> list["WebSocketSession"]:
     return sessions if session in sessions else [session, *sessions]
 
 
+def resource_sessions(session: "WebSocketSession") -> list["WebSocketSession"]:
+    manager = session.ws_manager
+    if manager is None:
+        return [session]
+    sessions = list(manager.resource_sessions())
+    return sessions if session in sessions else [session, *sessions]
+
+
 def conversation_activity_blockers(session: "WebSocketSession", conversation_id: str) -> dict[str, int]:
     """Count the live resources owned by a conversation before a mutation."""
     from backend.preview.launcher import running_preview_processes
     from backend.api import _state as api_state
     from backend.tasks import scheduler as scheduler_module
 
-    owners = live_sessions(session)
+    owners = resource_sessions(session)
     bootstrap = api_state.bootstrap
     scheduler = (bootstrap.task_scheduler if bootstrap is not None else None) or scheduler_module._GLOBAL_SCHEDULER
     return {

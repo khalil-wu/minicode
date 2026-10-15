@@ -240,7 +240,9 @@ def test_prompt_builder_keeps_dynamic_turn_context_out_of_stable_prefix(tmp_path
         assert dynamic_fact not in parts.stable
 
     assert "DYNAMIC WORKSPACE SUMMARY" in parts.context
-    assert "DYNAMIC SKILL CONTEXT" in parts.context
+    assert "DYNAMIC SKILL CONTEXT" in parts.skill_context
+    assert "DYNAMIC SKILL CONTEXT" not in parts.render_system()
+    assert parts.render_skill_instructions() == "<skills_instructions>\nDYNAMIC SKILL CONTEXT: selected skill for this turn\n</skills_instructions>"
     assert "DYNAMIC PROJECT GUIDELINES" in parts.project_guidelines
     assert "DYNAMIC PROJECT GUIDELINES" not in parts.render_system()
     assert "DYNAMIC TOOL GUIDANCE" not in parts.context
@@ -330,7 +332,8 @@ def test_read_only_subagent_keeps_project_instructions_without_parent_memory(tmp
     )
 
     assert "SCOPED WORKSPACE SUMMARY" in parts.context
-    assert "TASK SPECIFIC SKILL" in parts.context
+    assert "TASK SPECIFIC SKILL" in parts.skill_context
+    assert "TASK SPECIFIC SKILL" not in parts.render_system()
     assert "PARENT PROJECT GUIDELINES" in parts.project_guidelines
     assert "PARENT CONVERSATION MEMORY" not in parts.context
     assert "PARENT PERSISTENT FACTS" not in parts.context
@@ -347,7 +350,7 @@ def test_context_builder_puts_tool_runtime_context_in_dynamic_developer_instruct
     asyncio.run(context.start_turn(state.user_message, state))
     messages = asyncio.run(context.build(state))
     system = messages[0].content
-    developer = messages[1].content
+    developer = next(message.content for message in messages if message.role == "developer" and "<tool_runtime_context>" in str(message.content))
     user = messages[-1].content
 
     assert "DYNAMIC TOOL GUIDANCE" not in system

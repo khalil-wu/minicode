@@ -235,7 +235,10 @@ def _proxy_for_url(url: str) -> str | None:
         or os.environ.get("no_proxy")
         or str(proxies.get("no") or proxies.get("no_proxy") or "")
     )
-    if _host_matches_no_proxy(parsed.hostname, parsed.port, no_proxy):
+    port = parsed.port
+    if port is None:
+        port = {"http": 80, "https": 443}.get(parsed.scheme)
+    if _host_matches_no_proxy(parsed.hostname, port, no_proxy):
         return None
     value = proxies.get(parsed.scheme) or proxies.get("all")
     return str(value) if value else None
@@ -259,10 +262,11 @@ def _host_matches_no_proxy(host: str, port: int | None, raw: str) -> bool:
         if item.startswith("."):
             item = item[1:]
         token_host, sep, token_port = item.rpartition(":")
-        if sep and token_host and token_port.isdigit():
+        if sep and token_host and token_port.isdigit() and (item.count(":") == 1 or token_host.endswith("]")):
             if port is None or int(token_port) != port:
                 continue
             item = token_host
+        item = item.strip("[]")
         try:
             if address is not None and address in ipaddress.ip_network(item, strict=False):
                 return True

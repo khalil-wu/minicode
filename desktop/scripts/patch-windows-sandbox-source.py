@@ -374,6 +374,13 @@ fn revoking_absent_sid_preserves_child_null_dacl()''')
     replace("service_identity.rs", 'None => crate::SANDBOX_PROVISIONING_PIPE_NAME.into()', 'None => crate::owner_identity::owner().pipe.clone()')
 
     replace("wrapper.rs", '    let request = parse_windows_sandbox_wrapper_args(args)?;', '    let request = parse_windows_sandbox_wrapper_args(args)?;\n    crate::owner_identity::bind_current(&request.codex_home)?;')
+    # UnifiedExec exposes tty in the resolved request. Keep its actual ConPTY
+    # sandbox spawn; attaching only the outer wrapper to a PTY is insufficient.
+    replace("wrapper.rs", '    command: Vec<String>,\n}', '    command: Vec<String>,\n    tty: bool,\n}')
+    replace("wrapper.rs", '            tty: false,', '            tty: request.tty,')
+    replace("wrapper.rs", '    let mut command = None;', '    let mut command = None;\n    let mut tty = false;')
+    replace("wrapper.rs", '            PROXY_ENFORCED_FLAG => proxy_enforced = true,', '            "--tty" => tty = true,\n            PROXY_ENFORCED_FLAG => proxy_enforced = true,')
+    replace("wrapper.rs", '        command: command.ok_or_else(|| anyhow!("missing sandboxed command separator --"))?,', '        command: command.ok_or_else(|| anyhow!("missing sandboxed command separator --"))?,\n        tty,')
     replace("setup_provisioning.rs", '    *setup_mode = Some(payload.mode);', '    crate::owner_identity::bind_for_user(&payload.codex_home, &payload.real_user)?;\n    anyhow::ensure!(payload.offline_username == crate::setup::offline_username() && payload.online_username == crate::setup::online_username(), "setup payload accounts do not match its owner");\n    *setup_mode = Some(payload.mode);')
     replace("setup_provisioning.rs", '        anyhow::ensure!(\n            crate::runtime_ownership::load_installation()?\n                .is_none_or(|record| record.runtime.is_none()),\n            "registered Core owns these sandbox accounts; helper provisioning is not permitted"\n        );', '''        let owner = crate::owner_identity::owner();
         if let Some(record) = crate::runtime_ownership::load_installation()? {

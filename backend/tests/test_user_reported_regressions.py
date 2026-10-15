@@ -829,10 +829,13 @@ def test_paged_read_artifact_does_not_resend_the_artifact_head(tmp_path) -> None
     assert "LINE0001_head" not in rendered
     assert paged.content_preview is None
 
-    # An unpaged read still gets the truncated preview.
+    # Unpaged reads return the requested body once; a second head preview
+    # would duplicate the same model-visible text.
     unpaged = asyncio.run(tool.execute({"artifact_id": artifact_id}))
-    assert unpaged.content_preview
-    assert "LINE0001_head" in unpaged.content_preview
+    assert unpaged.content_preview is None
+    unpaged_rendered = unpaged.to_context_string()
+    assert unpaged_rendered.count("LINE0001_head") == 1
+    assert unpaged_rendered.count("LINE0600_tail") == 1
 
     # Invalid windows are rejected at the real schema boundary instead of
     # silently expanding the request to an unpaged artifact read.

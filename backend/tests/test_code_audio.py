@@ -64,7 +64,8 @@ async def test_selected_audio_is_persisted_once_and_references_survive_cold_read
     assert store.get(artifact_id, conversation_id="another", workspace_root=tmp_path) is None
     history = json.dumps(builder.export_snapshot(), ensure_ascii=False)
     assert artifact_id in history and "not transcribed" in history
-    assert wav_data(1) not in history
+    assert wav_data(1) in history  # Native audio remains part of the admitted model body.
+    assert any(item["type"] == "input_audio" for message in builder._history for item in message.code_mode_output or [])
     assert any(event.payload.get("lifecycle") == "artifact_preview" and event.payload["artifact_id"] == artifact_id for event in journal.read_events())
     recovered = journal.reconstruct_history()
     assert artifact_id in json.dumps(recovered)
@@ -96,7 +97,7 @@ async def test_audio_helper_rejects_non_audio_input(tmp_path, expression):
     model = ScriptModel(expression)
     _, _, _, events, _ = await run_model(tmp_path, model, [])
     assert model.reports[-1]["status"] == "failed"
-    assert "audio() requires" in model.reports[-1]["error"]
+    assert "audio" in model.reports[-1]["error"] and "TypeError" in model.reports[-1]["error"]
     assert not any(event.type == "artifact.preview" for event in events)
 
 
@@ -108,18 +109,16 @@ async def test_mcp_audio_is_available_to_code_and_direct_results(tmp_path):
         annotations={"readOnlyHint": True}), client)
     normalized = await tool.execute({})
     assert normalized.audios == [{"media_type": "audio/wav", "data": wav_data()}]
-    model = ScriptModel(f'await tools.tool_search({{query:"select:{tool.name}"}}); const r = await tools.{tool.name}({{}}); audio(r.audios[0]);')
+    model = ScriptModel(f'const r = await tools.{tool.name}({{}}); audio(r.content[0]);')
     state, _, _, events, _ = await run_model(tmp_path / "nested", model, [tool])
     assert state.terminal_status == "completed", model.reports
     assert len([event for event in events if event.type == "artifact.preview"]) == 1
     from backend.llm.base import ToolCallEvent
-    async def after_discovery(_report):
-        return ToolCallEvent(id="audio-direct", name=tool.name, arguments={})
-    direct = ScriptModel("", first_call=ToolCallEvent(id="discover", name="tool_search", arguments={"query": f"select:{tool.name}"}), after_first=after_discovery)
+    direct = ScriptModel("", first_call=ToolCallEvent(id="audio-direct", name=tool.name, arguments={}))
     state, builder, _, events, _ = await run_model(tmp_path / "direct", direct, [tool])
     assert state.terminal_status == "completed"
     assert len([event for event in events if event.type == "artifact.preview"]) == 1
-    assert wav_data() not in json.dumps(builder.export_snapshot())
+    assert wav_data() in json.dumps(builder.export_snapshot())
 
 
 def test_audio_raw_response_preserves_bytes_ranges_and_conversation_owner(tmp_path):

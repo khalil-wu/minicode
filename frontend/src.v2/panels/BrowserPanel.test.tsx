@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { handlePreviewEvent } from "../chat/previewEvents";
 import type { ServerEvent } from "../protocol/events";
-import type { EmbeddedBrowserState } from "../desktop/runtime";
+import type { EmbeddedBrowserState, EmbeddedBrowserSettingsSnapshot } from "../desktop/runtime";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import { ContextMenu } from "../components/ContextMenu";
 import { __resetOpenWebInBrowserForTests, openWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
+vi.mock("./browser-annotation-capture", () => ({ captureBrowserAnnotationAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], composerAttachments: [] })) }));
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -53,8 +55,11 @@ const runtimeMocks = vi.hoisted(() => ({
   clearSiteData: vi.fn(async () => true),
   close: vi.fn(async () => true),
   onEvent: vi.fn((_callback: (event: EmbeddedBrowserState) => void) => () => {}),
+  onSettingsChanged: vi.fn((_callback: (settings: EmbeddedBrowserSettingsSnapshot) => void) => () => {}),
   openExternal: vi.fn(async () => true),
 }));
+const feedbackMocks = vi.hoisted(() => ({ send: vi.fn(async (_options: Record<string, unknown>) => true) }));
+vi.mock("../chat/sendChatMessage", () => ({ sendChatMessage: feedbackMocks.send }));
 
 vi.mock("../desktop/runtime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../desktop/runtime")>();
@@ -73,6 +78,7 @@ vi.mock("../desktop/runtime", async (importOriginal) => {
     embeddedBrowserClearSiteData: runtimeMocks.clearSiteData,
     embeddedBrowserClose: runtimeMocks.close,
     onEmbeddedBrowserEvent: runtimeMocks.onEvent,
+    onEmbeddedBrowserSettingsChanged: runtimeMocks.onSettingsChanged,
     openExternal: runtimeMocks.openExternal,
   };
 });
@@ -103,9 +109,25 @@ const openBrowserAction = (name: string) => {
 };
 
 describe("BrowserPanel", () => {
+  it("preserves an unsubmitted address through same-URL title/favicon/loading events", async () => {
+    const listeners = new Set<(event: EmbeddedBrowserState) => void>();
+    runtimeMocks.onEvent.mockImplementation(listener => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+    runtimeMocks.list.mockResolvedValueOnce([page("address-draft", "Initial title", "https://example.com/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Initial title" });
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: "https://unsent.example/new" } });
+    act(() => { for (const listener of listeners) listener({ ...page("address-draft", "New title", "https://example.com/", true), loading: true, favicon: "https://example.com/favicon.ico" }); });
+    expect(address.value).toBe("https://unsent.example/new");
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    fireEvent.submit(address.closest("form")!);
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledWith("conv-browser", "address-draft", "https://unsent.example/new"));
+  });
   beforeEach(() => {
     vi.clearAllMocks();
+    feedbackMocks.send.mockReset().mockResolvedValue(true);
     runtimeMocks.onEvent.mockImplementation((_callback) => () => {});
+    runtimeMocks.onSettingsChanged.mockImplementation((_callback) => () => {});
     __resetOpenWebInBrowserForTests();
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     useAppStore.setState({
@@ -130,6 +152,41 @@ describe("BrowserPanel", () => {
       turnDiffs: {},
       diffReview: null,
     });
+  });
+
+  it("sends selected elements directly with real queue admission while keeping the main composer draft", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("feedback-page", "Page feedback", "https://feedback.example/", true)]);
+    useAppStore.setState({ isConnected: true, isStreaming: true, draft: "主对话未发送内容", selectedMentions: [{ kind: "file", path: "pending.ts", name: "pending.ts" }] });
+    feedbackMocks.send.mockImplementationOnce(async (options) => {
+      (options.onAdmission as (event: unknown) => void)({ data: { admitted: true, queued: true } });
+      return true;
+    });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page feedback" });
+    runtimeMocks.inspect.mockResolvedValueOnce({ ok: true, value: { selector: "#save", text: "保存", rect: { x: 10, y: 20, width: 40, height: 30 }, viewport: { width: 400, height: 300 } } } as never);
+    fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    await screen.findByText("保存");
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "调整按钮间距" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送页面反馈" }));
+    await screen.findByText("反馈已排队");
+    expect(feedbackMocks.send).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-browser", displayContent: "调整按钮间距", allowWhileStreaming: true, busyBehavior: "queue", awaitAdmission: true,
+      contextRefs: [expect.objectContaining({ kind: "browser_annotation", url: "https://feedback.example/", targetId: "feedback-page", selector: "#save", viewportWidth: 400 })] }));
+    expect(useAppStore.getState().draft).toBe("主对话未发送内容");
+    expect(useAppStore.getState().selectedMentions).toEqual([{ kind: "file", path: "pending.ts", name: "pending.ts" }]);
+  });
+
+  it("preserves a feedback draft when admission is rejected", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("rejected", "Rejected page", "https://rejected.example/", true)]);
+    feedbackMocks.send.mockResolvedValueOnce(false);
+    useAppStore.setState({ isConnected: true });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Rejected page" });
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "保留这条反馈" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送页面反馈" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送页面反馈" }).hasAttribute("disabled")).toBe(false));
+    expect((screen.getByRole("textbox", { name: "批注内容" }) as HTMLTextAreaElement).value).toBe("保留这条反馈");
+    expect(screen.queryByText("反馈已发送")).toBeNull();
   });
 
   it("presents an authorized tool's exact native target and reports the real pane bounds", async () => {
@@ -218,7 +275,7 @@ describe("BrowserPanel", () => {
     }
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "一起统一间距" } });
     fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
-    expect(useAppStore.getState().browserAnnotations.map((item) => item.selector).sort()).toEqual(["#first", "#second"]);
+    await waitFor(() => expect(useAppStore.getState().browserAnnotations.map((item) => item.selector).sort()).toEqual(["#first", "#second"]));
     expect(useAppStore.getState().selectedMentions).toHaveLength(2);
     expect(useAppStore.getState().browserAnnotations.every((item) => item.viewportWidth === 844 && item.note === "一起统一间距")).toBe(true);
   });
@@ -256,6 +313,50 @@ describe("BrowserPanel", () => {
     if (kind === "console") openBrowserAction("打开页面诊断");
     else fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Native inspector refused this page");
+  });
+
+  it("synchronizes an open site's committed permissions across windows and keeps each origin separate", async () => {
+    const listeners = new Set<(settings: EmbeddedBrowserSettingsSnapshot) => void>();
+    runtimeMocks.onSettingsChanged.mockImplementation(listener => { listeners.add(listener); return () => { listeners.delete(listener); }; });
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true), page("b", "Page B", "https://b.example/")]);
+    runtimeMocks.getSettings.mockResolvedValueOnce({ downloadPolicy: "block", origin: "https://a.example", permissions: ["geolocation"] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    openBrowserAction("打开站点设置");
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "位置" })).toHaveProperty("checked", true));
+    act(() => { for (const listener of listeners) listener({ downloadPolicy: "allow", sitePermissions: { "https://a.example": ["notifications"], "https://b.example": ["geolocation"] } }); });
+    expect(screen.getByRole("checkbox", { name: "位置" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "通知" })).toHaveProperty("checked", true);
+    const oldRead = pending<{ downloadPolicy: "block"; origin: string; permissions: string[] }>();
+    runtimeMocks.getSettings.mockReturnValueOnce(oldRead.promise);
+    fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
+    openBrowserAction("打开站点设置");
+    act(() => { for (const listener of listeners) listener({ downloadPolicy: "ask", sitePermissions: { "https://b.example": ["geolocation"] } }); });
+    await act(async () => oldRead.resolve({ downloadPolicy: "block", origin: "https://b.example", permissions: ["notifications"] }));
+    expect(screen.getByRole("checkbox", { name: "位置" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("checkbox", { name: "通知" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("button", { name: "下载策略，当前：每次询问" })).toBeTruthy();
+    act(() => { for (const listener of listeners) listener({ downloadPolicy: "ask", sitePermissions: {} }); });
+    expect(screen.getByRole("checkbox", { name: "位置" })).toHaveProperty("checked", false);
+  });
+
+  it("does not roll an open site back to a delayed write ACK after another window commits", async () => {
+    let publish!: (settings: EmbeddedBrowserSettingsSnapshot) => void;
+    runtimeMocks.onSettingsChanged.mockImplementation(listener => { publish = listener; return () => {}; });
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    runtimeMocks.getSettings.mockResolvedValueOnce({ downloadPolicy: "block", origin: "https://a.example", permissions: [] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    openBrowserAction("打开站点设置");
+    await screen.findByText("https://a.example");
+    const write = pending<{ downloadPolicy: "allow"; origin: string; permissions: string[] }>();
+    runtimeMocks.setSettings.mockReturnValueOnce(write.promise);
+    fireEvent.click(screen.getByRole("button", { name: "下载策略，当前：阻止" }));
+    fireEvent.click(screen.getByRole("option", { name: "保存到下载目录" }));
+    act(() => publish({ downloadPolicy: "ask", sitePermissions: { "https://a.example": ["geolocation"] } }));
+    await act(async () => write.resolve({ downloadPolicy: "allow", origin: "https://a.example", permissions: [] }));
+    expect(screen.getByRole("checkbox", { name: "位置" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("button", { name: "下载策略，当前：每次询问" })).toHaveProperty("disabled", false);
   });
 
   it("serializes site writes and keeps a committed setting when a reopened pane's older read completes", async () => {
@@ -1002,8 +1103,14 @@ describe("BrowserPanel", () => {
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "agent_browser", "console"));
     expect(screen.getByRole("tab", { name: /控制台/ })).toBeTruthy();
 
+    fireEvent.change(screen.getByRole("combobox", { name: "筛选页面诊断" }), { target: { value: "warnings" } });
+
     fireEvent.click(screen.getByRole("tab", { name: /网络/ }));
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenLastCalledWith("conv-browser", "agent_browser", "network"));
+    expect((screen.getByRole("combobox", { name: "筛选页面诊断" }) as HTMLSelectElement).value).toBe("all");
+    fireEvent.change(screen.getByRole("combobox", { name: "筛选页面诊断" }), { target: { value: "fetch" } });
+    fireEvent.click(screen.getByRole("tab", { name: /控制台/ }));
+    expect((screen.getByRole("combobox", { name: "筛选页面诊断" }) as HTMLSelectElement).value).toBe("all");
   });
 
   it("loads and updates embedded browser site settings", async () => {
@@ -1060,6 +1167,7 @@ describe("BrowserPanel", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "调整这里的圆角" } });
     fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
 
+    await waitFor(() => expect(useAppStore.getState().browserAnnotations).toHaveLength(1));
     const annotation = useAppStore.getState().browserAnnotations[0];
     expect(annotation.note).toBe("调整这里的圆角");
     expect(annotation.xPercent).toBeCloseTo(0.2);
@@ -1205,7 +1313,7 @@ describe("BrowserPanel", () => {
     expect((screen.getByRole("textbox", { name: "元素选择器" }) as HTMLInputElement).value).toBe("");
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "Only for page B" } });
     fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
-    expect(useAppStore.getState().browserAnnotations[0]).toMatchObject({ targetId: "b", url: "https://b.example/", note: "Only for page B" });
+    await waitFor(() => expect(useAppStore.getState().browserAnnotations[0]).toMatchObject({ targetId: "b", url: "https://b.example/", note: "Only for page B" }));
     expect(useAppStore.getState().browserAnnotations[0].selector).toBeUndefined();
   });
 

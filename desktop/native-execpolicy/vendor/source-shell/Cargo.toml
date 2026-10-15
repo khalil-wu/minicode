@@ -1,0 +1,28 @@
+[package]
+name = "minicode-source-shell"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+description = "Unmodified pinned Codex shell parsing and command safety modules"
+
+[dependencies]
+codex-utils-absolute-path = { workspace = true }
+libc = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tree-sitter-powershell = { workspace = true }
+url = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+doctest = false

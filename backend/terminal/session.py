@@ -4,6 +4,7 @@ import asyncio
 import codecs
 import logging
 import os
+from pathlib import Path
 import platform
 import signal
 import subprocess
@@ -69,6 +70,7 @@ class TerminalSession:
         on_output: Callable[[str, str, int, int], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
         conversation_id: str = "",
+        shell: str = "",
     ) -> None:
         self.session_id = session_id
         self.conversation_id = conversation_id
@@ -77,6 +79,7 @@ class TerminalSession:
         self._on_exit = on_exit
         self._process: asyncio.subprocess.Process | None = None
         self._shell_cmd: list[str] = []
+        self._requested_shell = shell
         self._started_at = 0.0
         self._output_buffer: list[str] = []
         self._output_cursor = 0
@@ -220,16 +223,28 @@ class TerminalSession:
         if self.is_alive:
             return
 
-        if self._is_windows:
+        requested = self._requested_shell
+        shell = requested if requested and requested != "system" else ("powershell.exe" if self._is_windows else os.environ.get("SHELL", "/bin/bash"))
+        if self._is_windows and shell in {"powershell", "pwsh", "cmd"}:
+            shell += ".exe"
+        shell_name = Path(shell).name.casefold().removesuffix(".exe")
+        if shell_name in {"powershell", "pwsh"}:
             self._shell_cmd = [
-                "powershell.exe",
+                shell,
                 "-NoProfile",
                 "-NoLogo",
                 "-NoExit",
             ]
-        else:
-            shell = os.environ.get("SHELL", "/bin/bash")
+        elif shell_name == "cmd":
+            self._shell_cmd = [shell, "/Q", "/K"]
+        elif shell_name == "bash":
             self._shell_cmd = [shell, "--norc", "--noprofile", "-i"]
+        elif shell_name == "zsh":
+            self._shell_cmd = [shell, "-f", "-i"]
+        elif shell_name == "fish":
+            self._shell_cmd = [shell, "-i"]
+        else:
+            self._shell_cmd = [shell]
 
         self._process = await spawn_exec(
             *self._shell_cmd,
@@ -247,8 +262,8 @@ class TerminalSession:
         self._stderr_reader_task = asyncio.create_task(self._read_stderr())
         self._waiter_task = asyncio.create_task(self._wait_for_exit())
 
-        if self._is_windows and self._process.stdin:
-            init_cmd = _windows_powershell_init_command()
+        if self._is_windows and shell_name in {"powershell", "pwsh", "cmd"} and self._process.stdin:
+            init_cmd = "chcp 65001 >nul\n" if shell_name == "cmd" else _windows_powershell_init_command()
             try:
                 self._process.stdin.write(init_cmd.encode("utf-8"))
                 await self._process.stdin.drain()
@@ -479,6 +494,7 @@ class TerminalSessionManager:
         on_output: Callable[[str, str, int, int], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
         conversation_id: str = "",
+        shell: str = "",
     ) -> TerminalSession:
         owner = _require_conversation_owner(conversation_id)
         dead_ids = [sid for sid, session in self._sessions.items() if not session.is_alive]
@@ -498,6 +514,7 @@ class TerminalSessionManager:
             # against a stripped id, so storing the raw value made a padded
             # conversation_id produce a session nothing could address or kill.
             conversation_id=owner,
+            shell=shell,
         )
         await session.start()
         self._sessions[session_id] = session

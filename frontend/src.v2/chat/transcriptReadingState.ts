@@ -51,5 +51,10 @@ export function useTranscriptReadingPreference<T>(key: string, initial: T) {
       return value;
     });
   }, [key, preferences]);
-  return [value, update, userToggled] as const;
+  const reset = useCallback((next: T) => {
+    preferences?.delete(key);
+    userToggled.current = false;
+    setValue(next);
+  }, [key, preferences]);
+  return [value, update, userToggled, reset] as const;
 }

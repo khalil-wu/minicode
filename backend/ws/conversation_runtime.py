@@ -377,7 +377,7 @@ class ConversationRuntime:
         elif callback is not None:
             await callback(conversation_id)
 
-    def rewind_to_user_turn(
+    def prepare_retry_from_message(
         self,
         *,
         conversation: Any,
@@ -442,20 +442,34 @@ class ConversationRuntime:
             trimmed_transcript,
             getattr(conversation, "workspace_root", "") or None,
         )
-        committed = self._conversation_repo.commit_rewind_projection(
-            conversation.id,
-            transcript=trimmed_transcript,
-            context_snapshot=snapshot,
-            summary=self._build_summary_from_transcript(
+        return {
+            "transcript": trimmed_transcript,
+            "context_snapshot": snapshot,
+            "summary": self._build_summary_from_transcript(
                 trimmed_transcript,
                 compaction_summary=conversation.compaction_summary or "",
             ),
-            memory_pollution_sources=pollution_sources_from_transcript(
+            "memory_pollution_sources": pollution_sources_from_transcript(
                 trimmed_transcript
             ),
-            expected_revision=int(getattr(conversation, "revision", 0) or 0),
+            "expected_revision": int(getattr(conversation, "revision", 0) or 0),
+        }
+
+    def rewind_to_user_turn(
+        self,
+        *,
+        conversation: Any,
+        retry_from_message_id: str,
+    ) -> Any | None:
+        prepared = self.prepare_retry_from_message(
+            conversation=conversation, retry_from_message_id=retry_from_message_id,
+        )
+        if prepared is None:
+            return None
+        committed = self._conversation_repo.commit_rewind_projection(
+            conversation.id, **prepared,
         )
         if committed is None:
             return None
-        self._context_builder.load_snapshot(snapshot)
+        self._context_builder.load_snapshot(prepared["context_snapshot"])
         return committed

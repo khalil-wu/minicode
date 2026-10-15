@@ -1,5 +1,7 @@
 export { UserMessageCell } from "./UserMessageCell";
 export { StatusNoticeCell } from "./StatusNoticeCell";
+export { GuardianReviewCell, GuardianWarningCell } from "./GuardianReviewCell";
+export { ContextCompactionCell } from "./ContextCompactionCell";
 export { ActivityCell } from "./ActivityCell";
 export { ExecCell } from "./ExecCell";
 export { DiffCell } from "./DiffCell";

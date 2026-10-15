@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import hashlib
 import inspect
 import logging
 import os
@@ -29,7 +28,7 @@ from backend.services.conversation_projection_service import (
     replay_pending_conversation_projections as _replay_pending_conversation_projections,
 )
 from backend.agent.context import ContextBuilder
-from backend.agent.execution_journal import execution_journal_owner, conversation_projection_owner_fields
+from backend.agent.execution_journal import execution_journal_owner, conversation_projection_owner_fields, turn_user_prompt_id, turn_input_consumption_id, turn_input_rejection_id
 from backend.agent.lifecycle_generation import LifecycleGenerationState
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import (
@@ -46,9 +45,10 @@ from backend.agent.query_engine import AgentSession, QuerySubmission
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
 from backend.agent.model_execution import ModelExecutionSnapshot
-from backend.agent.turn_state import AgentTurnState
+from backend.agent.turn_state import AgentTurnState, record_user_input_block
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
 from backend.config import AppConfig, get_available_models, get_llm_provider, load_config
+from backend.conversations.public_projection import project_public_transcript_message
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
     conversation_query_guards,
@@ -140,6 +140,9 @@ _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
     "approval_request",
     "approval.file_diff",
     "ask_user",
+    "request_user_input",
+    "guardian_assessment",
+    "guardian_warning",
     "citation.add",
     "artifact.preview",
     "done",
@@ -378,6 +381,8 @@ def _project_agent_message_event(
                     if item.get(key) is not None
                 },
             )
+        elif item.get("type") == "context_compaction":
+            turn_state.record_context_compaction_item(item)
     elif event_type == "agent_message.delta":
         turn_state.append_agent_message_delta(
             str(data.get("item_id") or "agent-message"),
@@ -400,6 +405,8 @@ def _project_agent_message_event(
                     else None
                 ),
             )
+        elif item.get("type") == "context_compaction":
+            turn_state.record_context_compaction_item(item)
 
 
 def _empty_ui_agent_state() -> dict[str, Any]:
@@ -408,7 +415,8 @@ def _empty_ui_agent_state() -> dict[str, Any]:
 
 def _reset_ui_agent_state_snapshot(snapshot: Any) -> dict[str, Any]:
     next_snapshot = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
-    next_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = _empty_ui_agent_state()
+    children = _coerce_ui_agent_state(next_snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY))["subagents"]
+    next_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = {**_empty_ui_agent_state(), "subagents": children}
     return next_snapshot
 
 
@@ -902,7 +910,9 @@ def _subagent_ui_metadata(data: dict[str, Any]) -> dict[str, Any]:
         "current_activity": "currentActivity", "waiting_on": "waitingOn",
         "current_tool": "currentTool", "iteration": "iteration",
         "last_progress_at": "lastProgressAt", "needs_input": "needsInput",
-        "teammate_name": "teammateName", "team_name": "teamName",
+        "teammate_name": "teammateName", "display_name": "displayName", "team_name": "teamName",
+        "accepted_at": "acceptedAt", "started_at": "startedAt", "completed_at": "completedAt",
+        "workspace_root": "workspaceRoot",
         "awaiting_plan_approval": "awaitingPlanApproval", "active_plan_request_id": "activePlanRequestId",
         "is_idle": "isIdle", "cleanup_pending": "cleanupPending", "cleanup_reason": "cleanupReason",
     }
@@ -920,10 +930,19 @@ def _subagent_ui_metadata(data: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def _newer_subagent_ui_incarnation(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    return bool(existing.get("agentPath") and incoming.get("agentPath")
+                and isinstance(existing.get("mailboxEpoch"), int) and isinstance(incoming.get("mailboxEpoch"), int)
+                and incoming["mailboxEpoch"] > existing["mailboxEpoch"])
+
+
 def _project_subagent_start(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
     subagent_id = str(data.get("subagent_id") or "").strip()
     if not subagent_id:
         return None
+    existing = next((row for row in state["subagents"] if row.get("id") == subagent_id), None)
+    if existing and existing.get("status") in {"done", "partial", "cancelled", "error"} and not _newer_subagent_ui_incarnation(existing, _subagent_ui_metadata(data)):
+        return state
     state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
         "id": subagent_id,
         "role": str(data.get("role") or "subagent"),
@@ -947,7 +966,7 @@ def _project_subagent_progress(state: dict[str, Any], data: dict[str, Any]) -> d
     )
     if isinstance(existing_subagent, dict) and str(existing_subagent.get("status") or "") in {
         "done", "partial", "cancelled", "error",
-    }:
+    } and not _newer_subagent_ui_incarnation(existing_subagent, _subagent_ui_metadata(data)):
         return state
     summary = _subagent_summary(data)
     reported_status = str(data.get("status") or "running")
@@ -1194,7 +1213,24 @@ def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any
     handler = _UI_AGENT_STATE_HANDLERS.get(event_type)
     if handler is None:
         return None
-    return handler(_coerce_ui_agent_state(current), data)
+    state = _coerce_ui_agent_state(current)
+    if event_type in {"subagent.start", "subagent.progress", "subagent.done"}:
+        existing = next((row for row in state["subagents"] if row.get("id") == data.get("subagent_id")), None)
+        incoming = _subagent_ui_metadata(data)
+        if existing and existing.get("agentPath") and incoming.get("agentPath") and isinstance(existing.get("mailboxEpoch"), int) and isinstance(incoming.get("mailboxEpoch"), int):
+            if incoming["mailboxEpoch"] < existing["mailboxEpoch"] or incoming["agentPath"] != existing["agentPath"]:
+                return state
+            if incoming["mailboxEpoch"] > existing["mailboxEpoch"]:
+                # A resume keeps the thread history, but the previous execution
+                # result must not masquerade as this incarnation's completion.
+                state["subagents"] = [
+                    {**row, "resultAvailable": False, "resultContent": None, "resultError": None,
+                     "completedAt": None, "durationMs": None, "toolCallCount": None,
+                     "terminationReason": None, "terminationInitiator": None, "checkpointId": None}
+                    if row.get("id") == existing["id"] else row
+                    for row in state["subagents"]
+                ]
+    return handler(state, data)
 
 
 def _reconcile_ui_agent_state_with_runtime(
@@ -1289,12 +1325,11 @@ async def _commit_automatic_compaction(
     context_builder: Any,
     summary: str,
     projection_lock: asyncio.Lock | None = None,
+    window_receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Durably replace context before a compacted loop may continue."""
 
     summary_text = str(summary or "").strip()
-    if not summary_text:
-        raise RuntimeError("automatic compaction produced no durable summary")
     async def _commit() -> dict[str, Any]:
         saved_snapshot = context_builder.export_snapshot()
         latest = await asyncio.to_thread(repository.get_conversation, conversation_id)
@@ -1302,6 +1337,20 @@ async def _commit_automatic_compaction(
             raise RuntimeError(
                 "conversation disappeared while committing automatic compaction"
             )
+        if not summary_text:
+            from backend.agent.context_window import is_context_window_rollover
+            advanced = is_context_window_rollover(latest.context_snapshot, saved_snapshot)
+            if not advanced and window_receipt is not None:
+                # A partial UI projection may already have persisted this
+                # exact replacement. The core receipt still has to prove the
+                # archived advance; an old empty compact is not a receipt.
+                advanced = (
+                    window_receipt == saved_snapshot.get("context_window_state")
+                    and latest.context_snapshot.get("context_window_state") == window_receipt
+                    and is_context_window_rollover({}, saved_snapshot)
+                )
+            if not advanced:
+                raise RuntimeError("automatic compaction produced no durable summary or new context window")
         _merge_ui_agent_state_into_snapshot(
             saved_snapshot,
             getattr(latest, "context_snapshot", None),
@@ -1481,7 +1530,7 @@ class SessionAgentRunnerMixin:
         terminal_fences = self.ui_agent_state_store.terminal_fences
         fenced_message_id = terminal_fences.get(conversation_id)
         incoming_message_id = str(data.get("message_id") or "").strip()
-        if fenced_message_id and incoming_message_id in {
+        if event_type not in {"subagent.start", "subagent.progress", "subagent.done"} and fenced_message_id and incoming_message_id in {
             "",
             str(fenced_message_id),
         }:
@@ -1656,7 +1705,7 @@ class SessionAgentRunnerMixin:
             await asyncio.sleep(0)
             manager = self.ws_manager
             if manager is not None:
-                await manager.shutdown_session(
+                await manager.shutdown_execution_host(
                     str(self.session_id or ""),
                     reason="extension_shutdown",
                 )
@@ -2879,11 +2928,29 @@ class SessionAgentRunnerMixin:
                 setattr(runner, "_pending_model_selection", resolved_model)
                 return True
             if snapshot is not None:
-                await selected_catalog.refresh_oauth_credentials(provider_name)
-                await selected_catalog.refresh_provider_auth(provider_name)
-                previous_levels = model_thinking_levels(snapshot.model_info, snapshot.llm)
-                thinking_seed = snapshot.thinking_level if previous_levels not in {(), ("off",)} else "medium"
-                selected = _publish_model_selection(provider_name, model_name, thinking_seed)
+                from backend.agent.model_activation import ModelActivationRejected, ModelActivationTargetUnavailable
+
+                activation = selection_owner.model_activation
+                if activation is not None:
+                    async with activation.updates:
+                        ticket = activation.capture()
+                        if not activation.admitted.config.feature_flags.enabled("step_model_switching"):
+                            raise ModelActivationRejected("turn settings updates require the step_model_switching feature")
+                        if provider_name != ticket.current.provider:
+                            raise ModelActivationRejected("turn settings cannot change the admitted model provider")
+                        await selected_catalog.refresh_oauth_credentials(provider_name)
+                        await selected_catalog.refresh_provider_auth(provider_name)
+                        previous_levels = model_thinking_levels(ticket.current.model_info, ticket.current.llm)
+                        thinking_seed = ticket.current.thinking_level if previous_levels not in {(), ("off",)} else "medium"
+                        selected = _publish_model_selection(provider_name, model_name, thinking_seed,
+                            selection_owner=selection_owner, ticket=ticket)
+                else:
+                    await selected_catalog.refresh_oauth_credentials(provider_name)
+                    await selected_catalog.refresh_provider_auth(provider_name)
+                    previous_levels = model_thinking_levels(snapshot.model_info, snapshot.llm)
+                    thinking_seed = snapshot.thinking_level if previous_levels not in {(), ("off",)} else "medium"
+                    selected = _publish_model_selection(provider_name, model_name, thinking_seed,
+                        selection_owner=selection_owner, ticket=None)
                 await runner.emit({
                     "type": "model_select",
                     "model": {"provider": selected.provider, "id": selected.model},
@@ -2967,11 +3034,10 @@ class SessionAgentRunnerMixin:
                 )
             return True
 
-        def _publish_model_selection(provider: str, model: str, level: str) -> ModelExecutionSnapshot:
+        def _publish_model_selection(provider: str, model: str, level: str, *, selection_owner, ticket) -> ModelExecutionSnapshot:
             # Build before publishing; an in-flight request and its tools retain
             # their original adapter, budget and model identity.
-            selection_owner = _model_execution_owner()
-            previous = selection_owner.model_execution
+            previous = ticket.current if ticket is not None else selection_owner.model_execution
             selected_catalog = previous.model_runtime
             config = _config_with_runtime_model_budget(
                 replace(previous.config, llm=replace(previous.config.llm,
@@ -2980,20 +3046,32 @@ class SessionAgentRunnerMixin:
             )
             adapter = _get_or_create_session_llm(self, config=config, provider=provider,
                 model=model, model_runtime=selected_catalog)
-            selected_model = selected_catalog.get_model(provider, model) if selected_catalog is not None else None
+            selected_model = (previous.model_info if (provider, model) == (previous.provider, previous.model)
+                else selected_catalog.get_model(provider, model) if selected_catalog is not None else None)
             effective = _apply_thinking_level(adapter, selected_model, level)
             config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
             selected = ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=model,
                 thinking_level=effective, model_runtime=selected_catalog,
                 available_models=tuple(item.id for item in selected_catalog.get_models(provider)) if selected_catalog is not None else previous.available_models,
                 models_source=previous.models_source, model_info=selected_model)
-            if selection_owner is owner_context:
-                self.conversation_repo.update_model_selection(conversation_id,
-                    provider=provider, model=model, reasoning_effort=effective)
-            selection_owner.model_execution = selected
+            if ticket is not None:
+                from backend.config import load_config
+
+                tool_context = selection_owner.context_builder._tool_execution_context
+                live_config = load_config(cwd=tool_context.workspace_root, resolve_credentials=False)
+                def original_execution_is_current():
+                    generation = getattr(self, "_extension_runtime_states", {}).get(conversation_id)
+                    return (_model_execution_owner() is selection_owner and isinstance(generation, LifecycleGenerationState)
+                        and generation.is_current(runner))
+                ticket.state.commit(ticket, selected, live_config=live_config, is_current=original_execution_is_current)
+            else:
+                if selection_owner is owner_context:
+                    self.conversation_repo.update_model_selection(conversation_id,
+                        provider=provider, model=model, reasoning_effort=effective)
+                selection_owner.model_execution = selected
             if selection_owner.retain_model is not None and selection_owner.extension_actions is not None:
                 selection_owner.retain_model(adapter, selection_owner.extension_actions.execution_task)
-            if selection_owner is owner_context and agent_session is not None:
+            if ticket is None and selection_owner is owner_context and agent_session is not None:
                 agent_session.llm = adapter
                 agent_session.token_budget = config.token_budget
             return selected
@@ -3006,9 +3084,17 @@ class SessionAgentRunnerMixin:
 
         def _set_thinking_level(level: Any) -> str:
             previous = _get_thinking_level()
-            snapshot = _model_execution_owner().model_execution
+            selection_owner = _model_execution_owner()
+            snapshot = selection_owner.model_execution
             if snapshot is not None:
-                value = _publish_model_selection(snapshot.provider, snapshot.model, str(level or "off")).thinking_level
+                from backend.agent.model_activation import ModelActivationRejected
+
+                activation = selection_owner.model_activation
+                if activation is not None and activation.updates.locked():
+                    raise ModelActivationRejected("a running-turn model settings update is already in progress")
+                ticket = activation.capture() if activation is not None else None
+                value = _publish_model_selection(snapshot.provider, snapshot.model, str(level or "off"),
+                    selection_owner=selection_owner, ticket=ticket).thinking_level
             else:
                 active_llm = agent_session.llm if agent_session is not None else run_llm
                 current_provider = str(getattr(self, "provider", "") or "")
@@ -3385,6 +3471,7 @@ class SessionAgentRunnerMixin:
             skill_manager=self.skill_manager,
             conversation_id=conversation_id,
             workspace_root=workspace_root,
+            skill_config_stack=config.config_layer_stack,
         )
         context_builder.load_snapshot(
             dict(getattr(conversation, "context_snapshot", {}) or {})
@@ -3701,9 +3788,11 @@ class SessionAgentRunnerMixin:
             if part
         )
         query_guards = conversation_query_guards()
-        query_claim = query_guards.try_start(
-            target_conversation_id,
-            owner_id=owner_id,
+        transition = run_metadata.pop("_conversation_transition", None)
+        query_claim = (
+            query_guards.handoff(transition, owner_id=owner_id)
+            if transition is not None
+            else query_guards.try_start(target_conversation_id, owner_id=owner_id)
         )
         if query_claim is None:
             active_claim = query_guards.active_claim(target_conversation_id)
@@ -3913,6 +4002,10 @@ class SessionAgentRunnerMixin:
             await emit_conversation_not_found(self, target_conversation_id)
             return
 
+        # A turn's explicit mode belongs to this exact conversation. Resumed
+        # or scheduled turns inherit its durable selection, never another tab.
+        run_metadata.setdefault("agent_mode", conversation.agent_mode)
+
         # A restored conversation may have only its newest entries loaded
         # synchronously.  Do not construct or send a provider request until
         # the durable older prefix has been hydrated.
@@ -3947,6 +4040,8 @@ class SessionAgentRunnerMixin:
         run_context.agent_runtime = admission_runtime
         run_metadata["run_id"] = admission_record.run_id
         run_metadata["conversation_id"] = conversation.id
+        run_metadata["conversation_type"] = conversation.conversation_type
+        run_metadata["parent_conversation_id"] = conversation.parent_conversation_id
         conversation_store_id = await asyncio.to_thread(
             self.conversation_repo.store_instance_id
         )
@@ -3959,7 +4054,14 @@ class SessionAgentRunnerMixin:
         execution_journal = admission_runtime.execution_journal(journal_owner)
         run_context.execution_journal = execution_journal
 
+        conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
         run_workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        if not conversation.workspace_root and getattr(conversation, "projectless_output_dir", ""):
+            run_metadata["projectless_context"] = {
+                "cwd": str(run_workspace_root),
+                "output_directory": conversation.projectless_output_dir,
+                "browser_root": conversation.projectless_browser_root,
+            }
         run_tool_registry = self._conversation_tool_registry(
             conversation.id,
             workspace_root=run_workspace_root,
@@ -3982,7 +4084,15 @@ class SessionAgentRunnerMixin:
                     "conversation disappeared while initializing a new turn"
                 )
             conversation = latest_for_turn
-            if flushed_ui_state:
+            retry_projection = run_metadata.get("_retry_projection")
+            if retry_projection is not None:
+                run_context_snapshot = _reset_ui_agent_state_snapshot(retry_projection["context_snapshot"])
+                # Retry rolls back model context, not facts about child threads
+                # which already ran in this conversation after that checkpoint.
+                run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]["subagents"] = _coerce_ui_agent_state(
+                    conversation.context_snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY)
+                )["subagents"]
+            elif flushed_ui_state:
                 self.ui_agent_state_store.cache.pop(conversation.id, None)
                 run_context_snapshot = _reset_ui_agent_state_snapshot(
                     conversation.context_snapshot
@@ -4007,6 +4117,7 @@ class SessionAgentRunnerMixin:
         # the client-created assistant placeholder id so late events from an
         # old turn cannot attach to a newer assistant message.
         stream_state = create_stream_state(conversation.id, assistant_message_id)
+        stream_state["agent_mode"] = run_metadata["agent_mode"]
         getattr(self, "_conversation_streams", {})[conversation.id] = stream_state
 
         # Extension providers must enter ModelRuntime before turn-model
@@ -4287,6 +4398,29 @@ class SessionAgentRunnerMixin:
                     run_manager.mark_delivery_complete(conversation.id, run_task_id)
                 getattr(self, "_conversation_streams", {}).pop(conversation.id, None)
                 return
+            rejected_input = {
+                "command": "user_message", "level": "error", "message": error_message,
+                "client_command_id": str(run_metadata.get("client_command_id") or ""),
+                "conversation_id": conversation.id,
+                "data": {
+                    "admitted": False, "reason": "llm_initialization_failed",
+                    "conversation_id": conversation.id,
+                    "user_message_id": str(run_metadata["user_message_id"]),
+                    "assistant_message_id": assistant_message_id,
+                    "run_id": admission_record.run_id,
+                    "error_type": classification.error_type,
+                    "provider_error_type": classification.provider_error_type,
+                    "recoverable": not classification.fatal,
+                },
+            }
+            if rejected_input["client_command_id"]:
+                await to_thread_cancel_safe(execution_journal.append_once, "system", {
+                    "lifecycle": "turn_input_rejected",
+                    "command": run_metadata["_submitted_command"],
+                    "result": rejected_input,
+                }, event_id=turn_input_rejection_id(
+                    rejected_input["data"]["user_message_id"], rejected_input["client_command_id"],
+                ))
             await self.send_event(
                 AgentEvent(
                     type="error",
@@ -4311,6 +4445,9 @@ class SessionAgentRunnerMixin:
                 conversation_id=conversation.id,
                 reason="failed",
             ))
+            admission_future = run_metadata.get("_turn_admission_future")
+            if isinstance(admission_future, asyncio.Future) and not admission_future.done():
+                admission_future.set_result(rejected_input)
             run_manager = getattr(self, "run_manager", None)
             mark_terminal_status = getattr(run_manager, "mark_terminal_status", None)
             if callable(mark_terminal_status):
@@ -4328,16 +4465,6 @@ class SessionAgentRunnerMixin:
             from backend.memory.manager import MemoryManager
 
             run_memory_manager = MemoryManager(FileMemory.for_workspace(run_workspace_root))
-            if str(getattr(conversation, "conversation_type", "main")) == "main":
-                memory_task = schedule_memory_startup(
-                    repository=self.conversation_repo,
-                    llm=run_llm,
-                    workspace_root=run_workspace_root,
-                    current_conversation_id=conversation.id,
-                    token_budget=int(getattr(run_config.token_budget, "total", 0) or 0),
-                    foreground_tasks=lambda: tuple(self.run_manager.run_tasks.values()),
-                )
-                _lease_session_llm_for_task(self, run_llm, memory_task)
 
         run_context_builder = ContextBuilder(
             token_budget=run_config.token_budget,
@@ -4360,6 +4487,10 @@ class SessionAgentRunnerMixin:
             approval_handler=self.approval_handler,
             lifecycle_observer_factory=lifecycle_observer_factory,
             lifecycle_runtime=lifecycle_runtime,
+            guardian_host=self.guardian_host_for_conversation(conversation.id,
+                evidence_checkpoint=run_context_snapshot.get("guardian_evidence")),
+            owns_guardian_host=False,
+            mcp_tool_approvals=self.mcp_approvals_for_conversation(conversation.id),
         )
         run_agent_session.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
 
@@ -4506,9 +4637,29 @@ class SessionAgentRunnerMixin:
                 source=run_permission_context.source,
                 pre_plan_mode=str(getattr(conversation, "permission_previous_mode", "") or "") or None,
                 approval_policy=run_permission_context.approval_policy,
+                granular_approval=run_permission_context.granular_approval,
                 sandbox_mode=run_permission_context.sandbox_mode,
                 requirements_source=run_permission_context.requirements_source,
             )
+
+        if run_workspace_root is not None and str(conversation.conversation_type) == "main":
+            from backend.sandbox.policy import SandboxEnforcement, sandbox_policy_for_permission_context
+
+            startup_policy = sandbox_policy_for_permission_context(run_workspace_root, run_permission_context,
+                config_stack=run_config.config_layer_stack).resolve(cwd=run_workspace_root)
+            startup_sandbox_mode = ("external-sandbox" if startup_policy.enforcement is SandboxEnforcement.EXTERNAL
+                else "danger-full-access" if startup_policy.full_disk_write
+                else "workspace-write" if startup_policy.writable_roots else "read-only")
+            memory_task = schedule_memory_startup(
+                repository=self.conversation_repo,
+                llm=run_llm,
+                workspace_root=run_workspace_root,
+                current_conversation_id=conversation.id,
+                startup_sandbox_mode=startup_sandbox_mode,
+                token_budget=int(getattr(run_config.token_budget, "total", 0) or 0),
+                foreground_tasks=lambda: tuple(self.run_manager.run_tasks.values()),
+            )
+            _lease_session_llm_for_task(self, run_llm, memory_task)
 
         async def _set_run_permission_mode(mode: str, *, source: str = "agent.run") -> None:
             from backend.agent.plans import bind_plan_owner, merge_plan_constraints
@@ -4561,6 +4712,7 @@ class SessionAgentRunnerMixin:
                         else None
                     ),
                     approval_policy=self.permission_context.approval_policy,
+                    granular_approval=self.permission_context.granular_approval,
                     sandbox_mode=self.permission_context.sandbox_mode,
                     requirements_source=self.permission_context.requirements_source,
                 )
@@ -4652,6 +4804,8 @@ class SessionAgentRunnerMixin:
                 and str(item.get("config_name") or item.get("name") or "").strip()
             )
 
+        pending_admission_journal: dict[str, tuple[str, dict[str, Any]]] = {}
+
         async def _commit_turn_admission(
             *,
             boundary_input: Any,
@@ -4726,6 +4880,10 @@ class SessionAgentRunnerMixin:
                     else {}
                 ),
             }
+            if consumed_steer is not None:
+                # Pending reasoning already occupies its canonical turn_state
+                # position; publish it before the later user item as well.
+                await _flush_pending_reasoning()
             async with self._conversation_projection_lock(conversation.id):
                 latest = await asyncio.to_thread(
                     self.conversation_repo.get_conversation,
@@ -4736,7 +4894,8 @@ class SessionAgentRunnerMixin:
                 saved_snapshot = run_context_builder.export_snapshot()
                 _merge_ui_agent_state_into_snapshot(
                     saved_snapshot,
-                    getattr(latest, "context_snapshot", None),
+                    run_context_snapshot if run_metadata.get("_retry_projection") is not None
+                    else getattr(latest, "context_snapshot", None),
                 )
                 admissions = dict(saved_snapshot.get("turn_admissions") or {})
                 admissions[user_message_id] = {
@@ -4744,51 +4903,139 @@ class SessionAgentRunnerMixin:
                     "history_end": max(0, int(history_end)),
                     "run_id": str(run_metadata.get("run_id") or ""),
                     "client_command_id": admitted_client_command_id,
+                    "client_queue_key": str(admitted_input.get("_client_queue_key") or ""),
+                    "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
                 }
                 saved_snapshot["turn_admissions"] = admissions
                 run_context_builder.record_turn_admission(user_message_id, admissions[user_message_id])
                 append_once = getattr(execution_journal, "append_once", None)
                 if not callable(append_once):
                     raise RuntimeError("turn admission has no idempotent journal writer")
-                journal_event_id = "user_prompt_" + hashlib.sha256(
-                    (
-                        f"{conversation_store_id}\0{conversation.id}\0"
-                        f"{user_message_id}"
-                    ).encode("utf-8")
-                ).hexdigest()
-                append_once(
-                    "user_prompt",
-                    {
+                journal_event_id = turn_user_prompt_id(conversation_store_id, conversation.id, user_message_id)
+                journal_payload = {
                         "content": admitted_content,
                         "provider_content": admitted_content,
                         "conversation_id": conversation.id,
                         "user_message_id": user_message_id,
                         "client_command_id": admitted_client_command_id,
+                        "client_queue_key": str(admitted_input.get("_client_queue_key") or ""),
+                        "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
                         "attachments": admitted_attachments,
                         **input_metadata,
                         **({"context_refs": context_refs} if context_refs else {}),
                         "context_snapshot": saved_snapshot,
-                    },
-                    event_id=journal_event_id,
-                )
+                        "user_message": project_public_transcript_message(user_projection),
+                    }
+                steer_assistant = None
+                if consumed_steer is not None:
+                    steer_assistant = _partial_turn_message()
+                    record_user_input_block(steer_assistant["blocks"], user_message_id)
                 committed = await to_thread_cancel_safe(
                     self.conversation_repo.commit_turn_admission,
                     conversation.id,
                     user_message=user_projection,
                     context_snapshot=saved_snapshot,
+                    assistant_message=steer_assistant,
                     expected_revision=max(
                         0, int(getattr(latest, "revision", 0) or 0)
                     ),
+                    rewind_projection=run_metadata.get("_retry_projection"),
+                    **({
+                        "agent_mode": run_metadata["agent_mode"],
+                        "expected_agent_mode_revision": run_metadata["_agent_mode_selection_revision"],
+                    } if consumed_steer is None
+                        and "_agent_mode_selection_revision" in run_metadata
+                        and not run_metadata.get("_turn_admission_restored")
+                        and not str(run_metadata.get("agent_role") or "main").startswith("subagent:") else {}),
                 )
                 if committed is None:
                     raise RuntimeError("conversation disappeared during turn admission")
-                admission_future = run_metadata.get("_turn_admission_future")
-                if isinstance(admission_future, asyncio.Future) and not admission_future.done():
-                    admission_future.set_result(None)
+                if consumed_steer is not None:
+                    turn_state.record_user_input(user_message_id)
+                run_metadata["_turn_admitted"] = True
+                if run_metadata.get("_retry_projection") is not None:
+                    self.ui_agent_state_store.cache.pop(conversation.id, None)
+                    self.ui_agent_state_store.pending.pop(conversation.id, None)
+                pending_admission_journal[user_message_id] = (journal_event_id, journal_payload)
 
         run_metadata["commit_turn_admission"] = _commit_turn_admission
 
-        start_time = time.monotonic()
+        async def _report_turn_admission(*, boundary_input: Any = None) -> None:
+            if parent_notification_only:
+                return
+            consumed_steer = getattr(boundary_input, "consumed_steer", None)
+            admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
+            admitted_user_id = str(admitted_input.get("user_message_id") or "")
+            admitted_command_id = str(admitted_input.get("client_command_id") or "")
+            run_metadata["_turn_admitted"] = True
+            if consumed_steer is not None:
+                item = {"type": "user_message", "id": admitted_user_id,
+                    "message": pending_admission_journal[admitted_user_id][1]["user_message"]}
+                for event_type in ("item.started", "item.completed"):
+                    await self.send_event(AgentEvent(type=event_type, data={
+                        "conversation_id": conversation.id,
+                        "message_id": assistant_message_id,
+                        "turn_id": str(stream_state.get("turn_id") or run_metadata["run_id"]),
+                        "item": item,
+                    }))
+            receipt = AgentEvent(type="command.result", data={
+                "command": "user_message", "level": "success", "message": "",
+                "client_command_id": admitted_command_id, "conversation_id": conversation.id,
+                "data": {
+                    "admitted": True, "conversation_id": conversation.id,
+                    "user_message_id": admitted_user_id,
+                    "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
+                    "run_id": str(run_metadata.get("run_id") or ""),
+                    **({"retry_from_message_id": run_metadata["retry_from_message_id"]}
+                       if run_metadata.get("retry_from_message_id") else {}),
+                    **({"input": {"code_review": admitted_input["code_review"],
+                                  "display_content": admitted_input["display_content"],
+                                  "content": consumed_steer.content if consumed_steer is not None else user_message}}
+                       if "code_review" in admitted_input else {}),
+                },
+            })
+            from backend.ws.conversation_stream import bind_response_origin
+            manager = self.ws_manager
+            submitting = manager.session_for_input_origin(str(admitted_input.get("_client_queue_key") or "")) if manager is not None else None
+            receipt_owner = (submitting.session_id if submitting is not None else None) if manager is not None and admitted_input.get("_client_queue_key") else self.session_id
+            with bind_response_origin(receipt_owner, admitted_command_id):
+                await self.send_event(receipt)
+            if manager is not None:
+                await manager.publish_turn_input_admission(self, conversation.id)
+
+        async def _publish_turn_admission(*, boundary_input: Any = None) -> None:
+            if parent_notification_only:
+                return
+            consumed_steer = getattr(boundary_input, "consumed_steer", None)
+            admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
+            admitted_user_id = str(admitted_input.get("user_message_id") or "")
+            admitted_command_id = str(admitted_input.get("client_command_id") or "")
+            pending_prompt = pending_admission_journal.get(admitted_user_id)
+            if pending_prompt is not None:
+                event_id, prompt_payload = pending_prompt
+                await to_thread_cancel_safe(execution_journal.append_once,
+                    "user_prompt", prompt_payload, event_id=event_id)
+                pending_admission_journal.pop(admitted_user_id)
+            # This durable fact is written before entering the provider. Queue
+            # recovery uses it even when a later tool/run terminal is failed.
+            await to_thread_cancel_safe(execution_journal.append_once,
+                "system", {
+                    "lifecycle": "turn_input_consumed", "conversation_id": conversation.id,
+                    "user_message_id": admitted_user_id, "client_command_id": admitted_command_id,
+                    "client_queue_key": str(admitted_input.get("_client_queue_key") or ""),
+                    "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
+                    "run_id": str(run_metadata.get("run_id") or ""),
+                }, event_id=turn_input_consumption_id(admitted_user_id, admitted_command_id),
+            )
+            admission_future = run_metadata.get("_turn_admission_future")
+            if isinstance(admission_future, asyncio.Future) and not admission_future.done():
+                admission_future.set_result(None)
+            if consumed_steer is None and run_metadata.get("_retry_projection") is not None:
+                self.run_manager.clear_user_message_queue(conversation.id, preserve_turn_input_queue=True)
+                run_metadata.pop("_retry_projection")
+
+        run_metadata["report_turn_admission"] = _report_turn_admission
+        run_metadata["publish_turn_admission"] = _publish_turn_admission
 
         # Attach workspace context to agent state so ContextBuilder can inject it
         from backend.agent.state import AgentState
@@ -4859,10 +5106,24 @@ class SessionAgentRunnerMixin:
             await self.send_event(AgentEvent(type="command_output_chunk", data=payload))
 
         async def _emit_runtime_event(event_type: str, data: dict[str, Any]) -> None:
-            if not _accepts_projection_events():
+            accepts_parent_projection = _accepts_projection_events()
+            child_lifecycle = event_type in {"subagent.start", "subagent.progress", "subagent.done"}
+            if not accepts_parent_projection and not child_lifecycle:
                 return
             payload = dict(data)
             payload.setdefault("conversation_id", conversation.id)
+            if child_lifecycle:
+                payload.setdefault("parent_message_id", assistant_message_id)
+                direct_child = payload.get("parent_run_id", run_metadata.get("run_id")) == run_metadata.get("run_id") and payload["parent_message_id"] == assistant_message_id
+                if not accepts_parent_projection or not direct_child:
+                    if direct_child and event_type in {"subagent.start", "subagent.done"} and payload.get("parent_tool_call_id") and payload.get("delegation") is not None:
+                        async with self._conversation_projection_lock(conversation.id):
+                            await to_thread_cancel_safe(self.conversation_repo.update_tool_delegation,
+                                conversation.id, message_id=assistant_message_id,
+                                tool_call_id=payload["parent_tool_call_id"], delegation=payload["delegation"])
+                    self._persist_ui_agent_state_event(conversation.id, event_type, payload)
+                    await self.send_event(AgentEvent(type=event_type, data=payload))
+                    return
             if event_type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
                 payload.setdefault("message_id", assistant_message_id)
                 canonical_turn_id = str(
@@ -4885,6 +5146,8 @@ class SessionAgentRunnerMixin:
                 await _persist_partial_turn(force=True)
             self._persist_ui_agent_state_event(conversation.id, event_type, payload)
             if event_type == "runtime.span":
+                if payload.get('event') == 'tool.started' and turn_state.record_tool_execution_started(payload):
+                    await _persist_partial_turn(force=True)
                 span_id = str(payload.get("span_id") or "").strip()
                 span_event = str(payload.get("event") or "")
                 span_status = str(payload.get("status") or "")
@@ -4896,6 +5159,8 @@ class SessionAgentRunnerMixin:
                 ):
                     active_runtime_spans.pop(span_id, None)
             _project_agent_message_event(turn_state, event_type, payload)
+            if child_lifecycle and turn_state.record_subagent_lifecycle(payload):
+                await _persist_partial_turn(force=True)
             if event_type == "agent.item" or (
                 event_type == "agent.progress"
                 and str(payload.get("status") or "").strip().lower()
@@ -4916,6 +5181,7 @@ class SessionAgentRunnerMixin:
         query_terminal_reason = ""
         query_done_payload: dict[str, Any] = {}
         query_run_completed_payload: dict[str, Any] = {}
+        turn_completion_notification: dict[str, Any] | None = None
         provider_terminal_received = False
         active_runtime_spans: dict[str, dict[str, Any]] = {}
         latest_turn_diff: dict[str, Any] | None = None
@@ -4939,6 +5205,33 @@ class SessionAgentRunnerMixin:
             owner = str(payload.get("thread_id") or payload.get("conversation_id") or "")
             if owner == conversation.id:
                 latest_turn_diff = {**payload, "truncated": False}
+
+        def _partial_turn_message() -> dict[str, Any]:
+            snapshot = turn_state.finalize(terminal_status="partial")
+            runtime = run_context.agent_runtime
+            run = runtime.get_run(run_metadata["run_id"]) if runtime is not None else None
+            message: dict[str, Any] = {
+                "id": assistant_message_id,
+                "role": "assistant",
+                "content": snapshot.content,
+                "timestamp": datetime.fromtimestamp((run.started_at if run is not None else turn_started_at_ms) / 1000, UTC).isoformat(),
+                "terminal_status": "partial",
+                "termination_reason": "run_in_progress",
+                "usage": snapshot.usage,
+                "blocks": snapshot.blocks,
+            }
+            duration_ms = run.elapsed_ms() if run is not None else None
+            if duration_ms is not None:
+                message["duration_ms"] = duration_ms
+            if snapshot.tool_calls:
+                message["tool_calls"] = snapshot.tool_calls
+            if assistant_artifacts:
+                message["artifacts"] = list(assistant_artifacts)
+            if snapshot.citations:
+                message["citations"] = snapshot.citations
+            if latest_turn_diff is not None:
+                message["metadata"] = {"turn_diff": dict(latest_turn_diff)}
+            return message
 
         async def _persist_partial_turn(*, force: bool = False) -> None:
             """Coalesce the derived conversation view behind the durable journal."""
@@ -4967,33 +5260,17 @@ class SessionAgentRunnerMixin:
                 # immediately. Older turns stay in the immutable checkpoint.
                 if not force and now - last_partial_persisted_at < 1.0:
                     return
-                snapshot = turn_state.finalize(terminal_status="partial")
-                if not snapshot.blocks and not assistant_artifacts and latest_turn_diff is None:
-                    return
-                partial_message: dict[str, Any] = {
-                    "id": assistant_message_id,
-                    "role": "assistant",
-                    "content": snapshot.content,
-                    "timestamp": datetime.fromtimestamp(turn_started_at_ms / 1000, UTC).isoformat(),
-                    "terminal_status": "partial",
-                    "termination_reason": "run_in_progress",
-                    "duration_ms": max(0, _now_ms() - turn_started_at_ms),
-                    "usage": snapshot.usage,
-                    "blocks": snapshot.blocks,
-                }
-                if snapshot.tool_calls:
-                    partial_message["tool_calls"] = snapshot.tool_calls
-                if assistant_artifacts:
-                    partial_message["artifacts"] = list(assistant_artifacts)
-                if snapshot.citations:
-                    partial_message["citations"] = snapshot.citations
-                if latest_turn_diff is not None:
-                    partial_message["metadata"] = {"turn_diff": dict(latest_turn_diff)}
                 try:
                     if not _accepts_projection_events():
                         return
                     async with self._conversation_projection_lock(conversation.id):
                         if not _accepts_projection_events():
+                            return
+                        # Capture under the same boundary as user admission.
+                        # A queued partial writer must not publish blocks from
+                        # before an already committed steering user item.
+                        partial_message = _partial_turn_message()
+                        if not partial_message["blocks"] and not assistant_artifacts and latest_turn_diff is None:
                             return
                         projection_base = await asyncio.to_thread(
                             self.conversation_repo.get_projection_context,
@@ -5154,12 +5431,13 @@ class SessionAgentRunnerMixin:
                 )
                 return False
             done_event = AgentEvent(type="done", data=dict(query_done_payload))
-            done_event.data.setdefault(
-                "duration_ms",
-                round((time.monotonic() - start_time) * 1000),
-            )
+            if terminal_duration_ms is not None:
+                done_event.data["duration_ms"] = terminal_duration_ms
+            else:
+                done_event.data.pop("duration_ms", None)
             done_event.data["conversation_id"] = conversation.id
             done_event.data["message_id"] = assistant_message_id
+            done_event.data["completion_notification"] = turn_completion_notification
             if isinstance(run_failure_recoverable, bool) and "failure_recoverable" not in done_event.data:
                 done_event.data["failure_recoverable"] = run_failure_recoverable
             await self.send_event(done_event)
@@ -5240,6 +5518,7 @@ class SessionAgentRunnerMixin:
                         task_manager=self.task_manager,
                         background_manager=getattr(self, "background_manager", None),
                         terminal_manager=getattr(self, "terminal_manager", None),
+                        permission_grants=self.permission_grants_for_conversation(conversation.id),
                         emit_event=_emit_runtime_event,
                         metadata=run_metadata,
                         run_context=run_context,
@@ -5263,6 +5542,9 @@ class SessionAgentRunnerMixin:
                     admission_future = run_metadata.get("_turn_admission_future")
                     if isinstance(admission_future, asyncio.Future) and not admission_future.done():
                         admission_future.set_result(None)
+                elif event.type == "agent.run.started" and run_metadata.get("_turn_admission_restored"):
+                    await _report_turn_admission()
+                    await _publish_turn_admission()
                 if event.type == "context_compacted":
                     summary_text = str(event.data.get("summary", "")).strip()
                     await _commit_automatic_compaction(
@@ -5273,6 +5555,7 @@ class SessionAgentRunnerMixin:
                         projection_lock=self._conversation_projection_lock(
                             conversation.id
                         ),
+                        window_receipt=event.data.get("context_window_state"),
                     )
                     await self.send_payload(
                         {
@@ -5280,6 +5563,7 @@ class SessionAgentRunnerMixin:
                             "conversation_id": conversation.id,
                             "state": "compacted",
                             "summary": summary_text,
+                            **({"compaction_item_id": event.data["compaction_item_id"]} if "compaction_item_id" in event.data else {}),
                         },
                         log_context="conversation.compaction.updated",
                     )
@@ -5331,6 +5615,9 @@ class SessionAgentRunnerMixin:
 
                 if event.type in {"item.started", "agent_message.delta", "item.completed"}:
                     _project_agent_message_event(turn_state, event.type, event.data)
+                elif event.type in {"subagent.start", "subagent.done"}:
+                    if turn_state.record_subagent_lifecycle(event.data):
+                        await _persist_partial_turn(force=True)
                 elif event.type == "artifact.preview":
                     event.data["message_id"] = assistant_message_id
                     if event.data.get("source") != "tool":
@@ -5428,6 +5715,8 @@ class SessionAgentRunnerMixin:
                     turn_state.record_progress(event.data)
                 elif event.type == "agent.item":
                     turn_state.record_process_item(event.data)
+                elif event.type == "agent.item.delta":
+                    turn_state.record_process_delta(event.data)
                 elif event.type == "agent.run.completed":
                     # Buffer the durable completion so lifecycle, transcript,
                     # and DONE share one immutable terminal status.
@@ -5477,6 +5766,9 @@ class SessionAgentRunnerMixin:
                     "error",
                     "approval_request",
                     "ask_user",
+                    "request_user_input",
+                    "guardian_assessment",
+                    "guardian_warning",
                 }:
                     await _persist_partial_turn(force=True)
                 elif event.type in {"agent_message.delta", "tool_output_delta", "agent.item.delta"}:
@@ -5588,6 +5880,7 @@ class SessionAgentRunnerMixin:
                 else "completed"
             )
 
+            terminal_duration_ms = query_run_completed_payload.get("duration_ms")
             turn_state.reconcile_committed_tool_results(agent_state.tool_calls)
             turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
             assistant_blocks = turn_snapshot.blocks
@@ -5682,15 +5975,26 @@ class SessionAgentRunnerMixin:
                 or assistant_artifacts
             ):
                 completed_at = _now_ms()
+                from backend.services.turn_notifications import completion_notification
+
+                queued_follow_ups = run_manager.queued_user_message_snapshot(conversation.id) if run_manager is not None else []
+                has_pending_continuation = terminal_status != "cancelled" and bool(queued_follow_ups) and not queued_follow_ups[0]["paused"]
+                turn_completion_notification = completion_notification(
+                    status=terminal_status, last_agent_message=assistant_content,
+                    thread_source=conversation.thread_source,
+                    has_pending_continuation=has_pending_continuation,
+                )
                 assistant_message = {
                     "id": assistant_message_id,
                     "role": "assistant",
                     "content": assistant_content,
                     "timestamp": datetime.fromtimestamp(completed_at / 1000, UTC).isoformat(),
                     "completed_at": completed_at,
+                    **({"duration_ms": terminal_duration_ms} if terminal_duration_ms is not None else {}),
                     "terminal_status": terminal_status,
                     "termination_reason": query_terminal_reason,
                     "usage": usage_payload or {},
+                    "metadata": {"completion_notification": turn_completion_notification},
                 }
                 if run_failed_message:
                     assistant_message["failure_message"] = run_failed_message
@@ -5708,7 +6012,7 @@ class SessionAgentRunnerMixin:
                 if assistant_citations:
                     assistant_message["citations"] = assistant_citations
                 if latest_turn_diff is not None:
-                    assistant_message["metadata"] = {"turn_diff": dict(latest_turn_diff)}
+                    assistant_message["metadata"]["turn_diff"] = dict(latest_turn_diff)
 
                 if assistant_content and not parent_notification_only:
                     new_summary = build_conversation_summary(
@@ -5852,12 +6156,12 @@ class SessionAgentRunnerMixin:
                             self.ui_agent_state_store.cache.pop(conversation.id, None)
                         if conversation.id == self.active_conversation_id:
                             self.load_active_conversation_snapshot(conversation.id, saved_snapshot)
-                        if new_summary is not None:
+                        if updated_conversation is not None:
                             conversation_summary_payload = {
                                 "type": "conversation.summary.updated",
                                 "conversation_id": conversation.id,
                                 "revision": updated_conversation.revision,
-                                "summary": new_summary,
+                                "summary": new_summary if new_summary is not None else updated_conversation.summary,
                                 "title": getattr(updated_conversation, "title", conversation.title),
                                 "updated_at": getattr(updated_conversation, "updated_at", conversation.updated_at),
                                 "memory_mode": str(
@@ -5869,6 +6173,8 @@ class SessionAgentRunnerMixin:
                                 ),
                                 "memory_polluted": memory_polluted,
                                 "memory_pollution_sources": memory_pollution_sources,
+                                "has_unread_turn": updated_conversation.has_unread_turn,
+                                "thread_source": updated_conversation.thread_source,
                             }
                 except Exception:
                     logger.exception(
@@ -5945,3 +6251,8 @@ class SessionAgentRunnerMixin:
                     conversation_summary_payload,
                     log_context="conversation.summary.updated",
                 )
+                from backend.ws.conversation_activity import live_sessions
+
+                for peer_session in live_sessions(self):
+                    if peer_session is not self and peer_session.is_connected:
+                        await peer_session.send_payload(conversation_summary_payload, log_context="conversation.summary.updated")

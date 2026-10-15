@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from copy import deepcopy
 
 from backend.agent.state import ToolCallRecord as InternalToolCallRecord
 from backend.api.models import ToolCallRecord as ApiToolCallRecord
@@ -62,4 +63,36 @@ def test_api_tool_call_record_from_internal_maps_projected_fields() -> None:
         "recoverable": False,
         "projection": "terminal",
         "model_observation": "ok",
+        "delegations": [],
+        "command_actions": [],
+        "stdout_preview": None,
+        "stderr_preview": None,
+        "exit_code": None,
+        "recipient_id": None,
+        "recipient_ids": [],
     }
+
+
+def test_delegations_survive_rest_json_roundtrip_without_mutating_the_internal_record() -> None:
+    internal = InternalToolCallRecord(tool_name="task", tool_call_id="spawn-call",
+        tool_input={"worker": {"paths": ["src/app.py"]}}, status="success", delegations=[
+            {"agent_id": "queued-worker", "name": "实际待执行任务", "status": "pending",
+             "started_at": 0, "accepted_at": 100, "input_prompt": "private original instructions"},
+            {"agent_id": "running-worker", "name": "实际执行任务", "status": "running",
+             "started_at": 120, "accepted_at": 90},
+        ])
+    original = deepcopy(dataclasses.asdict(internal))
+    projected = ApiToolCallRecord.from_internal(internal)
+    wire = projected.model_dump_json()
+    restored = ApiToolCallRecord.model_validate_json(wire)
+    assert restored.model_dump() == projected.model_dump()
+    assert restored.delegations == [
+        {"agent_id": "queued-worker", "name": "实际待执行任务", "status": "pending", "started_at": 0, "accepted_at": 100},
+        {"agent_id": "running-worker", "name": "实际执行任务", "status": "running", "started_at": 120, "accepted_at": 90},
+    ]
+    assert "input_prompt" not in wire
+    assert dataclasses.asdict(internal) == original
+    projected.delegations[0]["name"] = "API caller mutation"
+    projected.tool_input["worker"]["paths"].append("src/another.py")
+    assert dataclasses.asdict(internal) == original
+    assert restored.delegations[0]["name"] == "实际待执行任务"

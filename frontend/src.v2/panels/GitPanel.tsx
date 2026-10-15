@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, GitBranch, GitCompare, RefreshCw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -26,23 +27,28 @@ interface GitStatus {
 const toFileRows = (status: GitStatus | null) => {
   if (!status) return [];
   return [
-    ...status.staged.map((path) => ({ path, section: "staged" as const, group: "已暂存", color: "var(--state-success)" })),
-    ...status.modified.map((path) => ({ path, section: "working" as const, group: "已修改", color: "var(--state-warning)" })),
-    ...status.untracked.map((path) => ({ path, section: "untracked" as const, group: "未跟踪", color: "var(--text-muted)" })),
+    ...status.staged.map((path) => ({ path, section: "staged" as const, group: "已暂存" as const, color: "var(--state-success)" })),
+    ...status.modified.map((path) => ({ path, section: "working" as const, group: "已修改" as const, color: "var(--state-warning)" })),
+    ...status.untracked.map((path) => ({ path, section: "untracked" as const, group: "未跟踪" as const, color: "var(--text-muted)" })),
   ];
 };
 
 export const GitPanel = ({ onEditorOpened, active = true }: { onEditorOpened?: () => void; active?: boolean } = {}) => {
+  const { t: tr } = useI18n();
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  if (!workingDirectory) return <div className="h-full grid place-items-center p-4">
+    <EmptyState icon={<GitBranch size={20} />} title={tr("尚未打开项目")} hint={tr("打开项目后查看 Git 变更与工作树。")} />
+  </div>;
   return <WorkspaceGitPanel key={normalizeWorkspaceRoot(workingDirectory)} workingDirectory={workingDirectory} onEditorOpened={onEditorOpened} active={active} />;
 };
 
 const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { workingDirectory: string; onEditorOpened?: () => void; active: boolean }) => {
+  const { t: tr } = useI18n();
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [worktree, setWorktree] = useState<WorkspaceGitWorktreeResponse | null>(null);
-  const [selected, setSelected] = useState<{ path: string; section: "staged" | "working" | "untracked"; group: string } | null>(null);
+  const [selected, setSelected] = useState<ReturnType<typeof toFileRows>[number] | null>(null);
   const [loading, setLoading] = useState(false);
   const [repoError, setRepoError] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -50,7 +56,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
   const refresh = () => setRefreshVersion((version) => version + 1);
 
   useEffect(() => {
-    if (!active || !workingDirectory) return;
+    if (!active) return;
     let cancelled = false;
     const isCurrent = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
     setLoading(true);
@@ -68,7 +74,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
       setStatus(null);
       setWorktree(null);
       setSelected(null);
-      setRepoError(error instanceof Error ? error.message : "无法读取 Git 仓库状态。");
+      setRepoError(error instanceof Error ? error.message : tr("无法读取 Git 仓库状态。"));
     }).finally(() => {
       if (isCurrent()) setLoading(false);
     });
@@ -76,7 +82,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
   }, [workingDirectory, refreshVersion, activeBottomTab, active]);
 
   const fileRows = useMemo(() => toFileRows(status), [status]);
-  const branch = branchDisplayName(status?.branch || workspaceGit?.branch) || "无分支";
+  const branch = branchDisplayName(status?.branch || workspaceGit?.branch) || tr("无分支");
   const openReview = (file: NonNullable<typeof selected>) => {
     setSelected(file);
     useAppStore.getState().openGitReview({
@@ -101,9 +107,9 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
   const removeWorktree = async (path: string, branchName?: string | null) => {
     const { showConfirm, showAlert } = await import("../overlays/DialogService");
     const ok = await showConfirm({
-      title: "移除隔离工作区",
-      message: `确定移除 ${branchDisplayName(branchName) || workspaceDisplayName(path, "当前工作区")}？`,
-      confirmLabel: "移除",
+      title: tr("移除隔离工作区"),
+      message: tr("确定移除 {v0}？", { v0: branchDisplayName(branchName) || workspaceDisplayName(path, tr("当前工作区")) }),
+      confirmLabel: tr("移除"),
       danger: true,
     });
     if (!ok) return;
@@ -112,11 +118,11 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
     try {
       const result = await removeWorkspaceGitWorktree(workingDirectory, path);
       if (!result?.removed) {
-        await showAlert({ title: "移除失败", message: result?.error || "无法移除工作树。" });
+        await showAlert({ title: tr("移除失败"), message: result?.error || tr("无法移除工作树。") });
       }
       if (workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) refresh();
     } catch (error: unknown) {
-      await showAlert({ title: "移除失败", message: error instanceof Error ? error.message : "无法移除工作树。" });
+      await showAlert({ title: tr("移除失败"), message: error instanceof Error ? error.message : tr("无法移除工作树。") });
     } finally {
       setWorktreeAction("");
     }
@@ -127,9 +133,9 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
       <div className="h-full grid place-items-center p-4">
         <EmptyState
           icon={<GitBranch size={20} />}
-          title="当前文件夹未启用 Git"
-          hint="可以继续使用文件编辑和聊天功能。"
-          action={<><button type="button" onClick={refresh}>刷新 Git 状态</button><GitDelivery workspaceRoot={workingDirectory} stagedCount={0} onChanged={refresh} refreshKey={refreshVersion} /></>}
+          title={tr("当前文件夹未启用 Git")}
+          hint={tr("可以继续使用文件编辑和聊天功能。")}
+          action={<><button type="button" onClick={refresh}>{tr("刷新 Git 状态")}</button><GitDelivery workspaceRoot={workingDirectory} active={active} stagedCount={0} onChanged={refresh} refreshKey={refreshVersion} /></>}
         />
       </div>
     );
@@ -143,7 +149,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
           <span title={branch} className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap font-mono" style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
             {branch}
           </span>
-          <button onClick={() => void refresh()} disabled={loading} title="刷新 Git 状态" aria-label="刷新 Git 状态" className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
+          <button onClick={() => void refresh()} disabled={loading} title={tr("刷新 Git 状态")} aria-label={tr("刷新 Git 状态")} className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
             <RefreshCw size={14} />
           </button>
         </div>
@@ -153,11 +159,11 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
         )}
         {repoError && <GitErrorDetails message={repoError} />}
 
-        <GitDelivery workspaceRoot={workingDirectory} stagedCount={status?.staged.length ?? 0} onChanged={refresh} refreshKey={refreshVersion} />
-        <SectionTitle label="变更" count={fileRows.length} />
+        <GitDelivery workspaceRoot={workingDirectory} active={active} stagedCount={status?.staged.length ?? 0} onChanged={refresh} refreshKey={refreshVersion} />
+        <SectionTitle label={tr("变更")} count={fileRows.length} />
         {fileRows.length === 0 ? (
           <div className="py-1 pb-3" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            {!workingDirectory ? "请先打开工作区。" : loading ? "正在加载…" : repoError ? "Git 状态不可用" : "工作树干净"}
+            {loading ? tr("正在加载…") : repoError ? tr("Git 状态不可用") : tr("工作树干净")}
           </div>
         ) : (
           <div className="flex flex-col gap-0.5 mb-3.5">
@@ -165,8 +171,8 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
               <button
                 key={`${row.group}:${row.path}`}
                 onClick={() => openReview(row)}
-                aria-label={`${row.group} ${row.path}`}
-                title={`${row.group}: ${row.path}`}
+                aria-label={`${tr(row.group)} ${row.path}`}
+                title={`${tr(row.group)}: ${row.path}`}
                 className="border-0 bg-transparent cursor-pointer overflow-hidden p-1 px-1.5 text-left truncate whitespace-nowrap"
                 style={{
                   borderRadius: "var(--radius-sm, 4px)",
@@ -178,13 +184,13 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
                   fontSize: "var(--text-xs)",
                 }}
               >
-                <span style={{ marginRight: 8, fontFamily: "var(--font-ui)", color: "var(--text-muted)" }}>{row.group}</span>{row.path}
+                <span style={{ marginRight: 8, fontFamily: "var(--font-ui)", color: "var(--text-muted)" }}>{tr(row.group)}</span>{row.path}
               </button>
             ))}
           </div>
         )}
 
-        <SectionTitle label="工作区" count={worktree?.worktrees?.length ?? workspaceGit?.worktreeCount ?? 0} />
+        <SectionTitle label={tr("工作区")} count={worktree?.worktrees?.length ?? workspaceGit?.worktreeCount ?? 0} />
         {worktree?.error && (
           <div className="mb-2" style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)" }}>
             {worktree.error}
@@ -211,29 +217,28 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
                     }}
                   />
                   <span className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap" style={{ color: "var(--text-primary)" }}>
-                    {branchDisplayName(item.branch) || (item.is_detached ? "游离状态" : item.is_isolated ? "隔离任务" : "未知")}
+                    {branchDisplayName(item.branch) || (item.is_detached ? tr("游离状态") : item.is_isolated ? tr("隔离任务") : tr("未知"))}
                   </span>
                   <span className="font-mono" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{item.commit}</span>
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
                   <span style={badgeStyle(item.is_current ? "var(--accent-primary)" : "var(--text-muted)")}>
-                    {item.is_current ? "当前" : item.is_main ? "主工作区" : item.is_isolated ? "隔离" : "已连接"}
+                    {item.is_current ? tr("当前") : item.is_main ? tr("主工作区") : item.is_isolated ? tr("隔离") : tr("已连接")}
                   </span>
                   <button
                     onClick={() => void switchWorktree(item.path)}
                     disabled={item.is_current || Boolean(worktreeAction)}
-                    title="切换工作区"
-                    aria-label="切换工作区"
+                    title={tr("切换工作区")}
+                    aria-label={tr("切换工作区")}
                     className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "1px 7px" }}
                   >
-                    切换
-                  </button>
+                    {tr("切换")}</button>
                   {item.can_remove && (
                     <button
                       onClick={() => void removeWorktree(item.path, item.branch)}
                       disabled={Boolean(worktreeAction)}
-                      title="移除隔离工作区"
-                      aria-label="移除隔离工作区"
+                      title={tr("移除隔离工作区")}
+                      aria-label={tr("移除隔离工作区")}
                       className="inline-flex items-center justify-center p-0 bg-transparent cursor-pointer border rounded" style={{ width: 22, height: 22, borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--state-danger)" }}
                     >
                       <Trash2 size={14} />
@@ -241,14 +246,14 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
                   )}
                 </div>
                 <div className="mt-0.5 overflow-hidden truncate whitespace-nowrap" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-                  {workspaceDisplayName(item.path, item.is_isolated ? "隔离工作区" : "当前工作区")}
+                  {workspaceDisplayName(item.path, item.is_isolated ? tr("隔离工作区") : tr("当前工作区"))}
                 </div>
               </div>
             ))}
           </div>
         ) : (
           <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            {repoError ? "工作区列表不可用。" : "没有检测到关联工作区。"}
+            {repoError ? tr("工作区列表不可用。") : tr("没有检测到关联工作区。")}
           </div>
         )}
       </aside>
@@ -265,7 +270,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
         >
           <GitCompare size={14} color="var(--text-muted)" />
           <span className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap font-mono" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
-            {selected ? `${selected.group} · ${selected.path}` : "工作区审阅"}
+            {selected ? `${tr(selected.group)} · ${selected.path}` : tr("工作区审阅")}
           </span>
           {selected && (
             <button
@@ -273,8 +278,8 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
                 useAppStore.getState().openEditorFile(selected.path, selected.path.split(/[/\\]/).pop(), { exact: true });
                 onEditorOpened?.();
               }}
-              title="在编辑器中打开文件"
-              aria-label="在编辑器中打开文件"
+              title={tr("在编辑器中打开文件")}
+              aria-label={tr("在编辑器中打开文件")}
               className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}
             >
               <ExternalLink size={14} />
@@ -282,12 +287,11 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
           )}
           {selected && (
             <button onClick={() => openReview(selected)} className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "2px 8px" }}>
-              返回审阅
-            </button>
+              {tr("返回审阅")}</button>
           )}
         </div>
         <div className="flex-1 min-h-0 grid place-items-center p-4">
-          <EmptyState compact icon={<GitCompare size={20} />} title={selected ? `${selected.group}差异已在审阅中打开` : "选择文件开始审阅"} hint="在审阅中查看真实行号、切换行内或分栏，并把代码行加入对话。" />
+          <EmptyState compact icon={<GitCompare size={20} />} title={selected ? tr("{v0}差异已在审阅中打开", { v0: selected.group }) : tr("选择文件开始审阅")} hint={tr("在审阅中查看真实行号、切换行内或分栏，并把代码行加入对话。")} />
         </div>
       </main>
     </div>
@@ -308,10 +312,13 @@ const SectionTitle = ({ label, count }: { label: string; count: number }) => (
   </div>
 );
 
-const GitErrorDetails = ({ message }: { message: string }) => <div role="alert" className="mb-2.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>
-  <div>无法读取 Git 状态。刷新后可以重新检查当前工作区。</div>
-  <details style={{ marginTop: 5 }}><summary style={{ cursor: "pointer" }}>错误详情</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: "6px 0", fontSize: "var(--text-xxs)" }}>{message}</pre></details>
+const GitErrorDetails = ({ message }: { message: string }) => {
+  const { t: tr } = useI18n();
+  return <div role="alert" className="mb-2.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>
+  <div>{tr("无法读取 Git 状态。刷新后可以重新检查当前工作区。")}</div>
+  <details style={{ marginTop: 5 }}><summary style={{ cursor: "pointer" }}>{tr("错误详情")}</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: "6px 0", fontSize: "var(--text-xxs)" }}>{message}</pre></details>
 </div>;
+};
 
 const badgeStyle = (color: string): React.CSSProperties => ({
   border: "1px solid var(--border-subtle)",

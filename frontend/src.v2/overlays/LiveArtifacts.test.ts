@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+/* @vitest-environment jsdom */
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { createElement } from "react";
 import type { ChatMessage } from "../stores/types";
-import { collectLiveArtifacts } from "./LiveArtifacts";
+import { useAppStore } from "../stores";
+import { collectLiveArtifacts, LiveArtifacts } from "./LiveArtifacts";
+
+afterEach(cleanup);
 
 const message = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
   id: "assistant-live",
@@ -29,29 +35,37 @@ const message = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
 });
 
 describe("LiveArtifacts projection", () => {
+  it("does not retain an empty execution-output filter in the normal gallery", () => {
+    useAppStore.setState({ liveArtifactsOpen: true, conversationId: "owner", messages: [], isConnected: false });
+    render(createElement(LiveArtifacts));
+    fireEvent.click(screen.getByRole("button", { name: /^实时制品类型，当前：/ }));
+    expect(screen.getByRole("listbox", { name: "实时制品类型", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "执行结果", exact: true })).toBeNull();
+    expect(screen.getByRole("option", { name: "全部类型", exact: true })).toBeTruthy();
+  });
   it.each(["Script completed", "Script yielded", "Script running", "Script failed", "Script cancelled"])(
-    "replaces the producer status title %s while retaining the artifact kind and owner",
+    "keeps the producer status %s in tool evidence instead of the normal gallery",
     (summary) => {
-      const [artifact] = collectLiveArtifacts([message({
+      const messages = [message({
         artifacts: [{ artifactId: "execution-output", kind: "text", summary }],
         blocks: [{ type: "tool_call", record: {
           id: "execution-call", name: "tool_wait", args: {}, status: "success", artifactId: "execution-output",
           artifactKind: "text", displaySummary: summary, startedAt: 100,
         } }],
-      })], "conversation-execution");
-      expect(artifact).toMatchObject({ artifactId: "execution-output", kind: "text", summary: "代码执行输出", conversationId: "conversation-execution" });
+      })];
+      const original = JSON.stringify(messages);
+      expect(collectLiveArtifacts(messages, "conversation-execution")).toEqual([]);
+      expect(JSON.stringify(messages)).toBe(original);
     },
   );
 
-  it("preserves a specific output title when richer execution metadata is merged", () => {
-    const [artifact] = collectLiveArtifacts([message({
+  it("does not promote orchestration text to a file because its summary resembles a filename", () => {
+    expect(collectLiveArtifacts([message({
       artifacts: [{ artifactId: "execution-output", kind: "text", summary: "Script completed.txt" }],
       blocks: [{ type: "tool_call", record: {
         id: "execution-call", name: "tool_exec", args: {}, status: "success", artifactId: "execution-output", displaySummary: "Script completed", startedAt: 100,
       } }],
-    })], "conversation-execution");
-    expect(artifact.summary).toBe("Script completed.txt");
-    expect(artifact.kind).toBe("text");
+    })], "conversation-execution")).toEqual([]);
   });
 
   it("projects browser screenshots as owner-scoped images", () => {

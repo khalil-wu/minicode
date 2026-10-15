@@ -995,11 +995,11 @@
 }
 
 .activity-cell-dot[data-failed="true"] {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .activity-cell-dot[data-partial="true"] {
-  color: var(--state-warning);
+  color: var(--text-muted);
 }
 
 .activity-cell-dot[data-completed="true"] {
@@ -1014,7 +1014,7 @@
 }
 
 .activity-cell-name[data-failed="true"] {
-  color: var(--state-danger);
+  color: var(--text-secondary);
 }
 
 /* File edits stay lightweight in the process timeline. The patch is a
@@ -1048,6 +1048,11 @@
   font-size: var(--text-xs);
 }
 
+.activity-cell-file-change-stats .activity-cell-added,
+.activity-cell-file-change-stats .activity-cell-removed {
+  color: var(--text-muted);
+}
+
 .activity-cell-detail {
   min-width: 0;
   max-width: 320px;
@@ -1066,13 +1071,13 @@
 }
 
 .activity-cell-read-target {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   max-width: none;
-  overflow: visible;
-  color: var(--text-secondary);
+  overflow: hidden;
+  color: var(--text-muted);
   font-family: var(--font-ui);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .activity-cell-inline-records {
@@ -1204,7 +1209,7 @@
 }
 
 .activity-cell-browser-detail-section[data-error="true"] .activity-cell-browser-detail-label {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .activity-cell-browser-detail-output {
@@ -1234,11 +1239,11 @@
 }
 
 .activity-cell-tool-icon[data-failed="true"] {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .activity-cell-tool-icon[data-partial="true"] {
-  color: var(--state-warning);
+  color: var(--text-muted);
 }
 
 .activity-cell-progress {
@@ -1286,7 +1291,6 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--workbench-tool);
-  animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .activity-cell-file-change-expanded,
@@ -1572,7 +1576,7 @@
 
 .activity-cell-error-label {
   margin-bottom: 4px;
-  color: var(--state-danger);
+  color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--text-xs);
   font-weight: var(--fw-semibold);
@@ -1583,7 +1587,7 @@
   padding: var(--spacing-2) var(--spacing-3);
   max-height: 200px;
   overflow: auto;
-  border-left: 2px solid var(--state-danger);
+  border-left: 2px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--surface-hover);
   color: var(--text-primary);
@@ -1661,11 +1665,11 @@
 }
 
 .exec-cell-status-failed {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .exec-cell-status-partial {
-  color: var(--state-warning);
+  color: var(--text-muted);
 }
 
 .exec-cell-status-cancelled {
@@ -1777,12 +1781,11 @@
 
 .exec-cell-expanded {
   margin: 4px 0 6px;
-  padding: 10px 12px;
+  padding: 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--workbench-tool);
   box-shadow: none;
-  animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .exec-cell-no-output {
@@ -1794,29 +1797,95 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-height: min(360px, 42vh);
+  min-width: 100%;
+  width: max-content;
+  margin: 0;
+  padding: 8px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: pre;
+}
+
+.exec-cell-output-command {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  width: 100%;
   margin: 0;
   padding: 0;
-  overflow: auto;
-  color: var(--text-secondary);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
   white-space: pre-wrap;
   word-break: break-word;
+  text-align: left;
+  cursor: pointer;
 }
 
-.exec-cell-output-command {
+.exec-cell-output-command[data-expanded="true"] {
+  -webkit-line-clamp: unset;
+}
+
+.exec-cell-output-command:focus-visible {
+  outline: 2px solid var(--border-focus);
+  border-radius: var(--radius-sm);
+}
+
+.exec-cell-shell-name {
+  padding: 4px 8px;
   color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.exec-cell-command-line {
+  position: relative;
+  margin: 8px 8px 0;
+  padding-right: 24px;
+}
+
+.exec-cell-output-body {
+  position: relative;
+  min-height: 20px;
+}
+
+.exec-cell-output-scroll {
+  display: flex;
+  flex-direction: column-reverse;
+  max-height: 9rem;
+  overflow: auto;
+}
+
+.exec-cell-copy {
+  position: absolute;
+  top: 0;
+  right: 0;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--easing-css-out);
+}
+
+.exec-cell-output-body .exec-cell-copy {
+  right: 8px;
+}
+
+.exec-cell-command-line:hover .exec-cell-copy,
+.exec-cell-output-body:hover .exec-cell-copy,
+.exec-cell-copy:focus-visible {
+  opacity: 1;
 }
 
 .exec-cell-output-stdout,
 .exec-cell-output-stderr {
-  white-space: pre-wrap;
+  white-space: pre;
 }
 
 .exec-cell-output-stderr {
-  color: var(--state-danger);
+  color: var(--text-secondary);
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1843,7 +1912,6 @@
   box-shadow: none;
 }
 
-.exec-cell-output-toolbar,
 .exec-cell-output-status {
   display: flex;
   align-items: center;
@@ -1852,19 +1920,13 @@
   font-size: var(--text-xs);
 }
 
-.exec-cell-output-toolbar {
-  justify-content: space-between;
-  min-height: 22px;
-  margin-bottom: 6px;
-}
-
 .exec-cell-output-status {
   justify-content: flex-end;
-  margin-top: 8px;
+  padding: 2px 10px 4px;
 }
 
 .exec-cell-output-status[data-status="failed"] {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .agent-loop-diff-area .diff-cell {
@@ -2646,3 +2708,13 @@ html[data-theme="dark"] .error-cell-raw-error {
   background: var(--surface-soft);
   font-size: var(--text-xs);
 }
+.context-compaction-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+.context-compaction-cell svg { flex-shrink: 0; }

@@ -102,12 +102,13 @@ def test_strip_historical_media_keeps_recent_user_attachments() -> None:
     assert stats["messages"] == 1
     assert stats["images"] == 1
     assert stats["documents"] == 1
+    rendered_users = [message for message in builder._render_prompt_messages(AgentState(user_message=""), None) if message.role == "user"]
     assert builder._history[0].images
-    assert not builder._render_prompt_messages(AgentState(user_message=""), None)[1].images
+    assert not rendered_users[0].images
     assert builder._history[0].documents
-    assert not builder._render_prompt_messages(AgentState(user_message=""), None)[1].documents
+    assert not rendered_users[0].documents
     assert "media-size recovery" not in str(builder._history[0].content)
-    assert "media-size recovery" in builder._render_prompt_messages(AgentState(user_message=""), None)[1].content
+    assert "media-size recovery" in rendered_users[0].content
     assert builder._history[2].images and builder._history[2].images[0]["data"] == "CCC"
 
 
@@ -268,5 +269,6 @@ def test_strip_historical_media_preserves_only_user_input() -> None:
     stats = builder.strip_historical_media(keep_recent_user_turns=1)
     assert stats["images"] == 0
     assert builder._history[0].images
-    assert builder._render_prompt_messages(AgentState(user_message=""), None)[1].images
+    rendered_users = [message for message in builder._render_prompt_messages(AgentState(user_message=""), None) if message.role == "user"]
+    assert rendered_users[0].images
 

@@ -21,6 +21,7 @@ from backend.agent.markdown_scopes import get_minicode_config_home_dir
 from backend.config import PROJECT_ROOT, STATE_ROOT
 from backend.feature_flags import feature_enabled
 from backend.skills.frontmatter import parse_skill_frontmatter
+from backend.skills.config import SkillsConfiguration, skills_configuration_from_stack
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ class SkillMeta:
     source_path: Path = field(default_factory=lambda: Path("."))
     source_level: str = "builtin"  # managed / plugin / user / workspace / builtin
     mcp_dependency_specs: list[dict[str, Any]] = field(default_factory=list)
+    products: tuple[str, ...] = ()
+    original_name: str = ""
+    alias_root: Path | None = None
+    agent_plugin: bool = False
 
     def to_layer1_summary(self) -> str:
         """Render MiniCode's absolute-path catalog line."""
@@ -80,6 +85,32 @@ class SkillLoader:
         self._catalog: list[SkillMeta] = []
         self._path_cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
+        self._role_disabled_paths: set[str] = set()
+        self._role_disabled_names: set[str] = set()
+        self._role_bundled_enabled = True
+        self._role_plugins_enabled = True
+        self._skills_configuration = SkillsConfiguration()
+        self._direct_skill_roots: set[str] = set()
+        self._config_stack = None
+
+    @property
+    def skills_configuration(self) -> SkillsConfiguration:
+        return self._skills_configuration
+
+    def restrict_role(self, config: dict[str, Any], features: dict[str, bool]) -> None:
+        """Layer Codex role restrictions onto this child-owned loader."""
+        for entry in config.get("config", []):
+            if entry["enabled"] is not False:
+                continue
+            path, name = entry.get("path"), entry.get("name")
+            if path is not None and name is None:
+                self._role_disabled_paths.add(self._path_key(Path(path)))
+            elif path is None and name is not None and name.strip():
+                self._role_disabled_names.add(name.strip())
+            else:
+                logger.warning("Ignoring skills.config entry without exactly one non-empty path or name selector")
+        self._role_bundled_enabled = self._role_bundled_enabled and config.get("bundled", {}).get("enabled", True)
+        self._role_plugins_enabled = self._role_plugins_enabled and features.get("plugins", True)
 
     def set_project_root(self, project_root: Path | str | None) -> None:
         """Rebind discovery to the active session workspace."""
@@ -178,7 +209,7 @@ class SkillLoader:
         try:
             from backend.config import load_config_layer_stack
 
-            stack = load_config_layer_stack(cwd=self._project_root)
+            stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
             snapshot = PluginManager(config_stack=stack).snapshot()
         except Exception:
             logger.warning("Unified plugin snapshot unavailable for Skills", exc_info=True)
@@ -207,7 +238,9 @@ class SkillLoader:
             skills_dirs: list[Path] = []
             for manifest_path in manifest_paths:
                 try:
-                    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    from backend.plugins.manifest import _read_plugin_manifest
+
+                    raw = _read_plugin_manifest(manifest_path)
                     configured = raw.get("skills") if isinstance(raw, dict) else None
                     configured_paths = [configured] if isinstance(configured, str) else configured if isinstance(configured, list) else []
                     for configured_path in configured_paths:
@@ -223,6 +256,8 @@ class SkillLoader:
             for skills_dir in skills_dirs:
                 if skills_dir.is_dir():
                     dirs.append((f"plugin:{plugin.get('id') or plugin_name}", skills_dir))
+                    if plugin.get("skill_discovery_mode") == "direct_children":
+                        self._direct_skill_roots.add(self._path_key(skills_dir))
         return dirs
 
     def discover(self) -> list[SkillMeta]:
@@ -237,6 +272,11 @@ class SkillLoader:
         """
         catalog: list[SkillMeta] = []
         seen_paths: set[str] = set()
+        from backend.config import load_config_layer_stack
+
+        stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
+        self._skills_configuration = skills_configuration_from_stack(stack)
+        self._direct_skill_roots.clear()
 
         # Search roots are already ordered from nearest workspace scope to
         # user/system fallbacks. Keep same-name skills as distinct catalog
@@ -245,15 +285,40 @@ class SkillLoader:
             if not base_dir.exists():
                 continue
 
-            skill_files = self._discover_skill_files(base_dir)
+            agent_plugin = self._path_key(base_dir) in self._direct_skill_roots
+            skill_files = sorted((child / "SKILL.md" for child in base_dir.iterdir() if child.is_dir() and (child / "SKILL.md").is_file())) if agent_plugin else self._discover_skill_files(base_dir)
             for skill_file in skill_files:
                 meta = self._parse_frontmatter(skill_file, level)
                 if meta:
+                    meta.alias_root = base_dir
+                    meta.agent_plugin = agent_plugin
+                    if meta.products and "codex" not in meta.products:
+                        continue
                     path_key = self._path_key(meta.source_path)
+                    if (path_key in self._role_disabled_paths
+                        or meta.name in self._role_disabled_names
+                        or self._path_key(meta.source_path.parent) in self._role_disabled_paths
+                        or (meta.source_level == "builtin" and not self._role_bundled_enabled)
+                        or (meta.source_level == "builtin" and not self._skills_configuration.bundled_enabled)
+                        or (meta.source_level == "plugin" and not self._role_plugins_enabled)):
+                        continue
                     if path_key in seen_paths:
                         continue
                     seen_paths.add(path_key)
                     catalog.append(meta)
+
+        disabled_paths: set[str] = set()
+        for kind, value, enabled in self._skills_configuration.rules:
+            matched = [self._path_key(meta.source_path) for meta in catalog if
+                (kind == "name" and (meta.original_name or meta.name) == value)
+                or (kind == "path" and self._path_key(meta.source_path) == self._path_key(Path(value)))]
+            if kind == "path":
+                matched.append(self._path_key(Path(value)))
+            if enabled:
+                disabled_paths.difference_update(matched)
+            else:
+                disabled_paths.update(matched)
+        catalog = [meta for meta in catalog if self._path_key(meta.source_path) not in disabled_paths]
 
         self._catalog = catalog
         self._discovered = True
@@ -481,6 +546,8 @@ class SkillLoader:
             default_prompt=self._metadata_text(interface.get("default_prompt")),
             source_path=skill_file,
             source_level="plugin" if plugin_namespace else level,
+            products=tuple(policy.get("products", [])),
+            original_name=name,
         )
 
     @staticmethod
@@ -510,7 +577,14 @@ class SkillLoader:
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             logger.warning("Ignoring invalid skill metadata %s: %s", path, exc)
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        policy = payload.get("policy") or {}
+        products = policy.get("products", [])
+        if not isinstance(products, list) or any(product not in {"codex", "chatgpt", "atlas"} for product in products):
+            logger.warning("Ignoring invalid Skill products metadata %s", path)
+            return {}
+        return payload
 
     @staticmethod
     def _safe_skill_asset(skill_dir: Path, value: Any) -> str:

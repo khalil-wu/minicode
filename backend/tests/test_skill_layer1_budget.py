@@ -2,12 +2,15 @@ import asyncio
 from pathlib import Path
 
 from backend.agent.context import ContextBuilder
+from backend.sandbox.policy import ResolvedSandboxPolicy, SandboxEnforcement, NetworkSandboxPolicy
+from backend.permissions.context import PermissionContext
 from backend.agent.skill_activation import activate_turn_skills
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
 from backend.skills.executor import SkillExecutor, _cap_layer1_summary
 from backend.skills.loader import SkillLoader
 from backend.skills.manager import SkillManager
+from backend.tests.skill_catalog_assertions import assert_skill_locator
 
 
 def _write_skill(
@@ -58,11 +61,11 @@ def test_executor_renders_minicode_available_skill_catalog(tmp_path) -> None:
 
     assert "## Skills" in result
     assert "### Available skills" in result
-    assert f"(file: {str(skill_path).replace(chr(92), '/')})" in result
+    assert_skill_locator(result, "verify", skill_path)
     assert "Do not carry skills across turns unless re-mentioned." in result
 
 
-def test_skill_catalog_budget_covers_guidance_and_zero_disables_it(tmp_path) -> None:
+def test_skill_catalog_budget_charges_metadata_and_keeps_source_usage_policy(tmp_path) -> None:
     skills_root = tmp_path / "skills"
     _write_skill(skills_root, "verify", "Verify " + "x" * 1_000, "Run the checks.")
     manager = SkillManager(_loader(("workspace", skills_root)))
@@ -73,10 +76,12 @@ def test_skill_catalog_budget_covers_guidance_and_zero_disables_it(tmp_path) -> 
     assert "## Skills" in capped
     assert "- verify:" in capped
     assert "### How to use skills" in capped
-    assert len(capped) <= 2_000
+    rows = capped.split("### Available skills\n", 1)[1].split("\n### How to use skills", 1)[0]
+    assert len(rows) <= 2_000
+    assert "Do not delegate reading, summarizing, or interpreting skill instructions" in capped
     assert ContextBuilder(
         skill_manager=manager, token_budget=TokenBudget(active_skills=0)
-    )._build_skill_catalog() == ""
+    )._build_skill_catalog()
 
 
 def test_executor_has_one_canonical_catalog_for_all_providers(tmp_path) -> None:
@@ -93,7 +98,7 @@ def test_executor_has_one_canonical_catalog_for_all_providers(tmp_path) -> None:
     result = executor.build_layer1_summary()
 
     normalized_path = str(skill_path).replace(chr(92), "/")
-    assert f"(file: {normalized_path})" in result
+    assert_skill_locator(result, "xml-safe", skill_path)
     assert "Use A & B <carefully>." in result
     assert "<available_skills>" not in result
 
@@ -192,7 +197,7 @@ def test_context_builder_consumes_complete_skill_payload_once(tmp_path) -> None:
     state.prompt_context["selected_skills"] = [{"name": "verify", "path": str(skill_path)}]
 
     async def run():
-        activation_events = [event async for event in activate_turn_skills(manager, state.user_message, state)]
+        activation_events = [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
         await builder.start_turn(state.user_message, state)
         first = await builder.build(state)
         await builder.start_turn("Check again", state)

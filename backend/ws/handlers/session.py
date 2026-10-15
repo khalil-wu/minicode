@@ -59,9 +59,13 @@ async def emit_session_usage_snapshot(session: "WebSocketSession") -> Any:
 
     tracker_summary = CostTracker.get_instance().get_summary(session.session_id)
     state = session.last_agent_state
-    if state is None:
+    if state is None or state.conversation_id != session.active_conversation_id:
         from backend.agent.state import AgentState
-        state = AgentState(user_message="")
+        state = AgentState(
+            user_message="",
+            conversation_id=str(session.active_conversation_id or ""),
+            workspace_root=session.session_lifecycle.current_workspace_root(),
+        )
 
     # Surface MCP tools connected since this session started before snapshotting.
     session.refresh_tool_registry_if_mcp_changed()
@@ -232,7 +236,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         restored_conversation_id=restored_conversation_id,
         active_payload=active_payload,
     )
-    provider_capabilities = runtime_snapshot.get("provider_capabilities") if isinstance(runtime_snapshot, dict) else {}
+    provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
     provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
     base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
     wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
@@ -342,7 +346,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     )
     workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
     runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
-    provider_capabilities = runtime_snapshot.get("provider_capabilities") if isinstance(runtime_snapshot, dict) else {}
+    provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
     provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
     base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
     wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()

@@ -195,6 +195,11 @@ class QueryTerminalTransaction:
             terminal_intent_event_id=(self.journal.terminal_intent_event_id
                 if self.turn_ctx.turn_kernel is not None and not journal_errors else ""))
         commit_failed = terminal_commit_failed(completion_event)
+        terminal_event.data.pop("duration_ms", None)
+        if completion_event is not None and completion_event.type == "agent.run.completed":
+            duration_ms = completion_event.data.get("duration_ms")
+            if duration_ms is not None:
+                terminal_event.data["duration_ms"] = duration_ms
 
         try:
             if completion_event is not None:

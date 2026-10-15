@@ -67,7 +67,9 @@ describe("InlineAgentPrompt control protocol responses", () => {
         template: { type: "string", oneOf: [{ const: "monthly-review", title: "Monthly review" }] } }, required: ["name", "template"] } });
     let mounted = render(<InlineAgentPrompt />);
     fireEvent.change(screen.getByRole("textbox", { name: "name" }), { target: { value: "Shanghai" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "template" }), { target: { value: "monthly-review" } });
+    const template = screen.getByRole("combobox", { name: "template" });
+    const option = screen.getByRole("option", { name: "Monthly review" }) as HTMLOptionElement;
+    fireEvent.change(template, { target: { value: option.value } });
     mounted.unmount(); mounted = render(<InlineAgentPrompt />);
     expect((screen.getByRole("textbox", { name: "name" }) as HTMLInputElement).value).toBe("Shanghai");
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
@@ -267,6 +269,16 @@ describe("InlineAgentPrompt control protocol responses", () => {
     expect(mocks.sendClientCommandAwaitResult).not.toHaveBeenCalled();
     await act(async () => accept({ type: "command.result", command: "control_response", level: "success", message: "", data: {} }));
     expect(useAppStore.getState().pendingApproval).toBeNull();
+  });
+
+  it.each(["prompt", "writes"] as const)("keeps Source MCP %s approvals to one invocation", (mode) => {
+    useAppStore.setState({ pendingApproval: {
+      requestId: "source-mcp-approval", conversationId: "conv-inline", toolName: "mcp__source__operation", args: { value: "actual" },
+      mcpApproval: { server: "source", tool_name: "operation", approval_mode: mode, allow_session_remember: false },
+    } });
+    render(<InlineAgentPrompt />);
+    expect(screen.queryByRole("button", { name: /选择允许范围/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "允许使用工具" })).toBeTruthy();
   });
 
   it("uses permission shortcuts only outside editable text", () => {
@@ -905,7 +917,7 @@ describe("InlineAgentPrompt control protocol responses", () => {
   });
 
   it("shows the server-owned approval deadline and highlights the last minute", () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     vi.setSystemTime(new Date("2026-08-03T00:00:00Z"));
     useAppStore.setState({
       pendingApproval: {

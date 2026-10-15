@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.config import PermissionSettings
+from backend.config import PermissionSettings, permission_settings_from_config
 from backend.artifact.store import ArtifactStore
 from backend.mcp.client import MCPToolDef
 from backend.mcp.registry import MCPToolProxy
@@ -127,7 +127,7 @@ def test_outside_workspace_error_identifies_target_and_workspace(tmp_path):
 
 def _checker(td: str, **settings_kwargs) -> PermissionChecker:
     return PermissionChecker(
-        settings=PermissionSettings(**settings_kwargs),
+        settings=permission_settings_from_config({"permissions": settings_kwargs}),
         workspace_root=Path(td),
     )
 

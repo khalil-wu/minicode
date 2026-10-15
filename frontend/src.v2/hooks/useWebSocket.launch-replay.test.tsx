@@ -33,7 +33,7 @@ const Harness = () => { useWebSocketConnection(); return null; };
 
 describe("live launch replay", () => {
   beforeEach(() => {
-    vi.useFakeTimers(); MockWebSocket.instances = []; vi.stubGlobal("WebSocket", MockWebSocket); localStorage.clear();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); MockWebSocket.instances = []; vi.stubGlobal("WebSocket", MockWebSocket); localStorage.clear();
     resetPendingClientCommandAcksForTests(); resetRecentInboundEventIdsForTests();
     useAppStore.setState({ isConnected: false, conversationId: null, conversations: [], messages: [], conversationMessages: {}, conversationStreaming: {}, isStreaming: false, connectionPhase: "connecting", reconnectAttempt: 0, reconnectMaxAttempts: null, connectionError: null });
   });

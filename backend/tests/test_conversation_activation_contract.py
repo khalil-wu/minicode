@@ -10,6 +10,7 @@ import pytest
 from backend.conversations.repository import ConversationRepository
 from backend.artifact.store import ArtifactStore
 from backend.ws.handlers import conversation
+from backend.ws.session_lifecycle import SessionLifecycle
 
 
 def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
@@ -32,8 +33,9 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
         diagnostic_store=SimpleNamespace(share_for_conversation=Mock()),
         runtime_snapshot=lambda **_: {"active_conversation_id": session.active_conversation_id},
         context_builder=SimpleNamespace(clear=Mock()),
-        session_lifecycle=SimpleNamespace(clear_workspace_runtime=Mock()),
     )
+    session.session_lifecycle = SessionLifecycle(session)
+    session.session_lifecycle.clear_workspace_runtime = Mock()
     session.permission_context_for_conversation = Mock(return_value=SimpleNamespace(mode="bypass"))
     session.refresh_llm_selection = Mock()
     session.session_lifecycle.schedule_runtime_capabilities = Mock()

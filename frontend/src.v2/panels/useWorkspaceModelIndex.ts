@@ -7,6 +7,7 @@ import { normalizeWorkspaceRoot, workspacePathWithin, workspaceRootsEqual } from
 import { editorModelUri, syncWorkspaceTypeScriptModels } from "./monacoLanguageServices";
 import { isDependencyIndexPath, isTypeScriptSourcePath, WorkspaceModelIndex } from "./workspaceModelIndex";
 import { editorPathComparisonKey } from "../stores/shared-helpers";
+import { sharedWorkspaceIndexes as sharedIndexes } from "./workspaceIndexRegistry";
 
 export interface WorkspaceIndexStatus {
   phase: "idle" | "loading" | "ready" | "partial" | "error";
@@ -21,7 +22,7 @@ type PendingFileChange = { latest: WorkspaceFileChange; deletion?: WorkspaceFile
 
 // The editor and Problems share models, requests, and the same published status.
 // A file notification queues the next snapshot; it never cancels the one being read.
-class WorkspaceIndexSession {
+export class WorkspaceIndexSession {
   readonly index: WorkspaceModelIndex;
   private readonly controller = new AbortController();
   private readonly listeners = new Set<(status: WorkspaceIndexStatus) => void>();
@@ -30,6 +31,9 @@ class WorkspaceIndexSession {
   private observedSequence = 0;
   private pendingChanges = new Map<string, PendingFileChange>();
   private loaded = false;
+  private revision: number | undefined;
+  private indexInstanceId: string | undefined;
+  private lastInvalidation: { instanceId: string; revision: number } | undefined;
   private dependenciesDirty = true;
   private running = false;
   private pending = false;
@@ -75,6 +79,12 @@ class WorkspaceIndexSession {
 
   refresh(): void { this.dependenciesDirty = true; this.request(); }
 
+  invalidated(instanceId: string, revision: number): void {
+    if (this.lastInvalidation?.instanceId === instanceId && this.lastInvalidation.revision >= revision) return;
+    this.lastInvalidation = { instanceId, revision };
+    this.refresh();
+  }
+
   private request(): void {
     this.pending = true;
     if (this.running) return;
@@ -94,29 +104,36 @@ class WorkspaceIndexSession {
     this.publish({ ...this.status, phase: "loading", issues: [] });
     try {
       this.index.noteFileChanges(changes);
-      const snapshot = await readWorkspaceProjectIndex(this.workspaceRoot, includeDependencies, signal);
+      const snapshot = await readWorkspaceProjectIndex(this.workspaceRoot, includeDependencies, signal, this.revision, this.indexInstanceId);
       if (signal.aborted) return;
       const sourceIssues = await this.index.applySnapshot(snapshot, includeDependencies, signal);
       if (signal.aborted) return;
+      this.revision = snapshot.revision ?? undefined;
+      this.indexInstanceId = snapshot.index_instance_id ?? undefined;
       const workers = await syncWorkspaceTypeScriptModels(this.index.resources());
       if (signal.aborted) return;
       const attempted = new Set<string>();
       while (!signal.aborted) {
-        const requested = (await workers.configurationRequests()).filter((uri) => !attempted.has(uri));
+        const requested = [...new Set([...await workers.configurationRequests(), ...await workers.dependencyRequests()])]
+          .filter((uri) => !attempted.has(uri));
         if (signal.aborted) return;
         if (!requested.length) break;
         const additions: Array<{ filePath: string; file: WorkspaceProjectIndexFile }> = [];
-        for (const uri of requested) {
-          attempted.add(uri);
-          const path = this.index.configurationPath(uri);
-          if (!workspacePathWithin(path, this.workspaceRoot)) continue;
-          try {
-            const file = await readWorkspaceFile(path, this.workspaceRoot, signal);
-            additions.push({ filePath: uri, file: { ...file, content_hash: file.content_hash!, kind: "config" } });
-          } catch (error) {
-            if (error instanceof ApiError && error.status === 404) continue;
-            throw error;
-          }
+        for (let offset = 0; offset < requested.length; offset += 8) {
+          await Promise.all(requested.slice(offset, offset + 8).map(async (uri) => {
+            attempted.add(uri);
+            const path = this.index.configurationPath(uri);
+            if (!workspacePathWithin(path, this.workspaceRoot)) return;
+            try {
+              const file = await readWorkspaceFile(path, this.workspaceRoot, signal);
+              additions.push({ filePath: uri, file: { ...file, content_hash: file.content_hash!,
+                kind: /\.d\.[cm]?ts$/i.test(path) ? "declaration" : /(?:^|[/\\])package\.json$/i.test(path) ? "package" : "config" } });
+            } catch (error) {
+              if (error instanceof ApiError && error.status === 404) return;
+              throw error;
+            }
+          }));
+          if (signal.aborted) return;
         }
         if (signal.aborted) return;
         this.index.addConfigurations(additions.map((entry) => entry.file));
@@ -149,8 +166,6 @@ class WorkspaceIndexSession {
     this.index.dispose();
   }
 }
-
-const sharedIndexes = new Map<string, { session: WorkspaceIndexSession; references: number }>();
 
 export function useWorkspaceModelIndex(workspaceRoot: string) {
   const registry = useRef<WorkspaceIndexSession | null>(null);

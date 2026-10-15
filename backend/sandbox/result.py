@@ -23,7 +23,8 @@ class SandboxResult:
     # reporting a completed teardown.
     cleanup_pending: bool = False
     cleanup_reason: str = ""
+    execution_error: str = ""
 
     @property
     def success(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out and not self.cancelled
+        return self.exit_code == 0 and not self.timed_out and not self.cancelled and not self.execution_error

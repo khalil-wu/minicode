@@ -134,6 +134,7 @@ function startBackendSidecar() {
       MINICODE_WS_BASE_URL: resolvedWsBaseUrl,
       MINICODE_FRONTEND_URL: resolvedFrontendUrl,
       MINICODE_RUNTIME_TOKEN: runtimeToken,
+      MINICODE_DESKTOP_OWNED: "1",
       MINICODE_STATE_ROOT: stateRoot,
       MINICODE_APP_RESOURCES_DIR: appResourcesDir,
       MINICODE_GH_COMMAND: githubCliCommand,
@@ -144,6 +145,9 @@ function startBackendSidecar() {
       MINICODE_DOWNLOADS_DIR: downloadsDir,
       PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     },
+    // The pipe belongs to Electron; EOF remains a lifetime boundary when quit handlers cannot run.
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     windowsHide: true,
   });
 
@@ -243,8 +247,7 @@ async function retireBackendSidecar(child, reason = "readiness failure") {
 }
 
 async function stopBackendSidecar() {
-  backendStopRequested = true;
-  clearBackendRestartTimer();
+  requestBackendStop();
 
   if (!backendProcess || !backendManagedByApp) return;
 
@@ -269,6 +272,11 @@ async function stopBackendSidecar() {
     child.kill("SIGKILL");
     await waitForChildExit(child, 1000);
   }
+}
+
+function requestBackendStop() {
+  backendStopRequested = true;
+  clearBackendRestartTimer();
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +404,7 @@ module.exports = {
   startBackendSidecar,
   retireBackendSidecar,
   stopBackendSidecar,
+  requestBackendStop,
   waitForBackendReady,
   launchBackendSidecar,
   getBackendProcess,

@@ -169,6 +169,8 @@ def test_browser_control_prefers_authenticated_embedded_browser_bridge(monkeypat
         ToolExecutionContext(
             permission=PermissionContext(),
             conversation_id="conv-browser-owner",
+            metadata={"window_instance_id": "fixture-window"},
+            window_binding_token="fixture-binding",
         ),
     ))
 
@@ -296,6 +298,8 @@ def test_embedded_screenshot_persists_owner_scoped_typed_image_artifact(monkeypa
             conversation_id="conv-screen",
             workspace_root=Path("C:/workspace"),
             artifact_store=_Store(),
+            metadata={"window_instance_id": "fixture-window"},
+            window_binding_token="fixture-binding",
         ),
     ))
 
@@ -345,6 +349,8 @@ def test_cdp_screenshot_persists_pure_base64_image_artifact(monkeypatch) -> None
             conversation_id="conv-cdp",
             workspace_root=Path("C:/workspace"),
             artifact_store=_Store(),
+            metadata={"window_instance_id": "fixture-window"},
+            window_binding_token="fixture-binding",
         ),
     ))
 
@@ -409,6 +415,8 @@ def test_embedded_screenshot_reports_the_actual_image_mime_type(
             conversation_id="conv-screen",
             workspace_root=Path("C:/workspace"),
             artifact_store=_Store(),
+            metadata={"window_instance_id": "fixture-window"},
+            window_binding_token="fixture-binding",
         ),
     ))
 

@@ -1,6 +1,8 @@
+import { useI18n } from "../i18n";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   Bug,
   Crosshair,
   Download,
@@ -38,6 +40,7 @@ import {
   embeddedBrowserSetBounds,
   isDesktop,
   onEmbeddedBrowserEvent,
+  onEmbeddedBrowserSettingsChanged,
   openExternal,
   type EmbeddedBrowserState,
   type EmbeddedBrowserSettings,
@@ -49,12 +52,16 @@ import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
 import { useTurnChanges } from "../chat/useTurnChanges";
+import { sendChatMessage } from "../chat/sendChatMessage";
 import { PreviewServerManager } from "./PreviewServerManager";
 import {
   acknowledgeBrowserRequest,
   subscribeBrowserRequests,
 } from "../chat/openWebInBrowser";
 import "./BrowserPanel.css";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { captureBrowserAnnotationAttachments } from "./browser-annotation-capture";
+import { liveConversationWorkbenchState } from "../stores/ui-slice";
 
 interface BrowserTab {
   id: string;
@@ -172,7 +179,9 @@ const updateTabFromEvent = (tab: BrowserTab, event: EmbeddedBrowserState): Brows
   ...tab,
   title: event.title || tab.title,
   url: event.url === "about:blank" ? "" : event.url || tab.url,
-  draftUrl: event.url === "about:blank" ? "" : event.url || tab.draftUrl,
+  draftUrl: event.url && event.url !== (tab.url || "about:blank")
+    ? event.url === "about:blank" ? "" : event.url
+    : tab.draftUrl,
   loading: event.loading,
   canGoBack: event.canGoBack,
   canGoForward: event.canGoForward,
@@ -181,16 +190,23 @@ const updateTabFromEvent = (tab: BrowserTab, event: EmbeddedBrowserState): Brows
 });
 
 export const BrowserPanel = () => {
+  const { t } = useI18n();
+  const { preferences } = useDesktopPreferences();
+  const [addressFocused, setAddressFocused] = useState(false);
   const conversationId = useAppStore((state) => state.conversationId) || "";
   const floatingComposerVisible = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
-  const { summary: turnChanges, openReview } = useTurnChanges();
+  const isStreaming = useAppStore((state) => state.isStreaming);
+  const isConnected = useAppStore((state) => state.isConnected);
   const [tabs, setRenderedTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
   const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
   const browserHydrated = hydratedConversationId === conversationId;
   const [annotationDrafts, setAnnotationDrafts] = useState<Record<string, AnnotationDraft>>({});
+  const [feedbackSubmittingPage, setFeedbackSubmittingPage] = useState<string | null>(null);
+  const [feedbackStatus, setFeedbackStatus] = useState<Record<string, string>>({});
+  const [feedbackBusyBehavior, setFeedbackBusyBehavior] = useState<"queue" | "steer">("queue");
   const [pickerMode, setPickerMode] = useState<"element" | "region" | null>(null);
   const [moreMenuPosition, setMoreMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [inspectorPage, setInspectorPage] = useState<string | null>(null);
@@ -230,6 +246,17 @@ export const BrowserPanel = () => {
     () => tabs.find((tab) => tab.id === activeId) ?? tabs[0],
     [activeId, tabs],
   );
+  useEffect(() => {
+    if (!isDesktop()) return;
+    return onEmbeddedBrowserSettingsChanged((settings) => {
+      const origin = parseHttpUrl(activeTab.url)?.origin ?? "";
+      settingsRevisionRef.current += 1;
+      setBrowserSettings({ downloadPolicy: settings.downloadPolicy, origin, permissions: settings.sitePermissions[origin] ?? [] });
+    });
+  }, [activeTab.url]);
+  const { summary: turnChanges, openReview } = useTurnChanges({
+    conversationId, tab: "browser", url: activeTab.url, targetId: activeTab.id,
+  });
   const pageKey = JSON.stringify([conversationId, activeId, activeTab.url]);
   const annotationDraft = annotationDrafts[pageKey] ?? EMPTY_ANNOTATION_DRAFT;
   const { open: annotationOpen, note: annotationNote, selector: annotationSelector, pickedElement } = annotationDraft;
@@ -747,10 +774,9 @@ export const BrowserPanel = () => {
     removeClosedTab(tabId);
   };
 
-  const saveAnnotation = () => {
+  const annotationItems = () => {
     const note = annotationNote.trim();
-    if (!note || !activeTab?.url) return;
-    for (const selectedElement of (pickedElements.length ? pickedElements : [null])) {
+    return (pickedElements.length ? pickedElements : [null]).map((selectedElement) => {
     const id = `browser_note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const selector = selectedElement?.selector || annotationSelector.trim();
     const viewport = selectedElement?.viewport;
@@ -772,11 +798,8 @@ export const BrowserPanel = () => {
       note,
       createdAt: Date.now(),
     };
-    addBrowserAnnotation(annotation);
-    // A saved annotation is immediately available to the next agent turn;
-    // the unique local path prevents annotations on the same page collapsing.
-    addSelectedMention({
-      kind: "browser_annotation",
+    const reference = {
+      kind: "browser_annotation" as const,
       path: `browser-annotation:${id}`,
       name: "页面批注",
       url: annotation.url,
@@ -789,15 +812,41 @@ export const BrowserPanel = () => {
       heightPercent: annotation.heightPercent,
       viewportWidth: annotation.viewportWidth,
       viewportHeight: annotation.viewportHeight,
+    };
+    return { annotation, reference };
     });
-    }
-    updateAnnotationDraft({ ...EMPTY_ANNOTATION_DRAFT, elements: [] });
+  };
+
+  const saveAnnotation = async () => {
+    if (!annotationNote.trim() || !activeTab?.url) return;
+    const owner = conversationId;
+    const initialWorkbench = liveConversationWorkbenchState(useAppStore.getState());
+    const workspaceRoot = useAppStore.getState().workingDirectory;
+    const submittedPage = pageKey;
+    const submittedDraft = annotationDraft;
+    const items = annotationItems();
+    setFeedbackSubmittingPage(submittedPage);
+    try {
+      const captured = await captureBrowserAnnotationAttachments({ conversationId: owner, workspaceRoot, targetId: activeTab.id, url: activeTab.url, elements: pickedElements });
+      useAppStore.setState((state) => {
+        if (state.conversationId === owner) return { selectedMentions: [...state.selectedMentions, ...items.map((item) => item.reference)], attachments: [...state.attachments, ...captured.composerAttachments] };
+        const workbench = state.conversationWorkbenchStates[owner] ?? initialWorkbench;
+        return { conversationWorkbenchStates: { ...state.conversationWorkbenchStates, [owner]: { ...workbench,
+          selectedMentions: [...workbench.selectedMentions, ...items.map((item) => item.reference)], attachments: [...workbench.attachments, ...captured.composerAttachments],
+        } } };
+      });
+      if (useAppStore.getState().conversationId === owner) items.forEach(({ annotation }) => addBrowserAnnotation(annotation));
+      setAnnotationDrafts((drafts) => drafts[submittedPage] === submittedDraft ? { ...drafts, [submittedPage]: { ...EMPTY_ANNOTATION_DRAFT, elements: [] } } : drafts);
+    } catch (error) {
+      setFeedbackStatus((statuses) => ({ ...statuses, [submittedPage]: error instanceof Error ? error.message : String(error) }));
+      return;
+    } finally { setFeedbackSubmittingPage((current) => current === submittedPage ? null : current); }
     const store = useAppStore.getState();
+    if (store.conversationId !== owner) return;
     const chatPanel = store.panelSlots.find((slot) => slot.kind === "chat");
     if (chatPanel) store.focusPanel(chatPanel.id);
     else store.addPanel({ id: "main-chat", kind: "chat", label: "Chat" });
     window.dispatchEvent(new Event("composer:focus"));
-    const workspaceRoot = store.workingDirectory;
     requestAnimationFrame(() => {
       const current = useAppStore.getState();
       if (current.conversationId !== conversationId || current.workingDirectory !== workspaceRoot) return;
@@ -805,18 +854,42 @@ export const BrowserPanel = () => {
     });
   };
 
-  const reviewPageChanges = () => {
-    openReview();
-    const store = useAppStore.getState();
-    store.setDiffReviewState({
-      ...store.diffReview!,
-      previewReturnTarget: {
-        conversationId,
-        tab: "browser",
-        url: activeTab.url,
-        targetId: activeTab.id,
+  const sendAnnotation = async () => {
+    if (!annotationNote.trim() || !activeTab.url || feedbackSubmittingPage === pageKey) return;
+    const submittedPage = pageKey;
+    const submittedDraft = annotationDraft;
+    const owner = conversationId;
+    const items = annotationItems();
+    setFeedbackSubmittingPage(submittedPage);
+    let captured;
+    try {
+      captured = await captureBrowserAnnotationAttachments({ conversationId: owner, workspaceRoot: useAppStore.getState().workingDirectory, targetId: activeTab.id, url: activeTab.url, elements: pickedElements });
+    } catch (error) {
+      setFeedbackStatus((statuses) => ({ ...statuses, [submittedPage]: error instanceof Error ? error.message : String(error) }));
+      setFeedbackSubmittingPage((current) => current === submittedPage ? null : current);
+      return;
+    }
+    let admissionStatus = "";
+    const accepted = await sendChatMessage({
+      displayContent: annotationNote.trim(), backendContent: annotationNote.trim(), conversationId: owner,
+      contextRefs: items.map((item) => item.reference), allowWhileStreaming: true, busyBehavior: feedbackBusyBehavior,
+      attachments: captured.attachments, attachmentRefs: captured.attachmentRefs,
+      awaitAdmission: true,
+      onAdmission: (event) => {
+        if (event.data?.steered === true) admissionStatus = "已引导当前任务";
+        else if (event.data?.queued === true) admissionStatus = "反馈已排队";
+        else admissionStatus = "反馈已发送";
       },
     });
+    setFeedbackSubmittingPage((current) => current === submittedPage ? null : current);
+    if (!accepted) return;
+    // Admission owns this feedback. Keep any edits typed while it was in
+    // flight, and leave the separate main-composer draft and references intact.
+    if (useAppStore.getState().conversationId === owner) items.forEach((item) => addBrowserAnnotation(item.annotation));
+    setAnnotationDrafts((drafts) => drafts[submittedPage] === submittedDraft
+      ? { ...drafts, [submittedPage]: { ...EMPTY_ANNOTATION_DRAFT, open: true, elements: [] } }
+      : drafts);
+    setFeedbackStatus((statuses) => ({ ...statuses, [submittedPage]: admissionStatus }));
   };
 
   const pickPageTarget = async (kind: "element" | "region") => {
@@ -861,7 +934,7 @@ export const BrowserPanel = () => {
     const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
-    settingsRevisionRef.current += 1;
+    const revision = ++settingsRevisionRef.current;
     setSettingsSaving(true);
     try {
       const next = await embeddedBrowserSetSettings(payload);
@@ -870,6 +943,7 @@ export const BrowserPanel = () => {
         || activeIdRef.current !== tabId
       ) return;
       if (!next) throw new Error("桌面浏览器未确认站点设置更新。");
+      if (settingsRevisionRef.current !== revision) return;
       settingsRevisionRef.current += 1;
       setBrowserSettings(next);
     } catch (error) {
@@ -894,11 +968,13 @@ export const BrowserPanel = () => {
       const cleared = await embeddedBrowserClearSiteData(owner, tabId);
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       if (!cleared) throw new Error("桌面浏览器未确认清除站点数据。");
+      const revision = settingsRevisionRef.current;
       const settings = await embeddedBrowserGetSettings(url);
       if (
         pageGenerationRef.current === generation
         && activeIdRef.current === tabId
         && settings
+        && settingsRevisionRef.current === revision
       ) { settingsRevisionRef.current += 1; setBrowserSettings(settings); }
     } catch (error) {
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
@@ -983,7 +1059,7 @@ export const BrowserPanel = () => {
         <div className="mc-browser-surface" data-empty="true">
           <div className="mc-browser-empty" role="status" tabIndex={0}>
             <Globe2 size={24} strokeWidth={1.8} aria-hidden="true" />
-            <strong>请先选择会话，再使用浏览器</strong>
+            <strong>{t("请先选择会话，再使用浏览器")}</strong>
             <span>从侧边栏选择一个会话，或创建新会话后打开浏览器。</span>
           </div>
         </div>
@@ -1022,7 +1098,7 @@ export const BrowserPanel = () => {
                 {tab.loading
                   ? <LoaderCircle className="mc-browser-spin" size={14} />
                   : <BrandIcon value={`${tab.title} ${tab.url}`} iconUrl={tab.faviconUrl} websiteUrl={tab.url} fallback="web" size={14} />}
-                <span>{tab.title || "新标签页"}</span>
+                <span>{tab.title || t("新标签页")}</span>
               </button>
               <button type="button" aria-label={`关闭 ${tab.title || "标签页"}`} onClick={() => void closeTab(tab.id)}>
                 <X size={14} />
@@ -1030,7 +1106,7 @@ export const BrowserPanel = () => {
             </div>
           ))}
         </div>
-        <button type="button" className="mc-browser-new-tab" aria-label="新建标签页" title="新建标签页" onClick={() => openTab()}>
+        <button type="button" className="mc-browser-new-tab" aria-label={t("新建标签页")} title={t("新建标签页")} onClick={() => openTab()}>
           <Plus size={16} />
         </button>
         <PreviewServerManager />
@@ -1039,8 +1115,8 @@ export const BrowserPanel = () => {
       <div className="mc-browser-toolbar">
         <button
           type="button"
-          aria-label="后退"
-          title="后退"
+          aria-label={t("后退")}
+          title={t("后退")}
           disabled={!activeTab.canGoBack}
           onClick={() => void runNavigationAction(activeTab.id, "back")}
         >
@@ -1048,8 +1124,8 @@ export const BrowserPanel = () => {
         </button>
         <button
           type="button"
-          aria-label="前进"
-          title="前进"
+          aria-label={t("前进")}
+          title={t("前进")}
           disabled={!activeTab.canGoForward}
           onClick={() => void runNavigationAction(activeTab.id, "forward")}
         >
@@ -1057,8 +1133,8 @@ export const BrowserPanel = () => {
         </button>
         <button
           type="button"
-          aria-label={activeTab.loading ? "停止加载" : "刷新"}
-          title={activeTab.loading ? "停止加载" : "刷新"}
+          aria-label={activeTab.loading ? t("停止加载") : t("刷新")}
+          title={activeTab.loading ? t("停止加载") : t("刷新")}
           disabled={!activeTab.url}
           onClick={() => void runNavigationAction(activeTab.id, activeTab.loading ? "stop" : "reload")}
         >
@@ -1074,43 +1150,44 @@ export const BrowserPanel = () => {
           {activeTab.url ? <ShieldCheck size={15} /> : <Search size={15} />}
           <input
             ref={addressRef}
-            value={activeTab.draftUrl}
+            value={!addressFocused && preferences && !preferences.showFullUrl && activeTab.url && activeTab.draftUrl === activeTab.url ? new URL(activeTab.url).host : activeTab.draftUrl}
             onChange={(event) => {
               const value = event.target.value;
               setTabs((current) => current.map((tab) => tab.id === activeTab.id ? { ...tab, draftUrl: value } : tab));
             }}
-            onFocus={(event) => event.currentTarget.select()}
-            placeholder="输入网址或搜索内容"
-            aria-label="地址栏"
+            onFocus={(event) => { setAddressFocused(true); event.currentTarget.value = activeTab.draftUrl; event.currentTarget.select(); }}
+            onBlur={() => setAddressFocused(false)}
+            placeholder={t("输入网址或搜索内容")}
+            aria-label={t("地址栏")}
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
             }}
             spellCheck={false}
           />
         </form>
-        <label className="mc-browser-device"><Smartphone size={15} /><select aria-label="预览设备"
+        <label className="mc-browser-device"><Smartphone size={15} /><select aria-label={t("预览设备")}
           value={viewport ? (viewport.width === 390 ? "phone" : viewport.width === 768 ? "tablet" : viewport.width === 1440 ? "desktop" : "custom") : "auto"}
           onChange={(event) => setViewport(event.target.value === "auto" ? null : {
             phone: { width: 390, height: 844, mobile: true }, tablet: { width: 768, height: 1024, mobile: true },
             desktop: { width: 1440, height: 900, mobile: false }, custom: { width: 1024, height: 768, mobile: false },
           }[event.target.value]!)}>
-          <option value="auto">自适应</option><option value="phone">手机</option><option value="tablet">平板</option><option value="desktop">桌面</option><option value="custom">自定义</option>
+          <option value="auto">{t("自适应")}</option><option value="phone">{t("手机")}</option><option value="tablet">{t("平板")}</option><option value="desktop">{t("桌面")}</option><option value="custom">{t("自定义")}</option>
         </select></label>
         <button
           type="button"
           className="mc-browser-select-target"
-          aria-label="选择元素"
+          aria-label={t("选择元素")}
           title={pickerMode === "element" ? "在页面中点击目标，按 Esc 退出" : "选择页面元素并描述修改"}
           disabled={!activeTab.url || pickerMode != null}
           onClick={() => void pickPageTarget("element")}
         >
           {pickerMode === "element" ? <LoaderCircle className="mc-browser-spin" size={15} /> : <Crosshair size={15} />}
-          <span className="mc-browser-select-label">{pickerMode === "element" ? "点击目标…" : "选择元素"}</span>
+          <span className="mc-browser-select-label">{pickerMode === "element" ? "点击目标…" : t("选择元素")}</span>
         </button>
         <button
           type="button"
-          aria-label="添加页面批注"
-          title="添加页面批注"
+          aria-label={t("添加页面批注")}
+          title={t("添加页面批注")}
           disabled={!activeTab.url}
           onClick={() => {
             updateAnnotationDraft({ open: !annotationOpen });
@@ -1125,12 +1202,12 @@ export const BrowserPanel = () => {
             type="button"
             aria-label={`审阅本轮 ${turnChanges.files.length} 个文件更改`}
             title={`审阅本轮更改 · ${turnChanges.files.length} 个文件 · +${turnChanges.additions} -${turnChanges.deletions}`}
-            onClick={reviewPageChanges}
+            onClick={openReview}
           >
             <FileDiff size={16} />
           </button>
         )}
-        <button type="button" aria-label="更多浏览器操作" title="更多浏览器操作" aria-haspopup="menu" aria-expanded={moreMenuPosition != null} onClick={(event) => {
+        <button type="button" aria-label={t("更多浏览器操作")} title={t("更多浏览器操作")} aria-haspopup="menu" aria-expanded={moreMenuPosition != null} onClick={(event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
           setMoreMenuPosition(moreMenuPosition ? null : { x: bounds.right - 190, y: bounds.bottom + 4 });
         }}><MoreHorizontal size={16} /></button>
@@ -1138,19 +1215,19 @@ export const BrowserPanel = () => {
 
       {moreMenuPosition && <ContextMenu position={moreMenuPosition} onClose={() => setMoreMenuPosition(null)} items={[
         { label: "在系统浏览器中打开", icon: <ExternalLink size={14} />, disabled: !activeTab.url, onClick: () => void openExternal(activeTab.url) },
-        { label: "打开页面诊断", icon: <Bug size={14} />, disabled: !activeTab.url, onClick: () => { setInspectorPage(inspectorOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setSettingsPage(null); } },
-        { label: "打开站点设置", icon: <Settings2 size={14} />, disabled: !activeTab.url, onClick: () => { setSettingsPage(settingsOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setInspectorPage(null); } },
+        { label: t("打开页面诊断"), icon: <Bug size={14} />, disabled: !activeTab.url, onClick: () => { setInspectorPage(inspectorOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setSettingsPage(null); } },
+        { label: t("打开站点设置"), icon: <Settings2 size={14} />, disabled: !activeTab.url, onClick: () => { setSettingsPage(settingsOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setInspectorPage(null); } },
       ]} />}
 
       {settingsOpen && activeTab.url && (
-        <section className="mc-browser-settings" aria-label="站点设置">
+        <section className="mc-browser-settings" aria-label={t("站点设置")}>
           <div className="mc-browser-settings-heading">
             <Settings2 size={14} />
             <strong>{browserSettings.origin || activeTab.url}</strong>
             <button
               type="button"
-              aria-label="清除站点数据"
-              title="清除站点数据"
+              aria-label={t("清除站点数据")}
+              title={t("清除站点数据")}
               disabled={settingsLoading || settingsSaving}
               onClick={() => void clearActiveSiteData()}
             >
@@ -1158,16 +1235,16 @@ export const BrowserPanel = () => {
             </button>
           </div>
           <div className="mc-browser-setting-row">
-            <span><Download size={14} /> 下载</span>
+            <span><Download size={14} />{t("下载")}</span>
             <SelectMenu
-              ariaLabel="下载策略"
+              ariaLabel={t("下载策略")}
               value={browserSettings.downloadPolicy}
               disabled={settingsLoading || settingsSaving}
               onValueChange={(value) => void updateBrowserSettings({ downloadPolicy: value as EmbeddedBrowserSettings["downloadPolicy"] })}
             >
-              <option value="block">阻止</option>
-              <option value="ask">每次询问</option>
-              <option value="allow">保存到下载目录</option>
+              <option value="block">{t("阻止")}</option>
+              <option value="ask">{t("每次询问")}</option>
+              <option value="allow">{t("保存到下载目录")}</option>
             </SelectMenu>
           </div>
           <div className="mc-browser-permissions" aria-label="站点权限">
@@ -1191,7 +1268,7 @@ export const BrowserPanel = () => {
       )}
 
       {inspectorOpen && activeTab.url && (
-        <section className="mc-browser-inspector" aria-label="页面诊断">
+        <section className="mc-browser-inspector" aria-label={t("页面诊断")}>
           <div className="mc-browser-inspector-heading">
             <div role="tablist" aria-label="诊断类别" onKeyDown={navigateTabList}>
               <button
@@ -1199,29 +1276,26 @@ export const BrowserPanel = () => {
                 role="tab"
                 aria-selected={inspectorKind === "console"}
                 tabIndex={inspectorKind === "console" ? 0 : -1}
-                onClick={() => setInspectorKind("console")}
+                onClick={() => { setInspectorKind("console"); setDiagnosticFilter("all"); }}
               >
-                <Bug size={14} /> 控制台
-              </button>
+                <Bug size={14} />{t("控制台")}</button>
               <button
                 type="button"
                 role="tab"
                 aria-selected={inspectorKind === "network"}
                 tabIndex={inspectorKind === "network" ? 0 : -1}
-                onClick={() => setInspectorKind("network")}
+                onClick={() => { setInspectorKind("network"); setDiagnosticFilter("all"); }}
               >
-                <Network size={14} /> 网络
-              </button>
+                <Network size={14} />{t("网络")}</button>
             </div>
             <button type="button" onClick={() => void refreshInspector()} disabled={inspectorLoading}>
-              <RefreshCw className={inspectorLoading ? "mc-browser-spin" : undefined} size={14} /> 刷新
-            </button>
+              <RefreshCw className={inspectorLoading ? "mc-browser-spin" : undefined} size={14} />{t("刷新")}</button>
           </div>
           <div className="mc-browser-diagnostic-filters">
-            <input aria-label="搜索页面诊断" placeholder="搜索消息或 URL" value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
-            <select aria-label="筛选页面诊断" value={diagnosticFilter} onChange={(event) => setDiagnosticFilter(event.target.value)}>
-              <option value="all">全部</option><option value="errors">错误</option>
-              {inspectorKind === "console" ? <option value="warnings">警告</option> : <option value="fetch">Fetch / XHR</option>}
+            <input aria-label={t("搜索页面诊断")} placeholder={t("搜索消息或 URL")} value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
+            <select aria-label={t("筛选页面诊断")} value={diagnosticFilter} onChange={(event) => setDiagnosticFilter(event.target.value)}>
+              <option value="all">{t("全部")}</option><option value="errors">{t("错误")}</option>
+              {inspectorKind === "console" ? <option value="warnings">{t("警告")}</option> : <option value="fetch">Fetch / XHR</option>}
             </select><small>{visibleDiagnostics.length} / {diagnostics.length}</small>
           </div>
           <div className="mc-browser-inspector-list">
@@ -1230,7 +1304,7 @@ export const BrowserPanel = () => {
             ) : inspectorLoading ? (
               <span className="mc-browser-inspector-empty">正在读取页面诊断…</span>
             ) : visibleDiagnostics.length === 0 ? (
-              <span className="mc-browser-inspector-empty">尚未记录{inspectorKind === "console" ? "控制台" : "网络"}事件</span>
+              <span className="mc-browser-inspector-empty">尚未记录{inspectorKind === "console" ? t("控制台") : t("网络")}事件</span>
             ) : visibleDiagnostics.slice().reverse().map((item, index) => (
               <div className="mc-browser-inspector-row" key={`${item.timestamp ?? "event"}-${index}`}>
                 <time>{diagnosticTimestamp(item.timestamp)}</time>
@@ -1246,12 +1320,12 @@ export const BrowserPanel = () => {
                 )}
                 <details className="mc-browser-diagnostic-detail"><summary>详情</summary>
                   <pre>{JSON.stringify(item, null, 2)}</pre>
-                  {diagnosticSource(item) && <button type="button" onClick={() => { const source = diagnosticSource(item)!; useAppStore.getState().openEditorFile(source.path, undefined, { line: source.line, exact: true }); }}>打开源码</button>}
+                  {diagnosticSource(item) && <button type="button" onClick={() => { const source = diagnosticSource(item)!; useAppStore.getState().openEditorFile(source.path, undefined, { line: source.line, exact: true }); }}>{t("打开源码")}</button>}
                   <button type="button" onClick={() => {
                     addSelectedMention({ kind: "browser_annotation", path: "browser-diagnostic:" + crypto.randomUUID(), name: "页面诊断",
                       url: activeTab.url, targetId: activeTab.id, note: JSON.stringify(item, null, 2) });
                     window.dispatchEvent(new Event("composer:focus"));
-                  }}>加入对话</button>
+                  }}>{t("加入对话")}</button>
                 </details>
               </div>
             ))}
@@ -1260,15 +1334,15 @@ export const BrowserPanel = () => {
       )}
 
       {viewport && <div className="mc-browser-viewport-controls" role="group" aria-label="设备视口">
-        {(["width", "height"] as const).map((axis) => <label key={axis}>{axis === "width" ? "宽" : "高"} <NumberInput aria-label={axis === "width" ? "视口宽度" : "视口高度"} min={240} max={3840} value={viewport[axis]} onCommit={(value) => setViewport({ ...viewport, [axis]: value })} /></label>)}
-        <span>px</span><button type="button" onClick={() => setViewport({ ...viewport, width: viewport.height, height: viewport.width })}>旋转</button><small>按可用空间缩放显示，网页以设定尺寸布局</small>
+        {(["width", "height"] as const).map((axis) => <label key={axis}>{axis === "width" ? t("宽") : t("高")} <NumberInput aria-label={axis === "width" ? t("视口宽度") : t("视口高度")} min={240} max={3840} value={viewport[axis]} onCommit={(value) => setViewport({ ...viewport, [axis]: value })} /></label>)}
+        <span>px</span><button type="button" onClick={() => setViewport({ ...viewport, width: viewport.height, height: viewport.width })}>{t("旋转")}</button><small>按可用空间缩放显示，网页以设定尺寸布局</small>
         <button type="button" aria-label="恢复自适应视口" onClick={() => setViewport(null)}><X size={14} /></button>
       </div>}
       {annotationOpen && activeTab.url && (
-        <div className="mc-browser-annotation" role="region" aria-label="页面批注">
+        <div className="mc-browser-annotation" role="region" aria-label={t("页面批注")}>
           <div className="mc-browser-annotation-heading">
             <MessageSquarePlus size={15} />
-            <span>页面批注</span>
+            <span>{t("页面批注")}</span>
             <small>{activeTab.title || activeTab.url}</small>
           </div>
           <div className="mc-browser-picker-actions">
@@ -1279,7 +1353,7 @@ export const BrowserPanel = () => {
               onClick={() => void pickPageTarget("region")}
             >
               {pickerMode === "region" ? <LoaderCircle className="mc-browser-spin" size={14} /> : <Scan size={14} />}
-              {pickerMode === "region" ? "在页面中拖拽区域…" : "框选区域"}
+              {pickerMode === "region" ? "在页面中拖拽区域…" : t("框选区域")}
             </button>
           </div>
           {pickedElements.map((element, index) => <div key={index} className="mc-browser-selected-target" title={element.selector || "页面区域"}>
@@ -1293,25 +1367,31 @@ export const BrowserPanel = () => {
             value={annotationNote}
             onChange={(event) => updateAnnotationDraft({ note: event.target.value })}
             placeholder="描述需要修复或验证的内容"
-            aria-label="批注内容"
+            aria-label={t("批注内容")}
             rows={3}
             autoFocus={pickerMode == null}
           />
           <details className="mc-browser-element-details">
-            <summary>高级元素信息</summary>
-            <input value={annotationSelector} onChange={(event) => updateAnnotationDraft({ selector: event.target.value, pickedElement: null, elements: [] })} placeholder="元素选择器（可选，例如 #save）" aria-label="元素选择器" spellCheck={false} />
+            <summary>{t("高级元素信息")}</summary>
+            <input value={annotationSelector} onChange={(event) => updateAnnotationDraft({ selector: event.target.value, pickedElement: null, elements: [] })} placeholder={t("元素选择器（可选，例如 #save）")} aria-label={t("元素选择器")} spellCheck={false} />
           </details>
           <div className="mc-browser-annotation-actions">
-            <button type="button" onClick={() => updateAnnotationDraft({ open: false })}>收起</button>
-            <button type="button" disabled={!annotationNote.trim()} onClick={saveAnnotation}>加入对话</button>
+            <button type="button" onClick={() => updateAnnotationDraft({ open: false })}>{t("收起")}</button>
+            <button type="button" disabled={!isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void saveAnnotation()}>{t("加入对话")}</button>
+            {isStreaming && <SelectMenu ariaLabel={t("页面反馈发送方式")} value={feedbackBusyBehavior} onValueChange={(value) => setFeedbackBusyBehavior(value as "queue" | "steer")}><option value="queue">{t("排队发送")}</option><option value="steer">{t("立即引导")}</option></SelectMenu>}
+            <button type="button" className="mc-browser-feedback-send" aria-label={feedbackSubmittingPage === pageKey ? "正在提交页面反馈" : "发送页面反馈"} title={isStreaming ? feedbackBusyBehavior === "queue" ? "排队发送反馈" : "引导当前任务" : "发送页面反馈"}
+              disabled={!isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void sendAnnotation()}>
+              {feedbackSubmittingPage === pageKey ? <LoaderCircle className="mc-browser-spin" size={15} /> : <ArrowUp size={15} />}
+            </button>
           </div>
+          {feedbackStatus[pageKey] && <div className="mc-browser-feedback-status" role="status">{feedbackStatus[pageKey]}</div>}
         </div>
       )}
 
       {activeTab.error && (
         <div className="mc-browser-error" role="alert">
           <span>{activeTab.error}</span>
-          <button type="button" onClick={() => void navigate(activeTab.id, activeTab.draftUrl)}>重试</button>
+          <button type="button" onClick={() => void navigate(activeTab.id, activeTab.draftUrl)}>{t("重试")}</button>
         </div>
       )}
 

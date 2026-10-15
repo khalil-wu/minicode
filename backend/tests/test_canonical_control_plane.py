@@ -24,6 +24,31 @@ from backend.ws.handlers.misc import HANDLERS, handle_agent_resume
 from backend.ws.session_lifecycle import SessionLifecycle
 
 
+def _capture_compaction_fixture(monkeypatch, session):
+    from copy import copy
+    from backend.config import AppConfig, LLMSettings
+
+    builder = copy(session.context_builder)
+    builder.load_snapshot = lambda snapshot: setattr(builder, "compacted", bool(snapshot.get("compaction_count")))
+    builder.bind_llm_turn_context = lambda _context: None
+    builder.hook_manager = None
+    builder.bind_hook_manager = lambda manager: setattr(builder, "hook_manager", manager)
+    builder.bind_context_window_model = lambda snapshot, **_kwargs: snapshot
+    session.context_builder.load_snapshot = lambda snapshot: setattr(session.context_builder, "compacted", bool(snapshot.get("compaction_count")))
+    session.cleanup_tasks = set()
+    session._llm_close_tasks = set()
+    from backend.permissions.context import PermissionContext
+    session.session_id = "compact-fixture-session"
+    session._conversation_tool_registry = lambda _id: session.tool_registry
+    session.permission_context_for_conversation = lambda *_args, **_kwargs: PermissionContext()
+    session.conversation_runtime._context_builder = session.context_builder
+    session.conversation_runtime.active_conversation_id = session.active_conversation_id
+    execution = SimpleNamespace(model="fixture-model", config=AppConfig(llm=LLMSettings(api_key="fixture-key")), llm=SimpleNamespace(aclose=AsyncMock()))
+    monkeypatch.setattr("backend.ws.handlers.conversation._capture_manual_compaction_model", lambda *_args: (execution, None, []))
+    monkeypatch.setattr("backend.agent.context.ContextBuilder", lambda **_kwargs: builder)
+    monkeypatch.setattr("backend.ws.compaction_coordinator.clone_context_builder", copy)
+
+
 def test_agent_paths_have_one_minicode_root(tmp_path) -> None:
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
     try:
@@ -72,8 +97,10 @@ def test_ws_resume_preserves_checkpoint_as_provenance_not_new_run_identity(monke
         active_conversation_id="conversation-1",
         conversation_repo=SimpleNamespace(
             get_conversation=lambda _conversation_id: SimpleNamespace(
+                id="conversation-1",
                 workspace_root="",
                 worktree_path="",
+                execution_cwd="",
             )
         ),
         send_payload=AsyncMock(return_value=True),
@@ -81,6 +108,7 @@ def test_ws_resume_preserves_checkpoint_as_provenance_not_new_run_identity(monke
         emit_command_result=AsyncMock(),
         ws_manager=None,
     )
+    session.conversation_repo.get_conversation_summary = session.conversation_repo.get_conversation
     session.session_lifecycle = SessionLifecycle(session)
     session.resolve_requested_workspace = lambda requested=None: Path(
         requested or "."
@@ -122,9 +150,13 @@ def test_manual_compaction_rejects_an_active_conversation_turn() -> None:
         assert guard.end(claim)
 
     builder.compact.assert_not_awaited()
-    event = session.send_event.await_args.args[0]
+    event = next(call.args[0] for call in session.send_event.await_args_list if call.args[0].type == "error")
     assert event.type == "error"
     assert event.data["error_type"] == "conversation_busy"
+    result = session.send_event.await_args.args[0]
+    assert result.type == "command.result"
+    assert result.data["command"] == "context.compact"
+    assert result.data["level"] == "error"
 
 
 @pytest.mark.parametrize(
@@ -140,8 +172,6 @@ def test_manual_compaction_reports_budget_failure_at_the_correct_commit_boundary
     expected_error_code: str,
     expected_commits: int,
 ) -> None:
-    from backend.services import context_budget
-
     calls = 0
 
     def budget_snapshot(_session, _builder):
@@ -151,8 +181,16 @@ def test_manual_compaction_reports_budget_failure_at_the_correct_commit_boundary
             raise RuntimeError("token estimate unavailable")
         return {"used": 100, "total": 1000, "breakdown": {}}
 
-    compact = AsyncMock(return_value=SimpleNamespace(summary="Saved summary"))
-    monkeypatch.setattr(context_budget, "build_context_budget_snapshot", budget_snapshot)
+    async def committed_compaction(*_args, on_started, on_completed, compaction_item, **_kwargs):
+        import time
+        from backend.ws.compaction_coordinator import CompactionCommit
+        await on_started()
+        committed = CompactionCommit("Saved summary", {}, {},
+            {**compaction_item, "status": "completed", "finished_at": int(time.time() * 1000)})
+        await on_completed(committed)
+        return committed
+
+    compact = AsyncMock(side_effect=committed_compaction)
     monkeypatch.setattr("backend.ws.compaction_coordinator.compact_conversation", compact)
     monkeypatch.setattr("backend.ws.handlers.conversation._conversation_has_active_run", lambda *_args: False)
     session = SimpleNamespace(
@@ -163,16 +201,20 @@ def test_manual_compaction_reports_budget_failure_at_the_correct_commit_boundary
         send_event=AsyncMock(),
         last_agent_state=None,
     )
+    session.conversation_repo.get_conversation = lambda _id: SimpleNamespace(context_snapshot={})
+    session.context_builder.get_budget_snapshot = lambda **_kwargs: budget_snapshot(session, session.context_builder)
+    _capture_compaction_fixture(monkeypatch, session)
 
     assert asyncio.run(handle_context_compact(session, {})) is True
     assert compact.await_count == expected_commits
     events = [call.args[0] for call in session.send_event.await_args_list]
     assert [event.type for event in events] == (
-        ["conversation.compaction.updated", "error"] if expected_commits else ["error"]
+        ["conversation.compaction.updated", "item.started", "item.completed", "conversation.compaction.updated", "command.result", "error"] if expected_commits else ["error", "command.result"]
     )
-    assert events[-1].data["error_code"] == expected_error_code
+    assert next(event for event in events if event.type == "error").data["error_code"] == expected_error_code
     if expected_commits:
-        assert events[0].data["summary"] == "Saved summary"
+        assert events[0].data["state"] == "compacting"
+        assert events[3].data["summary"] == "Saved summary"
         assert "compacted and saved" in events[-1].data["message"]
 
 
@@ -190,14 +232,20 @@ def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monk
         def get_budget_snapshot(self, *, state, tool_schemas):
             return {"used": 100, "total": 1000, "breakdown": {"history": 100}}
 
-        async def compact(self, *, focus, restore_state):
+        async def compact(self, *, focus, restore_state, manual):
+            assert manual is True
             self.compacted = True
             return "Saved summary"
 
         def export_snapshot(self):
             return {"history": [], "compaction_count": 1}
 
-    send_event = AsyncMock(side_effect=OSError("socket send failed"))
+    async def fail_completed_delivery(event):
+        if event.type == 'conversation.compaction.updated' and event.data.get('state') == 'compacted':
+            assert repo.get_conversation(conversation.id).compaction_state == 'compacted'
+            raise OSError('socket send failed')
+
+    send_event = AsyncMock(side_effect=fail_completed_delivery)
     session = SimpleNamespace(
         active_conversation_id=conversation.id,
         context_builder=Builder(),
@@ -210,6 +258,7 @@ def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monk
         _conversation_projection_lock=lambda _id: asyncio.Lock(),
         send_event=send_event,
     )
+    _capture_compaction_fixture(monkeypatch, session)
 
     with pytest.raises(OSError, match="socket send failed"):
         asyncio.run(handle_context_compact(session, {}))
@@ -219,8 +268,8 @@ def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monk
     assert saved.compaction_state == "compacted"
     assert saved.compaction_summary == "Saved summary"
     assert saved.context_snapshot["compaction_count"] == 1
-    assert send_event.await_count == 1
     assert send_event.await_args.args[0].type == "conversation.compaction.updated"
+    assert send_event.await_args.args[0].data['state'] == 'compacted'
 
 
 def test_memory_consolidation_uses_query_engine_lifecycle(monkeypatch, tmp_path) -> None:

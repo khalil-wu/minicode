@@ -1,4 +1,5 @@
-import { Clock3, Copy, CornerDownLeft, RotateCcw, X } from "lucide-react";
+import { useI18n } from "../../i18n";
+import { Clock3, Copy, RotateCcw, X } from "lucide-react";
 import { fileIcon } from "../../lib/file-icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
@@ -31,6 +32,7 @@ export function UserMessageCell({
   isTranscriptMode?: boolean;
   conversationId?: string;
 }) {
+  const { t: tr } = useI18n();
   const isConnected = useAppStore((s) => s.isConnected);
   const [copied, setCopied] = useState(false);
   const [expansionPreference, setExpanded] = useState(false);
@@ -51,16 +53,16 @@ export function UserMessageCell({
         user_message_id: cell.id,
       }, "user_message.queue.cancel");
       if (!commandResultSucceeded(result)) {
-        pushToast(result.message || "取消排队消息失败。", "error", 3500);
+        pushToast(result.message || tr("取消排队消息失败。"), "error", 3500);
       } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
         pushToast(result.message, "warning", 3000);
       }
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "取消排队消息失败。", "error", 3500);
+      pushToast(error instanceof Error ? error.message : tr("取消排队消息失败。"), "error", 3500);
     } finally {
       setCancelPending(false);
     }
-  }, [cancelPending, cell.id, cell.queueMessageId, ownerConversationId]);
+  }, [cancelPending, cell.id, cell.queueMessageId, ownerConversationId, tr]);
 
   const copy = useCallback(() => {
     navigator.clipboard.writeText(cell.content).then(() => {
@@ -77,9 +79,9 @@ export function UserMessageCell({
     const removeCount = index >= 0 ? state.messages.length - index : 1;
     const { showConfirm } = await import("../../overlays/DialogService");
     const ok = await showConfirm({
-      title: "撤回消息",
-      message: `将这条输入退回编辑框？当前视图中的 ${removeCount} 条消息将被移除。`,
-      confirmLabel: "撤回",
+      title: tr("撤回消息"),
+      message: tr("将这条输入退回编辑框？当前视图中的 {v0} 条消息将被移除。", { v0: removeCount }),
+      confirmLabel: tr("撤回"),
       danger: removeCount > 1 || state.isStreaming,
     });
     if (!ok) return;
@@ -88,12 +90,12 @@ export function UserMessageCell({
     if (latest.isStreaming) {
       const sent = sendClientCommand(buildInterruptCommand(latest));
       if (!sent) return;
-      pushToast("已请求停止，请在本轮结束后再撤回。", "info", 3000);
+      pushToast(tr("已请求停止，请在本轮结束后再撤回。"), "info", 3000);
       return;
     }
     const recalled = await recallMessage(cell.id);
     if (recalled) queueMicrotask(() => window.dispatchEvent(new Event("composer:focus")));
-  }, [cell.id, ownerConversationId, recallMessage]);
+  }, [cell.id, ownerConversationId, recallMessage, tr, tr]);
 
   const openFilePreview = useCallback((
     attachment: NonNullable<UserMessageCellState["attachments"]>[number],
@@ -136,19 +138,19 @@ export function UserMessageCell({
         <div
           className="user-cell-source"
           data-message-source="scheduled_task"
-          title="定时任务"
+          title={tr("定时任务")}
         >
           <Clock3 size={13} aria-hidden="true" />
-          <span>定时任务</span>
+          <span>{tr("定时任务")}</span>
         </div>
       ) : null}
       {Boolean(cell.contextRefs?.length) && (
-        <div className="user-cell-attachments" aria-label="消息上下文">
+        <div className="user-cell-attachments" aria-label={tr("消息上下文")}>
           {cell.contextRefs?.map((ref, index) => (
             <button type="button" key={ref.kind + ":" + ref.path + ":" + index} className="user-cell-attachment-chip"
               onClick={() => openContextReference(ref, ownerConversationId)}
               disabled={!["file", "url", "browser_annotation"].includes(ref.kind)}
-              aria-label={`打开引用 ${contextReferenceLabel(ref)}`}
+              aria-label={tr("打开引用 {v0}", { v0: contextReferenceLabel(ref) })}
               title={ref.kind === "browser_annotation" ? ref.url + "\n" + ref.note : ref.path}>
               {fileIcon(ref.kind === "skill" ? "SKILL.md" : ref.name, { size: 15, className: "user-cell-attachment-file-icon" })}
               <span>{(ref.kind === "skill" ? "$" : "@") + contextReferenceLabel(ref)}</span>
@@ -168,7 +170,7 @@ export function UserMessageCell({
                     className={isImage ? "user-cell-attachment-image" : "user-cell-attachment-chip user-cell-attachment-chip-button"}
                 aria-label={attachment.name}
                 onClick={() => openFilePreview(attachment, index)}
-                title={`预览 ${attachment.name}`}
+                title={tr("预览 {v0}", { v0: attachment.name })}
               >
                     {isImage ? <UserAttachmentImage artifactId={attachment.artifactId} dataUrl={attachment.dataUrl}
                       name={attachment.name} conversationId={ownerConversationId} sessionId={getWebSocket()?.sessionId} isConnected={isConnected} />
@@ -183,9 +185,9 @@ export function UserMessageCell({
           })}
         </div>
       )}
-      {(visibleContent || cell.quotedMessage || cell.queueState || cell.steeredIntoMessageId) && <div className="edit-bubble-wrap">
+      {cell.quotedMessage && <div className="user-cell-quote"><MessageQuote message={cell.quotedMessage} /></div>}
+      {(visibleContent || cell.queueState) && <div className="edit-bubble-wrap">
         <div className="user-cell-bubble md-prose">
-          {cell.quotedMessage && <MessageQuote message={cell.quotedMessage} />}
           {visibleContent ? (
             <>
               <div
@@ -201,7 +203,7 @@ export function UserMessageCell({
                   aria-expanded={expanded}
                   onClick={() => setExpanded((value) => !value)}
                 >
-                  {expanded ? "收起消息" : "展开消息"}
+                  {expanded ? tr("收起消息") : tr("展开消息")}
                 </button>
               ) : null}
             </>
@@ -211,32 +213,25 @@ export function UserMessageCell({
               <Clock3 size={14} />
               <span>
                 {cell.queueState === "queued"
-                  ? `排队中${cell.queuePosition ? ` · 第 ${cell.queuePosition} 位` : ""}`
-                  : "排队已取消"}
+                  ? tr("排队中{v0}", { v0: cell.queuePosition ? ` · 第 ${cell.queuePosition} 位` : "" })
+                  : tr("排队已取消")}
               </span>
             </div>
           ) : null}
-          {cell.steeredIntoMessageId ? (
-            <div className="user-cell-queue-status" data-status="steered" title="这条消息已用于引导当前任务">
-              <CornerDownLeft size={14} />
-              <span>已引导当前任务</span>
-            </div>
-          ) : null}
-
         </div>
       </div>}
       {!isTranscriptMode && <div className="user-cell-actions">
-        <button type="button" onClick={copy} title={copied ? "已复制" : "复制消息"} aria-label={copied ? "已复制" : "复制消息"} className="cell-action-btn">
+        <button type="button" onClick={copy} title={copied ? tr("已复制") : tr("复制消息")} aria-label={copied ? tr("已复制") : tr("复制消息")} className="cell-action-btn">
           <Copy size={14} />
         </button>
         {cell.queueState === "queued" ? (
-          <button type="button" onClick={() => void cancelQueuedMessage()} disabled={cancelPending} aria-busy={cancelPending} title="取消排队消息" aria-label="取消排队消息" className="cell-action-btn">
+          <button type="button" onClick={() => void cancelQueuedMessage()} disabled={cancelPending} aria-busy={cancelPending} title={tr("取消排队消息")} aria-label={tr("取消排队消息")} className="cell-action-btn">
             <X size={14} />
           </button>
         ) : canRecall ? (
-          <button type="button" onClick={recall} title="撤回到输入框编辑" aria-label="撤回到输入框" className="cell-action-btn user-cell-edit-action">
+          <button type="button" onClick={recall} title={tr("撤回到输入框编辑")} aria-label={tr("撤回到输入框")} className="cell-action-btn user-cell-edit-action">
             <RotateCcw size={14} />
-            <span>编辑</span>
+            <span>{tr("编辑")}</span>
           </button>
         ) : null}
       </div>}

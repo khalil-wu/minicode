@@ -1,4 +1,5 @@
-import { isTerminalToolCallStatus, normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
+import { isGuardianAssessment } from "../protocol/guardian-types";
+import { isTerminalToolCallStatus, normalizeToolDiff, isToolDelegations, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
 import {
   isHiddenProviderReasoning,
@@ -30,6 +31,7 @@ export type BackendTranscriptMessage = {
   role?: unknown;
   content?: unknown;
   display_content?: unknown;
+  code_review?: import("../protocol/code-review-types").CodeReviewScope;
   quoted_message?: unknown;
   thinking?: unknown;
   blocks?: unknown;
@@ -297,7 +299,7 @@ const normalizeHydratedToolStatus = (value: unknown): ToolCallRecord["status"] =
     : "running";
 };
 
-const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
+export const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
   if (!value || typeof value !== "object") return null;
   const tool = value as Record<string, unknown>;
   const id = String(tool.id ?? "").trim();
@@ -447,6 +449,10 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
     seq: numberValue(tool.seq),
     scopeMigrationCount: numberValue(tool.scopeMigrationCount ?? tool.scope_migration_count),
     callSource: (tool.callSource ?? tool.call_source) as ToolCallRecord["callSource"],
+    commandActions: (tool.commandActions ?? tool.command_actions) as ToolCallRecord["commandActions"],
+    streamingAnnouncement: (tool.streamingAnnouncement ?? tool.streaming_announcement) as boolean | undefined,
+    commandPresentation: (tool.commandPresentation ?? tool.command_presentation) as ToolCallRecord["commandPresentation"],
+    executionStartedAt: numberValue(tool.executionStartedAt ?? tool.execution_started_at),
     iterationId: typeof tool.iterationId === "string"
       ? tool.iterationId
       : typeof tool.iteration_id === "string"
@@ -473,7 +479,11 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.stderr_preview === "string"
         ? tool.stderr_preview
         : undefined,
+    exitCode: typeof tool.exitCode === "number" ? tool.exitCode : typeof tool.exit_code === "number" ? tool.exit_code : undefined,
+    recipientId: typeof tool.recipientId === "string" ? tool.recipientId : typeof tool.recipient_id === "string" ? tool.recipient_id : undefined,
+    recipientIds: Array.isArray(tool.recipientIds) ? tool.recipientIds as string[] : Array.isArray(tool.recipient_ids) ? tool.recipient_ids as string[] : undefined,
     outputFiles: toOutputFiles(tool.outputFiles ?? tool.output_files),
+    delegations: isToolDelegations(tool.delegations) ? tool.delegations : undefined,
     cleanupReceipt: tool.cleanupReceipt && typeof tool.cleanupReceipt === "object"
       ? tool.cleanupReceipt as Record<string, unknown>
       : tool.cleanup_receipt && typeof tool.cleanup_receipt === "object"
@@ -499,6 +509,12 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
     const position = nonNegativeNumberValue(item.transcriptIndex);
     const pushBlock = (block: ContentBlock) => blocks.push(position === undefined ? block : { ...block, transcriptIndex: position });
     const type = String(item.type ?? "").trim();
+    if (type === "user_input" && typeof item.userMessageId === "string") {
+      pushBlock({ type: "user_input", userMessageId: item.userMessageId });
+      continue;
+    }
+    if (type === "guardian_assessment" && isGuardianAssessment(item.review)) { pushBlock({ type, review: item.review }); continue; }
+    if (type === "guardian_warning" && typeof item.message === "string" && typeof item.turnId === "string") { pushBlock({ type, message: item.message, turnId: item.turnId, interruption: booleanValue(item.interruption) }); continue; }
     if (type === "thinking") {
       if (isHiddenProviderReasoning(item) || isTransientProviderReasoning(item)) continue;
       const reasoningType = providerReasoningType(item);
@@ -598,6 +614,8 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         seq: numberValue(item.seq),
         order: numberValue(item.order),
         timestamp: toTimestamp(item.timestamp),
+        startedAt: numberValue(item.startedAt ?? item.started_at),
+        finishedAt: numberValue(item.finishedAt ?? item.finished_at),
       });
       continue;
     }
@@ -885,6 +903,7 @@ export const hydrateMessages = (
       role,
       content,
       ...(hasDisplayContent ? { backendContent } : {}),
+      ...(message.code_review ? { codeReview: message.code_review } : {}),
       ...(role === "user" ? { quotedMessage: normalizeQuotedMessage(message.quoted_message) } : {}),
       messageSource: toMessageSource(message.metadata),
       blocks,

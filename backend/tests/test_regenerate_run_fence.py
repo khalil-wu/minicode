@@ -58,12 +58,13 @@ async def session(tmp_path, monkeypatch):
 
 
 def _regenerate(owner, conversation_id):
-    return owner.command_dispatcher._handle_command_inner(UserCommand(
+    return owner.command_dispatcher._handle_command(UserCommand(
         type="user_message",
         data={
             "content": "redo", "conversation_id": conversation_id,
             "retry_from_message_id": "u1",
             "assistant_message_id": "a2", "user_message_id": "u2",
+            "client_command_id": "retry-command",
         },
     ))
 
@@ -75,6 +76,9 @@ async def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypat
     monkeypatch.setattr(owner, "_prepare_retry_from_message", prepare)
 
     claim = conversation_query_guards().try_start(conversation_id, owner_id="scheduler:test")
+    owner.run_manager.enqueue_user_message(conversation_id, UserCommand("user_message", {
+        "content": "accepted follow-up", "conversation_id": conversation_id, "assistant_message_id": "queued-answer",
+    }))
     assert claim is not None
     try:
         await _regenerate(owner, conversation_id)
@@ -88,9 +92,10 @@ async def test_regenerate_is_blocked_by_a_foreign_query_claim(session, monkeypat
     errors = [
         call.args[0]
         for call in owner.send_event.await_args_list
-        if getattr(call.args[0], "type", "") == "error"
+        if getattr(call.args[0], "type", "") == "command.result"
     ]
-    assert any(event.data.get("error_type") == "conversation_busy" for event in errors)
+    assert any(event.data.get("client_command_id") == "retry-command" and event.data.get("data", {}).get("admitted") is False for event in errors)
+    assert len(owner.run_manager.queued_user_messages(conversation_id)) == 1
 
 
 @pytest.mark.asyncio

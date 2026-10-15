@@ -63,9 +63,18 @@ export type ConversationClientCommandType =
   | "conversation.archive"
   | "conversation.unarchive"
   | "conversation.rename"
+  | "conversation.pin.set"
+  | "conversation.pin.reorder"
+  | "sidebar.sort.set"
+  | "sidebar.project.reorder"
+  | "sidebar.project.thread.reorder"
+  | "sidebar.recent.reorder"
+  | "conversation.read_state.set"
+  | "conversation.project.set"
   | "conversation.memory_mode.set"
   | "memory.reset"
   | "conversation.permission_mode.set"
+  | "conversation.agent_mode.set"
   | "conversation.goal.set"
   | "conversation.worktree.cleanup"
   | "conversation.worktree.handoff.preflight"
@@ -80,6 +89,7 @@ export type ConversationClientCommandType =
   | "context.side_query"
   // LLM
   | "llm.model.set"
+  | "turn.settings.update"
   | "llm.config.set";
 
 // ──────────────────────────────────────────────────────────────────
@@ -102,6 +112,8 @@ export interface ContextCompactedEvent {
   after_tokens?: number;
   retained_categories?: string[];
   ledger?: Omit<ContextLedgerEvent, "type" | "conversation_id">;
+  compaction_item_id?: string;
+  context_window_state?: Record<string, unknown>;
 }
 
 export interface ContextForkedEvent {
@@ -203,8 +215,9 @@ export interface ConversationHydrationUpdatedEvent {
 export interface ConversationCompactionUpdatedEvent {
   type: "conversation.compaction.updated";
   conversation_id: string;
-  state: "compacted";
+  state: "compacting" | "compacted" | "failed";
   summary: string;
+  compaction_item_id?: string;
 }
 
 export interface ConversationSummaryUpdatedEvent {
@@ -214,6 +227,8 @@ export interface ConversationSummaryUpdatedEvent {
   title: string;
   updated_at: string;
   revision?: number;
+  has_unread_turn?: boolean;
+  thread_source?: string;
   memory_mode: "enabled" | "disabled" | "polluted";
   memory_polluted: boolean;
   memory_pollution_sources: string[];
@@ -244,6 +259,7 @@ export interface ConversationSummaryPayload {
   id: string;
   revision?: number;
   conversation_type?: "main" | "side_chat";
+  thread_source?: string;
   title?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -251,12 +267,20 @@ export interface ConversationSummaryPayload {
   memory_polluted?: boolean;
   memory_pollution_sources?: string[];
   permission_mode?: string | null;
+  agent_mode?: "build" | "plan" | "review" | "explore";
   summary?: string | null;
   compaction_state?: string | null;
   message_count?: number;
   archived?: boolean;
+  pinned?: boolean;
+  pinned_at?: string;
+  has_unread_turn?: boolean;
+  project_id?: string | null;
   archived_at?: string | null;
   workspace_root?: string | null;
+  execution_cwd?: string | null;
+  projectless_output_dir?: string | null;
+  projectless_browser_root?: string | null;
   git_branch?: string | null;
   worktree_path?: string | null;
   git_isolated?: boolean;
@@ -279,10 +303,21 @@ export interface ConversationRecordPayload extends ConversationSummaryPayload {
   context_snapshot?: Record<string, unknown>;
 }
 
+export interface SidebarOrderPayload {
+  revision: number;
+  sort_mode: "manual" | "updated_at";
+  project_order: string[];
+  project_thread_orders: Record<string, string[]>;
+  recent_thread_ids: string[];
+}
+
 export interface ConversationListEvent {
   type: "conversation.list";
   inventory_instance_id?: string;
   inventory_revision?: number;
+  pinned_conversation_ids?: string[];
+  pinned_sort_mode?: "manual" | "updated_at";
+  sidebar_order?: SidebarOrderPayload;
   conversation_id?: string | null;
   active_conversation_id?: string | null;
   conversations?: ConversationSummaryPayload[];
@@ -312,6 +347,9 @@ export interface LlmModelUpdatedEvent {
   wire_api?: string | null;
   available_models?: string[];
   models_source?: string;
+  model_selection_mode?: "default" | "model";
+  default_model_selection?: { provider: string; model: string; reasoning_effort: string; conversation_id: string; working_directory: string } | null;
+  available_model_options?: { model: string; reasoning_effort_levels: string[]; default_reasoning_effort: string }[];
   reasoning_effort?: string | null;
   configured_reasoning_effort?: string | null;
   effective_reasoning_effort?: string | null;
@@ -356,6 +394,7 @@ export interface UserMessageCommand {
   active_tab_path?: string;
   permission_mode?: "plan" | "confirm" | "bypass" | "auto";
   agent_mode?: "build" | "plan" | "review" | "explore" | "subagent" | string;
+  code_review?: import("./code-review-types").CodeReviewScope;
   attachments?: Record<string, unknown>[];
   skills?: { name: string; path: string }[];
   plugins?: { config_name: string; path: string }[];
@@ -401,15 +440,21 @@ export interface ReadArtifactCommand {
 }
 
 export interface ConversationCreateCommand {
+  activate?: boolean;
   type: "conversation.create";
   conversation_id?: string;
   title?: string;
   conversation_type?: "main" | "side_chat";
+  source_conversation_id?: string;
   /** @deprecated Use conversation_type. */
   side_chat?: boolean;
   git_isolated?: boolean;
   workspace_root?: string;
+  execution_cwd?: string;
+  projectless_base?: string;
+  initial_prompt?: string;
   permission_mode?: "plan" | "confirm" | "bypass" | "auto";
+  agent_mode?: "build" | "plan" | "review" | "explore";
 }
 
 export interface ConversationSwitchCommand {
@@ -500,6 +545,7 @@ export interface ConversationArchiveCommand {
   conversation_id: string;
   archived?: boolean;
   client_resource_cleanup?: boolean;
+  archive_navigation?: "home";
 }
 
 export interface ConversationRenameCommand {
@@ -508,10 +554,62 @@ export interface ConversationRenameCommand {
   title: string;
 }
 
+export interface ConversationPinSetCommand {
+  type: "conversation.pin.set";
+  conversation_id: string;
+  pinned: boolean;
+}
+
+export interface ConversationPinReorderCommand {
+  type: "conversation.pin.reorder";
+  moved_conversation_id: string;
+  before_conversation_id: string | null;
+  visible_conversation_ids: string[];
+}
+
+export interface SidebarSortSetCommand {
+  type: "sidebar.sort.set";
+  mode: "manual" | "updated_at";
+  project_thread_seeds: Record<string, string[]>;
+}
+
+export interface SidebarProjectReorderCommand {
+  type: "sidebar.project.reorder";
+  moved_project_id: string;
+  before_project_id: string | null;
+  visible_project_ids: string[];
+}
+
+export interface SidebarThreadReorderCommand {
+  type: "sidebar.project.thread.reorder" | "sidebar.recent.reorder";
+  project_id?: string;
+  moved_conversation_id: string;
+  before_conversation_id: string | null;
+  visible_conversation_ids: string[];
+}
+
+export interface ConversationReadStateSetCommand {
+  type: "conversation.read_state.set";
+  conversation_id: string;
+  has_unread_turn: boolean;
+}
+
+export interface ConversationProjectSetCommand {
+  type: "conversation.project.set";
+  conversation_id: string;
+  project_id: string;
+}
+
 export interface ConversationMemoryModeSetCommand {
   type: "conversation.memory_mode.set";
   conversation_id?: string;
   memory_mode: "enabled" | "disabled";
+}
+
+export interface ConversationAgentModeSetCommand {
+  type: "conversation.agent_mode.set";
+  conversation_id: string;
+  agent_mode: "build" | "plan" | "review" | "explore";
 }
 
 export interface MemoryResetCommand {
@@ -531,7 +629,17 @@ export interface ConversationGoalSetCommand {
 export interface LlmModelSetCommand {
   type: "llm.model.set";
   conversation_id?: string;
-  model: string;
+  model?: string;
+  selection_mode?: "default" | "model";
+  reasoning_effort?: string;
+}
+
+export interface TurnSettingsUpdateCommand {
+  type: "turn.settings.update";
+  conversation_id: string;
+  turn_id: string;
+  model?: string;
+  effort?: string;
 }
 
 export interface LlmConfigSetCommand {

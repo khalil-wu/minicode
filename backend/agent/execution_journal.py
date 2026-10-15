@@ -74,6 +74,14 @@ class ExecutionJournalCorruptionError(ExecutionJournalError):
 
 
 _TOOL_USE_OPTIONAL_FIELDS = (
+    "native_type",
+    "native_namespace",
+    "native_name",
+    "private_model_only",
+    "command_actions",
+    "streaming_announcement",
+    "command_presentation",
+    "execution_started_at",
     "call_source",
     "status",
     "started_at",
@@ -97,6 +105,16 @@ _TOOL_USE_OPTIONAL_FIELDS = (
 )
 
 _TOOL_RESULT_OPTIONAL_FIELDS = (
+    "private_model_only",
+    "streaming_announcement",
+    "command_presentation",
+    "execution_started_at",
+    "stdout_preview",
+    "stderr_preview",
+    "exit_code",
+    "recipient_id",
+    "recipient_ids",
+    "command_actions",
     "call_source",
     "artifact_id",
     "artifact_kind",
@@ -138,6 +156,7 @@ _TOOL_RESULT_OPTIONAL_FIELDS = (
     "request_digest",
     "termination_reason",
     "synthetic",
+    "delegations",
 )
 
 
@@ -222,6 +241,11 @@ def tool_result_journal_payload(
     }
     for field_name in _TOOL_RESULT_OPTIONAL_FIELDS:
         if field_name in event_data and event_data[field_name] is not None:
+            payload[field_name] = deepcopy(event_data[field_name])
+    # These are model-history bodies added by the private journal recorder;
+    # public tool events carry only their display summary.
+    for field_name in ("model_content", "mcp_output", "code_mode_output", "tool_search_output", "history_notes_output"):
+        if field_name in event_data:
             payload[field_name] = deepcopy(event_data[field_name])
     return payload
 
@@ -802,6 +826,8 @@ class ExecutionJournal:
                     and previous.get("arguments") == current.get("arguments")
                     and str(previous.get("request_digest") or "")
                     == str(current.get("request_digest") or "")
+                    and all(previous.get(field) == current.get(field) for field in (
+                        "streaming_announcement", "command_presentation", "execution_started_at", "status"))
                 ):
                     return None
             return self._append_unlocked(
@@ -809,6 +835,26 @@ class ExecutionJournal:
                 payload,
                 parent_event_id=parent_event_id,
             )
+
+    def append_tool_execution_started(self, event_data: Mapping[str, Any]) -> JournalEvent | None:
+        """Advance one existing native request from its actual tool.started fact."""
+        call_id = str(event_data['tool_call_id'])
+        with self._locked():
+            self._validated_events_unlocked()
+            state = self._tool_states.get(call_id)
+            if state is None or state[0] != 'open':
+                return None
+            previous = state[1].payload['tool_call']
+            if 'command_presentation' not in previous:
+                return None
+            if any(previous.get(field) != event_data.get(field) for field in ('turn_id', 'iteration_id')):
+                return None
+            started_at = event_data['started_at']
+            if previous.get('execution_started_at') == started_at:
+                return None
+            updated = deepcopy(previous)
+            updated.update(status='running', streaming_announcement=False, execution_started_at=started_at)
+            return self._append_unlocked('tool_use', tool_use_journal_payload(updated), parent_event_id=state[1].event_id)
 
     def append_tool_result(
         self,
@@ -860,6 +906,16 @@ class ExecutionJournal:
                 raise ExecutionJournalError(
                     f"Failed reading execution journal for {self.agent_id}"
                 ) from exc
+
+    def get_event(self, event_id: str) -> JournalEvent | None:
+        with self._locked():
+            self._validated_events_unlocked()
+            return self._events_by_id.get(event_id)
+
+    def read_events_since(self, seq: int) -> list[JournalEvent]:
+        with self._locked():
+            events = self._validated_events_unlocked()
+            return list(events[seq:])
 
     def reconstruct_history(self, *, events: list[JournalEvent] | None = None) -> list[dict[str, Any]]:
         """Rebuild provider-shaped history from ordered journal facts."""
@@ -936,6 +992,9 @@ class ExecutionJournal:
                 content = str(payload.get("content") or payload.get("text") or "")
                 tool_calls = payload.get("tool_calls")
                 message: dict[str, Any] = {"role": "assistant", "content": content}
+                for key in ("phase", "answer_source"):
+                    if key in payload:
+                        message[key] = payload[key]
                 if isinstance(tool_calls, list) and tool_calls:
                     message["tool_calls"] = tool_calls
                     pending_tool_call_ids.update(
@@ -977,9 +1036,11 @@ class ExecutionJournal:
                 history.append(
                     {
                         "role": "tool",
-                        "content": str(payload.get("content") or ""),
+                        "content": str(payload.get("model_content", payload.get("content")) or ""),
+                        **({"private_model_only": True} if payload.get("private_model_only") is True else {}),
                         "name": str(payload.get("tool_name") or payload.get("name") or "tool"),
                         "tool_call_id": call_id,
+                        **{field: deepcopy(payload[field]) for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output") if field in payload},
                     }
                 )
                 pending_tool_call_ids.discard(call_id)
@@ -1090,6 +1151,8 @@ class ExecutionJournal:
                     "idempotent": bool(tool_call.get("idempotent", False)),
                     "idempotency_key": str(tool_call.get("idempotency_key") or ""),
                     "request_digest": str(tool_call.get("request_digest") or ""),
+                    **{field: deepcopy(tool_call[field]) for field in (
+                        "streaming_announcement", "command_presentation", "execution_started_at", "command_actions") if field in tool_call},
                     "recovery_policy": (
                         "retry_safe"
                         if bool(tool_call.get("idempotent", False))
@@ -1125,6 +1188,8 @@ class ExecutionJournal:
                         "idempotent": bool(tool_call.get("idempotent", False)),
                         "idempotency_key": str(tool_call.get("idempotency_key") or ""),
                         "request_digest": str(tool_call.get("request_digest") or ""),
+                        **{field: deepcopy(tool_call[field]) for field in (
+                            "streaming_announcement", "command_presentation", "execution_started_at", "command_actions") if field in tool_call},
                         "recovery_policy": (
                             "retry_safe"
                             if bool(tool_call.get("idempotent", False))
@@ -1177,6 +1242,8 @@ class ExecutionJournal:
                     "termination_reason": clean_reason,
                     "synthetic": True,
                     "request_digest": str(item.get("request_digest") or ""),
+                    **{field: deepcopy(item[field]) for field in (
+                        "streaming_announcement", "command_presentation", "execution_started_at", "command_actions") if field in item},
                 },
                 tool_name=str(item["tool_name"]),
                 parent_event_id=str(item.get("event_id") or ""),
@@ -1508,3 +1575,21 @@ def load_agent_transcript(agent_id: str, *, base_dir: Path | None = None) -> dic
         "history": journal.reconstruct_history(),
         "unresolved_tool_uses": journal.unresolved_tool_uses(),
     }
+
+
+def turn_user_prompt_id(store_id: str, conversation_id: str, user_message_id: str) -> str:
+    return "user_prompt_" + hashlib.sha256(
+        f"{store_id}\0{conversation_id}\0{user_message_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def turn_input_consumption_id(user_message_id: str, client_command_id: str) -> str:
+    return "turn_input_consumed_" + hashlib.sha256(
+        f"{user_message_id}\0{client_command_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def turn_input_rejection_id(user_message_id: str, client_command_id: str) -> str:
+    return "turn_input_rejected_" + hashlib.sha256(
+        f"{user_message_id}\0{client_command_id}".encode("utf-8")
+    ).hexdigest()

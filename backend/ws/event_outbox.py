@@ -8,6 +8,7 @@ import asyncio
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import uuid
@@ -42,6 +43,14 @@ ReplayState = tuple[WebSocketReplayEventStore, list[dict[str, Any]]]
 # window is bounded so a long backlog cannot hold an unbounded line buffer, and
 # the remainder is written by the next iteration of the same writer.
 _PERSISTENCE_BATCH_LIMIT = 256
+
+
+@dataclass
+class CommandResultScope:
+    client_command_id: str
+    results: list[dict[str, Any]] = field(default_factory=list)
+    active: bool = True
+    include_data: bool = False
 
 
 class EventOutbox:
@@ -107,6 +116,9 @@ class EventOutbox:
         )
         self._client_command_owner: ContextVar[tuple[str, str] | None] = ContextVar(
             f"ws_client_command_owner_{session_id}", default=None,
+        )
+        self._command_result_scope: ContextVar[CommandResultScope | None] = ContextVar(
+            f"ws_command_result_scope_{session_id}", default=None,
         )
 
     @staticmethod
@@ -191,6 +203,18 @@ class EventOutbox:
             self._client_command_owner.reset(owner_token)
             self._client_command_type.reset(type_token)
             self._client_command_id.reset(command_token)
+
+    @contextmanager
+    def capture_command_results(self, *, include_data: bool = False) -> Iterator[CommandResultScope]:
+        scope = CommandResultScope(self.client_command_id, include_data=include_data)
+        token = self._command_result_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            # Child tasks inherit context, but a result after the handler has
+            # returned cannot change that handler's completed outcome.
+            scope.active = False
+            self._command_result_scope.reset(token)
 
     @contextmanager
     def bind_connection_generation(self, generation: int | None) -> Iterator[None]:
@@ -296,6 +320,7 @@ class EventOutbox:
                 self._pending_persistence.append((replay_payload, rewrite_events))
                 if self._persist_tail is None or self._persist_tail.done():
                     self._persist_tail = asyncio.create_task(self._persist_pending())
+            self.record_command_result(payload)
             if not self._can_send(generation):
                 if self._has_active_run():
                     self.events_dropped_during_disconnect = True
@@ -317,6 +342,17 @@ class EventOutbox:
         # socket completion. The bounded queue owns backpressure for slow peers.
         await asyncio.sleep(0)
         return True
+
+    def record_command_result(self, payload: dict[str, Any]) -> None:
+        scope = self._command_result_scope.get()
+        if (payload.get("type") == "command.result" and scope is not None and scope.active
+                and str(payload.get("client_command_id") or self.client_command_id) == scope.client_command_id):
+            scope.results.append({
+                **({"data": payload["data"]} if scope.include_data and "data" in payload else {}),
+                "command": str(payload.get("command") or ""),
+                "level": str(payload.get("level") or "info"),
+                "message": str(payload.get("message") or ""),
+            })
 
     async def _deliver_pending(self) -> None:
         while not self._delivery_queue.empty():

@@ -18,15 +18,16 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       response.end('<!doctype html><style>html,body{margin:0;background:rgb(17,133,71);color:white;font:32px sans-serif}h1{margin:80px}</style><h1>Actual browser capture</h1>');
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    manager.init({ getMainWindow: () => window });
+    manager.init({ getWindowByInstanceId: () => window });
     try {
       await window.loadURL("data:text/html,<h1>MiniCode capture host</h1>");
       const url = `http://127.0.0.1:${server.address().port}/`;
-      await manager.executeControlCommand({ action: "navigate", conversation_id: "capture-owner", url }, {
+      await manager.executeControlCommand({ action: "navigate", conversation_id: "capture-owner", url, window_instance_id: "fixture-window" }, {
         requestPresentation: true,
         navigationAuthorization: { kind: "owned_preview", url, conversation_id: "capture-owner" },
       });
-      const target = manager.listTargets("capture-owner")[0];
+      process.stdout.write("[capture] owned page navigation complete\n");
+      const target = manager.listTargets("capture-owner", "fixture-window")[0];
       const view = window.contentView.children.find((child) => child.webContents?.id !== window.webContents.id);
       const metrics = await view.webContents.executeJavaScript("({width:innerWidth,height:innerHeight})");
       const host = window.getContentBounds();
@@ -38,19 +39,21 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(window.isVisible(), false);
       const interrupted = new AbortController();
       const hiddenCapture = manager.executeControlCommand({ action: "screenshot", target_id: target.id,
-        conversation_id: "capture-owner" }, { signal: interrupted.signal });
+        conversation_id: "capture-owner", window_instance_id: "fixture-window" }, { signal: interrupted.signal });
       const cancelled = assert.rejects(hiddenCapture, /test cancellation/);
       interrupted.abort(new Error("test cancellation"));
       await cancelled;
+      process.stdout.write("[capture] hidden screenshot waiter cancelled\n");
 
       // This is the native presentation performed by BrowserPanel. The host
       // stays unfocused and only a narrow edge lies inside the desktop.
       window.showInactive();
-      manager.activate(target.id, "capture-owner");
+      manager.activate(target.id, "capture-owner", "fixture-window");
       assert.equal(view.getVisible(), false);
       const resultPromise = manager.executeControlCommand({ action: "screenshot", target_id: target.id,
-        conversation_id: "capture-owner" });
-      manager.setBounds({ id: target.id, conversation_id: "capture-owner", x: 0, y: 0, width: 900, height: 600 });
+        conversation_id: "capture-owner", window_instance_id: "fixture-window" });
+      manager.setBounds({ id: target.id, conversation_id: "capture-owner", x: 0, y: 0, width: 900, height: 600, window_instance_id: "fixture-window" });
+      process.stdout.write("[capture] owner activated and native viewport presented\n");
       const result = await resultPromise;
       const buffer = Buffer.from(result.data, "base64");
       const image = nativeImage.createFromBuffer(buffer);
@@ -60,7 +63,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       const pixel = image.toBitmap().subarray(0, 3);
       assert.deepEqual(Array.from(pixel), [71, 133, 17]);
       assert.equal(view.webContents.getURL(), url);
-      assert.equal(manager.listTargets("capture-owner").length, 1);
+      assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 1);
       process.stdout.write(`Real same-page compositor capture ${result.width}x${result.height}, ${buffer.length} bytes; hidden wait cancellation and ownership passed.\n`);
       manager.disposeAll(); window.destroy(); server.close(); app.exit(0);
     } catch (error) {

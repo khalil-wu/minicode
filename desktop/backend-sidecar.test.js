@@ -131,6 +131,9 @@ test("backend receives the packaged resources directory separately from user fol
     resourcesDirectory,
   );
   assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, desktopDirectory);
+  assert.equal(spawnOptions.env.MINICODE_DESKTOP_OWNED, "1");
+  assert.deepEqual(spawnOptions.stdio, ["pipe", "pipe", "pipe"]);
+  assert.equal(spawnOptions.detached, process.platform !== "win32");
   assert.equal(spawnOptions.env.MINICODE_EDITOR_LANGUAGE_SERVICES_DIR, languageServicesDirectory);
   assert.equal(
     spawnOptions.env.MINICODE_GH_COMMAND,

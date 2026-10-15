@@ -9,6 +9,7 @@ import { ArchivedTab } from "./ArchivedTab";
 import { GeneralTab } from "./GeneralTab";
 import { WorkspaceGitTab } from "./WorkspaceGitTab";
 import { openAutomations } from "../lib/automations-navigation";
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 const mocks = vi.hoisted(() => ({ command: vi.fn(), deleteConversation: vi.fn(), confirm: vi.fn(), toast: vi.fn(), detect: vi.fn(),
   getStatus: vi.fn(), onStatus: vi.fn(), status: vi.fn(), worktree: vi.fn(), diff: vi.fn() }));
@@ -240,13 +241,11 @@ describe("overlay transaction chains", () => {
     expect(screen.getByRole("button", { name: "重启并安装" })).toBeTruthy();
     expect(screen.queryByText(/old read failed/)).toBeNull();
   });
-  it("opens the Git file through the editor store and leaves settings", async () => {
-    const openEditorFile = vi.fn();
-    useAppStore.setState({ openEditorFile });
+  it("opens the actual Git workspace destination and leaves settings", async () => {
     render(<WorkspaceGitTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "已修改 main.ts" }));
-    fireEvent.click(screen.getByRole("button", { name: "在编辑器中打开文件" }));
-    expect(openEditorFile).toHaveBeenCalledWith("main.ts", "main.ts", { exact: true });
+    fireEvent.click(await screen.findByRole("button", { name: "打开 Git 工作区" }));
+    expect(useAppStore.getState().activeBottomTab).toBe("git");
+    expect(useAppStore.getState().dockCollapsed).toBe(false);
     expect(useAppStore.getState().settingsOpen).toBe(false);
   });
   it("opens automations through the actual settings scheduler destination", () => {

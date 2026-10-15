@@ -34,6 +34,8 @@ it("persists keyboard-selected theme and exact numeric sizes without font-style 
   expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   expect(localStorage.getItem(LS.theme)).toBe("light");
   expect(within(theme).getAllByRole("radio").filter((node) => node.tabIndex === 0)).toHaveLength(1);
+  expect(screen.getByRole("spinbutton", { name: "编辑器字号" }).closest("details")).toHaveProperty("open", false);
+  fireEvent.click(screen.getByText("高级"));
   expect(screen.getAllByRole("spinbutton")).toHaveLength(3);
   fireEvent.change(screen.getByRole("spinbutton", { name: "界面字号" }), { target: { value: "16" } });
   expect(document.documentElement.style.getPropertyValue("--app-text-scale")).toBe(String(16 / 14));
@@ -58,11 +60,12 @@ it("resets sizes separately from editing behavior and retains custom code snippe
       aiEnabled: true, aiModel: "saved-model", snippets: [snippet] } });
   render(<AppearanceTab />);
 
+  fireEvent.click(screen.getByText("高级"));
+
   fireEvent.click(screen.getByRole("button", { name: "恢复默认字号" }));
 
   expect(useAppStore.getState()).toMatchObject({ textScale: 1, codeTextScale: 1,
     workbenchPreferences: { proseSize: 14, tabSize: 2, wordWrap: false, formatOnSave: true, aiEnabled: true, aiModel: "saved-model", snippets: [snippet] } });
-  fireEvent.click(screen.getByText("高级"));
   expect(screen.getByRole("switch", { name: "自动换行" }).getAttribute("aria-checked")).toBe("false");
   fireEvent.click(screen.getByRole("button", { name: "恢复编辑器默认设置" }));
   expect(useAppStore.getState().workbenchPreferences).toMatchObject({ proseSize: 14, tabSize: 4, wordWrap: true, formatOnSave: false,
@@ -71,12 +74,13 @@ it("resets sizes separately from editing behavior and retains custom code snippe
 
 it("retains the unfinished code template when advanced settings are collapsed and reopened", () => {
   render(<AppearanceTab />);
-  expect(screen.getByRole("spinbutton", { name: "编辑器字号" })).toBeTruthy();
+  expect(screen.getByRole("spinbutton", { name: "编辑器字号" }).closest("details")).toHaveProperty("open", false);
   const advanced = screen.getByText("高级");
   const disclosure = advanced.closest("details") as HTMLDetailsElement;
   expect(disclosure.open).toBe(false);
   fireEvent.click(advanced);
   expect(disclosure.open).toBe(true);
+  expect(screen.getByRole("spinbutton", { name: "编辑器字号" })).toBeTruthy();
   expect(screen.getByRole("switch", { name: "AI 行内预测" })).toBeTruthy();
   fireEvent.click(screen.getByText("自定义代码模板 · 0"));
   fireEvent.change(screen.getByRole("textbox", { name: "模板前缀" }), { target: { value: "draft" } });

@@ -6,11 +6,12 @@ export const isKnownProviderModelList = (provider: string): boolean => {
 /**
  * Determine which models the composer should show as selectable.
  *
- * - If ``modelsSource`` is ``"live"``, the full list is trusted regardless of
- *   provider (the user explicitly ran Discover and it succeeded).
+ * - Live discovery, explicit configuration, and registered extension catalogs
+ *   are authoritative for their provider. The backend publishes these exact
+ *   source values with the resolved model list.
  * - Otherwise use the explicit built-in provider contract: OpenAI and
  *   Anthropic show their configured list, while custom gateways only expose
- *   the current model unless discovery marked the list as live. This avoids
+ *   the current model when the source is unknown or unavailable. This avoids
  *   treating a runtime fallback list as an authoritative custom catalog.
  */
 export const selectableModelsForProvider = (
@@ -20,7 +21,7 @@ export const selectableModelsForProvider = (
   modelsSource?: string,
 ): string[] => {
   const current = String(currentModel || "").trim();
-  const source = modelsSource === "live" || isKnownProviderModelList(provider)
+  const source = modelsSource === "live" || modelsSource === "configured" || modelsSource === "extension" || isKnownProviderModelList(provider)
     ? models
     : current
       ? [current]

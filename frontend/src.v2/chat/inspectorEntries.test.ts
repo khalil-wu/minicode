@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from "vitest";
 import { addInspectorPayload, focusInspectorEntry } from "./inspectorEntries";
 import { useAppStore } from "../stores";

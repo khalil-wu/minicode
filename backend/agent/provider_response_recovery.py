@@ -144,6 +144,7 @@ async def recover_provider_response(
                     intermediate_text,
                     phase="commentary",
                     provider_items=replay_items,
+                    answer_source="retained",
                 )
                 state.provider_continuation_recovery_count = recovery_count + 1
                 state.mark_transition(

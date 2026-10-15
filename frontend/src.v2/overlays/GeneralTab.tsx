@@ -1,8 +1,15 @@
+import { useI18n, type TranslationKey } from "../i18n";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { AppMode, FollowUpBehavior, RemoteImagePolicy, SendShortcut, ViewMode } from "../stores/types";
+import { createPortal } from "react-dom";
+import type { FollowUpBehavior, RemoteImagePolicy, SendShortcut } from "../stores/types";
 import { desktop, isDesktop, type UpdatePreflightResult, type UpdateStatus } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
+import { SelectMenu } from "../components/SelectMenu";
+import { FileOpenTargetIcon } from "../components/FileOpenTargetIcon";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import { ChevronDown, ShieldAlert } from "lucide-react";
 
 const REMOTE_IMAGE_CHOICES = [
   { id: "ask", label: "询问", title: "加载远程图片前询问" },
@@ -10,26 +17,16 @@ const REMOTE_IMAGE_CHOICES = [
   { id: "block", label: "阻止", title: "不加载任何远程图片" },
 ] as const;
 
-const APP_MODE_CHOICES: { id: AppMode; label: string; title: string }[] = [
-  { id: "cowork", label: "协作", title: "使用会话、任务和工具侧栏" },
-  { id: "code", label: "代码", title: "使用文件树与编辑器工作区" },
-];
+const SEND_SHORTCUT_CHOICES = [
+  { id: "enter", label: "按 Enter 键", title: "按 Enter 发送，Shift + Enter 换行" },
+  { id: "cmdIfMultiline", label: "{modifierSymbol} + Enter 用于多行提示", title: "单行按 Enter 发送，多行按 Ctrl/Cmd + Enter 发送" },
+  { id: "mod-enter", label: "总是使用 {modifierSymbol} + Enter", title: "按 Ctrl/Cmd + Enter 发送，Enter 换行" },
+ ] as const satisfies readonly { id: SendShortcut; label: TranslationKey; title: TranslationKey }[];
 
-const VIEW_MODE_CHOICES: { id: ViewMode; label: string; title: string }[] = [
-  { id: "summary", label: "精简", title: "减少过程信息" },
-  { id: "normal", label: "标准", title: "显示主要步骤" },
-  { id: "verbose", label: "详细", title: "显示完整活动信息" },
-];
-
-const SEND_SHORTCUT_CHOICES: { id: SendShortcut; label: string; title: string }[] = [
-  { id: "enter", label: "Enter", title: "按 Enter 发送，Shift + Enter 换行" },
-  { id: "mod-enter", label: "Ctrl/Cmd + Enter", title: "按 Ctrl/Cmd + Enter 发送，Enter 换行" },
-];
-
-const FOLLOW_UP_CHOICES: { id: FollowUpBehavior; label: string; title: string }[] = [
+const FOLLOW_UP_CHOICES = [
   { id: "queue", label: "排队", title: "当前任务结束后再处理新消息" },
   { id: "steer", label: "引导", title: "把新消息立即加入当前任务" },
-];
+ ] as const satisfies readonly { id: FollowUpBehavior; label: TranslationKey; title: TranslationKey }[];
 
 export const GeneralTab = ({
   remoteImagePolicy,
@@ -38,117 +35,50 @@ export const GeneralTab = ({
   remoteImagePolicy: RemoteImagePolicy;
   setRemoteImagePolicy: (policy: RemoteImagePolicy) => void;
 }) => {
-  const appMode = useAppStore((s) => s.appMode);
-  const setAppMode = useAppStore((s) => s.setAppMode);
-  const viewMode = useAppStore((s) => s.viewMode);
-  const setViewMode = useAppStore((s) => s.setViewMode);
+  const { t } = useI18n();
   const sendShortcut = useAppStore((s) => s.sendShortcut);
   const setSendShortcut = useAppStore((s) => s.setSendShortcut);
   const followUpBehavior = useAppStore((s) => s.followUpBehavior);
   const setFollowUpBehavior = useAppStore((s) => s.setFollowUpBehavior);
   const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
   const clearAllowedRemoteImageDomains = useAppStore((s) => s.clearAllowedRemoteImageDomains);
+  const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
     <>
-      <SettingsGroup title="工作区">
-        <SettingsRow title="工作模式" description="切换协作区或代码区。">
-          <SegmentedControl>
-            {APP_MODE_CHOICES.map((choice) => (
-              <button
-                key={choice.id}
-                type="button"
-                className="settings-segment"
-                data-active={appMode === choice.id ? "true" : "false"}
-                aria-pressed={appMode === choice.id}
-                onClick={() => setAppMode(choice.id)}
-                title={choice.title}
-              >
-                {choice.label}
-              </button>
-            ))}
-          </SegmentedControl>
+      {isDesktop() && <DesktopGeneralPreferences />}
+      <SettingsGroup title={t("输入框")}>
+        <SettingsRow title={t("发送快捷键")} description={t("选择按 Enter 时是发送提示还是插入新行")}>
+          <SelectMenu ariaLabel={t("发送快捷键")} className="settings-select settings-select-regular" align="end" value={sendShortcut}
+            onValueChange={(value) => setSendShortcut(value as SendShortcut)}>
+            {SEND_SHORTCUT_CHOICES.map(choice => <option key={choice.id} value={choice.id} title={t(choice.title)}>{t(choice.label, { modifierSymbol })}</option>)}
+          </SelectMenu>
         </SettingsRow>
-        <SettingsRow title="过程详情" description="控制活动与工具详情。">
-          <SegmentedControl>
-            {VIEW_MODE_CHOICES.map((choice) => (
-              <button
-                key={choice.id}
-                type="button"
-                className="settings-segment"
-                data-active={viewMode === choice.id ? "true" : "false"}
-                aria-pressed={viewMode === choice.id}
-                onClick={() => setViewMode(choice.id)}
-                title={choice.title}
-              >
-                {choice.label}
-              </button>
-            ))}
-          </SegmentedControl>
-        </SettingsRow>
-        <SettingsRow title="发送快捷键" description="设置输入框的发送按键。">
-          <SegmentedControl>
-            {SEND_SHORTCUT_CHOICES.map((choice) => (
-              <button
-                key={choice.id}
-                type="button"
-                className="settings-segment"
-                data-active={sendShortcut === choice.id ? "true" : "false"}
-                aria-pressed={sendShortcut === choice.id}
-                onClick={() => setSendShortcut(choice.id)}
-                title={choice.title}
-              >
-                {choice.label}
-              </button>
-            ))}
-          </SegmentedControl>
-        </SettingsRow>
-        <SettingsRow title="跟进行为" description="任务运行时发送新消息的方式。">
-          <SegmentedControl>
-            {FOLLOW_UP_CHOICES.map((choice) => (
-              <button
-                key={choice.id}
-                type="button"
-                className="settings-segment"
-                data-active={followUpBehavior === choice.id ? "true" : "false"}
-                aria-pressed={followUpBehavior === choice.id}
-                onClick={() => setFollowUpBehavior(choice.id)}
-                title={choice.title}
-              >
-                {choice.label}
-              </button>
-            ))}
-          </SegmentedControl>
+        <SettingsRow title={t("跟进行为")} description={t("任务运行时发送新消息的方式。")}>
+          <SelectMenu ariaLabel={t("跟进行为")} className="settings-select settings-select-regular" align="end" value={followUpBehavior}
+            onValueChange={(value) => setFollowUpBehavior(value as FollowUpBehavior)}>
+            {FOLLOW_UP_CHOICES.map(choice => <option key={choice.id} value={choice.id} title={t(choice.title)}>{t(choice.label)}</option>)}
+          </SelectMenu>
         </SettingsRow>
       </SettingsGroup>
 
-      <SettingsGroup title="内容">
-        <SettingsRow title="远程 Markdown 图片" description="控制外部图片加载。">
-          <SegmentedControl>
-            {REMOTE_IMAGE_CHOICES.map((choice) => (
-              <button
-                key={choice.id}
-                type="button"
-                className="settings-segment"
-                data-active={remoteImagePolicy === choice.id ? "true" : "false"}
-                aria-pressed={remoteImagePolicy === choice.id}
-                onClick={() => setRemoteImagePolicy(choice.id)}
-                title={choice.title}
-              >
-                {choice.label}
-              </button>
-            ))}
-          </SegmentedControl>
+      <details className="settings-appearance-advanced"><summary className="settings-appearance-advanced-trigger">{t("高级")}<ChevronDown size={15} aria-hidden="true" /></summary><div className="settings-appearance-advanced-body">
+      {isDesktop() && <DefaultPermissionSettings />}
+      <SettingsGroup title={t("内容")}>
+        <SettingsRow title={t("远程 Markdown 图片")} description={t("控制外部图片加载。")}>
+          <SelectMenu ariaLabel={t("远程 Markdown 图片")} className="settings-select settings-select-regular" align="end" value={remoteImagePolicy}
+            onValueChange={(value) => setRemoteImagePolicy(value as RemoteImagePolicy)}>
+            {REMOTE_IMAGE_CHOICES.map(choice => <option key={choice.id} value={choice.id} title={t(choice.title)}>{t(choice.label)}</option>)}
+          </SelectMenu>
         </SettingsRow>
         {allowedRemoteImageDomains.length > 0 && (
-          <SettingsRow title="已允许的网站" description={`${allowedRemoteImageDomains.length} 个网站已允许。`}>
-            <button type="button" className="settings-action-button" onClick={clearAllowedRemoteImageDomains}>
-              清除列表
-            </button>
+          <SettingsRow title={t("已允许的网站")} description={t("{count} 个网站已允许。", { count: allowedRemoteImageDomains.length })}>
+            <button type="button" className="settings-action-button" onClick={clearAllowedRemoteImageDomains}>{t("清除列表")}</button>
           </SettingsRow>
         )}
       </SettingsGroup>
 
       {isDesktop() && <DesktopUpdates />}
+      </div></details>
     </>
   );
 };
@@ -160,7 +90,7 @@ const SettingsGroup = ({ title, children }: { title: string; children: ReactNode
   </section>
 );
 
-const SettingsRow = ({ title, description, children }: { title: string; description: string; children: ReactNode }) => (
+const SettingsRow = ({ title, description, children }: { title: string; description: ReactNode; children: ReactNode }) => (
   <div className="settings-row">
     <div className="settings-row-copy">
       <div className="settings-row-title">{title}</div>
@@ -170,11 +100,111 @@ const SettingsRow = ({ title, description, children }: { title: string; descript
   </div>
 );
 
-const SegmentedControl = ({ children }: { children: ReactNode }) => (
-  <div className="settings-segmented">{children}</div>
-);
+const DesktopGeneralPreferences = () => {
+  const { t } = useI18n();
+  const { preferences, error, update } = useDesktopPreferences();
+  const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false);
+  if (error) return <p role="alert">{error}</p>;
+  if (!preferences) return <p role="status">{t("正在读取桌面设置…")}</p>;
+  return <>
+    <SettingsGroup title={t("权限")}>
+      <SettingsRow title={t("默认权限")} description={t("默认权限允许读取和编辑任务文件；需要时，可以请求额外访问权限。") }>
+        <button type="button" className="settings-toggle" role="switch" aria-label={t("始终显示默认权限")} aria-checked="true" data-active="true" disabled><span /></button>
+      </SettingsRow>
+      <SettingsRow title={t("完整访问权限")} description={<>{t("当 MiniCode 以完整访问权限运行时，它无需你的批准即可编辑电脑上的任何文件，并运行可访问网络的命令。这会显著增加数据丢失、泄露或意外行为的风险。")}{" "}<a href={PERMISSIONS_LEARN_MORE_URL} className="settings-full-access-learn-more" onClick={event => {
+        event.preventDefault(); void import("../lib/open-preferred-target").then(({ openPreferredWebLink }) => openPreferredWebLink(PERMISSIONS_LEARN_MORE_URL));
+      }}>{t("了解更多")}</a></>}>
+        <button type="button" className="settings-toggle" role="switch" aria-label={t("完整访问权限")} aria-checked={preferences.showFullAccess} data-active={preferences.showFullAccess}
+          onClick={() => preferences.showFullAccess ? void update({ showFullAccess: false }) : setFullAccessConfirmation(true)}><span /></button>
+      </SettingsRow>
+    </SettingsGroup>
+    <SettingsGroup title={t("常规")}>
+      <SettingsRow title={t("无项目任务文件夹")} description={t("在项目外启动的任务默认存储数据的位置。")}>
+        <code className="settings-general-task-path" title={preferences.defaultTaskDirectory}>{preferences.defaultTaskDirectory}</code><button type="button" className="settings-action-button" onClick={() => void desktop()!.preferences.chooseTaskDirectory().catch((error) => pushToast(error instanceof Error ? error.message : String(error), "error"))}>{t("更改")}</button>
+      </SettingsRow>
+      <SettingsRow title={t("默认文件打开位置")} description={t("默认打开文件和文件夹的位置。")}>
+        <SelectMenu ariaLabel={t("默认文件打开位置")} className="settings-select settings-select-regular" align="end" menuMaxHeight={320}
+          renderOptionIcon={(value) => <FileOpenTargetIcon target={preferences.fileOpenTargets.find(target => target.id === value)!} />}
+          value={preferences.fileOpenTarget} onValueChange={(value) => void update({ fileOpenTarget: value as typeof preferences.fileOpenTarget })}>
+          {preferences.fileOpenTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
+        </SelectMenu>
+      </SettingsRow>
+      <SettingsRow title={t("集成终端 Shell")} description={t("选择要在集成终端中打开的 Shell。")}>
+        <SelectMenu ariaLabel={t("集成终端 Shell")} className="settings-select settings-select-regular" align="end" value={preferences.terminalShell} onValueChange={(value) => void update({ terminalShell: value as typeof preferences.terminalShell })}>
+          {preferences.terminalShellTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
+        </SelectMenu>
+      </SettingsRow>
+      <SettingsRow title={t("语言")} description={t("应用界面语言。")}>
+        <SelectMenu ariaLabel={t("语言")} className="settings-select settings-select-regular" align="end" value={preferences.localeOverride ?? "auto"} onValueChange={(value) => void update({ localeOverride: value === "auto" ? null : value as "zh-CN" | "en-US" })}>
+          <option value="auto">{t("自动检测")}</option><option value="zh-CN">简体中文</option><option value="en-US">English</option>
+        </SelectMenu>
+      </SettingsRow>
+      <SettingsRow title={t("关闭窗口前确认")} description={preferences.confirmBeforeClose === "keyboardOnly" ? t("当关闭标签页快捷键将关闭窗口时提醒。") : t("选择何时在关闭窗口前提醒；Alt+F4 和关闭按钮仅在始终确认时提醒。")}>
+        <SelectMenu ariaLabel={t("关闭窗口前确认")} className="settings-select settings-select-regular" align="end" value={preferences.confirmBeforeClose} onValueChange={(value) => void update({ confirmBeforeClose: value as typeof preferences.confirmBeforeClose })}>
+          <option value="never">{t("从不")}</option><option value="keyboardOnly">{t("仅关闭快捷键")}</option><option value="always">{t("始终")}</option>
+        </SelectMenu>
+      </SettingsRow>
+    </SettingsGroup>
+    <SettingsGroup title={t("通知")}>
+      <SettingsRow title={t("任务完成通知")} description={t("任务或回复完成时提醒。")}>
+        <SelectMenu ariaLabel={t("任务完成通知")} className="settings-select settings-select-regular" align="end" value={preferences.turnCompletionNotifications} onValueChange={(value) => void update({ turnCompletionNotifications: value as typeof preferences.turnCompletionNotifications })}>
+          <option value="never">{t("从不")}</option><option value="onlyWhenUnfocused">{t("仅在应用未聚焦时")}</option><option value="always">{t("始终")}</option>
+        </SelectMenu>
+      </SettingsRow>
+      {([['permissionNotifications', t("权限请求通知")], ['questionNotifications', t("问题通知")]] as const).map(([key, label]) => <SettingsRow key={key} title={label} description={key === 'permissionNotifications' ? t("需要批准访问权限时提醒。") : t("需要你回答问题时提醒。")}>
+        <button type="button" className="settings-toggle" role="switch" aria-label={label} aria-checked={preferences[key]} data-active={preferences[key]} onClick={() => void update({ [key]: !preferences[key] })}><span /></button>
+      </SettingsRow>)}
+    </SettingsGroup>
+    {fullAccessConfirmation && <FullAccessAvailabilityDialog onClose={() => setFullAccessConfirmation(false)} onConfirm={() => {
+      void update({ showFullAccess: true });
+      setFullAccessConfirmation(false);
+    }} />}
+  </>;
+};
+
+const PERMISSIONS_LEARN_MORE_URL = "https://developers.openai.com/codex/concepts/sandboxing#how-you-control-it";
+const FullAccessAvailabilityDialog = ({ onClose, onConfirm }: { onClose: () => void; onConfirm: () => void }) => {
+  const { t } = useI18n();
+  const dialogRef = useFocusTrap(true);
+  const title = t("要启用完整访问权限吗？");
+  return createPortal(<div className="settings-full-access-backdrop" onClick={onClose}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
+      className="settings-full-access-dialog" onClick={event => event.stopPropagation()} onKeyDown={event => {
+        if (event.key !== "Escape") return;
+        event.preventDefault(); event.stopPropagation(); onClose();
+      }}>
+      <form onSubmit={event => { event.preventDefault(); onConfirm(); }}>
+        <h3><ShieldAlert size={17} aria-hidden="true" />{title}</h3>
+        <div className="settings-full-access-copy">
+          <p>{t("选中后，MiniCode 可以访问互联网，并在无需请求批准的情况下读取和编辑文件，包括执行可能具有破坏性的命令")}</p>
+          <p>{t("开启后会将“完整访问权限”添加到权限菜单中，但不会开启“完整访问权限”。")}{" "}<a href={PERMISSIONS_LEARN_MORE_URL} onClick={event => {
+            event.preventDefault(); void desktop()!.openExternal(PERMISSIONS_LEARN_MORE_URL);
+          }}>{t("了解更多")}</a></p>
+        </div>
+        <div className="settings-full-access-actions">
+          <button type="button" className="settings-action-button" onClick={onClose}>{t("取消")}</button>
+          <button type="submit" className="settings-action-button" data-danger="true"><ShieldAlert size={15} aria-hidden="true" />{t("确认")}</button>
+        </div>
+      </form>
+    </div>
+  </div>, document.body);
+};
+
+const DefaultPermissionSettings = () => {
+  const { t } = useI18n();
+  const { preferences, update } = useDesktopPreferences();
+  if (!preferences) return null;
+  return <SettingsGroup title={t("新任务")}>
+    <SettingsRow title={t("默认权限")} description={t("为之后新建的任务设置权限；当前任务保留自己的权限。")}>
+      <SelectMenu ariaLabel={t("新任务默认权限")} className="settings-select settings-select-regular" align="end" value={preferences.defaultPermissionMode} onValueChange={(value) => void update({ defaultPermissionMode: value as typeof preferences.defaultPermissionMode })}>
+        <option value="confirm">{t("默认权限")}</option><option value="auto">{t("自动批准")}</option><option value="plan">{t("计划")}</option><option value="bypass">{t("完全访问")}</option>
+      </SelectMenu>
+    </SettingsRow>
+  </SettingsGroup>;
+};
 
 const DesktopUpdates = () => {
+  const { t } = useI18n();
   const [status, setStatus] = useState("idle");
   const [version, setVersion] = useState("");
   const [previousVersion, setPreviousVersion] = useState("");
@@ -270,13 +300,13 @@ const DesktopUpdates = () => {
   const updatesUnavailable = status === "unavailable" || status === "recovery_required" || status === "rollback_launching";
   const actionPending = Boolean(pendingAction);
   return (
-    <SettingsGroup title="桌面更新">
-      <SettingsRow title="更新通道" description={label}>
+    <SettingsGroup title={t("桌面更新")}>
+      <SettingsRow title={t("更新通道")} description={label}>
         <button type="button" className="settings-action-button" onClick={() => void runUpdateAction("check")} disabled={updatesUnavailable || actionPending || status === "checking" || status === "downloading" || status === "ready"}>
-          {pendingAction === "check" ? "正在请求…" : "检查更新"}
+          {pendingAction === "check" ? t("正在请求…") : t("检查更新")}
         </button>
-        {status === "available" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("download")}>{pendingAction === "download" ? "正在请求…" : "下载"}</button>}
-        {status === "ready" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("install")}>{pendingAction === "install" ? "正在请求…" : "重启并安装"}</button>}
+        {status === "available" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("download")}>{pendingAction === "download" ? t("正在请求…") : t("下载")}</button>}
+        {status === "ready" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("install")}>{pendingAction === "install" ? t("正在请求…") : t("重启并安装")}</button>}
       </SettingsRow>
     </SettingsGroup>
   );

@@ -1,3 +1,4 @@
+import { AppLanguageBridge, useI18n, type Translate } from "../i18n";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -38,6 +39,7 @@ export type MarkdownEditorSession = {
   wrapConfig: Compartment;
   eventConfig: Compartment;
   lineConfig: Compartment;
+  languageConfig: Compartment;
 };
 
 type SourceRange = { from: number; to: number };
@@ -136,7 +138,7 @@ class RenderedMarkdown extends WidgetType {
     });
     element.addEventListener("load", () => view.requestMeasure(), true);
     this.root = createRoot(element);
-    this.root.render(<MarkdownBlock source={this.source} props={this.props} measure={() => view.requestMeasure()} />);
+    this.root.render(<AppLanguageBridge><MarkdownBlock source={this.source} props={this.props} measure={() => view.requestMeasure()} /></AppLanguageBridge>);
     return element;
   }
   destroy() { const root = this.root; queueMicrotask(() => root?.unmount()); }
@@ -154,15 +156,15 @@ class MarkdownBullet extends WidgetType {
 }
 
 class MarkdownCheckbox extends WidgetType {
-  constructor(readonly checked: boolean, readonly from: number, readonly readOnly: boolean) { super(); }
-  eq(other: MarkdownCheckbox) { return this.checked === other.checked && this.from === other.from && this.readOnly === other.readOnly; }
+  constructor(readonly checked: boolean, readonly from: number, readonly readOnly: boolean, readonly ariaLabel: string) { super(); }
+  eq(other: MarkdownCheckbox) { return this.checked === other.checked && this.from === other.from && this.readOnly === other.readOnly && this.ariaLabel === other.ariaLabel; }
   toDOM(view: EditorView) {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.checked = this.checked;
     input.disabled = this.readOnly;
     input.className = "live-md-checkbox";
-    input.setAttribute("aria-label", this.checked ? "标记为未完成" : "标记为完成");
+    input.setAttribute("aria-label", this.ariaLabel);
     input.addEventListener("mousedown", (event) => event.stopPropagation());
     input.addEventListener("change", () => view.dispatch({ changes: { from: this.from, to: this.from + 3, insert: input.checked ? "[x]" : "[ ]" } }));
     return input;
@@ -170,15 +172,15 @@ class MarkdownCheckbox extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-function liveMarkdown(props: LiveMarkdownEditorProps) {
+function liveMarkdown(props: LiveMarkdownEditorProps, tr: Translate) {
   return StateField.define<DecorationSet>({
-    create: (state) => buildMarkdownDecorations(state, props),
-    update: (_value, transaction) => buildMarkdownDecorations(transaction.state, props),
+    create: (state) => buildMarkdownDecorations(state, props, tr),
+    update: (_value, transaction) => buildMarkdownDecorations(transaction.state, props, tr),
     provide: (field) => EditorView.decorations.from(field),
   });
 }
 
-function buildMarkdownDecorations(state: EditorState, props: LiveMarkdownEditorProps): DecorationSet {
+function buildMarkdownDecorations(state: EditorState, props: LiveMarkdownEditorProps, tr: Translate): DecorationSet {
   const decorations: Range<Decoration>[] = [];
   const tree = ensureSyntaxTree(state, state.doc.length, 100) ?? syntaxTree(state);
   const editing = (from: number, to: number) => !props.readOnly && state.field(focused)
@@ -248,7 +250,8 @@ function buildMarkdownDecorations(state: EditorState, props: LiveMarkdownEditorP
       } else if (name === "ListMark" && !editing(node.node.parent!.from, node.node.parent!.to) && /^[*+-]$/.test(text)) {
         decorations.push(Decoration.replace({ widget: new MarkdownBullet() }).range(node.from, node.to));
       } else if (name === "TaskMarker" && !active) {
-        decorations.push(Decoration.replace({ widget: new MarkdownCheckbox(text.toLowerCase() === "[x]", node.from, props.readOnly) }).range(node.from, node.to));
+        const checked = text.toLowerCase() === "[x]";
+        decorations.push(Decoration.replace({ widget: new MarkdownCheckbox(checked, node.from, props.readOnly, tr(checked ? "标记为未完成" : "标记为完成")) }).range(node.from, node.to));
       }
     },
   });
@@ -256,6 +259,7 @@ function buildMarkdownDecorations(state: EditorState, props: LiveMarkdownEditorP
 }
 
 export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
+  const { t: tr } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const propsRef = useRef(props);
@@ -265,6 +269,8 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
   const wrapConfig = useRef(new Compartment());
   const eventConfig = useRef(new Compartment());
   const lineConfig = useRef(new Compartment());
+  const languageConfig = useRef(new Compartment());
+  const languageExtensions = () => [placeholder(tr("开始写 Markdown…")), EditorView.contentAttributes.of({ "aria-label": tr("Markdown 实时编辑器"), "aria-multiline": "true", spellcheck: "false" })];
 
   useEffect(() => {
     const selectionListeners = new Set<() => void>();
@@ -331,12 +337,11 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
         invertedEffects.of((transaction) => transaction.effects.filter((effect) => effect.is(sourceEolChanged))
           .map(() => sourceEolChanged.of(transaction.startState.lineBreak))),
         keymap.of([...searchKeymap, ...historyKeymap, ...defaultKeymap, indentWithTab]),
-        placeholder("开始写 Markdown…"),
-        liveConfig.current.of(liveMarkdown(props)),
+        languageConfig.current.of(languageExtensions()),
+        liveConfig.current.of(liveMarkdown(props, tr)),
         editConfig.current.of([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
         wrapConfig.current.of(props.wordWrap === false ? [] : EditorView.lineWrapping),
         eventConfig.current.of(events),
-        EditorView.contentAttributes.of({ "aria-label": "Markdown 实时编辑器", "aria-multiline": "true", spellcheck: "false" }),
       ],
     });
     const cached = props.sessions.get(props.documentId);
@@ -346,6 +351,7 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
       wrapConfig.current = cached.wrapConfig;
       eventConfig.current = cached.eventConfig;
       lineConfig.current = cached.lineConfig;
+      languageConfig.current = cached.languageConfig;
     }
     const view = new EditorView({ state: cached?.state ?? createState(), parent: hostRef.current! });
     viewRef.current = view;
@@ -354,7 +360,7 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
       // Each saved document owns its compartments, including callbacks. Mounting
       // a different document restores history without retaining the old view.
       const effects = [
-        focusChanged.of(false), liveConfig.current.reconfigure(liveMarkdown(props)), eventConfig.current.reconfigure(events),
+        focusChanged.of(false), liveConfig.current.reconfigure(liveMarkdown(props, tr)), eventConfig.current.reconfigure(events), languageConfig.current.reconfigure(languageExtensions()),
         editConfig.current.reconfigure([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
         wrapConfig.current.reconfigure(props.wordWrap === false ? [] : EditorView.lineWrapping),
       ];
@@ -447,7 +453,7 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
     propsRef.current.onMount(handle);
     notifyPosition(view);
     return () => {
-      props.sessions.set(props.documentId, { state: view.state, scrollTop: view.scrollDOM.scrollTop, liveConfig: liveConfig.current, editConfig: editConfig.current, wrapConfig: wrapConfig.current, eventConfig: eventConfig.current, lineConfig: lineConfig.current });
+      props.sessions.set(props.documentId, { state: view.state, scrollTop: view.scrollDOM.scrollTop, liveConfig: liveConfig.current, editConfig: editConfig.current, wrapConfig: wrapConfig.current, eventConfig: eventConfig.current, lineConfig: lineConfig.current, languageConfig: languageConfig.current });
       viewRef.current = null;
       for (const listener of disposeListeners) listener();
       view.destroy();
@@ -459,8 +465,8 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
     if (view.state.sliceDoc() !== props.value) view.dispatch(externalSourceUpdate(view.state, props.value, lineConfig.current));
   }, [props.value]);
   useEffect(() => {
-    viewRef.current!.dispatch({ effects: liveConfig.current.reconfigure(liveMarkdown(props)) });
-  }, [props.components, props.resolveUrl, props.urlTransform, props.scopeId, props.readOnly]);
+    viewRef.current!.dispatch({ effects: [liveConfig.current.reconfigure(liveMarkdown(props, tr)), languageConfig.current.reconfigure(languageExtensions())] });
+  }, [props.components, props.resolveUrl, props.urlTransform, props.scopeId, props.readOnly, tr]);
   useEffect(() => {
     viewRef.current!.dispatch({ effects: editConfig.current.reconfigure([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]) });
   }, [props.readOnly]);

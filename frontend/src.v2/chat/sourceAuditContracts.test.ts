@@ -4,7 +4,7 @@ import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import { projectMessagesToTurns } from "./chatSurfaceState";
-import { resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
+import { resetPendingUserMessagesForTests, sendChatMessage } from "./sendChatMessage";
 
 const { send } = vi.hoisted(() => ({ send: vi.fn(() => true) }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ send }) }));
@@ -12,7 +12,7 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 beforeEach(() => {
   send.mockClear();
-  resetSendDeduplication();
+  resetPendingUserMessagesForTests();
   useAppStore.setState({
     conversationId: "chat-b", workingDirectory: "C:/B", agentMode: "build",
     activeTabPath: "b.ts", isStreaming: false, messages: [], sideChats: {},

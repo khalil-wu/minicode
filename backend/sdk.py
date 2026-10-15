@@ -260,7 +260,9 @@ class SDKSession:
             child_kwargs["run_context"] = run_context
         elif inherited is not None:
             child_kwargs["run_context"] = RunContext(
+                model_execution=inherited.model_execution,
                 agent_runtime=inherited.agent_runtime,
+                window_binding_token=inherited.window_binding_token,
                 conversation_repository=inherited.conversation_repository,
                 mcp_manager=inherited.mcp_manager,
                 mcp_owner_session_id=inherited.mcp_owner_session_id,
@@ -476,12 +478,17 @@ async def _query_unclaimed(
     resolved_workspace_root = (
         requested_workspace_root or state_workspace_root or Path.cwd().resolve()
     )
-    config = config or load_config(cwd=resolved_workspace_root)
+    selected_snapshot = run_context.model_execution
+    config = config or (selected_snapshot.config if selected_snapshot is not None
+        else load_config(cwd=resolved_workspace_root))
     artifact_store = artifact_store or ArtifactStore()
     if llm is None:
-        from backend.llm.model_registry import create_session_llm
+        if selected_snapshot is not None:
+            llm = selected_snapshot.llm
+        else:
+            from backend.llm.model_registry import create_session_llm
 
-        llm = create_session_llm(config)
+            llm = create_session_llm(config)
     if tool_registry is None:
         from backend.services.tool_registry_factory import build_tool_registry
 
@@ -528,8 +535,11 @@ async def _query_unclaimed(
     # Route through the same QueryEngine the WS path uses so both entry points
     # share one lifecycle: workspace-root rebinding on the permission checker
     # and adapter-only event filtering (tool_call_start/delta stay internal).
-    run_context.model_execution = ModelExecutionSnapshot.capture(
-        replace(config, agent=agent_settings, token_budget=token_budget), llm,
+    issuing_config = replace(config, agent=agent_settings, token_budget=token_budget)
+    run_context.model_execution = (
+        replace(selected_snapshot, config=issuing_config)
+        if selected_snapshot is not None and selected_snapshot.llm is llm
+        else ModelExecutionSnapshot.capture(issuing_config, llm)
     )
     submission = QuerySubmission(
         user_message=message,

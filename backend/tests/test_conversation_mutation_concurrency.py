@@ -20,7 +20,10 @@ from backend.ws.handlers import conversation as conversation_handlers
 
 
 def _manager_with(*sessions):
-    return SimpleNamespace(iter_sessions=lambda: list(sessions), conversation_delete_cleanup_owner=lambda _: None)
+    return SimpleNamespace(iter_sessions=lambda: list(sessions), resource_sessions=lambda: list(sessions),
+        conversation_delete_cleanup_owner=lambda _: None,
+        cancel_conversation_admissions=AsyncMock(return_value=True),
+        unload_conversation_execution=AsyncMock(return_value=True))
 
 
 def _command_result_session(*, conversation_id: str, repository) -> SimpleNamespace:
@@ -109,6 +112,7 @@ def test_command_ingress_rejects_mutation_while_delete_fence_is_held() -> None:
         )
         session.command_dispatcher = object.__new__(SessionCommandDispatcher)
         session.command_dispatcher._session = session
+        session.command_dispatcher._regeneration_transitions = {}
 
         await session.command_dispatcher._handle_command(
             UserCommand(type="conversation.rename", data={"conversation_id": "conv-deleting"}),

@@ -3,9 +3,10 @@ import type { WorkspaceBufferEdit } from "../panels/applyWorkspaceBufferEdits";
 import { applyOffsetEdits } from "../panels/applyWorkspaceBufferEdits";
 
 export interface WorkspaceSearchOptions { query: string; regex: boolean; caseSensitive: boolean; wholeWord: boolean; include: string; exclude: string; }
+export interface WorkspaceSearchCapture { offset: number; length: number; }
 export interface WorkspaceSearchMatch {
   id: string; offset: number; length: number; line: number; column: number; end_line: number; end_column: number;
-  text: string; snippet: string; groups: Array<string | null>; named_groups: Record<string, string | null>;
+  snippet: string; groups: Array<WorkspaceSearchCapture | null>; named_groups: Record<string, WorkspaceSearchCapture | null>;
 }
 export interface WorkspaceSearchFile {
   path: string; content: string; original: string; content_hash: string; size_bytes: number; read_only: boolean; from_buffer: boolean; matches: WorkspaceSearchMatch[];
@@ -36,14 +37,16 @@ export async function searchWorkspaceText(workspaceRoot: string, options: Worksp
   return response.json();
 }
 
-export function replacementText(template: string, match: WorkspaceSearchMatch, regex: boolean): string {
+export function replacementText(template: string, match: WorkspaceSearchMatch, regex: boolean, content: string): string {
   if (!regex) return template;
+  const captureText = (capture: WorkspaceSearchCapture | null | undefined) => capture
+    ? content.slice(capture.offset, capture.offset + capture.length) : "";
   return template.replace(/\\([nrt])|\$(\$|&|0|[1-9]\d?|<[^>]+>)/g, (token, escape: string, capture: string) => {
     if (escape) return ({ n: "\n", r: "\r", t: "\t" } as Record<string, string>)[escape];
     if (capture === "$") return "$";
-    if (capture === "&" || capture === "0") return match.text;
-    if (capture.startsWith("<")) return match.named_groups[capture.slice(1, -1)] ?? "";
-    return Number(capture) <= match.groups.length ? match.groups[Number(capture) - 1] ?? "" : token;
+    if (capture === "&" || capture === "0") return captureText(match);
+    if (capture.startsWith("<")) return captureText(match.named_groups[capture.slice(1, -1)]);
+    return Number(capture) <= match.groups.length ? captureText(match.groups[Number(capture) - 1]) : token;
   });
 }
 
@@ -51,7 +54,7 @@ export function selectedReplacementFiles(files: WorkspaceSearchFile[], selected:
   return files.filter((file) => !file.read_only).flatMap((file) => {
     const eol = file.content.match(/\r\n|\r|\n/)?.[0] ?? "\n";
     const edits = file.matches.filter((match) => selected.has(match.id)).map((match) => ({ offset: match.offset, length: match.length,
-      text: replacementText(replacement, match, regex).replace(/\r\n|\r|\n/g, eol) }));
+      text: replacementText(replacement, match, regex, file.content).replace(/\r\n|\r|\n/g, eol) }));
     if (!edits.length) return [];
     return [{ path: file.path, before: file.content, original: file.original, contentHash: file.content_hash, sizeBytes: file.size_bytes, edits, after: applyOffsetEdits(file.content, edits) }];
   });

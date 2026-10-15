@@ -25,7 +25,7 @@ test("runtime bootstrap accepts the owned main frame before URL commit and rejec
   const webContents = { mainFrame, getURL: () => "" };
   const win = { webContents, isDestroyed: () => false };
   const runtime = { apiBaseUrl: "http://127.0.0.1:8123", wsBaseUrl: "ws://127.0.0.1:8123", runtimeToken: "test-token" };
-  moduleBox.exports.init({ getMainWindow: () => win, getRuntimeConfig: () => runtime });
+  moduleBox.exports.init({ getWindowForSender: (sender) => sender === win.webContents ? win : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), getRuntimeConfig: () => runtime });
   moduleBox.exports.registerIpcHandlers();
   const bootstrap = listeners.get("minicode:runtime:get");
   const event = { sender: webContents, senderFrame: mainFrame };
@@ -76,7 +76,7 @@ test("Windows initialization IPC accepts only the owned main renderer and ignore
   const webContents = { mainFrame, getURL: () => mainFrame.url };
   const win = { webContents, isDestroyed: () => false };
   const calls = [];
-  moduleBox.exports.init({ getMainWindow: () => win, setupWindowsSandbox: (...args) => {
+  moduleBox.exports.init({ getWindowForSender: (sender) => sender === win.webContents ? win : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), setupWindowsSandbox: (...args) => {
     calls.push(args); return Promise.resolve({ ok: true });
   } });
   moduleBox.exports.registerIpcHandlers();

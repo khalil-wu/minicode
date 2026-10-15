@@ -33,6 +33,7 @@ export const ThinkingCell = memo(function ThinkingCell({
       data-source={cell.source}
       data-reasoning-type={cell.providerReasoningType}
       data-streaming={streaming ? "true" : "false"}
+      data-processing={streaming && (summary || transient) ? "true" : undefined}
     >
       <MarkdownRenderer content={content} isStreaming={streaming} conversationId={conversationId} workspaceRoot={workspaceRoot} knownFilePaths={knownFilePaths} />
     </div>

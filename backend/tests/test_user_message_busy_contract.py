@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from backend.agent.message import UserCommand
 from backend.agent.runtime import AgentRuntime
@@ -14,6 +15,20 @@ from backend.tasks.manager import TaskManager
 from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
 from backend.ws.run_manager import SessionRunManager
+
+
+@pytest.fixture(autouse=True)
+def close_owned_notification_subscriptions(monkeypatch):
+    managers = []
+    initialize = SessionRunManager.__init__
+    def initialized(manager, session):
+        initialize(manager, session)
+        managers.append(manager)
+    monkeypatch.setattr(SessionRunManager, "__init__", initialized)
+    yield
+    for manager in managers:
+        asyncio.run(manager.shutdown_notification_wakes())
+        manager.close_durable_queue()
 
 
 class _NoopLLM(LLMAdapter):
@@ -129,6 +144,11 @@ def test_scheduler_fallback_projects_existing_durable_completion(
     events: list[dict] = []
     session = SimpleNamespace(
         active_conversation_id="conv-durable",
+        session_id="scheduler-fixture-session",
+        ws_manager=None,
+        window_instance_id="",
+        window_owner_id="",
+        _window_binding_token="",
         event_outbox=SimpleNamespace(
             bind_connection_generation=lambda _generation: contextlib.nullcontext(),
         ),
@@ -191,7 +211,9 @@ def test_scheduler_fallback_projects_existing_durable_completion(
                 session,
                 "hello",
                 conversation_id="conv-durable",
-                metadata={"assistant_message_id": "assistant-durable"},
+                # This schedules projection of an existing durable terminal;
+                # there is no new user turn to admit in this fixture.
+                metadata={"assistant_message_id": "assistant-durable", "_parent_notification_only": True},
             )
             await asyncio.gather(*tuple(session._command_tasks))
         finally:
@@ -248,6 +270,7 @@ def test_busy_user_message_is_queued_with_stable_message_ids(tmp_path: Path, mon
                         "content": "再查上海天气",
                         "conversation_id": conversation.id,
                         "assistant_message_id": "assistant-rejected",
+                        "client_command_id": "cmd-busy-owned",
                     },
                 )
             )
@@ -265,7 +288,7 @@ def test_busy_user_message_is_queued_with_stable_message_ids(tmp_path: Path, mon
 
     asyncio.run(scenario())
 
-    assert len(events) == 1
+    assert len(events) == 2
     assert events[0] == {
         "type": "user_message.queue.updated",
         "status": "queued",
@@ -275,10 +298,19 @@ def test_busy_user_message_is_queued_with_stable_message_ids(tmp_path: Path, mon
         "position": 1,
     }
     assert str(events[0]["user_message_id"]).startswith("user_")
+    assert events[1] == {
+        "type": "command.result", "command": "user_message", "level": "success", "message": "",
+        "client_command_id": "cmd-busy-owned", "conversation_id": conversation.id,
+        "data": {"admitted": False, "queued": True, "conversation_id": conversation.id,
+                 "user_message_id": events[0]["user_message_id"], "assistant_message_id": "assistant-rejected"},
+    }
     queued = session.run_manager.dequeue_user_message(conversation.id)
     assert queued is not None
     assert queued.data["content"] == "再查上海天气"
     assert queued.data["user_message_id"] == events[0]["user_message_id"]
+    assert queued.data["client_command_id"] == "cmd-busy-owned"
+    assert queued.data["assistant_message_id"] == "assistant-rejected"
+    assert queued.data["conversation_id"] == conversation.id
 
 
 def test_busy_user_message_can_atomically_steer_current_turn(tmp_path: Path, monkeypatch):
@@ -328,12 +360,17 @@ def test_busy_user_message_can_atomically_steer_current_turn(tmp_path: Path, mon
                     "assistant_message_id": "assistant-steer",
                     "user_message_id": "user-steer",
                     "streaming_behavior": "steer",
+                    "client_command_id": "cmd-steer-owned",
                 },
             ))
             item = session.run_manager.turn_input_queue(conversation.id).pop_steer()
             assert item is not None
             assert item.content == "change direction now"
             assert item.target_message_id == "assistant-current"
+            assert item.original_command.data["client_command_id"] == "cmd-steer-owned"
+            assert item.original_command.data["user_message_id"] == "user-steer"
+            assert item.original_command.data["assistant_message_id"] == "assistant-steer"
+            assert item.original_command.data["conversation_id"] == conversation.id
             assert session.run_manager.dequeue_user_message(conversation.id) is None
             session.run_manager.acknowledge_turn_input(conversation.id, item.original_command)
         finally:
@@ -345,6 +382,11 @@ def test_busy_user_message_can_atomically_steer_current_turn(tmp_path: Path, mon
     asyncio.run(scenario())
 
     assert events == [{
+        "type": "command.result", "command": "user_message", "level": "success", "message": "",
+        "client_command_id": "cmd-steer-owned", "conversation_id": conversation.id,
+        "data": {"admitted": False, "queued": True, "turn_mode": "steer", "conversation_id": conversation.id,
+                 "user_message_id": "user-steer", "assistant_message_id": "assistant-steer"},
+    }, {
         "type": "user_message.queue.updated",
         "status": "dequeued",
         "conversation_id": conversation.id,
@@ -685,7 +727,7 @@ def test_queued_user_message_can_be_cancelled_without_interrupting_active_run(tm
     ]
 
 
-def test_message_sent_while_stop_is_finishing_stays_behind_existing_queue(tmp_path: Path, monkeypatch):
+def test_message_sent_while_stop_is_finishing_preserves_paused_work_and_consents_only_to_new_input(tmp_path: Path, monkeypatch):
     events: list[dict] = []
     started: list[str] = []
     session = WebSocketSession(
@@ -704,6 +746,7 @@ def test_message_sent_while_stop_is_finishing_stays_behind_existing_queue(tmp_pa
 
     approvals_entered = asyncio.Event()
     release_approvals = asyncio.Event()
+    resumed = asyncio.Event()
 
     async def capture_event(event):
         events.append(event.to_ws_message())
@@ -718,6 +761,7 @@ def test_message_sent_while_stop_is_finishing_stays_behind_existing_queue(tmp_pa
     async def fake_run_agent(content, **_kwargs):
         _admit_fake_turn(_kwargs["metadata"])
         started.append(content)
+        resumed.set()
 
     monkeypatch.setattr(session, "send_event", capture_event)
     monkeypatch.setattr(
@@ -758,16 +802,13 @@ def test_message_sent_while_stop_is_finishing_stays_behind_existing_queue(tmp_pa
             },
         ))
 
-        queued = []
-        for _index in range(2):
-            command = session.run_manager.dequeue_user_message(conversation.id)
-            queued.append(command)
-            if command is not None:
-                session.run_manager.finish_user_message_dispatch(
-                    conversation.id,
-                    command,
-                    succeeded=True,
-                )
+        paused_before = session.run_manager.queued_user_message_snapshot(conversation.id)
+        command = session.run_manager.dequeue_user_message(conversation.id)
+        assert command is not None and command.data["content"] == "third"
+        session.run_manager.finish_user_message_dispatch(conversation.id, command, succeeded=True)
+        assert session.run_manager.dequeue_user_message(conversation.id) is None
+        preserved = session.run_manager.queued_user_message_snapshot(conversation.id)
+        initial_updates = [event for event in events if event["type"] == "user_message.queue.updated"]
         release_approvals.set()
         await cancel_task
         with contextlib.suppress(asyncio.CancelledError):
@@ -775,21 +816,28 @@ def test_message_sent_while_stop_is_finishing_stays_behind_existing_queue(tmp_pa
         session.run_manager.run_tasks.clear()
         session.run_manager.run_task_ids.clear()
         session.run_manager.cancel_events.clear()
-        return queued, current_cancel_event.is_set()
+        assert started == []
+        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.steer", data={
+            "conversation_id": conversation.id, "message_id": "assistant-second",
+        }))
+        await asyncio.wait_for(resumed.wait(), 5)
+        return paused_before, preserved, initial_updates, current_cancel_event.is_set()
 
-    queued, cancel_signalled = asyncio.run(scenario())
+    paused_before, preserved, queue_updates, cancel_signalled = asyncio.run(scenario())
 
-    assert [command.data["content"] for command in queued if command is not None] == ["second", "third"]
-    assert started == []
+    assert [(item["content"], item["paused"], item["position"]) for item in paused_before] == [
+        ("second", True, 1), ("third", False, 2),
+    ]
+    assert [(item["content"], item["paused"]) for item in preserved] == [("second", True)]
+    assert started == ["second"]
     assert cancel_signalled is True
-    queue_updates = [event for event in events if event["type"] == "user_message.queue.updated"]
     assert [(event["status"], event["message_id"]) for event in queue_updates] == [
         ("queued", "assistant-second"),
         ("queued", "assistant-third"),
     ]
 
 
-def test_stopping_current_run_continues_with_next_queued_message(tmp_path: Path, monkeypatch):
+def test_stopping_current_run_preserves_next_input_until_explicit_queue_steer(tmp_path: Path, monkeypatch):
     events: list[dict] = []
     runs: list[str] = []
     session = WebSocketSession(
@@ -805,6 +853,7 @@ def test_stopping_current_run_continues_with_next_queued_message(tmp_path: Path,
     conversation = repo.create_conversation(title="Stop and continue", workspace_root=str(tmp_path))
     session.conversation_repo = repo
     session.active_conversation_id = conversation.id
+    resumed = asyncio.Event()
 
     async def capture_event(event):
         events.append(event.to_ws_message())
@@ -817,6 +866,8 @@ def test_stopping_current_run_continues_with_next_queued_message(tmp_path: Path,
         runs.append(content)
         if content == "first":
             await asyncio.Event().wait()
+        else:
+            resumed.set()
 
     monkeypatch.setattr(session, "send_event", capture_event)
     monkeypatch.setattr(
@@ -849,16 +900,21 @@ def test_stopping_current_run_continues_with_next_queued_message(tmp_path: Path,
             conversation_id=conversation.id,
             reason="user_interrupted",
         ) is True
-        for _ in range(100):
-            if runs == ["first", "second"] and session.running_agent_task_for(conversation.id) is None:
-                break
-            await asyncio.sleep(0.01)
+        paused = session.run_manager.queued_user_message_snapshot(conversation.id)
+        assert [(item["content"], item["paused"]) for item in paused] == [("second", True)]
+        session.schedule_next_queued_user_message(conversation.id)
+        await asyncio.sleep(0)
+        assert runs == ["first"]
+        assert session.run_manager.dequeue_user_message(conversation.id) is None
+        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.steer", data={
+            "conversation_id": conversation.id, "message_id": "assistant-second",
+        }))
+        await asyncio.wait_for(resumed.wait(), 5)
 
     asyncio.run(scenario())
 
     assert runs == ["first", "second"]
     queue_updates = [event for event in events if event["type"] == "user_message.queue.updated"]
-    assert [(event["status"], event["message_id"]) for event in queue_updates] == [
-        ("queued", "assistant-second"),
-        ("dequeued", "assistant-second"),
-    ]
+    assert queue_updates[0]["status"] == "queued" and queue_updates[0]["message_id"] == "assistant-second"
+    assert [event["message_id"] for event in queue_updates if event["status"] == "dequeued"] == ["assistant-second"]
+    assert session.run_manager.queued_user_message_snapshot(conversation.id) == []

@@ -42,13 +42,40 @@ const runtimeConfig = {
   apiBaseUrl,
   wsBaseUrl,
   runtimeToken,
+  windowOwnerId: mainRuntimeConfig?.windowOwnerId || readRuntimeArgument("--minicode-window-owner-id="),
+  windowInstanceId: mainRuntimeConfig?.windowInstanceId || readRuntimeArgument("--minicode-window-instance-id="),
+  windowBindingToken: mainRuntimeConfig?.windowBindingToken || "",
+  initialNavigation: mainRuntimeConfig?.initialNavigation,
   desktop: {
+    preferences: {
+      chooseTaskDirectory: () => ipcRenderer.invoke("minicode:preferences:chooseTaskDirectory"),
+      get: () => ipcRenderer.invoke("minicode:preferences:get"),
+      set: (patch) => ipcRenderer.invoke("minicode:preferences:set", patch),
+      onChanged: (callback) => {
+        const listener = (_event, value) => callback(value);
+        ipcRenderer.on("minicode:preferences:changed", listener);
+        return () => ipcRenderer.removeListener("minicode:preferences:changed", listener);
+      },
+    },
+    openPreferredPath: (target, line, options) => ipcRenderer.invoke("minicode:openPreferredPath", target, line, options),
+    saveFile: (filename, bytes) => ipcRenderer.invoke("minicode:saveFile", filename, bytes),
     windowControls: {
+      consumeInitialNavigation: () => ipcRenderer.sendSync("minicode:window:initialNavigation:consume"),
+      openConversation: (conversationId) => ipcRenderer.invoke("minicode:window:openConversation", conversationId),
+      getState: () => ipcRenderer.invoke("minicode:window:state"),
+      onStateChanged: (callback) => {
+        const listener = (_event, state) => callback(state);
+        ipcRenderer.on("minicode:window:state", listener);
+        return () => ipcRenderer.removeListener("minicode:window:state", listener);
+      },
       minimize: () => ipcRenderer.invoke("minicode:window:minimize"),
       maximize: () => ipcRenderer.invoke("minicode:window:maximize"),
       close: () => ipcRenderer.invoke("minicode:window:close"),
+      captureUnloadIntent: () => ipcRenderer.sendSync("minicode:window:unload:capture"),
+      resumeUnload: (id) => ipcRenderer.invoke("minicode:window:unload:resume", id),
     },
     notify: (payload) => ipcRenderer.invoke("minicode:notify", payload),
+    hideNotifications: (selector) => ipcRenderer.invoke("minicode:notifications:hide", selector),
     onDeepLink: (callback) => {
       let subscribed = true;
       const deliver = (payload) => {
@@ -142,6 +169,8 @@ const runtimeConfig = {
       popup: (key) => ipcRenderer.invoke("minicode:menu:popup", key),
     },
     browser: {
+      history: (query) => ipcRenderer.invoke("minicode:browser:history", query),
+      removeHistory: (ids) => ipcRenderer.invoke("minicode:browser:removeHistory", ids),
       discover: (endpoint) => ipcRenderer.invoke("minicode:browser:discover", endpoint),
       captureScreenshot: (endpoint, targetId) => ipcRenderer.invoke("minicode:browser:captureScreenshot", endpoint, targetId),
       navigate: (endpoint, targetId, url) => ipcRenderer.invoke("minicode:browser:navigate", endpoint, targetId, url),
@@ -149,6 +178,8 @@ const runtimeConfig = {
       type: (endpoint, targetId, selector, text) => ipcRenderer.invoke("minicode:browser:type", endpoint, targetId, selector, text),
     },
     embeddedBrowser: {
+      capture: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:capture", payload),
+      clearBrowsingData: () => ipcRenderer.invoke("minicode:embeddedBrowser:clearBrowsingData"),
       create: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:create", payload),
       list: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:list", payload),
       activate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:activate", payload),
@@ -158,6 +189,11 @@ const runtimeConfig = {
       inspect: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:inspect", payload),
       getSettings: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:getSettings", payload),
       setSettings: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:setSettings", payload),
+      onSettingsChanged: (callback) => {
+        const listener = (_event, settings) => callback(settings);
+        ipcRenderer.on("minicode:embeddedBrowser:settingsChanged", listener);
+        return () => ipcRenderer.removeListener("minicode:embeddedBrowser:settingsChanged", listener);
+      },
       clearSiteData: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:clearSiteData", payload),
       close: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:close", payload),
       closeConversation: (conversationId) => ipcRenderer.invoke("minicode:embeddedBrowser:closeConversation", conversationId),

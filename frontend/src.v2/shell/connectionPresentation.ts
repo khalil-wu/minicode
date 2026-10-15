@@ -1,4 +1,5 @@
 import type { ConnectionPhase } from "../stores/types";
+import type { Translate } from "../i18n";
 
 export type ConnectionPresentationKind = "connected" | "preview" | "connecting" | "reconnecting" | "warning" | "failed";
 
@@ -27,11 +28,11 @@ export const getConnectionPresentation = ({
   reconnectAttempt = 0,
   reconnectMaxAttempts = null,
   connectionError,
-}: ConnectionPresentationInput): ConnectionPresentation => {
+}: ConnectionPresentationInput, tr: Translate): ConnectionPresentation => {
   if (isConnected) {
     return {
       kind: "connected",
-      accessibleLabel: "后端已连接",
+      accessibleLabel: tr("后端已连接"),
       shortLabel: null,
       bannerMessage: null,
     };
@@ -51,18 +52,18 @@ export const getConnectionPresentation = ({
     const counter = attempt > 0 ? `${attempt}${max ? `/${max}` : ""}` : "";
     return {
       kind: "reconnecting",
-      accessibleLabel: counter ? `正在重连 ${counter}` : "正在重连",
-      shortLabel: counter ? `重连 ${counter}` : "重连中",
-      bannerMessage: counter ? `正在重连 ${counter}…` : "正在重连 MiniCode 服务…",
+      accessibleLabel: counter ? tr("正在重连 {counter}", { counter }) : tr("正在重连"),
+      shortLabel: counter ? tr("重连 {counter}", { counter }) : tr("重连中"),
+      bannerMessage: counter ? tr("正在重连 {counter}…", { counter }) : tr("正在重连 MiniCode 服务…"),
     };
   }
 
   if (connectionPhase === "failed") {
-    const message = String(connectionError || "连接失败，请检查 MiniCode 服务或网络后重试。").trim();
+    const message = String(connectionError || tr("连接失败，请检查 MiniCode 服务或网络后重试。")).trim();
     return {
       kind: "failed",
       accessibleLabel: message,
-      shortLabel: "连接失败",
+      shortLabel: tr("连接失败"),
       bannerMessage: message,
     };
   }
@@ -70,25 +71,25 @@ export const getConnectionPresentation = ({
   if (!isDesktop && !hasRuntimeToken) {
     return {
       kind: "preview",
-      accessibleLabel: "浏览器预览模式",
-      shortLabel: "预览",
-      bannerMessage: "当前为浏览器预览模式，桌面功能暂不可用。",
+      accessibleLabel: tr("浏览器预览模式"),
+      shortLabel: tr("预览"),
+      bannerMessage: tr("当前为浏览器预览模式，桌面功能暂不可用。"),
     };
   }
 
   if (isDesktop) {
     return {
       kind: "connecting",
-      accessibleLabel: "正在连接 MiniCode 服务",
-      shortLabel: "连接中",
-      bannerMessage: "正在连接 MiniCode 服务…",
+      accessibleLabel: tr("正在连接 MiniCode 服务"),
+      shortLabel: tr("连接中"),
+      bannerMessage: tr("正在连接 MiniCode 服务…"),
     };
   }
 
   return {
     kind: "warning",
-    accessibleLabel: "后端不可用",
-    shortLabel: "未连接",
-    bannerMessage: "后端不可用。请确认 MiniCode 后端正在运行。",
+    accessibleLabel: tr("后端不可用"),
+    shortLabel: tr("未连接"),
+    bannerMessage: tr("后端不可用。请确认 MiniCode 后端正在运行。"),
   };
 };

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import pytest
 from typing import Any
 
 import backend.config as config_mod
@@ -39,6 +40,23 @@ def test_add_content_deny_rule_writes_deny_list(monkeypatch):
     assert written[0]["permissions"]["content_deny_rules"] == ["run_command(rm -rf:*)"]
     # allow list untouched
     assert written[0]["permissions"].get("content_allow_rules") is None
+
+
+@pytest.mark.parametrize("rule", ["run_command(npm run)", "run_command(npm *)", "run_command(npm run:*)"])
+def test_exact_glob_and_prefix_command_rules_are_saved(monkeypatch, rule):
+    stored = {"permissions": {}}
+    written = []
+    monkeypatch.setattr(config_mod, "_load_settings_json", lambda: stored)
+    monkeypatch.setattr(config_mod, "_write_settings_json", lambda data: written.append(data))
+    assert config_mod.add_permission_content_rule(rule) == [rule]
+    assert written[0]["permissions"]["content_allow_rules"] == [rule]
+
+
+@pytest.mark.parametrize("rule", ["run_command(pwsh *)", "run_command(bash -c:*)", "run_command(C:/Windows/System32/cmd.exe /c)"])
+def test_wrapper_command_rules_remain_rejected(monkeypatch, rule):
+    monkeypatch.setattr(config_mod, "_write_settings_json", lambda _data: pytest.fail("rejected rule was saved"))
+    with pytest.raises(ValueError, match="shell or command wrapper"):
+        config_mod.add_permission_content_rule(rule)
 
 
 def test_add_blank_rule_is_noop(monkeypatch):

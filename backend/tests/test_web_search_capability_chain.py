@@ -25,7 +25,7 @@ def policy(registry, *, hosted=False, mode="direct"):
     return effective_toolset_policy(
         base_policy=ToolsetPolicy.default(), tool_registry=registry, disabled_tools=set(),
         requires_explicit_workspace=False, workspace_root=None, permission_mode="bypass",
-        tool_mode=mode, hosted_web_search=hosted,
+        tool_mode=mode, hosted_web_search=hosted, supports_search_tool=True,
     )
 
 
@@ -57,8 +57,8 @@ def test_unconfigured_search_is_absent_from_schema_nested_directory_discovery_an
         permission=PermissionContext(mode="bypass"), tool_registry=registry,
         metadata={ACTIVE_TOOLSET_POLICY_METADATA_KEY: active, "_agent_state": AgentState(user_message="Research weather")},
     )
-    found = asyncio.run(ToolSearchTool(registry).execute({"query": "select:web_search"}, context))
-    assert json.loads(found.content)["matches"] == []
+    found = asyncio.run(ToolSearchTool(registry).execute({"query": "web_search"}, context))
+    assert found.tool_search_output == []
     reason = toolset_policy_guard_reason(
         ToolCallEvent(id="fabricated-search", name="web_search", arguments={"query": "weather"}), registry, context,
     )

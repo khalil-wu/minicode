@@ -226,11 +226,8 @@ def test_provider_pause_turn_replays_native_content_without_user_nudge() -> None
         ],
     }
     stream_state = StreamAttemptState(response_items=[provider_item])
-    stream_text = StreamTextState(
-        iteration_id="iter:1",
-        pending_unphased_text="Working.",
-        pending_unphased_visible_text="Working.",
-    )
+    stream_text = StreamTextState(iteration_id="iter:1")
+    stream_text.append_unphased_text("Working.")
 
     class _ToolExecutor:
         cancelled = False
@@ -438,11 +435,8 @@ def test_max_output_continuation_removes_nested_anthropic_tool_use() -> None:
 
 def test_model_context_window_finish_reason_compacts_before_continuation() -> None:
     state = AgentState(user_message="continue")
-    stream_text = StreamTextState(
-        iteration_id="iter:1",
-        pending_unphased_text="partial answer",
-        pending_unphased_visible_text="partial answer",
-    )
+    stream_text = StreamTextState(iteration_id="iter:1")
+    stream_text.append_unphased_text("partial answer")
 
     class _Context:
         operations: list[object] = []
@@ -502,6 +496,7 @@ def test_model_context_window_finish_reason_compacts_before_continuation() -> No
         "partial answer",
         {
             "phase": "final_answer",
+            "answer_source": "partial",
             "provider_items": [
                 {
                     "type": "anthropic_message",

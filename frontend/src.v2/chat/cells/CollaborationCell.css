@@ -10,6 +10,8 @@ button.collaboration-delegated-row:hover { color: var(--text-secondary); }
 button.collaboration-delegated-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: 4px; }
 .collaboration-delegated-state { color: var(--text-muted); font-size: var(--mc-font-secondary); line-height: 1.6; }
 .collaboration-delegated-error { color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.collaboration-parent-message { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 3px 0; color: var(--text-muted); font: inherit; line-height: 1.4; }
+.collaboration-parent-message > svg { flex: 0 0 auto; }
 .collaboration-completion { display: grid; gap: 4px; font-family: var(--font-ui); font-size: var(--mc-font-body); }
 .collaboration-completion-row .mc-agent-avatar { --agent-avatar-size: 20px; }
 .collaboration-completion-row { display: flex; align-items: center; gap: 8px; min-height: 28px; width: fit-content; max-width: 100%; padding: 2px 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-family: var(--font-ui); text-align: left; }

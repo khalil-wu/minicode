@@ -78,6 +78,7 @@ async def apply_provider_chunk_steer(
             phase=(
                 "final_answer" if stream_text.saw_final_answer_phase else "commentary"
             ),
+            answer_source="retained",
         )
     await turn_kernel.accept_turn_steer(chunk_steer)
     state.mark_transition(

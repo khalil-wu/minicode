@@ -4,6 +4,15 @@ export { countUnifiedDiffLines } from "./unified-diff";
 
 export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout" | "cancelled";
 
+export interface ToolDelegation {
+  agent_id: string;
+  name: string;
+  agent_path?: string;
+  status: string;
+  started_at: number;
+  accepted_at?: number;
+}
+
 export const isTerminalToolCallStatus = (status: ToolCallStatus): boolean =>
   status !== "pending" && status !== "running";
 
@@ -17,11 +26,17 @@ export const isToolCallExecuting = (record: ToolCallRecord): boolean =>
   && !["queued", "prepared", "waiting_approval"].includes(record.transition || "");
 
 export interface ToolCallRecord {
+  delegations?: ToolDelegation[];
   id: string;
   name: string;
   args: Record<string, unknown>;
   status: ToolCallStatus;
   callSource?: ToolCallEvent["call_source"];
+  commandActions?: ToolCallEvent["command_actions"];
+  /** A provider block is still writing arguments; it is not a planned tool item. */
+  streamingAnnouncement?: boolean;
+  commandPresentation?: ToolCallEvent["command_presentation"];
+  executionStartedAt?: number;
   /** Backend-owned lifecycle phase; status remains the stable UI terminal/running state. */
   transition?: string;
   waitingOn?: string;
@@ -65,6 +80,9 @@ export interface ToolCallRecord {
   outputPreview?: string;
   stdoutPreview?: string;
   stderrPreview?: string;
+  exitCode?: number;
+  recipientId?: string;
+  recipientIds?: string[];
   diff?: {
     plus: number;
     minus: number;
@@ -91,6 +109,31 @@ export interface ToolCallRecord {
   /** True when a file created by this call was later removed in the same turn. */
   temporaryRemoved?: boolean;
 }
+
+export const isToolDelegations = (value: unknown): value is ToolDelegation[] => Array.isArray(value)
+  && value.length <= 256 && value.every(item => item && typeof item === "object"
+    && typeof item.agent_id === "string" && item.agent_id.length > 0 && item.agent_id.length <= 1_024
+    && typeof item.name === "string" && item.name.length > 0 && item.name.length <= 1_024
+    && (item.agent_path === undefined || typeof item.agent_path === "string" && item.agent_path.length <= 1_024)
+    && typeof item.status === "string" && item.status.length > 0 && item.status.length <= 128
+    && Number.isSafeInteger(item.started_at) && item.started_at >= 0
+    && (item.accepted_at === undefined || Number.isSafeInteger(item.accepted_at) && item.accepted_at >= 0));
+
+export const mergeToolDelegations = (existing: ToolDelegation[] = [], incoming: ToolDelegation[] = []): ToolDelegation[] => {
+  const facts = new Map(existing.map(fact => [fact.agent_id, fact]));
+  for (const fact of incoming) {
+    const previous = facts.get(fact.agent_id);
+    if (!previous) { facts.set(fact.agent_id, fact); continue; }
+    const isOlderStart = previous.started_at > 0 && fact.started_at < previous.started_at;
+    const terminal = ["completed", "partial", "failed", "cancelled", "interrupted"];
+    const status = (isOlderStart && ["pending", "running"].includes(fact.status))
+      || (terminal.includes(previous.status) && ["pending", "running"].includes(fact.status) && fact.started_at <= previous.started_at)
+      ? previous.status : fact.status;
+    facts.set(fact.agent_id, { ...previous, ...fact, status,
+      started_at: Math.max(previous.started_at, fact.started_at), accepted_at: previous.accepted_at || fact.accepted_at });
+  }
+  return [...facts.values()];
+};
 
 const TOOL_STATUS_RANK: Record<ToolCallStatus, number> = {
   pending: 0,
@@ -136,9 +179,14 @@ export const mergeToolCallResultRecord = (
       outputPreview: existing.outputPreview ?? incoming.outputPreview,
       stdoutPreview: existing.stdoutPreview ?? incoming.stdoutPreview,
       stderrPreview: existing.stderrPreview ?? incoming.stderrPreview,
+      exitCode: existing.exitCode ?? incoming.exitCode,
+      recipientId: existing.recipientId ?? incoming.recipientId,
+      recipientIds: existing.recipientIds ?? incoming.recipientIds,
       diff: existing.diff ?? incoming.diff,
       cleanupReceipt: existing.cleanupReceipt ?? incoming.cleanupReceipt,
+      commandActions: existing.commandActions ?? incoming.commandActions,
       outputFiles: existing.outputFiles ?? incoming.outputFiles,
+      delegations: mergeToolDelegations(existing.delegations, incoming.delegations),
       finishedAt: existing.finishedAt ?? incoming.finishedAt,
     };
   }
@@ -146,7 +194,7 @@ export const mergeToolCallResultRecord = (
     && TOOL_STATUS_RANK[incoming.status] < TOOL_STATUS_RANK[existing.status]) {
     return existing;
   }
-  return { ...incoming, seq: incomingSeq ?? existingSeq };
+  return { ...incoming, delegations: mergeToolDelegations(existing.delegations, incoming.delegations), seq: incomingSeq ?? existingSeq };
 };
 
 const normalizedProjectionValue = (value: string | undefined): string => String(value || "").trim().toLowerCase();
@@ -318,6 +366,10 @@ export const reduceToolCallStart = (
     resultKind: e.result_kind ?? existing?.resultKind,
     activityKind: e.activity_kind ?? existing?.activityKind,
     callSource: e.call_source ?? existing?.callSource,
+    commandActions: e.command_actions ?? existing?.commandActions,
+    streamingAnnouncement: e.streaming_announcement ?? existing?.streamingAnnouncement,
+    commandPresentation: existing?.commandPresentation ?? e.command_presentation,
+    executionStartedAt: existing?.executionStartedAt ?? e.execution_started_at,
     visibility: e.visibility ?? existing?.visibility,
     groupId: e.group_id ?? existing?.groupId,
     stepId: e.step_id ?? existing?.stepId,
@@ -351,6 +403,12 @@ export const reduceToolCallResult = (
     waitingOn: undefined,
     blockingReason: undefined,
     summary: e.summary,
+    stdoutPreview: e.stdout_preview ?? existing.stdoutPreview,
+    stderrPreview: e.stderr_preview ?? existing.stderrPreview,
+    exitCode: e.exit_code ?? existing.exitCode,
+    recipientId: e.recipient_id ?? existing.recipientId,
+    recipientIds: e.recipient_ids ?? existing.recipientIds,
+    delegations: e.delegations ?? existing.delegations,
     artifactId: e.artifact_id ?? existing.artifactId,
     artifactKind: e.artifact_kind ?? existing.artifactKind,
     artifactMediaType: e.artifact_media_type ?? existing.artifactMediaType,
@@ -363,6 +421,10 @@ export const reduceToolCallResult = (
     resultKind: e.result_kind ?? existing.resultKind,
     activityKind: e.activity_kind ?? existing.activityKind,
     callSource: e.call_source ?? existing.callSource,
+    commandActions: e.command_actions ?? existing.commandActions,
+    streamingAnnouncement: e.streaming_announcement ?? existing.streamingAnnouncement,
+    commandPresentation: existing.commandPresentation ?? e.command_presentation,
+    executionStartedAt: existing.executionStartedAt ?? e.execution_started_at,
     visibility: e.visibility ?? existing.visibility,
     groupId: e.group_id ?? existing.groupId,
     stepId: e.step_id ?? existing.stepId,

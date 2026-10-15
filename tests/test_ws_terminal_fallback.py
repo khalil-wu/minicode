@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import pytest
 
 from backend.agent.message import AgentEvent
 from backend.artifact.store import ArtifactStore
 from backend.config import AppConfig, LLMSettings, PermissionSettings
-from backend.llm.base import LLMAdapter
+from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType
 from backend.permissions.checker import PermissionChecker
 from backend.tasks.manager import TaskManager
 from backend.tools.registry import ToolRegistry
@@ -14,16 +15,17 @@ from backend.ws.handler import WebSocketSession
 
 
 class _NoopLLM(LLMAdapter):
-    async def stream_chat(self, messages, tools=None):
+    async def stream_chat(self, messages, tools=None, metadata=None):
         if False:
             yield None
 
-    async def simple_chat(self, messages):
+    async def simple_chat(self, messages, *, max_tokens=None):
         return ""
 
 
 class _FakeWebSocket:
     def __init__(self) -> None:
+        self.headers = {}
         self.sent: list[dict[str, object]] = []
 
     async def send_json(self, payload: dict[str, object]) -> None:
@@ -44,6 +46,8 @@ def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
         "backend.ws.handler.get_models_source",
         lambda _provider="openai": "test",
     )
+    monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda session, **_kwargs: session.llm)
+    monkeypatch.setattr(WebSocketSession, "_build_conversation_tool_registry", lambda self, conversation_id="", **_kwargs: self.tool_registry)
     session = WebSocketSession(
         session_id="session-terminal-fallback",
         websocket=_FakeWebSocket(),
@@ -51,7 +55,7 @@ def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
         artifact_store=ArtifactStore(storage_dir=str(tmp_path / "artifacts")),
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(PermissionSettings()),
-        config=AppConfig(llm=LLMSettings(api_key="")),
+        config=AppConfig(llm=LLMSettings(api_key="", provider="openai", model="fixture")),
     )
     # Runtime capability notifications are unrelated to these lifecycle tests.
     session.task_manager = TaskManager()
@@ -86,11 +90,13 @@ def test_start_agent_run_setup_exception_emits_one_failed_done_and_idle(
         # Stub the locked body, not ``_run_agent`` itself: the pre-admission
         # terminal closure lives in ``_run_agent`` and is the contract here.
         session._run_agent_locked = fail_setup  # type: ignore[method-assign]
-        task_id = await session.start_agent_run(
-            "hello",
-            conversation_id="conv-setup-failure",
-            metadata={"assistant_message_id": "assistant-setup-failure"},
-        )
+        with pytest.raises(RuntimeError, match="exited before the user turn was durably admitted"):
+            await session.start_agent_run(
+                "hello",
+                conversation_id="conv-setup-failure",
+                metadata={"assistant_message_id": "assistant-setup-failure"},
+            )
+        task_id = session.task_manager.list()[0].id
         await _wait_for_run_cleanup(session, task_id)
         return session, session.ws.sent
 
@@ -120,33 +126,45 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
     async def scenario() -> list[dict[str, object]]:
         session = _session(tmp_path, monkeypatch)
 
-        async def complete_normally(*_args, conversation_id: str, **_kwargs) -> None:
-            done_event = AgentEvent.done(status="completed")
-            done_event.data["conversation_id"] = conversation_id
-            await session.send_event(done_event)
-            session.run_manager.mark_terminal_status(conversation_id, "completed")
-            session.run_manager.mark_delivery_complete(conversation_id)
-            await session.send_event(
-                AgentEvent.session_state_changed(
-                    state="idle",
-                    conversation_id=conversation_id,
-                    reason="completed",
-                )
-            )
+        class FinalReplyModel(LLMAdapter):
+            def __init__(self, settings):
+                self._settings = settings
+                self._provider_id = "openai"
 
-        session._run_agent = complete_normally  # type: ignore[method-assign]
+            async def stream_chat(self, messages, tools=None, metadata=None):
+                yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Owned terminal reply", phase="final_answer")
+                yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop", end_turn=True)
+
+            async def simple_chat(self, messages, *, max_tokens=None):
+                return "Owned terminal reply"
+
+        # Keep the actual QueryEngine/TurnIterationRuntime/AnswerCommitter;
+        # only the model transport is controlled. The session factory seam
+        # returns this captured model for the real run-scoped binding.
+        session.llm = FinalReplyModel(session.config.llm)
+        conversation = session.conversation_repo.create_conversation(title="Canonical terminal")
         task_id = await session.start_agent_run(
             "hello",
-            conversation_id="conv-normal",
+            conversation_id=conversation.id,
         )
         await _wait_for_run_cleanup(session, task_id)
+        restored = session.conversation_repo.get_conversation(conversation.id)
+        assert restored.transcript[0]["content"] == "hello"
+        assert restored.context_snapshot["turn_admissions"]
+        assert any(message["role"] == "assistant" and message["content"] == "Owned terminal reply"
+                   for message in restored.transcript)
         return session.ws.sent
 
     events = asyncio.run(scenario())
-    assert len([event for event in events if event.get("type") == "done"]) == 1
-    assert len(
-        [event for event in events if event.get("type") == "session.state_changed"]
-    ) == 1
+    terminal = [event for event in events if event.get("type") == "done"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == "completed"
+    assert not [event for event in events if event.get("type") == "error"]
+    transitions = [event for event in events if event.get("type") == "session.state_changed"]
+    assert [(event["state"], event["reason"]) for event in transitions] == [
+        ("working", "agent_run_started"), ("idle", "completed"),
+    ]
+    assert all(event["conversation_id"] == terminal[0]["conversation_id"] for event in transitions)
 
 
 def test_start_agent_run_cancellation_emits_one_cancelled_done_and_idle(
@@ -181,7 +199,8 @@ def test_start_agent_run_cancellation_emits_one_cancelled_done_and_idle(
         await started.wait()
         task_id = session.run_manager.run_task_ids["conv-cancelled"]
         assert session.task_manager.cancel(task_id) is True
-        assert await start_task == task_id
+        with pytest.raises(RuntimeError, match="cancelled before the user turn was durably admitted"):
+            await start_task
         await _wait_for_run_cleanup(session, task_id)
         return session, session.ws.sent
 
@@ -210,10 +229,9 @@ def test_normal_return_without_terminal_fence_fails_closed(
             return None
 
         session._run_agent_locked = return_without_terminal  # type: ignore[method-assign]
-        task_id = await session.start_agent_run(
-            "hello",
-            conversation_id="conv-missing-terminal",
-        )
+        with pytest.raises(RuntimeError, match="exited before the user turn was durably admitted"):
+            await session.start_agent_run("hello", conversation_id="conv-missing-terminal")
+        task_id = session.task_manager.list()[0].id
         await _wait_for_run_cleanup(session, task_id)
         return session.ws.sent
 
@@ -236,11 +254,13 @@ def test_pre_admission_busy_run_emits_terminal_done_and_idle(
         claim = guards.try_start("conv-busy", owner_id="other-run")
         assert claim is not None
         try:
-            task_id = await session.start_agent_run(
-                "hello",
-                conversation_id="conv-busy",
-                metadata={"assistant_message_id": "assistant-busy"},
-            )
+            with pytest.raises(RuntimeError, match="exited before the user turn was durably admitted"):
+                await session.start_agent_run(
+                    "hello",
+                    conversation_id="conv-busy",
+                    metadata={"assistant_message_id": "assistant-busy"},
+                )
+            task_id = session.task_manager.list()[0].id
             await _wait_for_run_cleanup(session, task_id)
             return session.ws.sent
         finally:
@@ -299,7 +319,8 @@ def test_second_run_is_refused_instead_of_orphaning_the_first(
         # The first run must still be the one Stop reaches.
         assert session.run_manager.run_task_ids["conv-single-owner"] == first_task_id
         assert await session.cancel_agent_runs(conversation_id="conv-single-owner") is True
-        assert await first_start_task == first_task_id
+        with pytest.raises(RuntimeError, match="cancelled before the user turn was durably admitted"):
+            await first_start_task
         await _wait_for_run_cleanup(session, first_task_id)
         return session, session.ws.sent, raised
 

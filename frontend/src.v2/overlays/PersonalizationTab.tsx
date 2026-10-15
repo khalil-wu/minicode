@@ -1,3 +1,4 @@
+import { useI18n, type Translate } from "../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Check, FileText, Info, LoaderCircle, RotateCcw, Save, ServerOff, ShieldAlert, Trash2 } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
@@ -27,27 +28,28 @@ type GuidelinePayload = {
   blocks?: GuidelineSource[];
 };
 
-const sourceLabel = (source: GuidelineSource): string => {
-  if (source.source_kind === "user_memory") return "全局指令";
-  if (source.source_kind === "agent_instruction") return "项目指令";
-  if (source.source_kind.includes("rule")) return "规则";
-  if (source.source_kind.includes("memory")) return "记忆";
-  return source.label || "指令";
+const sourceLabel = (tr: Translate, source: GuidelineSource): string => {
+  if (source.source_kind === "user_memory") return tr("全局指令");
+  if (source.source_kind === "agent_instruction") return tr("项目指令");
+  if (source.source_kind.includes("rule")) return tr("规则");
+  if (source.source_kind.includes("memory")) return tr("记忆");
+  return source.label || tr("指令");
 };
 
 const fileName = (path: string): string => path.split(/[\\/]/).filter(Boolean).pop() || path;
 
-const pollutionSourceLabel = (source: string): string => {
+const pollutionSourceLabel = (tr: Translate, source: string): string => {
   const normalized = source.trim().toLowerCase();
-  if (normalized === "web_search" || normalized.includes("web_search")) return "联网搜索";
-  if (normalized === "web_fetch" || normalized.includes("web_fetch")) return "网页读取";
-  if (normalized === "tool_search") return "工具检索";
-  if (normalized === "browser_control") return "浏览器";
+  if (normalized === "web_search" || normalized.includes("web_search")) return tr("联网搜索");
+  if (normalized === "web_fetch" || normalized.includes("web_fetch")) return tr("网页读取");
+  if (normalized === "tool_search") return tr("工具检索");
+  if (normalized === "browser_control") return tr("浏览器");
   if (normalized.startsWith("mcp__") || normalized.includes("mcp_")) return "MCP";
   return source;
 };
 
 export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
+  const { t: tr } = useI18n();
   const conversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
   const currentConversation = useAppStore((state) => state.conversations.find((conversation) => conversation.id === state.conversationId));
@@ -143,7 +145,7 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
         method: "PUT",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ instructions: savedDraft }),
-      }, { timeoutMessage: "保存自定义指令超时，请重试。" });
+      }, { timeoutMessage: tr("保存自定义指令超时，请重试。") });
       if (!response.ok) {
         const message = errorMessageFromResponseText(await response.text().catch(() => ""), response.statusText);
         throw new Error(message);
@@ -151,11 +153,11 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
       const next = await response.json() as PersonalizationPayload;
       setPayload(next);
       setDraft((current) => current === savedDraft ? next.instructions || "" : current);
-      pushToast("自定义指令已保存", "success");
+      pushToast(tr("自定义指令已保存"), "success");
       void loadSources(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      pushToast(`自定义指令保存失败：${message}`, "error");
+      pushToast(tr("自定义指令保存失败：{v0}", { v0: message }), "error");
     } finally {
       setSaving(false);
     }
@@ -174,13 +176,13 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
       }, "conversation.memory_mode.set");
       if (!isCurrentMemoryOwner()) return;
       if (!commandResultSucceeded(result)) {
-        pushToast(`长期记忆设置失败：${result.message || "后端未返回具体原因"}`, "error");
+        pushToast(tr("长期记忆设置失败：{v0}", { v0: result.message || tr("后端未返回具体原因") }), "error");
         return;
       }
-      pushToast(enabled ? "当前任务已启用长期记忆。" : "当前任务已关闭长期记忆。", "success");
+      pushToast(enabled ? tr("当前任务已启用长期记忆。") : tr("当前任务已关闭长期记忆。"), "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      if (isCurrentMemoryOwner()) pushToast(`长期记忆设置失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      if (isCurrentMemoryOwner()) pushToast(tr("长期记忆设置失败：{v0}", { v0: message }), "error");
     } finally {
       if (isCurrentMemoryOwner()) setSavingMemoryMode(false);
     }
@@ -189,9 +191,9 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
   const resetMemory = async () => {
     if (resettingMemory) return;
     const confirmed = await showConfirm({
-      title: "清除长期记忆",
-      message: "这会清除所有生成的长期记忆和派生摘要。任务对话、目标以及每个任务选择的记忆模式会保留。",
-      confirmLabel: "清除记忆",
+      title: tr("清除长期记忆"),
+      message: tr("这会清除所有生成的长期记忆和派生摘要。任务对话、目标以及每个任务选择的记忆模式会保留。"),
+      confirmLabel: tr("清除记忆"),
       danger: true,
     });
     if (!confirmed) return;
@@ -203,13 +205,13 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
         "memory.reset",
       );
       if (!commandResultSucceeded(result)) {
-        pushToast(`记忆清除失败：${result.message || "后端未返回具体原因"}`, "error");
+        pushToast(tr("记忆清除失败：{v0}", { v0: result.message || tr("后端未返回具体原因") }), "error");
         return;
       }
-      pushToast("长期记忆已清除，任务对话和记忆模式已保留。", "success");
+      pushToast(tr("长期记忆已清除，任务对话和记忆模式已保留。"), "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`记忆清除失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      pushToast(tr("记忆清除失败：{v0}", { v0: message }), "error");
     } finally {
       setResettingMemory(false);
     }
@@ -220,9 +222,9 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
     setClearingPollution(true);
     try {
       const confirmed = await showConfirm({
-        title: "重新启用任务记忆",
-        message: "此任务包含联网、浏览器或 MCP 外部上下文。重新启用后，后续回复可以再次生成长期记忆。",
-        confirmLabel: "重新启用",
+        title: tr("重新启用任务记忆"),
+        message: tr("此任务包含联网、浏览器或 MCP 外部上下文。重新启用后，后续回复可以再次生成长期记忆。"),
+        confirmLabel: tr("重新启用"),
       });
       if (!confirmed || !isCurrentMemoryOwner()) return;
       const result = await sendClientCommandAwaitResult({
@@ -232,33 +234,33 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
       }, "conversation.memory_mode.set");
       if (!isCurrentMemoryOwner()) return;
       if (!commandResultSucceeded(result)) {
-        pushToast(`任务记忆恢复失败：${result.message || "后端未返回具体原因"}`, "error");
+        pushToast(tr("任务记忆恢复失败：{v0}", { v0: result.message || tr("后端未返回具体原因") }), "error");
         return;
       }
-      pushToast("当前任务已重新启用长期记忆。", "success");
+      pushToast(tr("当前任务已重新启用长期记忆。"), "success");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || "未知错误");
-      if (isCurrentMemoryOwner()) pushToast(`任务记忆恢复失败：${message}`, "error");
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      if (isCurrentMemoryOwner()) pushToast(tr("任务记忆恢复失败：{v0}", { v0: message }), "error");
     } finally {
       if (isCurrentMemoryOwner()) setClearingPollution(false);
     }
   };
 
   const instructionsContent = loading ? (
-    <div className="settings-personalization-state"><LoaderCircle className="settings-spin" />正在读取指令…</div>
+    <div className="settings-personalization-state"><LoaderCircle className="settings-spin" />{tr("正在读取指令…")}</div>
   ) : loadError || !payload ? (
     <div className="settings-load-state" data-tone="danger" role="alert">
       <span className="settings-load-state-icon" aria-hidden="true"><ServerOff /></span>
       <div className="settings-load-state-copy">
-        <strong>自定义指令暂时不可用</strong>
-        <span>检查后端连接后重试。</span>
-        <code>{loadError || "未知错误"}</code>
+        <strong>{tr("自定义指令暂时不可用")}</strong>
+        <span>{tr("检查后端连接后重试。")}</span>
+        <code>{loadError || tr("未知错误")}</code>
       </div>
-      <button type="button" className="settings-action-button" onClick={() => void load()}>重试</button>
+      <button type="button" className="settings-action-button" onClick={() => void load()}>{tr("重试")}</button>
     </div>
   ) : (
     <>
-      <Section title="自定义指令" description="所有任务共用的用户级 INSTRUCTIONS.md 指令。">
+      <Section title={tr("自定义指令")} description={tr("所有任务共用的用户级 INSTRUCTIONS.md 指令。")}>
         <div className="settings-instructions-editor">
           <div className="settings-instructions-toolbar">
             <div className="settings-instructions-file">
@@ -266,7 +268,7 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
               <span>{fileName(payload.path)}</span>
               <code title={payload.path}>{payload.path}</code>
             </div>
-            {dirty && <span className="settings-unsaved" aria-live="polite">未保存</span>}
+            {dirty && <span className="settings-unsaved" aria-live="polite">{tr("未保存")}</span>}
             <button
               type="button"
               className="settings-action-button"
@@ -275,27 +277,27 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
               disabled={!dirty || tooLarge || saving}
             >
               {saving ? <LoaderCircle className="settings-spin" /> : dirty ? <Save /> : <Check />}
-              {saving ? "保存中" : dirty ? "保存" : "已保存"}
+              {saving ? tr("保存中") : dirty ? tr("保存") : tr("已保存")}
             </button>
           </div>
           <textarea
             className="settings-instructions-textarea"
-            aria-label="自定义指令"
+            aria-label={tr("自定义指令")}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="例如：优先复用现有结构；完成修改后统一运行测试。"
+            placeholder={tr("例如：优先复用现有结构；完成修改后统一运行测试。")}
             spellCheck={false}
           />
           <div className="settings-instructions-footer" data-invalid={tooLarge ? "true" : "false"}>
-            <span>保存到用户级 INSTRUCTIONS.md。</span>
-            <span>{byteCount.toLocaleString()} / {maxBytes.toLocaleString()} 字节</span>
+            <span>{tr("保存到用户级 INSTRUCTIONS.md。")}</span>
+            <span>{byteCount.toLocaleString()} / {maxBytes.toLocaleString()} {tr("字节")}</span>
           </div>
         </div>
       </Section>
 
       <div className="settings-personalization-note">
         <Info aria-hidden="true" />
-        <span>项目级指令随后加载，可补充当前代码库规则。</span>
+        <span>{tr("项目级指令随后加载，可补充当前代码库规则。")}</span>
       </div>
     </>
   );
@@ -304,16 +306,16 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
     <>
       {instructionsContent}
 
-      <Section title="当前任务记忆" description="控制当前任务是否参与长期记忆生成。">
+      <Section title={tr("当前任务记忆")} description={tr("控制当前任务是否参与长期记忆生成。")}>
         {memoryPolluted && (
           <div className="settings-memory-isolation" role="status">
             <ShieldAlert aria-hidden="true" />
             <div className="settings-memory-isolation-copy">
-              <strong>外部上下文已隔离</strong>
-              <span>此任务不会生成或传递新的长期记忆。</span>
+              <strong>{tr("外部上下文已隔离")}</strong>
+              <span>{tr("此任务不会生成或传递新的长期记忆。")}</span>
               {memoryPollutionSources.length > 0 && (
                 <span className="settings-memory-isolation-sources">
-                  {Array.from(new Set(memoryPollutionSources.map(pollutionSourceLabel))).map((source) => (
+                  {Array.from(new Set(memoryPollutionSources.map((source) => pollutionSourceLabel(tr, source)))).map((source) => (
                     <span key={source}>{source}</span>
                   ))}
                 </span>
@@ -326,7 +328,7 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
               onClick={() => void clearPollution()}
             >
               {clearingPollution ? <LoaderCircle className="settings-spin" /> : <RotateCcw />}
-              {clearingPollution ? "恢复中" : "重新启用"}
+              {clearingPollution ? tr("恢复中") : tr("重新启用")}
             </button>
           </div>
         )}
@@ -334,15 +336,15 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
           <div className="settings-row settings-memory-row">
             <span className="settings-memory-icon" aria-hidden="true"><Brain /></span>
             <div className="settings-row-copy">
-              <div className="settings-row-title">长期记忆生成</div>
-              <div className="settings-row-description">任务空闲后提取可复用信息，并由单写者统一归并。</div>
+              <div className="settings-row-title">{tr("长期记忆生成")}</div>
+              <div className="settings-row-description">{tr("任务空闲后提取可复用信息，并由单写者统一归并。")}</div>
             </div>
             <div className="settings-row-control">
               <button
                 type="button"
                 className="settings-toggle"
                 role="switch"
-                aria-label="长期记忆生成"
+                aria-label={tr("长期记忆生成")}
                 aria-checked={memoryMode === "enabled"}
                 data-active={memoryMode === "enabled" ? "true" : "false"}
                 disabled={!conversationId || memoryPolluted || savingMemoryMode}
@@ -355,8 +357,8 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
           <div className="settings-row settings-memory-row">
             <span className="settings-memory-icon" aria-hidden="true"><Trash2 /></span>
             <div className="settings-row-copy">
-              <div className="settings-row-title">清除长期记忆</div>
-              <div className="settings-row-description">移除生成的记忆和派生摘要，保留任务对话与记忆模式。</div>
+              <div className="settings-row-title">{tr("清除长期记忆")}</div>
+              <div className="settings-row-description">{tr("移除生成的记忆和派生摘要，保留任务对话与记忆模式。")}</div>
             </div>
             <div className="settings-row-control">
               <button
@@ -367,21 +369,21 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
                 onClick={() => void resetMemory()}
               >
                 {resettingMemory ? <LoaderCircle className="settings-spin" /> : <Trash2 />}
-                {resettingMemory ? "清除中" : "清除记忆"}
+                {resettingMemory ? tr("清除中") : tr("清除记忆")}
               </button>
             </div>
           </div>
         </div>
-        {!conversationId && <p className="settings-page-note">新建任务后可设置记忆。</p>}
+        {!conversationId && <p className="settings-page-note">{tr("新建任务后可设置记忆。")}</p>}
       </Section>
 
       {!loading && !loadError && payload && (
-        <Section title="当前指令来源" description="按作用域加载，项目指令优先。">
+        <Section title={tr("当前指令来源")} description={tr("按作用域加载，项目指令优先。")}>
           <div className="settings-source-list">
-            {sourcesLoading ? <div className="settings-empty-inline" role="status">正在读取指令来源…</div>
+            {sourcesLoading ? <div className="settings-empty-inline" role="status">{tr("正在读取指令来源…")}</div>
               : sourcesError ? <div className="settings-load-state" role="alert">
-                <span>指令来源读取失败：{sourcesError}</span>
-                <button type="button" className="settings-action-button" onClick={() => void loadSources()}>重试读取指令来源</button>
+                <span>{tr("指令来源读取失败：")}{sourcesError}</span>
+                <button type="button" className="settings-action-button" onClick={() => void loadSources()}>{tr("重试读取指令来源")}</button>
               </div>
               : sources.length > 0 ? sources.map((source, index) => (
               <div className="settings-source-row" key={`${source.path}-${index}`}>
@@ -390,10 +392,10 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
                   <strong>{fileName(source.path)}</strong>
                   <code title={source.path}>{source.path}</code>
                 </div>
-                <span className="settings-source-kind">{sourceLabel(source)}</span>
+                <span className="settings-source-kind">{sourceLabel(tr, source)}</span>
               </div>
             )) : (
-              <div className="settings-empty-inline">暂无指令文件。</div>
+              <div className="settings-empty-inline">{tr("暂无指令文件。")}</div>
             )}
           </div>
         </Section>

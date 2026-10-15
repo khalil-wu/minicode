@@ -9,6 +9,7 @@ from backend.agent.control_tools import ControlToolRouter
 from backend.agent.context import ContextBuilder
 from backend.agent.nested_tool_events import NestedToolEvents
 from backend.agent.run_context import RunContext
+from backend.sandbox.policy import ResolvedSandboxPolicy, SandboxEnforcement, NetworkSandboxPolicy
 from backend.agent.skill_activation import activate_turn_skills, implicit_skill_for_tool
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import _finalize_tool_result
@@ -80,7 +81,7 @@ def test_explicit_skill_selection_stages_turn_owned_payload_without_lifecycle_ev
     ]
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state)]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
 
     events = asyncio.run(run())
 
@@ -103,7 +104,7 @@ def test_plain_words_do_not_activate_a_skill(tmp_path) -> None:
     state = AgentState(user_message="Use React patterns for this page")
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state)]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
 
     assert asyncio.run(run()) == []
     assert "skill_injections" not in state.prompt_context
@@ -116,12 +117,14 @@ def test_skill_activation_reports_missing_mcp_dependency_to_user_and_model(tmp_p
     state = AgentState(user_message="Use $frontend-dev")
 
     class _McpManager:
+        def allows_user_server_install(self, _config): return True
+        def get_server_config(self, _name): return None
         def get_client(self, name: str):
             assert name == "docs"
             return None
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state, _McpManager())]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, _McpManager(), permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
 
     events = asyncio.run(run())
     assert [event.type for event in events] == ["system_notice"]
@@ -144,6 +147,7 @@ def test_explicit_skill_installs_approved_mcp_dependency_before_injection(tmp_pa
     installed = []
 
     class _McpManager:
+        def allows_user_server_install(self, _config): return True
         def get_client(self, name):
             return object() if name in connected else None
 
@@ -155,7 +159,7 @@ def test_explicit_skill_installs_approved_mcp_dependency_before_injection(tmp_pa
 
     async def answer(request_id):
         assert published[0].data["tool_call_id"] == request_id
-        return {"answer": "Install"}
+        return {"answers": {"skill_mcp_dependency_install": {"answers": ["Install"]}}}
 
     async def install(_mcp_manager, candidates):
         installed.extend(candidates)
@@ -167,11 +171,16 @@ def test_explicit_skill_installs_approved_mcp_dependency_before_injection(tmp_pa
     async def run():
         return [event async for event in activate_turn_skills(
             manager, state.user_message, state, _McpManager(), answer, publish,
+            permission_context=PermissionContext(),
+            permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED),
         )]
 
     assert asyncio.run(run()) == []
-    assert published[0].type == "ask_user"
-    assert published[0].data["options"] == ["Install", "Skip"]
+    assert published[0].type == "request_user_input"
+    question = published[0].data["questions"][0]
+    assert question["id"] == "skill_mcp_dependency_install"
+    assert [option["label"] for option in question["options"]] == ["Install", "Continue anyway"]
+    assert question["isOther"] is False and published[0].data["isBlocking"] is True
     assert installed == [{"name": "docs", "transport": "http", "url": "https://docs.example.test/mcp", "auto_start": True}]
     assert "MCP dependency unavailable" not in state.prompt_context["skill_injections"][0]["content"]
 
@@ -188,6 +197,7 @@ def test_skill_install_prompt_is_delivered_before_waiting_for_answer(tmp_path, m
     connected = False
 
     class _McpManager:
+        def allows_user_server_install(self, _config): return True
         def get_client(self, _name):
             return object() if connected else None
 
@@ -211,22 +221,24 @@ def test_skill_install_prompt_is_delivered_before_waiting_for_answer(tmp_path, m
 
         async def approve(_request_id):
             await answered.wait()
-            return {"answer": "Install"}
+            return {"answers": {"skill_mcp_dependency_install": {"answers": ["Install"]}}}
 
         async def producer():
             async for event in activate_turn_skills(
                 manager, state.user_message, state, _McpManager(), approve, nested.publish,
+                permission_context=PermissionContext(),
+                permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED),
             ):
                 yield event
 
         seen = []
         async for event in nested.stream(producer()):
             seen.append(event.type)
-            if event.type == "ask_user":
+            if event.type == "request_user_input":
                 answered.set()
         return seen
 
-    assert asyncio.run(asyncio.wait_for(run(), 10)) == ["ask_user"]
+    assert asyncio.run(asyncio.wait_for(run(), 10)) == ["request_user_input"]
     assert connected is True
 
 
@@ -276,96 +288,28 @@ def test_shell_read_and_skill_script_are_implicit_skill_use(tmp_path) -> None:
     assert run is not None and run.name == "frontend-dev"
 
 
-async def _collect_control_events(router, tool_call):
-    return [event async for event in router.run(tool_call)]
 
 
-def test_ask_user_emits_pre_wait_event_before_awaiting_answer() -> None:
-    async def approval_handler(tool_call_id: str) -> dict[str, str]:
-        assert tool_call_id == "ask-1"
-        return {"answer": "yes"}
-
-    router = ControlToolRouter(
-        state=AgentState(user_message="Confirm location"),
-        approval_handler=approval_handler,
-        skill_manager=None,
-        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
-    )
-    tool_call = ToolCallEvent(
-        id="ask-1",
-        name="ask_user",
-        arguments={"question": "Use this location?"},
-    )
-
-    *pre_events, result = asyncio.run(_collect_control_events(router, tool_call))
-
-    assert len(pre_events) == 1
-    assert pre_events[0].type == "ask_user"
-    assert pre_events[0].data["question"] == "Use this location?"
-    assert result is not None
-    assert result.events == []
-    assert result.result.content == "User answer: yes"
-
-
-def test_ask_user_pre_wait_event_sanitizes_options() -> None:
-    router = ControlToolRouter(
-        state=AgentState(user_message="Clean files"),
-        approval_handler=AsyncMock(return_value={"answer": "Keep"}),
-        skill_manager=None,
-        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
-    )
-    tool_call = ToolCallEvent(
-        id="ask-2",
-        name="ask_user",
-        arguments={
-            "question": "Delete temporary files?",
-            "options": ["Delete", "Keep", "Delete", "", "Extra"],
-        },
-    )
-
-    event, _result = asyncio.run(_collect_control_events(router, tool_call))
-
-    assert event.type == "ask_user"
-    assert event.data["options"] == ["Delete", "Keep"]
-
-
-def test_ask_user_triggers_elicitation_result_hook() -> None:
-    class HookRecorder:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        async def run_elicitation(self, *_args, **_kwargs):
-            return SimpleNamespace(blocked=False)
-
-        async def run_elicitation_result(self, **kwargs):
-            self.calls.append(dict(kwargs))
-
-    hook_manager = HookRecorder()
-
-    async def approval_handler(tool_call_id: str) -> dict[str, str]:
-        assert tool_call_id == "ask-1"
-        return {"answer": "yes"}
-
-    router = ControlToolRouter(
-        state=AgentState(user_message="Confirm location"),
-        approval_handler=approval_handler,
-        skill_manager=None,
-        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
-        hook_manager=hook_manager,
-    )
-    tool_call = ToolCallEvent(
-        id="ask-1",
-        name="ask_user",
-        arguments={"question": "Use this location?"},
-    )
-
-    _event, result = asyncio.run(_collect_control_events(router, tool_call))
-
-    assert result is not None
-    assert hook_manager.calls == [{
-        "mcp_server_name": "ask_user",
-        "elicitation_id": "ask-1",
-        "action": "accept",
-        "content": {"answer": "yes"},
-        "mode": "control",
-    }]
+def test_skill_mcp_skip_is_remembered_by_transport_identity_for_the_live_context(tmp_path):
+    manager, _ = _manager(tmp_path)
+    manager._loader.skills[0].meta.mcp_dependencies = ["docs"]
+    manager._loader.skills[0].meta.mcp_dependency_specs = [{"value": "docs", "url": "https://docs.example.test/mcp"}]
+    owner = ContextBuilder()
+    published = []
+    class McpManager:
+        def allows_user_server_install(self, _config): return True
+        def get_client(self, _name): return None
+        def get_server_config(self, _name): return None
+    async def publish(event): published.append(event)
+    async def skip(_request_id): return {"answers": {}}
+    async def activate():
+        state = AgentState(user_message="$frontend-dev")
+        return [event async for event in activate_turn_skills(manager, state.user_message, state,
+            McpManager(), skip, publish, prompted_dependencies=owner.prompted_mcp_dependencies, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
+    asyncio.run(activate())
+    asyncio.run(activate())
+    assert len(published) == 1
+    assert owner.prompted_mcp_dependencies == {"mcp__streamable_http__https://docs.example.test/mcp"}
+    manager._loader.skills[0].meta.mcp_dependency_specs[0]["url"] = "https://docs2.example.test/mcp"
+    asyncio.run(activate())
+    assert len(published) == 2

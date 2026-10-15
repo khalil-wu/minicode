@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { fsListTree, fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
 import { compareWriteWorkspaceFile, listWorkspaceTree, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
@@ -220,6 +220,12 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 const originalRequestGitChanges = useAppStore.getState().requestGitChanges;
 
 describe("EditorPanel", () => {
+  beforeAll(async () => {
+    // Load this test's Markdown/Monaco fixture before timing user actions.
+    // Packaged lazy-load timing requires the separate renderer verification.
+    await import("./LiveMarkdownEditor");
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
     editorMocks.actions.length = 0;

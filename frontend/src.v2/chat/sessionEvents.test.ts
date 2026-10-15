@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSessionEvent } from "./sessionEvents";
 import { useAppStore } from "../stores";
@@ -28,6 +29,7 @@ describe("handleSessionEvent", () => {
     useAppStore.setState({
       conversationId: "conv-active",
       pendingConversationSwitchId: null,
+      pendingConversationCreateId: null,
       conversations: [],
       conversationInventoryInstanceId: null,
       conversationInventoryRevision: 0,
@@ -476,7 +478,7 @@ describe("handleSessionEvent", () => {
     ]));
   });
 
-  it("moves an optimistic queued turn into streaming only when the backend dequeues it", () => {
+  it("removes queue flags on dequeue while waiting for the real run to start", () => {
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
     useAppStore.setState({
@@ -499,9 +501,9 @@ describe("handleSessionEvent", () => {
     } as ServerEvent, { textStreamBuffer, thinkingStreamBuffer })).toBe(true);
 
     const state = useAppStore.getState();
-    expect(state.isStreaming).toBe(true);
+    expect(state.isStreaming).toBe(false);
     expect(state.messages[0]).toMatchObject({ id: "user-next", queueState: undefined });
-    expect(state.messages[1]).toMatchObject({ id: "assistant-next", isStreaming: true, queueState: undefined });
+    expect(state.messages[1]).toMatchObject({ id: "assistant-next", isStreaming: false, queueState: undefined });
   });
 
   it("folds a steered queued message into the existing streaming turn", () => {
@@ -598,10 +600,10 @@ describe("handleSessionEvent", () => {
     const state = useAppStore.getState();
     expect(state.messages.map((message) => message.id)).toEqual([
       "user-current",
-      "user-steer",
       "assistant-current",
+      "user-steer",
     ]);
-    expect(state.messages[1]).toMatchObject({
+    expect(state.messages[2]).toMatchObject({
       content: "change direction",
       steeredIntoMessageId: "assistant-current",
       attachmentRefs: [expect.objectContaining({
@@ -609,9 +611,9 @@ describe("handleSessionEvent", () => {
         artifactId: "artifact-notes",
       })],
     });
-    expect(state.messages[1]?.queueState).toBeUndefined();
+    expect(state.messages[2]?.queueState).toBeUndefined();
     expect(state.isStreaming).toBe(true);
-    expect(state.messages[2]).toMatchObject({ id: "assistant-current", isStreaming: true });
+    expect(state.messages[1]).toMatchObject({ id: "assistant-current", isStreaming: true });
   });
 
   it("removes a cancelled queued prompt and its empty assistant placeholder", () => {
@@ -912,6 +914,26 @@ describe("handleSessionEvent", () => {
     expect(state.workingDirectory).toBe("C:/repo-active");
     expect(state.messages.map((message) => message.id)).toEqual(["streaming"]);
     expect(state.conversationMessages["conv-restored"]).toBeUndefined();
+    expect(state.pendingConversationSwitchId).toBe("conv-restored");
+  });
+
+  it.each(["switch", "create"])("keeps %s loading until the following canonical restored page arrives", (navigation) => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ pendingConversationSwitchId: navigation === "switch" ? "conv-target" : null,
+      pendingConversationCreateId: navigation === "create" ? "conv-target" : null,
+      draft: "unsent source draft", workingDirectory: "C:/source" });
+    handleSessionEvent({ type: "session.restored", active_conversation_id: "conv-target",
+      conversation_switched_follows: true, workspace: { root_path: "C:/target" } } as ServerEvent, buffers);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-active", pendingConversationSwitchId: "conv-target",
+      draft: "unsent source draft", workingDirectory: "C:/source" });
+    expect(useAppStore.getState().messages[0].id).toBe("streaming");
+    if (navigation === "create") expect(useAppStore.getState().pendingConversationCreateId).toBe("conv-target");
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-target",
+      conversation: { id: "conv-target", title: "Target", updated_at: "2026-10-12", workspace_root: "C:/target",
+        transcript: [{ id: "target-user", role: "user", content: "canonical target", timestamp: 1 }] } } as ServerEvent, buffers);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-target", pendingConversationSwitchId: null,
+      pendingConversationCreateId: navigation === "create" ? "conv-target" : null, workingDirectory: "C:/target" });
+    expect(useAppStore.getState().messages.map(message => message.content)).toEqual(["canonical target"]);
   });
 
   it("completed reconnect snapshot clears stale streaming before canonical hydration", () => {

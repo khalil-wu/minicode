@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerEvent, UserMessageCommand } from "../protocol/events";
 import type { ChatMessage, ComposerQuote, MessageContextRef } from "../stores/types";
 import { useAppStore } from "../stores";
-import { resetSendDeduplication, sendChatMessage } from "./sendChatMessage";
+import { resetPendingUserMessagesForTests, sendChatMessage } from "./sendChatMessage";
 import { hydrateMessages } from "./transcriptHydration";
 import { handleSessionEvent } from "./sessionEvents";
 import { projectMessagesToTurns } from "./chatSurfaceState";
@@ -53,9 +53,9 @@ const synced = (session: Record<string, unknown>) => handleSessionEvent({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resetSendDeduplication();
+  resetPendingUserMessagesForTests();
   mocks.receipt.mockResolvedValue(receipt());
-  useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A",
+  useAppStore.setState({ ...initial, appMode: "chat", conversationId: "A", workingDirectory: "C:/A",
     conversations: [{ id: "A", title: "A", updatedAt: "", workspaceRoot: "C:/A" }],
     messages: [], conversationMessages: {}, conversationStreaming: {}, conversationRecallTruncations: {},
     conversationHistoryPages: {}, conversationAgentStates: {}, conversationWorkbenchStates: {},
@@ -155,10 +155,10 @@ describe("queued and steer input restoration", () => {
       context_refs: refs, quoted_message: quote, attachments: [attachment],
     }] }));
     const current = useAppStore.getState().messages;
-    expect(current[0]).toMatchObject({ id: "steer-user", role: "user", content: input, backendContent: modelInput,
+    expect(current[1]).toMatchObject({ id: "steer-user", role: "user", content: input, backendContent: modelInput,
       contextRefs: refs, quotedMessage: quote, steeredIntoMessageId: "live-assistant" });
-    expect(current[0].attachmentRefs?.[0]).toMatchObject({ inputSource: "pasted_text", sourceCharCount: 12 });
-    expect(current[1].id).toBe("live-assistant");
+    expect(current[1].attachmentRefs?.[0]).toMatchObject({ inputSource: "pasted_text", sourceCharCount: 12 });
+    expect(current[0].id).toBe("live-assistant");
   });
 
   it("preserves a known local display when an old queued snapshot lacks display metadata", () => {

@@ -20,6 +20,40 @@ from typing import Any, Literal, NotRequired, TypedDict
 # Server → Client event type union
 # ──────────────────────────────────────────────────────────────────
 
+class GuardianAssessmentEvent(TypedDict):
+    type: Literal["guardian_assessment"]
+    id: str
+    target_item_id: NotRequired[str]
+    conversation_id: str
+    message_id: str
+    turn_id: str
+    started_at_ms: int
+    completed_at_ms: NotRequired[int]
+    status: Literal["in_progress", "approved", "denied", "timed_out", "aborted"]
+    action: dict[str, Any]
+    risk_level: NotRequired[Literal["low", "medium", "high", "critical"]]
+    user_authorization: NotRequired[Literal["unknown", "low", "medium", "high"]]
+    rationale: NotRequired[str]
+    decision_source: NotRequired[Literal["agent"]]
+    review_reason: NotRequired[str]
+
+
+class GuardianWarningEvent(TypedDict):
+    type: Literal["guardian_warning"]
+    conversation_id: str
+    message_id: str
+    turn_id: str
+    message: str
+    interruption: NotRequired[bool]
+
+
+class ApproveGuardianDeniedActionCommand(TypedDict):
+    type: Literal["thread/approveGuardianDeniedAction"]
+    threadId: str
+    conversation_id: str
+    event: dict[str, Any]
+
+
 ServerEventType = Literal[
     # Streaming text + tool execution
     "item.started",
@@ -36,6 +70,8 @@ ServerEventType = Literal[
     "user_message.queue.updated",
     "agent.item",
     "agent.item.delta",
+    "guardian_assessment",
+    "guardian_warning",
     "agent.progress",
     "runtime.span",
     "task.update",
@@ -84,6 +120,7 @@ ServerEventType = Literal[
     "checkpoint.run.resume",
     # File watcher
     "file.changed",
+    "workspace.project_index.invalidated",
     # Terminal
     "terminal.output",
     "terminal.exit",
@@ -174,6 +211,9 @@ ClientCommandType = Literal[
     "user_message",
     "user_message.queue.cancel",
     "user_message.queue.steer",
+    "review.options",
+    "review.prepare",
+    "thread/approveGuardianDeniedAction",
     "interrupt",
     "ping",
     # Control plane
@@ -195,10 +235,19 @@ ClientCommandType = Literal[
     "conversation.archive",
     "conversation.unarchive",
     "conversation.rename",
+    "conversation.pin.set",
+    "conversation.pin.reorder",
+    "sidebar.sort.set",
+    "sidebar.project.reorder",
+    "sidebar.project.thread.reorder",
+    "sidebar.recent.reorder",
+    "conversation.read_state.set",
+    "conversation.project.set",
     "conversation.memory_mode.set",
     "memory.reset",
     "conversation.permission_mode.set",
     "conversation.goal.set",
+    "conversation.agent_mode.set",
     "conversation.worktree.cleanup",
     "conversation.worktree.handoff.preflight",
     "conversation.worktree.handoff.execute",
@@ -215,6 +264,7 @@ ClientCommandType = Literal[
     "runtime.capabilities.inspect",
     # LLM
     "llm.model.set",
+    "turn.settings.update",
     "llm.provider.oauth.login",
     "llm.provider.oauth.logout",
     "llm.provider.oauth.status",
@@ -255,6 +305,7 @@ ClientCommandType = Literal[
     "subagent.transcript",       # user opens a read-only child-thread replay
     "subagent.plan_review",      # user approves/rejects a teammate plan
     "send_message",              # user steers a running subagent through its mailbox
+    "followup_task",             # user explicitly starts the agent's next turn
     "inspector.focus",           # UI tells backend which target the user is viewing
     # Frontend UI commands
     "workspace.set",
@@ -326,10 +377,19 @@ class AgentMessageItemData(TypedDict, total=False):
     status: Literal["in_progress", "completed", "partial", "cancelled", "failed"]
 
 
+class ContextCompactionItemData(TypedDict):
+    id: str
+    type: Literal["context_compaction"]
+    source: Literal["auto", "manual"]
+    status: Literal["in_progress", "completed", "interrupted"]
+    started_at: int
+    finished_at: NotRequired[int]
+
+
 class ItemStartedData(TypedDict, total=False):
     conversation_id: str
     message_id: str
-    item: AgentMessageItemData
+    item: AgentMessageItemData | ContextCompactionItemData
 
 
 class AgentMessageDeltaData(TypedDict, total=False):
@@ -340,7 +400,7 @@ class AgentMessageDeltaData(TypedDict, total=False):
 class ItemCompletedData(TypedDict, total=False):
     conversation_id: str
     message_id: str
-    item: AgentMessageItemData
+    item: AgentMessageItemData | ContextCompactionItemData
     finish_reason: str
     provider_raw: dict[str, Any]
     attachments: list[dict[str, Any]]
@@ -533,6 +593,10 @@ class ToolCallData(TypedDict, total=False):
     input_summary: str
     result_kind: str
     activity_kind: str
+    command_actions: list[dict[str, str]]
+    streaming_announcement: bool
+    command_presentation: dict[str, Any]
+    execution_started_at: int
     visibility: Literal["timeline", "compact", "debug"]
     group_id: str
     step_id: str
@@ -561,6 +625,14 @@ class CommandOutputChunkData(TypedDict):
 
 
 class ToolResultData(TypedDict, total=False):
+    streaming_announcement: bool
+    command_presentation: dict[str, Any]
+    execution_started_at: int
+    stdout_preview: str
+    stderr_preview: str
+    exit_code: int
+    recipient_id: str
+    recipient_ids: list[str]
     id: str
     summary: str
     artifact_id: str
@@ -583,6 +655,7 @@ class ToolResultData(TypedDict, total=False):
     display_summary: str
     result_kind: str
     activity_kind: str
+    command_actions: list[dict[str, str]]
     visibility: Literal["timeline", "compact", "debug"]
     group_id: str
     step_id: str
@@ -864,10 +937,36 @@ class ControlElicitationRequestData(TypedDict):
     tool_use_id: str
     prompt: str
     question: str
+    mode: NotRequired[Literal["form", "url"]]
+    mcp_server_name: NotRequired[str]
+    url: NotRequired[str]
+    elicitation_id: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
     schema: NotRequired[dict[str, Any]]
     options: NotRequired[list[Any]]
     choices: NotRequired[list[Any]]
     allowed_values: NotRequired[list[Any]]
+
+
+class RequestUserInputOptionData(TypedDict):
+    label: str
+    description: str
+
+
+class RequestUserInputQuestionData(TypedDict):
+    id: str
+    header: str
+    question: str
+    options: list[RequestUserInputOptionData]
+    isOther: bool
+    isSecret: bool
+
+
+class ControlRequestUserInputRequestData(TypedDict):
+    subtype: Literal["request_user_input"]
+    tool_use_id: str
+    questions: list[RequestUserInputQuestionData]
+    isBlocking: bool
 
 
 class ControlProviderAuthPromptRequestData(TypedDict):
@@ -927,6 +1026,7 @@ class ControlRequestData(TypedDict):
     request: (
         ControlCanUseToolRequestData
         | ControlElicitationRequestData
+        | ControlRequestUserInputRequestData
         | ControlProviderAuthPromptRequestData
         | ControlConversationResourcesCleanupRequestData
     )
@@ -1174,6 +1274,9 @@ __all__ = [
     "ContextSideQueryResultData",
     "ControlCanUseToolRequestData",
     "ControlElicitationRequestData",
+    "RequestUserInputOptionData",
+    "RequestUserInputQuestionData",
+    "ControlRequestUserInputRequestData",
     "ControlProviderAuthPromptRequestData",
     "ControlRequestData",
     "ProviderOAuthAuthEventData",

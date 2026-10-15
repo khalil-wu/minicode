@@ -33,6 +33,7 @@ class ModelExecutionSnapshot:
             self.config, permissions=deepcopy(self.config.permissions),
             feature_flags=deepcopy(self.config.feature_flags),
             config_layer_stack=deepcopy(self.config.config_layer_stack),
+            model_request_policy=deepcopy(self.config.model_request_policy),
         ))
 
     @classmethod

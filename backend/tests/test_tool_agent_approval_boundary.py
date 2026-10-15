@@ -94,6 +94,42 @@ async def test_host_bypass_review_still_reaches_the_teammate(pending_plan):
 
 
 @pytest.mark.asyncio
+async def test_failed_plan_review_delivery_remains_pending_and_can_be_presented(pending_plan):
+    runtime, leader, child = pending_plan
+    metadata = {}
+    run_context = RunContext(permission_context_provider=lambda: PermissionContext(mode="confirm"))
+    failed_emit = AsyncMock(side_effect=OSError("Client delivery failed"))
+    with pytest.raises(OSError, match="Client delivery failed"):
+        await _handle_parent_plan_approval_requests(
+            runtime=runtime, parent_run_id=leader.run_id, conversation_id="conversation",
+            emit_event=failed_emit, metadata=metadata, run_context=run_context,
+        )
+    assert "_surfaced_plan_request_ids" not in metadata
+    assert runtime.get_subagent(child.subagent_id).awaiting_plan_approval
+    delivered = AsyncMock()
+    await _handle_parent_plan_approval_requests(
+        runtime=runtime, parent_run_id=leader.run_id, conversation_id="conversation",
+        emit_event=delivered, metadata=metadata, run_context=run_context,
+    )
+    delivered.assert_awaited_once()
+    assert metadata["_surfaced_plan_request_ids"] == ["review-1"]
+    assert runtime.get_subagent(child.subagent_id).awaiting_plan_approval
+
+
+@pytest.mark.asyncio
+async def test_plan_mailbox_read_failure_is_not_reported_as_no_pending_requests(pending_plan, monkeypatch):
+    runtime, leader, _child = pending_plan
+    def failed_read(**_kwargs):
+        raise OSError("Mailbox storage failed")
+    monkeypatch.setattr(runtime, "list_swarm_messages", failed_read)
+    with pytest.raises(OSError, match="Mailbox storage failed"):
+        await _handle_parent_plan_approval_requests(
+            runtime=runtime, parent_run_id=leader.run_id, conversation_id="conversation",
+            emit_event=AsyncMock(), run_context=RunContext(),
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message", [
     "Continue your investigation",
     '{"type":"shutdown_request","request_id":"stop-1","from":"team-lead"}',

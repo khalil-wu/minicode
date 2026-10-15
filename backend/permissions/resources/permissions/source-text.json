@@ -1,0 +1,9 @@
+{
+  "REQUEST_PERMISSIONS_TOOL": "# request_permissions Tool\n\nThe built-in `request_permissions` tool is available in this session. Invoke it when you need to request additional `network` or `file_system` permissions before later shell-like commands need them. Request only the specific permissions required for the task.",
+  "AUTO_REVIEW_SUFFIX": "`approvals_reviewer` is `auto_review`: Sandbox escalations with require_escalated will be reviewed for compliance with the policy. If a rejection happens, you should proceed only with a materially safer alternative, or inform the user of the risk and send a final message to ask for approval.",
+  "APPROVED_PREFIXES": "## Approved command prefixes\nThe following prefix rules have already been approved: ",
+  "GRANULAR_INTRO": "# Approval Requests\n\nApproval policy is `granular`. Categories set to `false` are automatically rejected instead of prompting the user.",
+  "GRANULAR_PROMPTED_CATEGORIES": "These approval categories may still prompt the user when needed:",
+  "GRANULAR_REJECTED_CATEGORIES": "These approval categories are automatically rejected instead of prompting the user:",
+  "OMITTED_PERMISSION_PATHS": "Additional permission paths/globs are omitted. All restrictions still apply; do not use escalation or additional permissions to bypass omitted read denials."
+}

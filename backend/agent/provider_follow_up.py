@@ -23,7 +23,8 @@ def retain_provider_follow_up(*, state: Any, stream_state: Any, stream_text: Any
         completed = stream_text.complete_active_agent_message(text, source="commentary", status="completed")
         if completed is not None:
             yield completed
-    append_assistant_history(context_builder, text, phase=stream_state.response_phase, provider_items=stream_state.response_items)
+    append_assistant_history(context_builder, text, phase=stream_state.response_phase,
+                             provider_items=stream_state.response_items, answer_source="retained")
     state.mark_transition("provider_follow_up")
     stream_text.reset_for_retry()
     stream_text.saw_final_answer_phase = False

@@ -5,6 +5,7 @@ from backend.agent.loop_process_events import model_process_text_event
 from backend.services.subagent_service import (
     build_subagent_status_event,
     build_subagent_transcript_messages,
+    project_subagent_transcript_events,
 )
 
 
@@ -291,16 +292,18 @@ def test_subagent_transcript_coalesces_duplicate_tool_lifecycle_observations() -
 
 
 def test_subagent_transcript_projects_live_assistant_text_as_an_ordinary_stream() -> None:
-    messages = build_subagent_transcript_messages({"events": [
+    events = [
         {
             "event_type": "user_prompt",
             "event_id": "user-live",
+            "seq": 1,
             "ts_ms": 1,
             "payload": {"content": "实时汇报结果"},
         },
         {
             "event_type": "progress",
             "event_id": "answer-live-1",
+            "seq": 2,
             "ts_ms": 2,
             "payload": {
                 "kind": "assistant_message",
@@ -314,6 +317,7 @@ def test_subagent_transcript_projects_live_assistant_text_as_an_ordinary_stream(
         {
             "event_type": "progress",
             "event_id": "answer-live-2",
+            "seq": 3,
             "ts_ms": 3,
             "payload": {
                 "kind": "assistant_message",
@@ -324,7 +328,8 @@ def test_subagent_transcript_projects_live_assistant_text_as_an_ordinary_stream(
                 "transcript_only": True,
             },
         },
-    ]})
+    ]
+    messages = build_subagent_transcript_messages({"events": events})
 
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assistant = messages[1]
@@ -338,6 +343,15 @@ def test_subagent_transcript_projects_live_assistant_text_as_an_ordinary_stream(
         "status": "running",
         "is_streaming": True,
     }]
+    projected = project_subagent_transcript_events(events)
+    assert assistant["blocks"][0]["item_id"] == projected[-1]["payload"]["item_id"]
+    assert assistant["blocks"][0]["status"] == projected[-1]["payload"]["status"]
+    completed = build_subagent_transcript_messages({"events": [*events, {
+        "event_type": "terminal", "event_id": "terminal-live", "seq": 4, "ts_ms": 4,
+        "payload": {"status": "completed", "summary": "正在生成最终答复"},
+    }]})[-1]
+    assert completed["blocks"][0]["item_id"] == "answer-live"
+    assert completed["blocks"][0]["status"] == "completed"
 
 
 def test_synthetic_missing_tool_result_never_replays_as_success() -> None:

@@ -22,9 +22,9 @@ from backend.conversations.context_delta import apply_context_snapshot_delta, co
 from backend.conversations.projection_log import append_projection, read_projection
 from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
 from backend.config import DATA_ROOT
-from backend.encoding_repair import repair_mojibake_payload
 
 from .models import (
+    inherited_execution_cwd,
     DEFAULT_CONVERSATION_PERMISSION_MODE,
     DEFAULT_CONVERSATION_TYPE,
     ConversationRecord,
@@ -33,6 +33,7 @@ from .models import (
     normalize_memory_mode,
     normalize_conversation_type,
     normalize_permission_mode,
+    normalize_conversation_agent_mode,
     utc_now_iso,
 )
 from .public_projection import (
@@ -42,6 +43,8 @@ from .public_projection import (
     project_transcript_page,
     project_tool_window,
     project_tool_items,
+    merge_delegation_facts,
+    merge_message_delegations,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,15 @@ _CONVERSATION_ID_PATTERN = re.compile(
 )
 _STORAGE_MANIFEST_SCHEMA = "minicode.conversation.manifest"
 _STORAGE_MANIFEST_VERSION = 8
+
+
+def rebind_transcript_turn_diffs(messages: list[dict[str, Any]], conversation_id: str) -> None:
+    """A copied patch is retained by its new transcript, with its original turn evidence."""
+    for message in messages:
+        turn_diff = message.get("metadata", {}).get("turn_diff")
+        if turn_diff is not None:
+            turn_diff["thread_id"] = conversation_id
+            turn_diff["conversation_id"] = conversation_id
 
 
 class ConversationWriteConflict(RuntimeError):
@@ -85,6 +97,8 @@ class ConversationRepository:
         self._store_lock_path = self._base_dir / ".conversation-store.lock"
         self._store_revision_path = self._base_dir / ".conversation-store.revision"
         self._store_instance_path = self._base_dir / ".conversation-store.instance"
+        self._pinned_order_path = self._base_dir / ".pinned-thread-order.json"
+        self._sidebar_order_path = self._base_dir / ".sidebar-occurrence-order.json"
         self._store_file_lock = FileLock(self._store_lock_path, timeout=60)
         self._summary_index: dict[str, ConversationSummary] | None = None
         self._summary_index_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -103,16 +117,21 @@ class ConversationRepository:
         conversation_id: str | None = None,
         title: str | None = None,
         conversation_type: ConversationType | str = DEFAULT_CONVERSATION_TYPE,
+        thread_source: str = "user",
         memory_mode: str | None = None,
         memory_polluted: bool = False,
         memory_pollution_sources: list[str] | None = None,
         permission_mode: str = DEFAULT_CONVERSATION_PERMISSION_MODE,
+        agent_mode: str = "build",
         permission_deny_rules: list[str] | None = None,
         permission_overrides: dict[str, str] | None = None,
         summary: str = "",
         transcript: list[dict[str, Any]] | None = None,
         context_snapshot: dict[str, Any] | None = None,
         workspace_root: str = "",
+        execution_cwd: str = "",
+        projectless_base: str = "",
+        initial_prompt: str = "",
         git_branch: str = "",
         worktree_path: str = "",
         git_isolated: bool = False,
@@ -160,9 +179,10 @@ class ConversationRepository:
                 for owned_id in dict.fromkeys((candidate_id, command_conversation_id)):
                     existing = self._load_record(owned_id)
                     if existing is not None and existing.creation_command_id == creation_command_id:
-                        return existing
+                        if not reuse_existing:
+                            return existing
                     manifest = self._read_manifest(owned_id, log_errors=False)
-                    if manifest is not None and manifest.get("creation_command_id") == creation_command_id:
+                    if existing is None and manifest is not None and manifest.get("creation_command_id") == creation_command_id:
                         raise ConversationCreationUnavailableError("The conversation created by this command has been deleted")
             if reuse_existing:
                 if not requested_id or candidate_id != requested_id:
@@ -170,7 +190,8 @@ class ConversationRepository:
                 existing = self._load_record(requested_id)
                 if existing is not None:
                     if (existing.archived or existing.conversation_type != normalized_conversation_type
-                            or existing.workspace_root != workspace_root or existing.git_isolated != git_isolated):
+                            or existing.workspace_root != workspace_root or existing.git_isolated != git_isolated
+                            or existing.parent_conversation_id != parent_conversation_id):
                         raise ValueError("The existing conversation does not match the requested scope")
                     return existing
                 if self._manifest_path_for(requested_id).exists():
@@ -188,14 +209,26 @@ class ConversationRepository:
                     candidate_id = command_conversation_id
                 else:
                     candidate_id = f"conv_{uuid.uuid4().hex[:12]}"
+            projectless = None
+            if projectless_base and not workspace_root and not execution_cwd:
+                from backend.services.projectless_directory_service import create_projectless_directory
+
+                projectless = create_projectless_directory(projectless_base, initial_prompt)
+                execution_cwd = projectless.cwd
+            execution_cwd = execution_cwd or inherited_execution_cwd({
+                "workspace_root": workspace_root, "worktree_path": worktree_path,
+                "context_snapshot": context_snapshot or {},
+            })
             record = ConversationRecord(
                 id=candidate_id,
                 title=(title or "New chat").strip() or "New chat",
                 conversation_type=normalized_conversation_type,
+                thread_source=thread_source,
                 memory_mode=normalized_memory_mode,
                 memory_polluted=is_memory_polluted,
                 memory_pollution_sources=normalized_pollution_sources,
                 permission_mode=permission_mode,
+                agent_mode=normalize_conversation_agent_mode(agent_mode),
                 permission_deny_rules=copy.deepcopy(list(permission_deny_rules or [])),
                 permission_overrides=copy.deepcopy(dict(permission_overrides or {})),
                 summary=summary,
@@ -203,6 +236,9 @@ class ConversationRepository:
                 transcript=initial_transcript,
                 context_snapshot=copy.deepcopy(dict(context_snapshot or {})),
                 workspace_root=workspace_root,
+                execution_cwd=str(Path(execution_cwd).expanduser().resolve()) if execution_cwd else "",
+                projectless_output_dir=projectless.output_directory if projectless is not None else "",
+                projectless_browser_root=projectless.browser_root if projectless is not None else "",
                 git_branch=git_branch,
                 worktree_path=worktree_path,
                 git_isolated=git_isolated,
@@ -215,6 +251,7 @@ class ConversationRepository:
             )
             self._commit_record(record)
             self._cache_record(record)
+            self._prepend_sidebar_occurrence(record)
             return record
 
     def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
@@ -365,8 +402,10 @@ class ConversationRepository:
                 return None
             clone = copy.deepcopy(source)
             clone.id = f"conv_{uuid.uuid4().hex[:12]}"
+            rebind_transcript_turn_diffs(clone.transcript, clone.id)
             clone.creation_command_id = ""
             clone.revision = 0
+            clone.agent_mode_revision = 0
             clone.created_at = utc_now_iso()
             clone.updated_at = clone.created_at
             clone.title = (title or f"{source.title} · 副本").strip()[:120] or "New chat"
@@ -402,7 +441,7 @@ class ConversationRepository:
                 _new_slug, copied_plan_path = copy_plan_for_fork(
                     source.context_snapshot,
                     clone.context_snapshot,
-                    clone.workspace_root or source.workspace_root or None,
+                    clone.execution_cwd or source.execution_cwd or None,
                 )
                 self._commit_record(clone)
             except Exception:
@@ -446,12 +485,13 @@ class ConversationRepository:
             if source.merged_into_conversation_id and source.merged_into_conversation_id != target.id:
                 return source, target, "already_merged_elsewhere"
 
-            source_messages = list(source.transcript or [])
-            target_messages = list(target.transcript or [])
+            source_messages = copy.deepcopy(source.transcript)
+            rebind_transcript_turn_diffs(source_messages, target.id)
+            target_messages = target.transcript
             parent_index = source.parent_message_index
             if parent_index is None:
-                parent_index = len(source_messages) - 1
-            prefix_length = max(0, min(len(source_messages), int(parent_index) + 1))
+                parent_index = -1
+            prefix_length = max(0, min(len(source_messages), parent_index + 1))
             prefix = source_messages[:prefix_length]
 
             if len(target_messages) == len(source_messages) and all(
@@ -469,7 +509,7 @@ class ConversationRepository:
             ):
                 return source, target, "target_diverged"
 
-            target.transcript = copy.deepcopy(source_messages)
+            target.transcript = source_messages
             target.message_count = len(target.transcript)
             target.context_snapshot = copy.deepcopy(source.context_snapshot)
             target.summary = source.summary
@@ -530,7 +570,7 @@ class ConversationRepository:
         for item_id in ids:
             record = self.get_conversation(item_id)
             if record is not None:
-                records.append(project_public_conversation(record))
+                records.append(project_public_conversation(record, defer_turn_diff=False))
         return {
             "schema": "minicode.conversation.export",
             "version": 1,
@@ -871,9 +911,15 @@ class ConversationRepository:
                         -1,
                     )
                 if replace_index >= 0:
+                    previous_notification = record.transcript[replace_index].get("metadata", {}).get("completion_notification")
+                    merge_message_delegations(record.transcript[replace_index], next_message)
                     record.transcript[replace_index] = next_message
                 else:
+                    previous_notification = None
                     record.transcript.append(next_message)
+                notification = next_message.get("metadata", {}).get("completion_notification")
+                if not partial and notification is not None and previous_notification is None:
+                    record.has_unread_turn |= notification["should_mark_unread"]
             record.context_snapshot = (
                 apply_context_snapshot_delta(record.context_snapshot, context_delta)
                 if context_delta is not None
@@ -890,21 +936,50 @@ class ConversationRepository:
             self._cache_record(record, copy_record=return_record)
             return record if return_record else record.to_summary()
 
+    def update_tool_delegation(
+        self, conversation_id: str, *, message_id: str, tool_call_id: str, delegation: dict[str, Any],
+    ) -> bool:
+        """Publish a real detached-child lifecycle to its original parent item."""
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return False
+            message = next((item for item in record.transcript if item.get("id") == message_id), None)
+            if message is None:
+                return False
+            records = [*message.get("tool_calls", []), *(block["record"] for block in message.get("blocks", []) if block.get("type") == "tool_call")]
+            changed = False
+            for tool in records:
+                if tool["id"] == tool_call_id:
+                    tool["delegations"] = merge_delegation_facts(tool.get("delegations", []), [delegation])
+                    changed = True
+            if not changed:
+                return False
+            record.updated_at = utc_now_iso()
+            self._commit_record(record)
+            self._cache_record(record)
+            return True
+
     def commit_turn_admission(
         self,
         conversation_id: str,
         *,
         user_message: dict[str, Any],
         context_snapshot: dict[str, Any],
+        assistant_message: dict[str, Any] | None = None,
         expected_revision: int | None = None,
+        rewind_projection: dict[str, Any] | None = None,
+        agent_mode: str | None = None,
+        expected_agent_mode_revision: int | None = None,
     ) -> ConversationRecord | None:
-        """Atomically admit one canonical user item and its typed context."""
+        """Admit one user and, for steer, its ordered physical-turn boundary."""
 
         with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
             next_message = project_public_transcript_message(user_message)
+            next_assistant = project_public_transcript_message(assistant_message) if assistant_message is not None else None
             message_id = str(next_message.get("id") or "").strip()
             current_revision = max(0, int(getattr(record, "revision", 0) or 0))
             if expected_revision is not None and current_revision != expected_revision:
@@ -920,6 +995,7 @@ class ConversationRepository:
                 if (
                     existing_message == next_message
                     and record.context_snapshot == context_snapshot
+                    and (next_assistant is None or next_assistant in record.transcript)
                 ):
                     return record
                 raise ConversationWriteConflict(
@@ -928,6 +1004,23 @@ class ConversationRepository:
                     current=current_revision,
                 )
 
+            if rewind_projection is not None:
+                record.transcript = project_public_transcript(rewind_projection["transcript"])
+                record.summary = rewind_projection["summary"]
+                record.memory_pollution_sources = list(rewind_projection["memory_pollution_sources"])
+                record.memory_polluted = bool(record.memory_pollution_sources)
+                if record.memory_polluted:
+                    record.memory_mode = "polluted"
+                elif record.memory_mode == "polluted":
+                    record.memory_mode = "enabled"
+            if next_assistant is not None:
+                assistant_index = next((index for index, item in enumerate(record.transcript)
+                    if item.get("id") == next_assistant["id"]), -1)
+                if assistant_index >= 0:
+                    merge_message_delegations(record.transcript[assistant_index], next_assistant)
+                    record.transcript[assistant_index] = next_assistant
+                else:
+                    record.transcript.append(next_assistant)
             replace_index = next(
                 (
                     index
@@ -943,6 +1036,10 @@ class ConversationRepository:
             else:
                 record.transcript.append(next_message)
             record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
+            if (agent_mode is not None and expected_agent_mode_revision is not None
+                    and record.agent_mode_revision == expected_agent_mode_revision):
+                record.agent_mode = normalize_conversation_agent_mode(agent_mode)
+                record.agent_mode_revision += 1
             record.message_count = len(record.transcript)
             if record.title == "New chat":
                 record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
@@ -1202,13 +1299,37 @@ class ConversationRepository:
         git_branch: str = "",
         worktree_path: str = "",
         git_isolated: bool | None = None,
+        execution_cwd: str | None = None,
     ) -> ConversationRecord | None:
         def mutate(record: ConversationRecord) -> None:
+            from backend.conversations.sidebar_order import conversation_project_key
+
+            previous_project = conversation_project_key(record)
+            previous_directory = record.worktree_path or record.workspace_root
+            if execution_cwd is not None:
+                record.execution_cwd = str(Path(execution_cwd).expanduser().resolve())
+            elif not record.execution_cwd:
+                record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve()) if worktree_path or workspace_root else record.execution_cwd
+            elif previous_directory and (worktree_path or workspace_root) and previous_directory != (worktree_path or workspace_root):
+                current_directory = Path(record.execution_cwd).expanduser().resolve()
+                previous_root = Path(previous_directory).expanduser().resolve()
+                if current_directory.is_relative_to(previous_root):
+                    record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve() / current_directory.relative_to(previous_root))
             record.workspace_root = workspace_root
             record.git_branch = git_branch
             record.worktree_path = worktree_path
             if git_isolated is not None:
                 record.git_isolated = bool(git_isolated)
+            if conversation_project_key(record) != previous_project:
+                self._prepend_sidebar_occurrence(record, recent=False)
+
+        return self._mutate_meta(conversation_id, mutate)
+
+    def bind_execution_cwd(self, conversation_id: str, actual_cwd: str) -> ConversationRecord | None:
+        """Fix an old unbound thread to the directory of its next real operation."""
+        def mutate(record: ConversationRecord) -> None:
+            if not record.execution_cwd:
+                record.execution_cwd = str(Path(actual_cwd).expanduser().resolve())
 
         return self._mutate_meta(conversation_id, mutate)
 
@@ -1251,13 +1372,222 @@ class ConversationRepository:
             lambda record: setattr(record, "goal", dict(goal)),
         )
 
+    def update_agent_mode(
+        self, conversation_id: str, agent_mode: str, *, expected_agent_mode_revision: int | None = None,
+    ) -> ConversationRecord | None:
+        mode = normalize_conversation_agent_mode(agent_mode)
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id, copy_history=False)
+            if record is None:
+                return None
+            if expected_agent_mode_revision is not None and record.agent_mode_revision != expected_agent_mode_revision:
+                return record
+            record.agent_mode = mode
+            # Even selecting the same value is a newer explicit configuration.
+            # Progress/transcript revisions do not advance this identity.
+            record.agent_mode_revision += 1
+            record.updated_at = utc_now_iso()
+            record.message_count = len(record.transcript)
+            self._commit_metadata(record)
+            self._cache_record(record)
+            return record
+
+    def set_conversation_pinned(self, conversation_id: str, pinned: bool) -> ConversationRecord | None:
+        def mutate(record: ConversationRecord) -> bool:
+            if record.pinned == pinned:
+                return False
+            self._update_pinned_order_membership(record.id, pinned)
+            record.pinned = pinned
+            record.pinned_at = utc_now_iso() if pinned else ""
+            return True
+        return self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+
+    def _read_pinned_order(self) -> dict[str, Any]:
+        if not self._pinned_order_path.exists():
+            return {"thread_ids": [], "sort_mode": "manual"}
+        return json.loads(self._pinned_order_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _ordered_pinned_ids(conversations: list[ConversationSummary], saved_ids: list[str]) -> list[str]:
+        pinned = sorted((conversation for conversation in conversations if conversation.pinned and conversation.conversation_type == "main"),
+                        key=lambda conversation: (conversation.pinned_at, conversation.id))
+        current = {conversation.id for conversation in pinned}
+        return [identifier for identifier in saved_ids if identifier in current] + [conversation.id for conversation in pinned if conversation.id not in saved_ids]
+
+    def get_pinned_order(self, conversations: list[ConversationSummary]) -> dict[str, Any]:
+        with file_mutation_locks([self._pinned_order_path]):
+            saved = self._read_pinned_order()
+            return {"pinned_conversation_ids": self._ordered_pinned_ids(conversations, saved["thread_ids"]),
+                    "pinned_sort_mode": saved["sort_mode"]}
+
+    def _update_pinned_order_membership(self, conversation_id: str, pinned: bool) -> None:
+        with file_mutation_locks([self._pinned_order_path]):
+            saved = self._read_pinned_order()
+            identifiers = self._ordered_pinned_ids(self.list_conversations(), saved["thread_ids"])
+            identifiers = [identifier for identifier in identifiers if identifier != conversation_id]
+            if pinned:
+                identifiers.append(conversation_id)
+            atomic_write_text(self._pinned_order_path, json.dumps({**saved, "thread_ids": identifiers}, ensure_ascii=False), encoding="utf-8")
+
+    def reorder_pinned_conversations(self, moved_id: str, before_id: str | None, visible_ids: list[str]) -> list[str]:
+        # Source _P / WNi replaces the visible slots; a hidden pinned thread
+        # keeps its original place instead of being appended or dropped.
+        with file_mutation_locks([self._pinned_order_path]):
+            saved = self._read_pinned_order()
+            current = self._ordered_pinned_ids(self.list_conversations(), saved["thread_ids"])
+            visible = set(visible_ids)
+            if len(visible) != len(visible_ids) or not visible.issubset(current) or moved_id not in visible or before_id is not None and before_id not in visible:
+                raise ValueError("The pinned threads changed before this reorder")
+            if before_id == moved_id:
+                return current
+            next_visible = [identifier for identifier in visible_ids if identifier != moved_id]
+            position = len(next_visible) if before_id is None else next_visible.index(before_id)
+            next_visible.insert(position, moved_id)
+            replacements = iter(next_visible)
+            ordered = [next(replacements) if identifier in visible else identifier for identifier in current]
+            if ordered != current or saved["sort_mode"] != "manual":
+                atomic_write_text(self._pinned_order_path, json.dumps({"thread_ids": ordered, "sort_mode": "manual"}, ensure_ascii=False), encoding="utf-8")
+                self._advance_store_revision_unlocked()
+            return ordered
+
+    def _read_sidebar_order(self) -> dict[str, Any]:
+        from backend.conversations.sidebar_order import empty_sidebar_order
+
+        if not self._sidebar_order_path.exists():
+            return empty_sidebar_order()
+        return json.loads(self._sidebar_order_path.read_text(encoding="utf-8"))
+
+    def _write_sidebar_order(self, state: dict[str, Any], *, advance_inventory: bool = True) -> None:
+        # Callers own the repository store lock, including the membership they
+        # used for this change. Sorting never rewrites conversation generations.
+        state = {**state, "revision": state["revision"] + 1}
+        atomic_write_text(self._sidebar_order_path, json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        if advance_inventory:
+            self._advance_store_revision_unlocked()
+
+    def get_sidebar_order(self, conversations: list[ConversationSummary]) -> dict[str, Any]:
+        from backend.conversations.sidebar_order import thread_orders
+
+        with self._store_lock():
+            state = self._read_sidebar_order()
+            recent, projects = thread_orders(conversations, state)
+            return {"sidebar_order": {**state, "recent_thread_ids": recent, "project_thread_orders": projects}}
+
+    def set_sidebar_sort_mode(self, mode: str, project_seeds: dict[str, list[str]]) -> None:
+        from backend.conversations.sidebar_order import conversation_project_key, project_key, thread_orders
+
+        if mode not in {"manual", "updated_at"}:
+            raise ValueError("Sidebar sort mode must be manual or updated_at")
+        with self._store_lock():
+            state = self._read_sidebar_order()
+            if state["sort_mode"] == mode:
+                return
+            summaries = self._list_conversations_unlocked()
+            by_id = {item.id: item for item in summaries if item.conversation_type == "main"}
+            orders = dict(state["project_thread_orders"])
+            if mode == "manual":
+                for raw_project, identifiers in project_seeds.items():
+                    key = project_key(raw_project)
+                    if len(set(identifiers)) != len(identifiers) or any(
+                        identifier not in by_id or conversation_project_key(by_id[identifier]) != key for identifier in identifiers
+                    ):
+                        raise ValueError("The project chats changed before manual sorting was selected")
+                    # Source qoo -> Joo/sAr seeds visible projects once and
+                    # restores an existing manual order on later mode changes.
+                    if key not in orders:
+                        orders[key] = identifiers
+                recent, _ = thread_orders(summaries, state)
+                state = {**state, "recent_thread_ids": recent, "project_thread_orders": orders}
+            self._write_sidebar_order({**state, "sort_mode": mode})
+
+    def reorder_sidebar_threads(self, project_id: str | None, moved_id: str, before_id: str | None, visible_ids: list[str]) -> None:
+        from backend.conversations.sidebar_order import conversation_project_key, project_key, replace_visible_slots, thread_orders
+
+        with self._store_lock():
+            state = self._read_sidebar_order()
+            if state["sort_mode"] != "manual":
+                raise ValueError("Select manual sidebar sorting before reordering chats")
+            summaries = self._list_conversations_unlocked()
+            recent, projects = thread_orders(summaries, state)
+            key = project_key(project_id) if project_id is not None else None
+            eligible = {item.id for item in summaries if item.conversation_type == "main" and not item.archived and not item.pinned
+                        and (key is None or conversation_project_key(item) == key)}
+            if not set(visible_ids).issubset(eligible):
+                raise ValueError("The project chats changed before this reorder")
+            current = recent if key is None else projects.get(key, [])
+            ordered = replace_visible_slots(current, visible_ids, moved_id, before_id)
+            if ordered == current:
+                return
+            if key is None:
+                state = {**state, "recent_thread_ids": ordered}
+            else:
+                state = {**state, "project_thread_orders": {**state["project_thread_orders"], key: ordered}}
+            self._write_sidebar_order(state)
+
+    def reorder_sidebar_projects(self, moved_id: str, before_id: str | None, visible_ids: list[str], opened_ids: list[str]) -> None:
+        from backend.conversations.sidebar_order import project_key, replace_visible_slots
+
+        with self._store_lock():
+            state = self._read_sidebar_order()
+            opened = [project_key(identifier) for identifier in opened_ids]
+            visible = [project_key(identifier) for identifier in visible_ids]
+            if not set(visible).issubset(opened):
+                raise ValueError("The projects changed before this reorder")
+            # Source Ylr keeps saved slots outside the currently shown groups.
+            current = state["project_order"] + [identifier for identifier in opened if identifier not in state["project_order"]]
+            ordered = replace_visible_slots(current, visible, project_key(moved_id), project_key(before_id) if before_id is not None else None)
+            if ordered != current:
+                self._write_sidebar_order({**state, "project_order": ordered})
+
+    def _prepend_sidebar_occurrence(self, record: ConversationRecord, *, recent: bool = True) -> None:
+        from backend.conversations.sidebar_order import conversation_project_key
+
+        if record.conversation_type != "main":
+            return
+        state = self._read_sidebar_order()
+        if state["sort_mode"] != "manual":
+            return
+        key = conversation_project_key(record)
+        if key:
+            identifiers = state["project_thread_orders"].get(key, [])
+            state = {**state, "project_thread_orders": {**state["project_thread_orders"],
+                key: [record.id, *[identifier for identifier in identifiers if identifier != record.id]]}}
+        if recent:
+            state = {**state, "recent_thread_ids": [record.id, *[identifier for identifier in state["recent_thread_ids"] if identifier != record.id]]}
+        self._write_sidebar_order(state, advance_inventory=False)
+
+    def set_conversation_read_state(self, conversation_id: str, has_unread_turn: bool) -> ConversationRecord | None:
+        def mutate(record: ConversationRecord) -> bool:
+            if record.has_unread_turn == has_unread_turn:
+                return False
+            record.has_unread_turn = has_unread_turn
+            return True
+        return self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+
+    def set_conversation_project(self, conversation_id: str, project_id: str) -> ConversationRecord | None:
+        # Codex thread/metadata/update assigns a project independently of cwd.
+        # None retains the existing inferred grouping; "" explicitly clears it.
+        def mutate(record: ConversationRecord) -> bool:
+            if record.project_id == project_id and not record.pinned:
+                return False
+            if record.pinned:
+                self._update_pinned_order_membership(record.id, False)
+            record.project_id = project_id
+            record.pinned = False
+            record.pinned_at = ""
+            self._prepend_sidebar_occurrence(record, recent=False)
+            return True
+        return self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+
     def rename_conversation(
         self, conversation_id: str, title: str
     ) -> ConversationRecord | None:
-        cleaned = title.strip() or "New chat"
+        cleaned = title.strip()
+        if not cleaned:
+            raise ValueError("Conversation name must not be empty")
         return self._mutate_meta(
             conversation_id,
-            lambda record: setattr(record, "title", cleaned[:120]),
+            lambda record: setattr(record, "title", cleaned),
         )
 
     def set_archived(
@@ -1297,6 +1627,7 @@ class ConversationRepository:
     def update_model_selection(
         self, conversation_id: str, *, provider: str, model: str,
         reasoning_effort: str | None = None,
+        selection_mode: str | None = None,
         only_if_unset: bool = False,
     ) -> ConversationRecord | None:
         with self._store_lock(conversation_id):
@@ -1308,6 +1639,8 @@ class ConversationRepository:
             selection = {**record.model_selection, "provider": provider, "model": model}
             if reasoning_effort is not None:
                 selection["reasoning_effort"] = reasoning_effort
+            if selection_mode is not None:
+                selection["selection_mode"] = selection_mode
             if record.model_selection == selection:
                 return record
             record.model_selection = selection
@@ -1336,6 +1669,8 @@ class ConversationRepository:
         state: str,
         summary: str,
         expected_revision: int | None = None,
+        compaction_item: dict[str, Any] | None = None,
+        operation_turn_id: str = "",
     ) -> ConversationRecord | None:
         """Commit the compacted context and its metadata as one generation."""
         with self._store_lock(conversation_id):
@@ -1352,6 +1687,13 @@ class ConversationRepository:
             record.context_snapshot = copy.deepcopy(dict(context_snapshot))
             record.compaction_state = str(state)
             record.compaction_summary = str(summary)
+            if compaction_item is not None:
+                from backend.agent.turn_state import project_context_compaction_item
+                blocks: list[dict[str, Any]] = []
+                project_context_compaction_item(blocks, compaction_item)
+                record.transcript.append({"id": compaction_item["id"], "role": "system", "content": "",
+                    "timestamp": compaction_item["started_at"], "turn_id": operation_turn_id,
+                    "blocks": blocks})
             record.updated_at = utc_now_iso()
             self._commit_record(record)
             self._cache_record(record)
@@ -1420,14 +1762,17 @@ class ConversationRepository:
     def _mutate_meta(
         self,
         conversation_id: str,
-        mutate: Callable[[ConversationRecord], None],
+        mutate: Callable[[ConversationRecord], bool | None],
+        *, touch_updated_at: bool = True,
     ) -> ConversationRecord | None:
         with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id, copy_history=False)
             if record is None:
                 return None
-            mutate(record)
-            record.updated_at = utc_now_iso()
+            if mutate(record) is False:
+                return record
+            if touch_updated_at:
+                record.updated_at = utc_now_iso()
             record.message_count = len(record.transcript)
             self._commit_metadata(record)
             self._cache_record(record)
@@ -1824,7 +2169,8 @@ class ConversationRepository:
             (manifest_stat.st_mtime_ns, manifest_stat.st_size),
             manifest_payload,
         )
-        self._delete_legacy_files(record.id)
+        # Keep the original legacy bytes after migration. The manifest owns
+        # subsequent reads; an explicit conversation delete removes these files.
         self._cleanup_generations(
             record.id,
             keep={
@@ -1868,8 +2214,8 @@ class ConversationRepository:
             if not meta_path.exists() or not transcript_path.exists() or not snapshot_path.exists():
                 raise FileNotFoundError(f"generation {generation} is incomplete")
             meta_payload = self._read_generation_metadata(conversation_id, generation)
-            transcript = self._read_transcript_path(transcript_path, strict=True, repair_encoding=False)
-            snapshot = self._read_snapshot_path(snapshot_path, strict=True, repair_encoding=False)
+            transcript = self._read_transcript_path(transcript_path, strict=True)
+            snapshot = self._read_snapshot_path(snapshot_path, strict=True)
             if "message_count" in meta_payload and int(meta_payload["message_count"]) != len(transcript):
                 raise ValueError("generation message count mismatch")
             record = ConversationRecord.from_dict(
@@ -1896,7 +2242,7 @@ class ConversationRepository:
     def _read_generation_metadata(self, conversation_id: str, generation: int) -> dict[str, Any]:
         path = self._generation_paths(conversation_id, generation)[0]
         try:
-            value = repair_mojibake_payload(json.loads(self._safe_read_text(path)))
+            value = json.loads(self._safe_read_text(path))
             if not isinstance(value, dict) or value.get("id") != conversation_id:
                 raise ValueError("generation metadata owner mismatch")
             return value
@@ -2105,9 +2451,7 @@ class ConversationRepository:
         meta_path = self._meta_path_for(conversation_id)
         if meta_path.exists():
             try:
-                meta_payload = repair_mojibake_payload(
-                    json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
-                )
+                meta_payload = json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
                 if not isinstance(meta_payload, dict):
                     raise ValueError("legacy meta must be an object")
                 transcript_path = self._transcript_path_for(conversation_id)
@@ -2115,12 +2459,10 @@ class ConversationRepository:
                 transcript = self._read_transcript_path(
                     transcript_path,
                     strict=transcript_path.exists(),
-                    repair_encoding=meta_payload.get("encoding_version") != "utf-8-v1",
                 )
                 snapshot = self._read_snapshot_path(
                     snapshot_path,
                     strict=snapshot_path.exists(),
-                    repair_encoding=meta_payload.get("encoding_version") != "utf-8-v1",
                 )
 
                 if not transcript and snapshot.get("history"):
@@ -2140,6 +2482,8 @@ class ConversationRepository:
                         for key in ("tool_calls", "name", "tool_call_id"):
                             if msg.get(key):
                                 rec_msg[key] = msg[key]
+                        if role == "assistant" and msg.get("answer_source"):
+                            rec_msg["blocks"] = [{"type": "text", "content": msg.get("content", ""), "source": msg["answer_source"]}]
                         reconstructed.append(rec_msg)
                     transcript = reconstructed
 
@@ -2161,9 +2505,7 @@ class ConversationRepository:
         if not legacy_path.exists():
             return None
         try:
-            payload = repair_mojibake_payload(
-                json.loads(self._safe_read_text(legacy_path, encoding="utf-8"))
-            )
+            payload = json.loads(self._safe_read_text(legacy_path, encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("legacy conversation must be an object")
             payload["transcript"] = _normalize_loaded_transcript(
@@ -2197,7 +2539,7 @@ class ConversationRepository:
         meta_path = self._meta_path_for(conversation_id)
         if meta_path.exists():
             try:
-                payload = repair_mojibake_payload(json.loads(self._safe_read_text(meta_path, encoding="utf-8")))
+                payload = json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
                 return ConversationSummary.from_dict(payload)
             except Exception as e:
                 logger.error("Failed to load summary for %s: %s", conversation_id, e)
@@ -2221,7 +2563,6 @@ class ConversationRepository:
         path: Path,
         *,
         strict: bool,
-        repair_encoding: bool = True,
     ) -> list[dict[str, Any]]:
         if not path.exists():
             if strict:
@@ -2241,7 +2582,7 @@ class ConversationRepository:
                 continue
             try:
                 message = json.loads(stripped)
-                transcript.append(repair_mojibake_payload(message) if repair_encoding else message)
+                transcript.append(message)
             except (json.JSONDecodeError, TypeError) as exc:
                 if strict:
                     raise ValueError(f"malformed transcript line {line_number}") from exc
@@ -2259,7 +2600,7 @@ class ConversationRepository:
             strict=False,
         )
 
-    def _read_snapshot_path(self, path: Path, *, strict: bool, repair_encoding: bool = True) -> dict[str, Any]:
+    def _read_snapshot_path(self, path: Path, *, strict: bool) -> dict[str, Any]:
         if not path.exists():
             if strict:
                 raise FileNotFoundError(path)
@@ -2267,8 +2608,6 @@ class ConversationRepository:
         try:
             content = self._safe_read_text(path, encoding="utf-8")
             payload = json.loads(content)
-            if repair_encoding:
-                payload = repair_mojibake_payload(payload)
             if not isinstance(payload, dict):
                 raise ValueError("snapshot must be an object")
             return dict(payload)
@@ -2277,20 +2616,6 @@ class ConversationRepository:
                 raise
             logger.error("Failed to read snapshot %s", path, exc_info=True)
             return {}
-
-    def _delete_legacy_files(self, conversation_id: str) -> None:
-        for legacy_path in (
-            self._meta_path_for(conversation_id),
-            self._transcript_path_for(conversation_id),
-            self._snapshot_path_for(conversation_id),
-            self._legacy_path_for(conversation_id),
-        ):
-            if not legacy_path.exists():
-                continue
-            try:
-                legacy_path.unlink()
-            except OSError as exc:
-                logger.warning("Failed to delete legacy file %s: %s", legacy_path, exc)
 
     def _safe_id(self, conversation_id: str) -> str:
         """Validate conversation_id to prevent path traversal.

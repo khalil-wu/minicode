@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ServerEvent } from "../protocol/events";

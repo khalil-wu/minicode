@@ -146,14 +146,14 @@ it("cannot open a captured turn review after the active conversation changes", (
 });
 
 it("preserves renamed source identity from actual Git patch metadata", () => {
-  useAppStore.setState({ gitChanges: { workingTree: [], staged: [], untracked: [], loading: true } });
-  handleDiffEvent({ type: "diff.git_working_tree", conversation_id: "receipt-owner", workspace_root: "C:/receipt-owner", files: [{ path: "new.ts", patch: "diff --git a/old.ts b/new.ts\nsimilarity index 100%\nrename from old.ts\nrename to new.ts\n", additions: 0, deletions: 0 }] });
+  useAppStore.setState({ gitChanges: { workingTree: [], staged: [], untracked: [], loading: true, workingTreeRequestId: "rename-read" } });
+  handleDiffEvent({ type: "diff.git_working_tree", conversation_id: "receipt-owner", workspace_root: "C:/receipt-owner", request_id: "rename-read", files: [{ path: "new.ts", patch: "diff --git a/old.ts b/new.ts\nsimilarity index 100%\nrename from old.ts\nrename to new.ts\n", additions: 0, deletions: 0 }] });
   expect(useAppStore.getState().gitChanges.workingTree[0]).toMatchObject({ path: "new.ts", oldPath: "old.ts" });
 });
 
 it("marks elided context and never fabricates source coordinates for fragments", () => {
   const view = render(<InlineDiff patch={"@@ -1,8 +1,8 @@\n a\n b\n c\n-old\n+new\n d\n e\n f\n g"} contextLines={0} />);
-  expect([...view.container.querySelectorAll(".inline-diff-line-marker")].map((node) => node.textContent)).toEqual([" …", " …"]);
+  expect([...view.container.querySelectorAll(".inline-diff-context-toggle")].map((node) => node.textContent)).toEqual(["3 行未修改", "4 行未修改"]);
   view.rerender(<InlineDiff patch={"-old\n+new"} />);
   expect([...view.container.querySelectorAll(".inline-diff-number")].map((node) => node.textContent)).toEqual(["", ""]);
 });

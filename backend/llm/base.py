@@ -37,6 +37,7 @@ from backend.llm.errors import (
     retry_after_seconds,
 )
 from backend.llm.provider_contracts import ReasoningPolicy
+from backend.llm.model_request_policy import ModelRequestPolicy
 from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ _SENSITIVE_REQUEST_METADATA_KEY_RE = re.compile(
 _REQUEST_METADATA_MAX_PAIRS = 16
 _REQUEST_METADATA_MAX_VALUE_CHARS = 512
 _LOCAL_REQUEST_METADATA_KEYS = {
+    "_source_responses_metadata",
+    "internal_session_source",
+    "parent_response_id",
     "prompt_cache_skip_write",
     # Prompt-cache fork fields are fixed, hash-only diagnostics produced by
     # the loop. They must survive the general 16-pair trace budget even when
@@ -403,6 +407,9 @@ class ToolCallEvent:
     # one immutable-by-convention record instead of attaching a private
     # attribute dynamically.
     prepare_arguments_error: str = ""
+    native_type: str = ""
+    native_namespace: str = ""
+    native_name: str = ""
 
 
 @dataclass
@@ -554,6 +561,9 @@ class SideQueryOptions:
     # smaller, operation-specific budget without nesting another retry policy.
     max_retries: int | None = None
     query_source: str = ""
+    source_responses_metadata: Mapping[str, Any] | None = None
+    source_window_id: str | None = None
+    source_subagent_header: str | None = None
 
 
 @dataclass(slots=True)
@@ -580,7 +590,16 @@ class LLMSideCallContext:
     turn: LLMTurnContext | None = None
 
     def request_metadata(self) -> dict[str, Any]:
-        return self.turn.request_metadata() if self.turn is not None else {}
+        metadata = self.turn.request_metadata() if self.turn is not None else {}
+        if self.options.source_responses_metadata is not None:
+            metadata.update({
+                "session_id": self.options.session_id,
+                "thread_id": self.options.thread_id,
+                "turn_id": self.options.turn_id,
+                "query_source": self.options.query_source,
+                "_source_responses_metadata": dict(self.options.source_responses_metadata),
+            })
+        return metadata
 
 
 @dataclass
@@ -622,6 +641,7 @@ class StreamEvent:
     # Provider-declared text phase for TEXT_CHUNK events, e.g. "commentary" or
     # "final_answer" from the Responses API message item.
     phase: str = ""
+
     # Stable provider content identity. Codex carries item_id on every delta;
     # Pi carries contentIndex through start/delta/end.
     item_id: str = ""
@@ -665,10 +685,24 @@ class LLMMessage:
     # Other providers ignore this field.
     phase: str = ""
 
+    # Local provenance survives history/checkpoint reconstruction without
+    # changing the provider phase or its native replay items.
+    answer_source: str = ""
+
     # Provider-native Responses output items to round-trip on the next request.
     # This preserves opaque encrypted reasoning/function_call items across the
     # stateless Responses transcript replay and is never rendered in the UI.
     provider_items: list[dict[str, Any]] = field(default_factory=list)
+    # The native model body is projected and bounded on admission. Raw MCP
+    # CallToolResult lives only in ToolResult / the private execution record.
+    mcp_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
+    tool_search_output: list[dict[str, Any]] | None = field(default=None, repr=False)
+    # Source Code Mode uses an ordered, already bounded content-item body.
+    # Display receipts never replace this provider-visible projection.
+    code_mode_output: list[dict[str, Any]] | None = field(default=None, repr=False)
+    history_notes_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
+    private_model_only: bool = False
+    input_origin: str = ""
 
     # user 角色的图片附件（多模态输入）
     # 每项: {"media_type": "image/png", "data": "<base64>"}
@@ -733,7 +767,7 @@ class LLMMessage:
                 parts.append(
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                        "image_url": {"url": f"data:{media_type};base64,{data}", **({"detail": img["detail"]} if img.get("detail") else {})},
                     }
                 )
             if parts:
@@ -741,6 +775,16 @@ class LLMMessage:
         else:
             msg["content"] = self.content or ""
 
+        if self.role == "tool" and self.mcp_output is not None:
+            from backend.mcp.result_projection import mcp_text_output
+
+            msg["content"] = mcp_text_output(self.mcp_output)
+        if self.role == "tool" and self.code_mode_output is not None:
+            msg["content"] = "\n".join(item["text"] for item in self.code_mode_output if item["type"] == "input_text")
+        if self.role == "tool" and self.history_notes_output is not None:
+            from backend.mcp.result_projection import mcp_text_output
+
+            msg["content"] = mcp_text_output(self.history_notes_output)
         if self.role == "assistant" and self.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -825,6 +869,18 @@ def _estimate_responses_window_tokens(items: list[dict[str, Any]]) -> int:
 
 
 def estimate_llm_message_tokens(message: LLMMessage, content: Any | None = None) -> int:
+    if message.history_notes_output is not None:
+        from backend.mcp.result_projection import mcp_output_visible_bytes
+
+        return (mcp_output_visible_bytes(message.history_notes_output) + 3) // 4
+    if message.code_mode_output is not None:
+        from backend.mcp.result_projection import mcp_output_visible_bytes
+
+        return (mcp_output_visible_bytes(message.code_mode_output) + 3) // 4
+    if message.mcp_output is not None:
+        from backend.mcp.result_projection import mcp_output_visible_bytes
+
+        return (mcp_output_visible_bytes(message.mcp_output) + 3) // 4
     text = str(message.content if content is None else content)
     if message.tool_calls:
         text += "".join(call.name + _safe_json_dumps(call.arguments) for call in message.tool_calls)
@@ -1007,6 +1063,21 @@ class LLMAdapter(ABC):
         """Apply a canonical reasoning policy at the provider boundary."""
 
         self._reasoning_policy = policy
+
+    def model_request_policy(self) -> ModelRequestPolicy:
+        return getattr(self, "_model_request_policy", ModelRequestPolicy())
+
+    def apply_model_request_policy(self, policy: ModelRequestPolicy, *, service_tier_provider: Callable[[], str | None] | None = None) -> None:
+        """Bind model-owned settings to this adapter's real request boundary."""
+        self._model_request_policy = policy
+        self._root_service_tier_provider = service_tier_provider
+
+    def root_service_tier_provider(self) -> Callable[[], str | None] | None:
+        return getattr(self, "_root_service_tier_provider", None)
+
+    def current_service_tier(self) -> str | None:
+        provider = self.root_service_tier_provider()
+        return provider() if provider is not None else self.model_request_policy().service_tier
 
     def configured_small_fast_model_id(self) -> str:
         """Return the optional configured model for auxiliary operations."""

@@ -21,6 +21,20 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 const renderDelivery = () => render(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={() => {}} />);
 const expandPR = () => fireEvent.click(screen.getByText("创建草稿 PR", { selector: "summary" }));
 
+it("loads only while active and retains a hidden commit draft", async () => {
+  const { rerender } = render(<GitDelivery workspaceRoot="C:/project" active={false} stagedCount={2} onChanged={() => {}} />);
+  expect(fetch).not.toHaveBeenCalled();
+  rerender(<GitDelivery workspaceRoot="C:/project" active stagedCount={2} onChanged={() => {}} />);
+  await screen.findByText("连接 GitHub 后可创建草稿 PR。");
+  fireEvent.change(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "Keep the commit draft" } });
+  rerender(<GitDelivery workspaceRoot="C:/project" active={false} stagedCount={2} onChanged={() => {}} refreshKey={1} />);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("Keep the commit draft");
+  rerender(<GitDelivery workspaceRoot="C:/project" active stagedCount={2} onChanged={() => {}} refreshKey={1} />);
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("Keep the commit draft");
+});
+
 it("keeps local commits and push available while GitHub authorization gates draft PR", async () => {
   renderDelivery();
   await screen.findByText("连接 GitHub 后可创建草稿 PR。");

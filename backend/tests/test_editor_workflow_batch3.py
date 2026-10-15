@@ -28,23 +28,28 @@ async def test_bundled_python_uses_unsaved_documents_for_completion_navigation_d
     (tmp_path / "main.py").write_text("# disk content\n", encoding="utf-8")
     (tmp_path / "helper.py").write_text("# disk helper\n", encoding="utf-8")
     service = WorkspaceService(get_workspace_root=lambda: tmp_path)
+    revision = 0
 
     async def request(method, content, line=0, character=0):
+        nonlocal revision
+        revision += 1
         return (
             await editor_language_request(
                 service,
                 EditorLanguageRequest(
+                    window_owner_id="primary", window_instance_id="editor-python-instance", client_id="editor-python", snapshot_revision=revision,
                     method=method,
                     line=line,
                     character=character,
                     documents=[
-                        EditorDocument(path="main.py", content=content),
+                        EditorDocument(document_id="main-model", model_version=revision, path="main.py", content=content),
                         EditorDocument(
+                            document_id="helper-model", model_version=1,
                             path="helper.py",
                             content="def greeting() -> str:\n    return 'hello'\n",
                         ),
                     ],
-                ),
+                ), binding_token="editor-python-proof",
             )
         )["result"]
 
@@ -85,17 +90,21 @@ async def test_bundled_yaml_uses_local_schema_for_completion_and_diagnostics(tmp
     prefix = (
         "# yaml-language-server: $schema=" + (tmp_path / "schema.json").as_uri() + "\n"
     )
+    revision = 0
 
     async def request(method, content, line=0, character=0):
+        nonlocal revision
+        revision += 1
         return (
             await editor_language_request(
                 service,
                 EditorLanguageRequest(
+                    window_owner_id="primary", window_instance_id="editor-yaml-instance", client_id="editor-yaml", snapshot_revision=revision,
                     method=method,
                     line=line,
                     character=character,
-                    documents=[EditorDocument(path="config.yaml", content=content)],
-                ),
+                    documents=[EditorDocument(document_id="config-model", model_version=revision, path="config.yaml", content=content)],
+                ), binding_token="editor-yaml-proof",
             )
         )["result"]
 

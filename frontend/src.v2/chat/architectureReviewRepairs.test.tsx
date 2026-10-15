@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { useAppStore } from "../stores";
@@ -108,7 +108,7 @@ it("preserves rendered prose across resource updates and stream settlement", () 
   expect(view.container.querySelector("h2")).toBe(heading);
 });
 
-it("summarizes older failures while leaving running work visible", () => {
+it("retains all loaded failures and running work in the actual group", () => {
   const message = assistant();
   message.blocks = message.blocks!.filter((block) => block.type === "tool_call");
   for (const block of message.blocks) if (block.type === "tool_call") block.record.status = "failed";
@@ -116,8 +116,7 @@ it("summarizes older failures while leaving running work visible", () => {
   first.record.status = "running";
   const cells = projectMessagesToTurns([message], true)[0].committedCells;
   render(<AgentTimeline cells={cells} isRunning renderCell={({ key, cell }) => <div key={key} data-testid="cell">{cell.id}</div>} />);
-  expect(screen.getAllByTestId("cell")).toHaveLength(41);
+  expect(screen.getAllByTestId("cell")).toHaveLength(300);
   expect(screen.getByText("t0")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /显示更早的操作.*失败/ }));
-  expect(screen.getAllByTestId("cell")).toHaveLength(81);
+  expect(screen.queryByRole("button", { name: /显示更早的操作/ })).toBeNull();
 });

@@ -68,10 +68,20 @@ _MODEL_KNOWN_KEYS = frozenset(
         "contextWindow", "context_window", "maxContextWindow",
         "max_context_window", "maxTokens", "max_tokens", "headers",
         "supports_custom_tools", "supports_hosted_web_search", "model_instructions", "responses_websocket", "native_compaction",
-        "parallel_tool_calls",
+        "parallel_tool_calls", "comp_hash",
         "tool_mode",
+        "supports_experimental_context",
+        "truncation_policy", "supports_image_detail_original",
+        "supports_search_tool",
+        "source_model_metadata", "used_fallback_model_metadata",
     }
 )
+
+
+@dataclass(frozen=True)
+class ModelMetadataSource:
+    reference_commit: str
+    catalog_file: str
 
 
 @dataclass(frozen=True)
@@ -83,7 +93,9 @@ class ModelDefinition:
     base_url: str
     reasoning: bool = False
     thinking_level_map: Mapping[str, Any] | None = None
-    input: tuple[str, ...] = ("text",)
+    # No declaration is capability-unknown; only an explicit text-only list
+    # may suppress image input.
+    input: tuple[str, ...] = ()
     cost: Mapping[str, Any] = field(default_factory=dict)
     context_window: TokenNumber = 0
     context_window_source: str = ""
@@ -101,12 +113,41 @@ class ModelDefinition:
     supports_custom_tools: bool = False
     responses_websocket: bool = False
     native_compaction: bool | None = None
+    comp_hash: str | None = None
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
     tool_mode: str = ""
     supports_hosted_web_search: bool | None = None
+    supports_experimental_context: bool = False
+    truncation_policy: Mapping[str, Any] | None = None
+    supports_image_detail_original: bool = False
+    supports_search_tool: bool = False
+    # Host-owned catalog provenance. It is neither accepted from a model's
+    # extension dictionary nor projected back into that dictionary.
+    source_model_metadata: ModelMetadataSource | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.supports_experimental_context, bool):
+            raise ProviderRegistrationError("supports_experimental_context must be a boolean")
+        if self.extra.get("model_messages") is not None and not isinstance(self.extra["model_messages"], Mapping):
+            raise ProviderRegistrationError("model_messages must be an object")
+        object.__setattr__(self, "extra", deepcopy({key: value for key, value in self.extra.items()
+            if key not in {"source_model_metadata", "used_fallback_model_metadata"}}))
+        if self.truncation_policy is not None:
+            mode, limit = self.truncation_policy["mode"], self.truncation_policy["limit"]
+            if mode not in {"bytes", "tokens"} or type(limit) is not int or limit < 0:
+                raise ProviderRegistrationError("truncation_policy must contain a bytes/tokens mode and a nonnegative integer limit")
+            object.__setattr__(self, "truncation_policy", deepcopy(dict(self.truncation_policy)))
+        if not isinstance(self.supports_image_detail_original, bool):
+            raise ProviderRegistrationError("supports_image_detail_original must be a boolean")
+        if not isinstance(self.supports_search_tool, bool):
+            raise ProviderRegistrationError("supports_search_tool must be a boolean")
+
+    @property
+    def model_messages(self) -> Mapping[str, Any] | None:
+        return self.extra.get("model_messages")
 
     @property
     def model_id(self) -> str:
@@ -114,7 +155,7 @@ class ModelDefinition:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            **dict(self.extra), "provider": self.provider, "id": self.id,
+            **deepcopy(dict(self.extra)), "provider": self.provider, "id": self.id,
             "name": self.name, "api": self.api, "baseUrl": self.base_url,
             "reasoning": self.reasoning, "input": list(self.input),
             "cost": deepcopy(dict(self.cost)), "contextWindow": self.context_window,
@@ -132,12 +173,19 @@ class ModelDefinition:
             result["responses_websocket"] = True
         if self.native_compaction is not None:
             result["native_compaction"] = self.native_compaction
+        if self.comp_hash is not None:
+            result["comp_hash"] = self.comp_hash
         if self.model_instructions:
             result["model_instructions"] = self.model_instructions
         if self.parallel_tool_calls is not None:
             result["parallel_tool_calls"] = self.parallel_tool_calls
         if self.tool_mode:
             result["tool_mode"] = self.tool_mode
+        result["supports_experimental_context"] = self.supports_experimental_context
+        if self.truncation_policy is not None:
+            result["truncation_policy"] = deepcopy(dict(self.truncation_policy))
+        result["supports_image_detail_original"] = self.supports_image_detail_original
+        result["supports_search_tool"] = self.supports_search_tool
         return result
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -168,10 +216,30 @@ class ModelDefinition:
         result["supports_hosted_web_search"] = self.supports_hosted_web_search
         result["responses_websocket"] = self.responses_websocket
         result["native_compaction"] = self.native_compaction
+        result["comp_hash"] = self.comp_hash
         result["model_instructions"] = self.model_instructions
         result["parallel_tool_calls"] = self.parallel_tool_calls
         result["tool_mode"] = self.tool_mode
+        result["supports_experimental_context"] = self.supports_experimental_context
+        if self.truncation_policy is not None:
+            result["truncation_policy"] = deepcopy(dict(self.truncation_policy))
+        result["supports_image_detail_original"] = self.supports_image_detail_original
+        result["supports_search_tool"] = self.supports_search_tool
+        if self.model_messages is not None:
+            result["model_messages"] = deepcopy(dict(self.model_messages))
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class TokenBudgetAuthContext:
+    auth_mode: str | None = None
+    account_plan_type: str | None = None
+    supports_codex_backend_routes: bool = False
+    requires_openai_auth: bool = False
+    has_env_key: bool = False
+    has_experimental_bearer_token: bool = False
+    has_auth: bool = False
+    has_aws: bool = False
 
 
 @dataclass(frozen=True)
@@ -228,10 +296,12 @@ class ProviderAdapterSpec:
     supports_custom_tools: bool = False
     responses_websocket: bool = False
     native_compaction: bool | None = None
+    comp_hash: str | None = None
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
     tool_mode: str = ""
     supports_hosted_web_search: bool | None = None
+    supports_search_tool: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,7 +316,7 @@ class ReasoningPolicy:
 
 __all__ = [
     "ModelDefinition", "ProviderAdapterSpec", "ProviderDefinition",
-    "ReasoningPolicy",
+    "ReasoningPolicy", "TokenBudgetAuthContext",
     "ProviderRegistrationError", "TokenNumber", "MAX_SAFE_INTEGER", "normalize_model_limit",
     "UnsupportedProviderCapabilityError",
 ]

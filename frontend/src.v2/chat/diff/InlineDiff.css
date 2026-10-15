@@ -1,0 +1,61 @@
+.inline-diff .inline-diff-line {
+  border-left: 2px solid transparent;
+}
+
+.inline-diff .inline-diff-line-added {
+  border-left-color: var(--diff-added-foreground);
+  background: var(--diff-added-background);
+  color: var(--text-secondary);
+}
+
+.inline-diff .inline-diff-line-removed {
+  border-left-color: var(--diff-removed-foreground);
+  background: var(--diff-removed-background);
+  color: var(--text-secondary);
+}
+
+.inline-diff .inline-diff-line-added .inline-diff-marker {
+  color: var(--diff-added-foreground);
+}
+
+.inline-diff .inline-diff-line-removed .inline-diff-marker {
+  color: var(--diff-removed-foreground);
+}
+
+.inline-diff-context-toggle,
+.inline-diff-context-gap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  margin: 3px 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+}
+
+.inline-diff-context-toggle {
+  cursor: pointer;
+}
+
+.inline-diff-context-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.inline-diff-context-toggle svg {
+  flex: 0 0 auto;
+}
+
+.inline-diff-context-gap {
+  padding-left: 30px;
+}
+
+.inline-diff-file-title {
+  padding: 4px 8px;
+  color: var(--text-muted);
+}

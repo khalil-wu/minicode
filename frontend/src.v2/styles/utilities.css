@@ -396,6 +396,14 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
   pointer-events: none;
   transition: opacity var(--transition-fast);
 }
+
+.session-row-pin { display: inline-flex; opacity: 0; pointer-events: none; }
+.session-row-hover:hover .session-row-pin,
+.session-row-hover:focus-within .session-row-pin,
+.session-row-pin[data-pinned="true"] { opacity: 1; pointer-events: auto; }
+.mc-session-unread-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--text-primary); }
+.mc-sidebar-pinned, .mc-pinned-drag-overlay { --conversation-row-indent: 12px; }
+.mc-sidebar-pinned { padding-bottom: 8px; }
 .session-row-hover:hover .session-row-actions,
 .session-row-hover:focus-within .session-row-actions,
 .session-row-actions[data-open] {

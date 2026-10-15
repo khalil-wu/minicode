@@ -7,11 +7,14 @@ from types import SimpleNamespace
 from backend.agent.message import AgentEvent
 from backend.conversations.repository import ConversationRepository
 from backend.services import scheduled_task_runner as runner
+from backend.tasks.scheduler import ScheduledTaskRun
 
 
 class _Repository:
     def __init__(self, conversation=None) -> None:
         self.conversation = conversation
+        if conversation is not None:
+            conversation.thread_source = "user"
         self.created = []
         self.messages = []
         self.snapshots = []
@@ -27,6 +30,7 @@ class _Repository:
         conversation = SimpleNamespace(
             id="conv_scheduled",
             archived=False,
+            thread_source=kwargs["thread_source"],
             workspace_root=kwargs["workspace_root"],
             worktree_path="",
             git_isolated=False,
@@ -68,8 +72,10 @@ def _task(workspace: Path, **overrides):
         "conversation_id": "",
         "permission_mode": "auto_approve",
         "isolation": "workspace",
+        "notification_policy": None,
     }
     values.update(overrides)
+    values.setdefault("kind", "heartbeat" if values["conversation_id"] else "cron")
     return SimpleNamespace(**values)
 
 
@@ -78,7 +84,7 @@ def _bootstrap():
 
 
 def test_scheduled_runner_rejects_missing_workspace(tmp_path) -> None:
-    result = asyncio.run(runner.run_scheduled_task(_task(tmp_path / "missing"), SimpleNamespace(id="run_1"), bootstrap=_bootstrap()))
+    result = asyncio.run(runner.run_scheduled_task(_task(tmp_path / "missing"), ScheduledTaskRun(id="run_1"), bootstrap=_bootstrap()))
 
     assert result["status"] == "failed"
     assert "workspace is unavailable" in result["error"]
@@ -91,7 +97,7 @@ def test_scheduled_heartbeat_fails_closed_when_conversation_is_missing(monkeypat
 
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path, conversation_id="conv_missing"),
-        SimpleNamespace(id="run_2"),
+        ScheduledTaskRun(id="run_2"),
         bootstrap=_bootstrap(),
     ))
 
@@ -119,7 +125,7 @@ def test_scheduled_worktree_creation_is_fail_closed(monkeypatch, tmp_path) -> No
 
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path, isolation="worktree"),
-        SimpleNamespace(id="run_3"),
+        ScheduledTaskRun(id="run_3"),
         bootstrap=_bootstrap(),
     ))
 
@@ -160,7 +166,7 @@ def test_scheduled_runner_executes_in_managed_worktree(monkeypatch, tmp_path) ->
 
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path, isolation="worktree"),
-        SimpleNamespace(id="run_4"),
+        ScheduledTaskRun(id="run_4"),
         bootstrap=_bootstrap(),
         bind_conversation=lambda run_id, conversation_id: bindings.append((run_id, conversation_id)),
     ))
@@ -190,7 +196,7 @@ def test_scheduled_runner_persists_partial_status_reason_and_errors(monkeypatch,
 
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path, isolation="workspace"),
-        SimpleNamespace(id="run_partial"),
+        ScheduledTaskRun(id="run_partial"),
         bootstrap=_bootstrap(),
     ))
 
@@ -239,7 +245,7 @@ def test_scheduled_retry_uses_the_prior_run_conversation(monkeypatch, tmp_path) 
     monkeypatch.setattr(runner, "run_owned_rest_chat", fake_run_rest_chat)
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path),
-        SimpleNamespace(id="run_retry", conversation_id="conv_retry"),
+        ScheduledTaskRun(id="run_retry", conversation_id="conv_retry"),
         bootstrap=_bootstrap(),
     ))
 
@@ -271,7 +277,7 @@ def test_scheduled_terminal_message_and_context_survive_reopen_together(monkeypa
     monkeypatch.setattr(runner, "run_owned_rest_chat", fake_run_rest_chat)
     result = asyncio.run(runner.run_scheduled_task(
         _task(tmp_path, conversation_id=conversation.id),
-        SimpleNamespace(id="run_persisted"),
+        ScheduledTaskRun(id="run_persisted"),
         bootstrap=_bootstrap(),
     ))
 
@@ -303,7 +309,7 @@ def test_scheduled_runner_rejects_busy_conversation_before_side_effects(monkeypa
     try:
         result = asyncio.run(runner.run_scheduled_task(
             _task(tmp_path, conversation_id="conv_busy", isolation="worktree"),
-            SimpleNamespace(id="run_busy"),
+            ScheduledTaskRun(id="run_busy"),
             bootstrap=_bootstrap(),
         ))
     finally:

@@ -68,8 +68,13 @@ async def apply_stop_hook_policy(
         if subagent_id:
             prompt_context["subagent_stop_prevented_continuation"] = True
         return AcceptanceResult("accept", notice_events)
-    feedback = str(hook_result.feedback or hook_result.message or "").strip()
-    if not hook_result.blocked and not feedback:
+    feedback = str(hook_result.feedback or "").strip() or str(hook_result.message or "").strip()
+    if not feedback:
+        if hook_result.blocked:
+            notice_events += (AgentEvent(type="system_notice", data={
+                "content": f"{hook_event.value} hook 的继续指令为空，已忽略本次阻止。",
+                "level": "warning",
+            }),)
         return AcceptanceResult("accept", notice_events)
 
     # A blocking Stop hook starts another model turn in Claude Code. It is not
@@ -87,6 +92,7 @@ async def apply_stop_hook_policy(
         candidate_text,
         phase=provider_phase or "final_answer",
         provider_items=provider_items_for_final_answer(provider_items),
+        answer_source="retained",
     )
     context_builder.append_user(feedback)
     stream_text.reset_for_retry()

@@ -120,6 +120,11 @@ def conversation_workspace_path(conversation: Any) -> str:
     ).strip()
 
 
+def conversation_execution_path(conversation: Any) -> str:
+    """Resolve a task's fixed cwd independently of the project inventory."""
+    return str(getattr(conversation, "execution_cwd", "") or conversation_workspace_path(conversation)).strip()
+
+
 def workspace_matches_context(workspace_path: str, workspace_context: Any | None) -> bool:
     if workspace_context is None:
         return False
@@ -154,7 +159,7 @@ def record_recent_workspace_project(project_path: Path, metadata: Any) -> None:
 
     RecentProjectStore().add(
         path=str(project_path),
-        name=metadata.name,
+        name=project_path.name,
         project_type=metadata.project_type,
     )
 

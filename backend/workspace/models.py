@@ -60,6 +60,11 @@ class WorkspaceProjectIndexIssue(BaseModel):
 class WorkspaceProjectIndexResponse(BaseModel):
     workspace_root: str
     files: list[WorkspaceProjectIndexFile]
+    dependency_paths: list[str] | None = None
+    revision: int | None = None
+    index_instance_id: str | None = None
+    base_revision: int | None = None
+    removed_paths: list[str] = Field(default_factory=list)
     complete: bool
     issues: list[WorkspaceProjectIndexIssue]
 

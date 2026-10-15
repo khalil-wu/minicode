@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -27,17 +28,38 @@ from backend.workspace.service import WorkspaceService
 @pytest.mark.asyncio
 async def test_directory_changed_during_scan_is_visible_on_the_next_listing(tmp_path, monkeypatch):
     (tmp_path / "original.py").write_text("original", encoding="utf-8")
-    original_iterdir = Path.iterdir
+    original_scandir = os.scandir
+
+    class CapturedDirectoryScan:
+        def __init__(self, directory):
+            with original_scandir(directory) as scan:
+                self.entries = iter(list(scan))
+            self.directory = Path(directory)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.entries)
+
+        def close(self):
+            pass
 
     def enumerate_then_mutate(directory):
-        entries = list(original_iterdir(directory))
-        if directory == tmp_path:
+        captured = CapturedDirectoryScan(directory)
+        if Path(directory) == tmp_path:
             (tmp_path / "late.py").write_text("late", encoding="utf-8")
-        return iter(entries)
+        return captured
 
     context = ToolExecutionContext(permission=PermissionContext(mode="confirm"), workspace_root=tmp_path)
     with monkeypatch.context() as mutation:
-        mutation.setattr(Path, "iterdir", enumerate_then_mutate)
+        mutation.setattr(os, "scandir", enumerate_then_mutate)
         first = await ListFilesTool().execute({"path": "."}, context)
     second = await ListFilesTool().execute({"path": "."}, context)
     assert "late.py" not in first.content

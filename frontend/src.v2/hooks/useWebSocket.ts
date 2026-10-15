@@ -15,12 +15,14 @@ import {
   rejectClientCommandResult,
   rejectPendingPromptResponseResults,
   registerWebSocketSender,
+  notifyClientCommandReceived,
 } from "../protocol/ws-outbox";
 export { commandWithClientCommandId } from "../protocol/ws-outbox";
 import { dismissToast, pushToast } from "../overlays/ToastContainer";
 import { handleChatStreamEvent, resetStreamResumePages } from "../chat/chatStreamEvents";
 import { normalizeAgentErrorMessage } from "../chat/errorMessages";
 import { updateMessagesForConversation } from "../stores/shared-helpers";
+import { handleGuardianEvent } from "../chat/guardianEvents";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { handleControlEvent } from "../chat/controlEvents";
 import { handleSessionEvent } from "../chat/sessionEvents";
@@ -38,6 +40,8 @@ import { safeJsonParse } from "../lib/safe-parse";
 import { LS, readLS } from "../stores/shared-helpers";
 import { hasInterruptFence } from "../lib/interrupt-command";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
+import { latestProjectionCommandIds, rememberSentCommandProjection, isSupersededPendingProjectionCommand, isSupersededCommandProjection } from "../protocol/command-projection";
+export { isSupersededCommandProjection } from "../protocol/command-projection";
 
 // Transport policy follows MiniCode's WebSocket transport: reconnects are
 // bounded by a total budget, use bounded jitter, and heartbeat liveness is
@@ -155,12 +159,12 @@ export interface WebSocketHandle {
 
 export const workspaceRootForConversationRestore = (state: {
   conversationId?: string | null;
-  conversations?: Array<{ id?: string; workspaceRoot?: string; worktreePath?: string }>;
+  conversations?: Array<{ id?: string; workspaceRoot?: string; worktreePath?: string; executionCwd?: string }>;
 }): string => {
   const conversationId = typeof state.conversationId === "string" ? state.conversationId : "";
   if (!conversationId) return "";
   const conversation = state.conversations?.find((item) => item.id === conversationId);
-  return conversation?.worktreePath || conversation?.workspaceRoot || "";
+  return conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || "";
 };
 
 export const conversationIdForSessionRestore = (state: {
@@ -241,7 +245,6 @@ const processedReplaySeqs = new Set<number>();
 const failedReplaySeqs = new Set<number>();
 const pendingClientCommandAckIdQueue: string[] = [];
 const pendingClientCommands = new Map<string, ClientCommand>();
-const latestProjectionCommandIds = new Map<string, string>();
 let lastReceivedServerSeq = 0;
 
 // Commands can project more than one event, and different command types can
@@ -249,51 +252,6 @@ let lastReceivedServerSeq = 0;
 // state domain it owns instead of only by command type; otherwise a delayed
 // restore could overwrite a newer manual switch, or an old switch's list could
 // replace metadata from a newer switch.
-const COMMAND_PROJECTION_DOMAINS: Readonly<
-  Record<string, Readonly<Record<string, readonly string[]>>>
-> = {
-  "conversation.list": {
-    "conversation.list": ["conversation-list"],
-  },
-  "conversation.switch": {
-    "conversation.switched": ["active-conversation"],
-    "conversation.list": ["conversation-list"],
-  },
-  "session.restore": {
-    "session.restored": ["session-state", "active-conversation"],
-    "conversation.switched": ["active-conversation"],
-    "session.replay": ["session-recovery"],
-    "stream_resume": ["session-recovery"],
-  },
-  "session.sync": {
-    "session.synced": ["session-state", "active-conversation"],
-    "session.replay": ["session-recovery"],
-    "stream_resume": ["session-recovery"],
-  },
-};
-
-const projectionDomainsForEvent = (commandType: string, eventType: string): readonly string[] =>
-  COMMAND_PROJECTION_DOMAINS[commandType]?.[eventType] ?? [];
-
-const projectionDomainsForCommand = (commandType: string): string[] => Array.from(new Set(
-  Object.values(COMMAND_PROJECTION_DOMAINS[commandType] ?? {}).flat(),
-));
-
-const rememberSentCommandProjection = (command: ClientCommand, clientCommandId: string): void => {
-  for (const domain of projectionDomainsForCommand(command.type)) {
-    latestProjectionCommandIds.set(domain, clientCommandId);
-  }
-};
-
-const isSupersededPendingProjectionCommand = (command: ClientCommand): boolean => {
-  const clientCommandId = String(command.client_command_id || "").trim();
-  if (!clientCommandId) return false;
-  const domains = projectionDomainsForCommand(command.type);
-  return domains.length > 0 && domains.some((domain) => {
-    const latestCommandId = latestProjectionCommandIds.get(domain);
-    return Boolean(latestCommandId && latestCommandId !== clientCommandId);
-  });
-};
 
 export const getWebSocket = (): WebSocketHandle | null => singleton;
 
@@ -543,17 +501,6 @@ export const resetPendingClientCommandAcksForTests = () => {
   latestProjectionCommandIds.clear();
 };
 
-export const isSupersededCommandProjection = (event: ServerEvent): boolean => {
-  const commandId = String(event.client_command_id || "").trim();
-  const commandType = String(event.client_command_type || "").trim();
-  if (!commandId || !commandType) return false;
-  const domains = projectionDomainsForEvent(commandType, event.type);
-  if (domains.length === 0) return false;
-  return domains.some((domain) => {
-    const latestCommandId = latestProjectionCommandIds.get(domain);
-    return Boolean(latestCommandId && latestCommandId !== commandId);
-  });
-};
 
 export const getPendingClientCommandAckIdsForTests = (): string[] =>
   pendingClientCommandAckIdQueue.filter((id) => pendingClientCommands.has(id));
@@ -566,7 +513,7 @@ const pendingClientCommandPayloads = (): ClientCommand[] =>
     // Replaying an older unacknowledged switch/restore after reconnect would
     // make stale state authoritative again even though ingress rejects its old
     // response. Keep it pending for a late ACK, but never transmit it again.
-    .filter((cmd) => !isSupersededPendingProjectionCommand(cmd));
+    .filter((cmd) => !isSupersededPendingProjectionCommand(cmd, useAppStore.getState().conversationId));
 
 const hasPendingClientCommand = (clientCommandId: string): boolean =>
   pendingClientCommands.has(clientCommandId);
@@ -606,6 +553,7 @@ export const acknowledgeClientCommand = (event: ServerEvent): boolean => {
   if (typeof clientCommandId !== "string" || !clientCommandId) return true;
   const command = pendingClientCommands.get(clientCommandId);
   clearPendingClientCommandAck(clientCommandId);
+  if (ack.accepted !== false) notifyClientCommandReceived(clientCommandId);
   if (ack.accepted === false) {
     const reason = String(ack.reason || "Command was rejected by the server");
     rejectClientCommandResult(clientCommandId, reason);
@@ -759,7 +707,8 @@ export const useWebSocketConnection = () => {
         return false;
       }
       if (clientCommandId) {
-        rememberSentCommandProjection(command, clientCommandId);
+        const view = useAppStore.getState();
+        rememberSentCommandProjection(command, clientCommandId, view.pendingConversationSwitchId || view.conversationId);
       }
       trackPendingClientCommandAck(command);
       return true;
@@ -836,6 +785,10 @@ export const useWebSocketConnection = () => {
       const url = wsUrl("/ws", {
         session_id: browserSessionId,
         protocol: "control_v1",
+        ...(window.__MINICODE_RUNTIME__?.windowInstanceId ? {
+          window_instance_id: window.__MINICODE_RUNTIME__.windowInstanceId,
+          window_owner_id: window.__MINICODE_RUNTIME__.windowOwnerId,
+        } : {}),
       });
       const protocols = wsProtocols();
       const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
@@ -1321,6 +1274,7 @@ const CHAT_STREAM_EVENT_TYPES = new Set<string>([
   "command_output_chunk", "tool_result", "permission.decision", "agent.item", "agent.item.delta",
   "done", "error", "stream_resume",
 ]);
+const GUARDIAN_EVENT_TYPES = new Set<string>(["guardian_assessment", "guardian_warning"]);
 const RUNTIME_EVENT_TYPES = new Set<string>([
   "agent.progress", "runtime.span", "agent.run.started", "agent.run.completed",
   "context_usage", "context_compacted", "context_ledger", "context_forked",
@@ -1350,6 +1304,7 @@ const COMMAND_CATALOG_EVENT_TYPES = new Set<string>([
 ]);
 const PERIPHERAL_EVENT_TYPES = new Set<string>([
   "terminal.output", "terminal.resized", "workspace.imported", "file.changed",
+  "workspace.project_index.invalidated",
   "terminal.created", "terminal.killed", "terminal.exit", "terminal.list",
   "terminal.snapshot", "mcp_status", "env.list", "git.pr_status",
   "scheduler.list", "background.started", "background.stalled",
@@ -1384,6 +1339,7 @@ const EVENT_DISPATCHERS: ReadonlyArray<{
   dispatch: ServerEventDispatcher;
 }> = [
   { types: CHAT_STREAM_EVENT_TYPES, dispatch: (e, cid) => handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer }) },
+  { types: GUARDIAN_EVENT_TYPES, dispatch: e => handleGuardianEvent(e as import("../protocol/guardian-types").GuardianAssessmentEvent | import("../protocol/guardian-types").GuardianWarningEvent) },
   { types: RUNTIME_EVENT_TYPES, dispatch: (e, cid) => handleRuntimeEvent(e, cid) },
   { types: CONTROL_EVENT_TYPES, dispatch: (e) => handleControlEvent(e) },
   { types: SESSION_EVENT_TYPES, dispatch: (e, _cid) => handleSessionEvent(e, { textStreamBuffer, thinkingStreamBuffer }) },

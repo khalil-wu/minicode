@@ -176,8 +176,33 @@ def _public_diff(value: Any) -> dict[str, Any] | None:
     return projected or None
 
 
+def merge_delegation_facts(previous: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A delayed task-result observation cannot retract an actual child start."""
+    current = {item["agent_id"]: dict(item) for item in previous}
+    for item in incoming:
+        old = current.get(item["agent_id"])
+        updated = dict(item)
+        if old is not None and old["started_at"] > 0:
+            if updated["started_at"] == 0 or (old["status"] not in {"pending", "running"} and updated["status"] in {"pending", "running"}):
+                updated = old
+        current[item["agent_id"]] = updated
+    return list(current.values())
+
+
+def merge_message_delegations(previous: dict[str, Any], incoming: dict[str, Any]) -> None:
+    current = {record["id"]: record for record in previous.get("tool_calls", [])}
+    current.update({block["record"]["id"]: block["record"] for block in previous.get("blocks", []) if block.get("type") == "tool_call"})
+    records = [*incoming.get("tool_calls", []), *(block["record"] for block in incoming.get("blocks", []) if block.get("type") == "tool_call")]
+    for record in records:
+        old = current.get(record["id"])
+        if old is not None and old.get("delegations"):
+            record["delegations"] = merge_delegation_facts(old["delegations"], record.get("delegations", []))
+
+
 def project_public_tool_call(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, Mapping) else {}
+    if source.get("private_model_only") is True or source.get("privateModelOnly") is True:
+        return {}
     projected: dict[str, Any] = {}
     for key, maximum in (
         ("id", 1_024),
@@ -216,19 +241,43 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
         ("outputPreview", 60_000),
         ("stdoutPreview", 60_000),
         ("stderrPreview", 60_000),
+        ("recipientId", 1_024),
     ):
         raw = source.get(key)
         if raw is None:
             snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
             raw = source.get(snake_key)
         text = public_text(raw, max_chars=maximum, single_line=maximum <= 2_048)
-        if text:
+        if text or (key in {"stdoutPreview", "stderrPreview"} and raw is not None):
             projected[key] = text
     arguments = source.get("args")
+    command_presentation = source.get("commandPresentation", source.get("command_presentation"))
+    if isinstance(command_presentation, Mapping):
+        projected["commandPresentation"] = _public_json(command_presentation)
+    if source.get("exitCode", source.get("exit_code")) is not None:
+        projected["exitCode"] = source.get("exitCode", source.get("exit_code"))
+    if source.get("recipientIds", source.get("recipient_ids")) is not None:
+        projected["recipientIds"] = list(source.get("recipientIds", source.get("recipient_ids")))
+    command_actions = source.get("commandActions", source.get("command_actions"))
+    if isinstance(command_actions, list):
+        projected["commandActions"] = [
+            {key: public_text(value, max_chars=12_000 if key in {"command", "query"} else 4_096)
+             for key, value in action.items() if key in {"type", "command", "name", "path", "query"}}
+            for action in command_actions
+        ]
+    if isinstance(source.get("delegations"), list):
+        projected["delegations"] = [{
+            "agent_id": public_text(item["agent_id"], max_chars=1_024, single_line=True),
+            "name": public_text(item["name"], max_chars=1_024, single_line=True),
+            **({"agent_path": public_text(item["agent_path"], max_chars=1_024, single_line=True)} if "agent_path" in item else {}),
+            "status": public_text(item["status"], max_chars=64, single_line=True),
+            "started_at": _nonnegative_int(item["started_at"]),
+            **({"accepted_at": _nonnegative_int(item["accepted_at"])} if "accepted_at" in item else {}),
+        } for item in source["delegations"]]
     if not isinstance(arguments, Mapping):
         arguments = source.get("arguments")
     projected["args"] = _public_json(arguments if isinstance(arguments, Mapping) else {})
-    for key in ("durationMs", "seq", "startedAt", "finishedAt", "artifactBytes"):
+    for key in ("durationMs", "seq", "startedAt", "finishedAt", "artifactBytes", "executionStartedAt"):
         raw = source.get(key)
         if raw is None:
             snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
@@ -236,7 +285,7 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
         count = _nonnegative_int(raw)
         if count is not None:
             projected[key] = count
-    for key in ("recoverable", "temporaryRemoved"):
+    for key in ("recoverable", "temporaryRemoved", "streamingAnnouncement"):
         raw = source.get(key)
         if raw is None:
             snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
@@ -293,6 +342,16 @@ def _project_block(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     block_type = public_text(value.get("type"), max_chars=64, single_line=True)
+    if block_type == "user_input":
+        user_message_id = public_text(value["userMessageId"], max_chars=1_024, single_line=True)
+        return {"type": "user_input", "userMessageId": user_message_id}
+    if block_type == "guardian_assessment":
+        review = value["review"]
+        return {"type": block_type, "review": _public_json({key: review[key] for key in (
+            "id", "target_item_id", "turn_id", "started_at_ms", "completed_at_ms", "status", "action",
+            "risk_level", "user_authorization", "rationale", "decision_source", "review_reason") if key in review})}
+    if block_type == "guardian_warning":
+        return _public_json({key: value[key] for key in ("type", "message", "turnId", "interruption") if key in value})
     if block_type == "tool_call":
         record = project_public_tool_call(value.get("record"))
         return {"type": "tool_call", "record": record} if record.get("id") and record.get("name") else None
@@ -387,7 +446,9 @@ def _project_block(value: Any) -> dict[str, Any] | None:
             text = public_text(raw, max_chars=50_000 if key in {"content", "message", "detail", "summary"} else 2_048)
             if text:
                 block[key] = text
-        for key in ("timestamp", "seq", "order", "tokenEstimate", "count"):
+        if block_type == "process" and block.get("itemKind") == "context_compaction":
+            block["content"] = ""
+        for key in ("timestamp", "startedAt", "finishedAt", "seq", "order", "tokenEstimate", "count"):
             raw = value.get(key)
             if raw is None:
                 snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
@@ -715,6 +776,7 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         ("context_refs", "context_refs", False),
         ("contextRefs", "context_refs", False),
         ("quoted_message", "quoted_message", False),
+        ("code_review", "code_review", False),
         ("reply_attachments", "reply_attachments", False),
         ("replyAttachments", "reply_attachments", False),
         ("citations", "citations", False),
@@ -730,6 +792,8 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
                 text_budget=public_json_text_budget,
             )
     metadata = source.get("metadata")
+    if isinstance(metadata, Mapping) and isinstance(metadata.get("completion_notification"), Mapping):
+        projected.setdefault("metadata", {})["completion_notification"] = _public_json(metadata["completion_notification"])
     if isinstance(metadata, Mapping) and str(metadata.get("source") or "") == "scheduled_task":
         safe_metadata: dict[str, Any] = {"source": "scheduled_task"}
         for key in ("scheduled_task_id", "scheduled_run_id", "stopped_reason"):
@@ -744,7 +808,7 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         )
         if errors:
             safe_metadata["errors"] = errors
-        projected["metadata"] = safe_metadata
+        projected.setdefault("metadata", {}).update(safe_metadata)
     if isinstance(metadata, Mapping) and isinstance(metadata.get("turn_diff"), Mapping):
         source_diff = metadata["turn_diff"]
         turn_diff: dict[str, Any] = {}
@@ -864,6 +928,7 @@ def project_tool_window(message: dict[str, Any], *, limit: int = 40) -> dict[str
 
 def project_public_conversation(
     value: Any, *, include_transcript: bool = True, transcript_limit: int | None = None,
+    defer_turn_diff: bool = True,
 ) -> dict[str, Any]:
     # Project only public fields; asdict would first copy the entire private
     # provider history even for a metadata or recent-page response.
@@ -879,11 +944,17 @@ def project_public_conversation(
         ("conversation_type", 64),
         ("memory_mode", 64),
         ("permission_mode", 64),
+        ("agent_mode", 64),
         ("summary", 50_000),
         ("compaction_state", 64),
         ("compaction_summary", 262_144),
         ("archived_at", 128),
+        ("pinned_at", 128),
+        ("thread_source", 128),
         ("workspace_root", 4_096),
+        ("execution_cwd", 4_096),
+        ("projectless_output_dir", 4_096),
+        ("projectless_browser_root", 4_096),
         ("git_branch", 1_024),
         ("worktree_path", 4_096),
         ("parent_conversation_id", 1_024),
@@ -899,7 +970,8 @@ def project_public_conversation(
         count = _nonnegative_int(source.get(key))
         if count is not None:
             projected[key] = count
-    for key in ("memory_polluted", "archived", "git_isolated"):
+    projected["project_id"] = public_text(source["project_id"], max_chars=4_096) if source.get("project_id") is not None else None
+    for key in ("memory_polluted", "archived", "git_isolated", "pinned", "has_unread_turn"):
         if isinstance(source.get(key), bool):
             projected[key] = bool(source.get(key))
     pollution_sources = public_string_list(
@@ -942,7 +1014,7 @@ def project_public_conversation(
             projected["parent_message_index"] = count
     if include_transcript:
         if transcript_limit is None:
-            transcript = [project_public_transcript_message(message, defer_turn_diff=True)
+            transcript = [project_public_transcript_message(message, defer_turn_diff=defer_turn_diff)
                           for message in source.get("transcript", []) if isinstance(message, Mapping)]
             projected["transcript"] = transcript
             projected["message_count"] = len(transcript)

@@ -63,6 +63,14 @@ class ToolCallRecord:
     call_source: dict[str, str] = field(default_factory=dict)
     tool_call_id: str = ""
     result_payload: dict[str, Any] = field(default_factory=dict, repr=False)
+    delegations: list[dict[str, Any]] = field(default_factory=list)
+    command_actions: list[dict[str, str]] = field(default_factory=list)
+    stdout_preview: str | None = None
+    stderr_preview: str | None = None
+    exit_code: int | None = None
+    recipient_id: str | None = None
+    recipient_ids: list[str] = field(default_factory=list)
+    private_model_only: bool = False
 
 
 # Terminal-reason vocabulary for run termination.
@@ -281,10 +289,17 @@ class AgentState:
         artifact_kind: str | None = None,
         artifact_media_type: str | None = None,
         artifact_bytes: int | None = None,
+        delegations: list[dict[str, Any]] | None = None,
         command_id: str = "",
         output_cursor: int | None = None,
         call_source: dict[str, str] | None = None,
         tool_call_id: str = "",
+        command_actions: list[dict[str, str]] | None = None,
+        stdout_preview: str | None = None,
+        stderr_preview: str | None = None,
+        exit_code: int | None = None,
+        recipient_id: str | None = None,
+        recipient_ids: list[str] | None = None,
     ) -> ToolCallRecord:
         """记录一次工具调用。"""
         resolved_status: ToolCallStatus
@@ -318,10 +333,17 @@ class AgentState:
                 artifact_kind=str(artifact_kind or "").strip() or None,
                 artifact_media_type=str(artifact_media_type or "").strip() or None,
                 artifact_bytes=(max(0, int(artifact_bytes)) if artifact_bytes is not None else None),
+                delegations=deepcopy(delegations or []),
                 command_id=command_id,
                 output_cursor=output_cursor,
                 call_source=dict(call_source or {}),
                 tool_call_id=tool_call_id,
+                command_actions=deepcopy(command_actions or []),
+                stdout_preview=stdout_preview,
+                stderr_preview=stderr_preview,
+                exit_code=exit_code,
+                recipient_id=recipient_id,
+                recipient_ids=list(recipient_ids or []),
             )
         self.tool_calls.append(record)
         if artifact_id:

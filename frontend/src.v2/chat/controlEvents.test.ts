@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleControlEvent } from "./controlEvents";
 import { useAppStore } from "../stores";

@@ -6,6 +6,7 @@ import { useRef, useState } from "react";
 import { LiveMarkdownEditor, type MarkdownEditorSession } from "./LiveMarkdownEditor";
 import type { EditorTextSurface } from "./editor-text-surface";
 import { useAgentEditReview } from "./useAgentEditReview";
+import { LanguageProvider } from "../i18n";
 
 beforeAll(() => {
   // JSDOM has no layout engine; CodeMirror's range measurement still needs the
@@ -32,6 +33,26 @@ const fixture = (source: string) => {
 };
 
 describe("LiveMarkdownEditor", () => {
+  it("updates locale labels while preserving the editor document and native undo", () => {
+    const state = fixture("# Title\n\n- [ ] Task\n");
+    const mounted = vi.fn(state.props.onMount);
+    const view = render(<LanguageProvider locale="zh-CN"><LiveMarkdownEditor {...state.props} onMount={mounted} /></LanguageProvider>);
+    const editor = state.editor();
+    const input = screen.getByRole("textbox", { name: "Markdown 实时编辑器" });
+    act(() => editor.executeEdits!("draft", [{ range: { startLineNumber: 1, startColumn: 8, endLineNumber: 1, endColumn: 8 }, text: " draft" }]));
+    view.rerender(<LanguageProvider locale="en-US"><LiveMarkdownEditor {...state.props} onMount={mounted} /></LanguageProvider>);
+    expect(screen.getByRole("textbox", { name: "Live Markdown editor" })).toBe(input);
+    expect(state.editor()).toBe(editor);
+    expect(mounted).toHaveBeenCalledOnce();
+    const readDocument = () => {
+      const model = editor.getModel()!;
+      const last = model.getLineCount();
+      return model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: last, endColumn: model.getLineMaxColumn(last) });
+    };
+    expect(readDocument()).toBe("# Title draft\n\n- [ ] Task\n");
+    act(() => editor.getAction!("undo")!.run());
+    expect(readDocument()).toBe("# Title\n\n- [ ] Task\n");
+  });
   it("records unopened Markdown buffer replacements into native Undo when the document first mounts", () => {
     const before = "# foo\r\n\r\n😀 foo\r\n";
     const after = "# bar\r\n\r\n😀 foo\r\n";

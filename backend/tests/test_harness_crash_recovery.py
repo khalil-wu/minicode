@@ -32,6 +32,7 @@ from backend.tools.registry import ToolRegistry
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.durable_user_queue import DurableUserMessageQueue
 from backend.ws.event_outbox import EventOutbox
+from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.handlers.conversation import handle_conversation_create
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.session_restore import SessionRestoreManager
@@ -104,14 +105,15 @@ async def _create_session(root: Path):
         active_conversation_id=None, _extension_shutdown_requested=False, _model_override_active=False,
         config=SimpleNamespace(llm=SimpleNamespace(reasoning_effort="")), provider="fixture", selected_model="fixture",
         artifact_store=None, conversation_repo=ConversationRepository(root / "conversations"),
-        run_manager=SimpleNamespace(durable_client_commands=queue), connection_generation=1)
+        run_manager=SimpleNamespace(durable_client_commands=queue, durable_queue=None), connection_generation=1)
     lock = asyncio.Lock()
     session.conversation_lifecycle_lock = lambda: lock
     session.load_active_conversation_snapshot = lambda *args, **kwargs: False
     session.sync_permission_mode_with_active_conversation = lambda **kwargs: None
     session.runtime_snapshot = lambda **kwargs: {"session_id": session.session_id}
-    session.session_lifecycle = SimpleNamespace(clear_workspace_runtime=lambda: None,
-                                               workspace_root_for_conversation=lambda *args: None)
+    session.session_lifecycle = SessionLifecycle(session)
+    session.session_lifecycle.clear_workspace_runtime = lambda: None
+    session.session_lifecycle.workspace_root_for_conversation = lambda *args: None
     async def send_payload(payload, **kwargs):
         return True
     async def send_event(event):

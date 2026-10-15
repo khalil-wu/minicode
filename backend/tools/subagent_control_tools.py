@@ -16,6 +16,14 @@ from backend.tools.subagent_result import full_subagent_result
 from backend.tools.subagent_runtime import require_runtime_from_context
 
 
+def _aggregate_subagent_status(statuses: set[str]) -> str:
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    if statuses & {"pending", "running"}:
+        return "running"
+    return "partial"
+
+
 def _authorized_subagent(
     runtime: Any,
     subagent_id: str,
@@ -129,11 +137,12 @@ class TaskStopTool(BaseTool):
             )
 
         if status == "done":
+            previous_status = outcome.previous_status
             return ToolResult(
-                content=f"Background subagent {outcome.target.subagent_id} has already finished.",
-                display_summary=f"{outcome.target.subagent_id} already finished",
+                content=f"Background subagent {outcome.target.subagent_id} has already finished ({previous_status}).",
+                display_summary=f"{outcome.target.subagent_id}: {previous_status}",
                 result_kind="subagent",
-                status="completed",
+                status=previous_status,
             )
 
         record = runtime.get_subagent(outcome.target.subagent_id)
@@ -293,11 +302,7 @@ class TaskStatusTool(BaseTool):
                     for subagent_id in subagent_ids
                 ))
                 statuses = {str(result.status or "") for result in results}
-                overall_status = (
-                    "running" if statuses & {"pending", "running"}
-                    else "blocked" if statuses & {"blocked", "failed", "error", "not_found"}
-                    else "completed"
-                )
+                overall_status = _aggregate_subagent_status(statuses)
                 status_counts: dict[str, int] = {}
                 for result in results:
                     label = str(result.status or "unknown")
@@ -424,7 +429,7 @@ class TaskStatusTool(BaseTool):
                     f"out {int(result.get('output_tokens') or 0)})"
                 )
             lines.append(stats + ".")
-            if consume and status != "running":
+            if consume and status not in {"pending", "running"}:
                 control.forget_subagent_result(subagent_id)
                 lines.append("Retained result cache released.")
         elif result_available:
@@ -498,11 +503,9 @@ class TaskStatusTool(BaseTool):
                 f"- {subagent} [{status}]{result_note}"
                 + (f": {task}" if task else "")
             )
-        overall = (
-            "running"
-            if any(str(item.get("status") or "") in {"pending", "running"} for item in items)
-            else "completed"
-        )
+        overall = _aggregate_subagent_status({
+            str(item.get("status") or "running") for item in items
+        })
         return ToolResult(
             content="\n".join(lines),
             content_preview="\n".join(

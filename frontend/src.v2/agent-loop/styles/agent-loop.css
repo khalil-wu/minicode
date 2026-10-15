@@ -22,6 +22,38 @@
   color: var(--text-primary);
 }
 
+.assistant-proposed-plan {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-base);
+}
+
+.assistant-proposed-plan-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+}
+
+.assistant-proposed-plan-heading button {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.assistant-proposed-plan-original pre {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+}
+
 .agent-loop-process {
   color: var(--text-secondary);
 }
@@ -90,6 +122,26 @@
   max-width: 100%;
 }
 
+.user-cell-quote {
+  width: 100%;
+  min-width: 0;
+}
+
+.user-cell-quote .message-quote {
+  margin-bottom: 0;
+}
+
+.workbench-empty-project {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.18em;
+  cursor: pointer;
+}
+
 /* ── Process summary（尺寸/字重由 ui-polish 接管，仅保留布局与图标色）─── */
 
 .agent-loop-process-summary {
@@ -110,16 +162,7 @@
 
 .agent-loop-process-summary-status {
   display: inline-block;
-  --agent-loop-processing-rest: var(--text-muted);
-  --agent-loop-processing-glint: color-mix(in oklch, var(--text-primary) 28%, white);
   color: var(--text-muted);
-}
-
-/* Light surfaces need a wider luminance gap between the waiting and swept
-   states. Keep the animated text readable while making the transition clear. */
-html[data-theme="light"] .agent-loop-process-summary-status {
-  --agent-loop-processing-rest: color-mix(in oklch, var(--text-muted) 78%, white);
-  --agent-loop-processing-glint: var(--text-secondary);
 }
 
 .agent-loop-process-summary-status-label {
@@ -131,33 +174,9 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-summary-failure {
   display: inline-block;
   margin-left: 0.35em;
-  color: var(--state-danger);
+  color: var(--text-muted);
   font-size: var(--text-base);
   line-height: 1.45;
-}
-
-.agent-loop-process-summary-status[data-running="true"]
-  .agent-loop-process-summary-status-label {
-  /* The text itself is the mask: the left side becomes primary text only after
-     the sweep has crossed it. This avoids revealing a rectangular black layer
-     (the old clip-path overlay looked like a black block in Chromium). */
-  color: var(--text-primary);
-  background-image: linear-gradient(
-    90deg,
-    var(--text-primary) 0%,
-    var(--text-primary) 32%,
-    var(--agent-loop-processing-glint) 33%,
-    var(--agent-loop-processing-rest) 35%,
-    var(--agent-loop-processing-rest) 100%
-  );
-  background-position: 100% 0;
-  background-size: 300% 100%;
-  background-repeat: no-repeat;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: agent-loop-processing-sheen var(--duration-status-sweep)
-    var(--easing-status-sweep) infinite both;
 }
 
 .agent-loop-process-summary-icon {
@@ -177,7 +196,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-summary .agent-loop-failed-icon {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 /* 每轮只从左向右刷新；不反向、不呼吸，末段短暂停在主文字色。 */
@@ -242,7 +261,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .activity-cell-main-button[data-clickable="true"]:hover,
 .agent-loop-process-cell .exec-cell-header-button:hover {
   border: 0;
-  background: var(--workbench-hover);
+  background-color: var(--workbench-hover);
   border-radius: var(--radius-sm);
 }
 
@@ -275,7 +294,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-name[data-failed="true"] {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 .agent-loop-process-cell .activity-cell-provider-icon {
@@ -289,7 +308,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell .activity-cell-provider-icon[data-failed="true"] {
-  color: var(--state-danger);
+  color: var(--text-muted);
 }
 
 /* Nested record cards do not add hierarchy once the cell owns the single
@@ -316,6 +335,37 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 
 .agent-loop-process-cell .activity-cell-error-detail {
   padding-left: 0;
+}
+
+.activity-cell-change-disclosure {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-cell-change-disclosure:disabled {
+  cursor: default;
+}
+
+.activity-cell-change-disclosure svg {
+  flex-shrink: 0;
+}
+
+.agent-loop-process-cell :is(.activity-cell-failure-summary, .exec-cell-failure-summary) {
+  margin: 0 0 4px 23px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-loop-process-cell .activity-cell-error-pre {
@@ -408,10 +458,12 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   overflow-wrap: normal;
 }
 
-.agent-loop-process-cell .activity-cell-running:not([data-provider-retry="true"]) .activity-cell-name,
-.agent-loop-process-cell .activity-cell-running:not([data-provider-retry="true"]) .activity-cell-detail,
-.agent-loop-process-cell .exec-cell-running .exec-cell-title,
-.agent-loop-process-cell .exec-cell-running .exec-cell-command-preview {
+.agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
+.agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+.agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
+.agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
+.agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
+.agent-loop-process-cell .thinking-cell[data-processing="true"] {
   background-image: linear-gradient(
     90deg,
     var(--text-primary) 0%,
@@ -429,16 +481,19 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   animation: agent-loop-processing-sheen var(--duration-status-sweep) var(--easing-status-sweep) infinite both;
 }
 
-.agent-loop-process-cell .activity-cell-dot[data-running="true"] {
-  color: var(--state-info);
+.agent-loop-process-cell .activity-cell-dot[data-running="true"],
+.agent-loop-process-cell .activity-cell-tool-icon[data-running="true"],
+.agent-loop-process-cell .exec-cell-status-info {
+  color: var(--text-muted);
+  animation: none;
 }
 
 .agent-loop-process-cell > .thinking-cell-commentary {
   padding: 0;
 }
 
-.thinking-cell-commentary > :first-child { margin-top: 0; }
-.thinking-cell-commentary > :last-child { margin-bottom: 0; }
+.thinking-cell-commentary > .md-body > :first-child { margin-top: 0; }
+.thinking-cell-commentary > .md-body > :last-child { margin-bottom: 0; }
 
 /* ── Final answer（回答正文 + 流式光标）───────────────────────────────── */
 
@@ -466,22 +521,12 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 /* ── Reduced motion ──────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {
-  /* 无障碍模式不播放扫光，直接显示最终主文字色。 */
-  .agent-loop-process-summary-status[data-running="true"] {
-    color: var(--text-primary);
-  }
-
-  .agent-loop-process-summary-status[data-running="true"]
-    .agent-loop-process-summary-status-label {
-    color: var(--text-primary);
-    background: none;
-    -webkit-text-fill-color: currentColor;
-  }
-
-  .agent-loop-process-cell .activity-cell-running .activity-cell-name,
-  .agent-loop-process-cell .activity-cell-running .activity-cell-detail,
-  .agent-loop-process-cell .exec-cell-running .exec-cell-title,
-  .agent-loop-process-cell .exec-cell-running .exec-cell-command-preview {
+  .agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
+  .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+  .agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
+  .agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
+  .agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
+  .agent-loop-process-cell .thinking-cell[data-processing="true"] {
     color: var(--text-primary);
     background: none;
     -webkit-text-fill-color: currentColor;
@@ -499,7 +544,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   align-items: center;
   min-height: 30px;
   width: 100%;
-  gap: 8px;
+  gap: 6px;
   padding: 3px 0;
   border: 0;
   border-radius: 0;
@@ -554,14 +599,21 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   gap: 2px;
   margin: 4px 0 0;
   padding-left: 0;
-  animation: mc-process-details-in var(--duration-fast) var(--easing-enter) both;
 }
 
-.agent-loop-timeline-group-work > .agent-loop-timeline-group-items {
-  max-height: min(420px, 55vh);
+.agent-loop-timeline-group-disclosure {
+  overflow: hidden;
+}
+
+.agent-loop-timeline-group-work .agent-loop-timeline-group-items {
+  max-height: min(14rem, 55vh);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.agent-loop-timeline-group-work .agent-loop-timeline-group-items[data-overflow-bottom="true"] {
+  mask-image: linear-gradient(to bottom, var(--text-primary) calc(100% - 20px), transparent);
 }
 
 .agent-loop-process-cell .activity-cell-main-button .activity-cell-file-change-stats {
@@ -588,6 +640,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell .exec-cell-command-preview {
+  flex: 0 1 auto;
   font-family: var(--font-ui);
   font-size: var(--text-sm);
   font-weight: var(--fw-regular);
@@ -610,13 +663,20 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-open-work-group {
-  display: grid;
-  gap: 7px;
   min-width: 0;
 }
 
-.agent-loop-open-work-group > .agent-loop-timeline-group-items {
+.agent-loop-open-work-group .agent-loop-timeline-group-items {
   margin-left: 0;
+}
+
+/* Codex's expanded group records are static; its live group header owns sheen. */
+.agent-loop-timeline-group-work .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+.agent-loop-timeline-group-work .agent-loop-process-cell .exec-cell-header-button[data-processing="true"] {
+  background: none;
+  background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  animation: none;
 }
 
 .agent-loop-open-work-group > .agent-loop-timeline-group {

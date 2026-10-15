@@ -146,7 +146,7 @@ class RecoveryController:
             and full_text.strip()
             and not pending_tool_calls
         ):
-            ctx.append_assistant(full_text)
+            ctx.append_assistant(full_text, answer_source="partial")
             state.reply = full_text
             state.stopped_reason = profile.partial_stopped_reason
             state.terminal_status = "partial"

@@ -54,6 +54,8 @@ beforeEach(() => {
   __resetOpenWebInBrowserForTests();
   useAppStore.setState({
     conversationId: "conv-diff",
+    pendingConversationSwitchId: null,
+    pendingConversationCreateId: null,
     workingDirectory: "C:\\workspace",
     requestGitChanges: vi.fn(),
     gitReviewRequest: null,
@@ -81,6 +83,53 @@ afterEach(() => {
 });
 
 describe("DiffPanel", () => {
+  it("renders an unknown child-root patch without editor navigation against the parent workspace", () => {
+    useAppStore.setState({ diffReview: { requestId: "unknown-child", conversationId: "conv-diff", workspaceRoot: "", diff: "@@ -1 +1 @@\n-old\n+new",
+      files: [{ path: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new" }], selectedPath: "src/app.ts", mode: "view", status: "viewing", fileDecisions: {}, lineComments: [] } });
+    render(<DiffPanel />);
+    expect(screen.getByText("new")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "在编辑器中打开文件" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /在编辑器中打开 src\/app.ts 第/ })).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+  it("activates an isolated review's actual workspace before opening its source file", async () => {
+    const openEditorFile = vi.fn();
+    const originalOpen = useAppStore.getState().openEditorFile;
+    useAppStore.setState({ openEditorFile, conversations: [{ id: "conv-diff", title: "Parent", workspaceRoot: "C:/workspace", updatedAt: "now" },
+      { id: "child-workspace", title: "Child", workspaceRoot: "C:/isolated-child", updatedAt: "now" }], diffReview: {
+      requestId: "child-review", conversationId: "conv-diff", workspaceRoot: "C:/isolated-child", diff: "@@ -1 +1 @@\n-old\n+new",
+      selectedPath: "src/app.ts", files: [{ path: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new" }], status: "viewing", mode: "view", fileDecisions: {}, lineComments: [],
+    } });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async () => {
+      useAppStore.getState().applyConversationSwitched({ conversationId: "child-workspace" });
+      return { command: "workspace.set", level: "success", message: "activated", data: { conversation_id: "child-workspace", workspace_root: "C:/isolated-child" } };
+    });
+    try {
+      render(<DiffPanel />);
+      fireEvent.click(screen.getByRole("button", { name: "在来源工作区打开" }));
+      await waitFor(() => expect(openEditorFile).toHaveBeenCalledWith("C:/isolated-child/src/app.ts", "app.ts", { exact: true }));
+      expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "workspace.set", path: "C:/isolated-child" }), "workspace.set");
+    } finally { useAppStore.setState({ openEditorFile: originalOpen }); }
+  });
+
+  it("does not steal editor focus when workspace activation returns after a newer scope selection", async () => {
+    const originalOpen = useAppStore.getState().openEditorFile;
+    const openEditorFile = vi.fn();
+    useAppStore.setState({ openEditorFile, draft: "保留未发送内容", diffReview: {
+      requestId: "late-child-review", conversationId: "conv-diff", workspaceRoot: "C:/isolated-child", diff: "@@ -1 +1 @@\n-old\n+new",
+      selectedPath: "src/app.ts", files: [{ path: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new" }], status: "viewing", mode: "view", fileDecisions: {}, lineComments: [],
+    } });
+    let finish!: (event: Awaited<ReturnType<typeof sendClientCommandAwaitResult>>) => void;
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    try {
+      render(<DiffPanel />);
+      fireEvent.click(screen.getByRole("button", { name: "在来源工作区打开" }));
+      useAppStore.setState({ conversationId: "newer-owner", workingDirectory: "C:/newer-workspace" });
+      await act(async () => finish({ command: "workspace.set", level: "success", message: "activated", data: { conversation_id: "child-workspace", workspace_root: "C:/isolated-child" } }));
+      expect(openEditorFile).not.toHaveBeenCalled();
+      expect(useAppStore.getState().draft).toBe("保留未发送内容");
+    } finally { useAppStore.setState({ openEditorFile: originalOpen }); }
+  });
   it("keeps deferred history files visible and only fetches after a file is selected", async () => {
     const persisted: TurnDiffState = { threadId: "conv-diff", turnId: "turn", messageId: "answer", diff: null,
       deferred: true, revision: 2, updatedAt: 1, source: "workspace_snapshot",
@@ -335,6 +384,32 @@ describe("DiffPanel", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "刷新 Git 状态" }));
     expect(useAppStore.getState().requestGitChanges).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["pendingConversationSwitchId", "pendingConversationCreateId"] as const)(
+    "resumes the mounted Git tab when %s settles, including a same-root owner change", pending => {
+      useAppStore.setState({ diffReview: null, messages: [], [pending]: "conv-next",
+        gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+      render(<DiffPanel />);
+      const request = useAppStore.getState().requestGitChanges;
+      expect(request).not.toHaveBeenCalled();
+      act(() => useAppStore.setState({ [pending]: null, conversationId: "conv-next" }));
+      expect(request).toHaveBeenCalledTimes(1);
+      act(() => useAppStore.setState({ workingDirectory: "C:/another" }));
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("refreshes the mounted Git tab after navigation is cancelled with the current owner unchanged", () => {
+    useAppStore.setState({ diffReview: null, messages: [],
+      gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+    render(<DiffPanel />);
+    const request = useAppStore.getState().requestGitChanges;
+    expect(request).toHaveBeenCalledTimes(1);
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
+    expect(request).toHaveBeenCalledTimes(1);
+    act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("keeps repository failures visible without reporting a clean worktree", () => {

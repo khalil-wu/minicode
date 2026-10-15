@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.sandbox import SandboxPolicy, SandboxRunner
+from backend.sandbox.policy import sandbox_policy_for_permission_context
 from backend.subprocesses import (
     SubprocessOutputLimitError,
     decode_process_output,
@@ -92,10 +94,14 @@ class GitStatusTool(BaseTool):
         if not work_dir.exists():
             return self._error_result(f"路径不存在: {path_str} (workspace: {root})")
 
+        policy = context.sandbox_policy if context is not None else None
+        if policy is None:
+            policy = (sandbox_policy_for_permission_context(root, context.permission)
+                      if context is not None else SandboxPolicy(workspace_root=root, readable_roots=(root,)))
         try:
             proc = await _run_git(
-                ["git", "status", "--short", "--branch"],
-                root=root, cwd=work_dir, context=context,
+                ["git", "status", "--porcelain=v1", "--branch", "-z"],
+                root=root, cwd=work_dir, context=context, sandbox_policy=policy,
             )
             stdout, stderr = proc.stdout, proc.stderr
 
@@ -105,9 +111,28 @@ class GitStatusTool(BaseTool):
                     return self._success_result(f"{path_str} 不是 Git 仓库；跳过 Git 状态检查。")
                 return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = decode_process_output(stdout).strip()
-            if not output:
-                output = "工作区干净，没有未提交的更改"
+            location = await _run_git(
+                ["git", "rev-parse", "--show-toplevel"], root=root, cwd=work_dir, context=context, sandbox_policy=policy,
+            )
+            if location.returncode != 0:
+                return self._error_result(f"Git 命令失败: {decode_process_output(location.stderr).strip()}")
+            repository_root = Path(SandboxRunner(policy).map_path_from_sandbox(decode_process_output(location.stdout).strip())).resolve()
+            records = iter(decode_process_output(stdout).split("\0"))
+            visible: list[str] = []
+            for record in records:
+                if not record:
+                    continue
+                if record.startswith("## "):
+                    visible.append(record)
+                    continue
+                status, target = record[:2], record[3:]
+                source = next(records) if "R" in status or "C" in status else None
+                paths = [repository_root / target] + ([repository_root / source] if source is not None else [])
+                if any(not candidate.resolve().is_relative_to(root) or _is_denied_path(context, str(candidate)) for candidate in paths):
+                    continue
+                shown = f"{source} -> {target}" if source is not None else target
+                visible.append(f"{status} {shown}")
+            output = "\n".join(visible) or "工作区干净，没有未提交的更改"
 
             return self._success_result(output)
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 
 from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 
@@ -35,6 +37,7 @@ from backend.conversations.import_export import import_conversation_tree
 _UPLOAD_READ_CHUNK = 1024 * 1024
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/api/conversations/import")
 async def import_conversations(
@@ -51,7 +54,16 @@ async def import_conversations(
     if len(content) > 25 * 1024 * 1024: raise HTTPException(status_code=413, detail="会话导入文件不能超过 25 MiB。")
     try:
         payload = json.loads(content)
-        return await run_in_threadpool(import_conversation_tree, session.conversation_repo, payload, workspace_root)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"会话文件不是有效 JSON：{exc}") from exc
+    try:
+        return await run_in_threadpool(
+            import_conversation_tree, session.conversation_repo, payload, workspace_root,
+            attachment_store=session.attachment_store, artifact_store=session.artifact_store,
+        )
+    except (OSError, json.JSONDecodeError, UnicodeError, ExceptionGroup) as exc:
+        logger.exception("Conversation import could not preserve its stored resources")
+        raise HTTPException(status_code=500, detail="会话导入未完成：附件或工件存储读写失败，请查看诊断记录后重试。") from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -69,6 +81,9 @@ async def conversation_resources(
                                        after=after, limit=limit, query=query, kind=kind, expected_workspace_root=workspace_root)
     except ChatApiServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (OSError, UnicodeError) as exc:
+        logger.exception("Failed to read the attachment inventory")
+        raise HTTPException(status_code=500, detail=f"附件列表存储读取失败（{type(exc).__name__}）。") from exc
 
 
 @router.get("/api/conversations/{conversation_id}/background-commands/{command_id}")
@@ -271,6 +286,9 @@ async def preview_attachment(
         )
     except ChatApiServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (OSError, ValueError, UnicodeError) as exc:
+        logger.exception("Failed to read the requested stored attachment")
+        raise HTTPException(status_code=500, detail=f"附件存储读取失败（{type(exc).__name__}）。原文件尚未删除。") from exc
 
 
 def _byte_range(value: str, total: int) -> tuple[int, int] | None:
@@ -349,6 +367,9 @@ async def raw_attachment(
         )
     except ChatApiServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (OSError, ValueError, UnicodeError) as exc:
+        logger.exception("Failed to read the original stored attachment")
+        raise HTTPException(status_code=500, detail=f"附件存储读取失败（{type(exc).__name__}）。原文件尚未删除。") from exc
 
     return _native_body_response(
         request,

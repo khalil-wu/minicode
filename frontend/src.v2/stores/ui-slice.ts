@@ -1,4 +1,5 @@
 import type { StateCreator } from "zustand";
+import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft } from "./composer-drafts";
 import type {
   AppStore,
   ArtifactContentState,
@@ -36,7 +37,6 @@ import {
   ensureCodePanelSlots,
   normalizePanelSlots,
   persistPanelSlots,
-  preferredRightSidebarWidth,
   cacheEditorStateForWorkspace,
   editorStateForWorkspace,
 } from "./shared-helpers";
@@ -77,8 +77,9 @@ function cloneArtifactState(state: ArtifactContentState | null): ArtifactContent
   return state ? { ...normalizeArtifactContentState(state) } : null;
 }
 
-function emptyConversationWorkbenchState(): ConversationWorkbenchState {
+export function emptyConversationWorkbenchState(): ConversationWorkbenchState {
   return {
+    agentMode: "build",
     diffReview: null,
     gitReviewRequest: null,
     previewArtifact: null,
@@ -105,6 +106,7 @@ function emptyConversationWorkbenchState(): ConversationWorkbenchState {
 function cloneConversationWorkbenchState(state: ConversationWorkbenchState): ConversationWorkbenchState {
   return {
     ...state,
+    agentMode: state.agentMode ?? "build",
     diffReview: cloneDiffReviewState(state.diffReview),
     previewArtifact: cloneArtifactState(state.previewArtifact),
     previewServers: (state.previewServers ?? []).map((server) => ({ ...server })),
@@ -125,8 +127,9 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
   };
 }
 
-function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState {
+export function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState {
   return {
+    agentMode: s.agentMode,
     diffReview: cloneDiffReviewState(s.diffReview),
     gitReviewRequest: s.gitReviewRequest,
     previewArtifact: cloneArtifactState(s.previewArtifact),
@@ -288,6 +291,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   currentProviderBaseUrl: "",
   currentWireApi: "",
   availableModels: [],
+  modelSelectionMode: null,
+  defaultModelSelection: null,
+  availableModelOptions: [],
   availableModelLabels: {},
   modelsSource: "",
   availableSkills: [],
@@ -313,6 +319,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
   skillsMarketplaceOpen: false,
   skillsMarketplaceTab: "skills",
+  skillsMarketplaceSelectedPluginId: null,
   skillsMarketplaceReturnTarget: "app",
   liveArtifactsOpen: false,
   agentEditorOpen: false,
@@ -408,10 +415,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       // view, so keep one canonical destination instead of storing a tab that
       // SidebarRight cannot render.
       const canonicalTab = t === "plan" ? "tasks" : t;
-      const rightSidebarWidth = preferredRightSidebarWidth(canonicalTab, s.rightSidebarWidth);
-      if (rightSidebarWidth !== s.rightSidebarWidth) {
-        writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
-      }
       writeLS(LS.layout.rightOpen, "1");
       return {
         rightStackTab: canonicalTab,
@@ -419,7 +422,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
         rightPanelExpanded: ["browser", "preview", "diff", "artifacts"].includes(canonicalTab) && s.rightPanelExpanded,
-        rightSidebarWidth,
       };
     }),
   setRightStackTabLocked: (locked) => set({ rightStackTabLocked: locked }),
@@ -473,13 +475,14 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   toggleSkillsMarketplace: (returnTarget = "app", tab = "skills") =>
     set((s) => {
       if (s.skillsMarketplaceOpen) {
-        return { skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" };
+        return { skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", skillsMarketplaceSelectedPluginId: null };
       }
       // Close all other modals when opening skills marketplace
       return {
         ...CLOSED_OVERLAYS,
         skillsMarketplaceOpen: true,
         skillsMarketplaceTab: tab,
+        skillsMarketplaceSelectedPluginId: null,
         skillsMarketplaceReturnTarget: returnTarget,
       };
     }),
@@ -522,6 +525,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setWorkingDirectory: (d) => {
     set((s) => {
       const workspaceChanged = !workspaceRootsEqual(d, s.workingDirectory);
+      const workspaceComposerDrafts = workspaceChanged && !s.conversationId
+        ? { ...s.workspaceComposerDrafts, [composerWorkspaceKey(s.workingDirectory)]: composerDraftOf(s) }
+        : s.workspaceComposerDrafts;
       if (workspaceChanged) {
         cacheEditorStateForWorkspace(
           s.workingDirectory,
@@ -539,6 +545,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
           scheduledTasks: [], scheduledTaskRuns: [],
           gitReviewRequest: null, rightPanelExpanded: false,
         } : {}),
+        workspaceComposerDrafts,
+        ...(workspaceChanged && !s.conversationId
+          ? workspaceComposerDrafts[composerWorkspaceKey(d)] ?? emptyComposerDraft()
+          : {}),
         workspaceGit: workspaceChanged ? null : s.workspaceGit,
         ...(workspaceChanged ? { gitChanges: { workingTree: [], staged: [], untracked: [], loading: false, workspaceRoot: d } } : {}),
         mcpServers: workspaceChanged ? [] : s.mcpServers,
@@ -559,7 +569,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   snapshotWorkbenchState: (conversationId) =>
     set((s) => {
       const targetId = conversationId || s.conversationId || undefined;
-      if (!targetId) return s;
+      if (!targetId) return { workspaceComposerDrafts: {
+        ...s.workspaceComposerDrafts, [composerWorkspaceKey(s.workingDirectory)]: composerDraftOf(s),
+      } };
       return {
         conversationWorkbenchStates: storeConversationWorkbenchState(
           s,
@@ -574,7 +586,11 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       const stored = targetId
         ? s.conversationWorkbenchStates?.[targetId]
         : undefined;
-      const next = cloneConversationWorkbenchState(stored ?? emptyConversationWorkbenchState());
+      const next = cloneConversationWorkbenchState(stored ?? {
+        ...emptyConversationWorkbenchState(),
+        agentMode: targetId ? s.conversations.find(conversation => conversation.id === targetId)?.agentMode ?? "build" : "build",
+        ...(!targetId ? s.workspaceComposerDrafts[composerWorkspaceKey(s.workingDirectory)] : {}),
+      });
       const terminalSessions = (next.terminalSessions ?? [])
         .filter((session) => session.conversationId === targetId)
         .map((session) => ({ ...session }));
@@ -599,6 +615,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightPanelExpanded: next.rightPanelExpanded ?? false,
         rightStackTabLocked: next.rightStackTabLocked,
         draft: next.draft,
+        agentMode: next.agentMode ?? "build",
         attachments: next.attachments,
         quotedMessage: next.quotedMessage,
         selectedMentions: next.selectedMentions,
@@ -958,6 +975,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set((s) => ({ gitChanges: { ...s.gitChanges, loading } })),
   requestGitChanges: () => {
     const state = get();
+    // A requested navigation still leaves the old conversation visible in
+    // the store. Its workspace is already being replaced on the server.
+    // The mounted Git surfaces retry when that navigation settles.
+    if (state.pendingConversationSwitchId || state.pendingConversationCreateId) return;
     const conversationId = String(state.conversationId || "").trim();
     const workspaceRoot = String(state.workingDirectory || "").trim();
     if (!conversationId || !workspaceRoot) {

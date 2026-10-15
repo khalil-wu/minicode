@@ -176,4 +176,4 @@ def append_tool_transition_history(
         )
         return
     if content.strip():
-        ctx.append_assistant(content, phase=phase, provider_items=provider_items)
+        ctx.append_assistant(content, phase=phase, provider_items=provider_items, answer_source="retained")

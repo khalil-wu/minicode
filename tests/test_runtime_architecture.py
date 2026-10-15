@@ -1593,8 +1593,8 @@ def test_auto_policy_requires_review_for_open_world_mcp_tools() -> None:
     checker = PermissionChecker(
         PermissionSettings(auto_allow=["*"], require_confirm=[])
     )
-    auto_context = checker.build_context(mode="auto", source="test")
-    bypass_context = checker.build_context(mode="bypass", source="test")
+    auto_context = checker.build_context(mode="auto", source="test", approval_policy="on-request")
+    bypass_context = checker.build_context(mode="bypass", source="test", approval_policy="on-request")
     proxy = MCPToolProxy(
         "figma-desktop",
         MCPToolDef(
@@ -1614,6 +1614,9 @@ def test_auto_policy_requires_review_for_open_world_mcp_tools() -> None:
         checker.check(proxy.name, {}, context=bypass_context, tool=proxy)
         == PermissionLevel.CONFIRM
     )
+    for mode in ("auto", "bypass"):
+        never = checker.build_context(mode=mode, source="test", approval_policy="never")
+        assert checker.check(proxy.name, {}, context=never, tool=proxy) == PermissionLevel.ALWAYS_DENY
 
 
 def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
@@ -1629,8 +1632,8 @@ def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
     checker = PermissionChecker(
         PermissionSettings(auto_allow=["*"], require_confirm=[])
     )
-    auto_context = checker.build_context(mode="auto", source="test")
-    bypass_context = checker.build_context(mode="bypass", source="test")
+    auto_context = checker.build_context(mode="auto", source="test", approval_policy="on-request")
+    bypass_context = checker.build_context(mode="bypass", source="test", approval_policy="on-request")
     proxy = MCPToolProxy(
         "github",
         MCPToolDef(
@@ -1650,6 +1653,9 @@ def test_auto_policy_requires_review_for_destructive_mcp_tools() -> None:
         checker.check(proxy.name, {"issue": 123}, context=bypass_context, tool=proxy)
         == PermissionLevel.CONFIRM
     )
+    for mode in ("auto", "bypass"):
+        never = checker.build_context(mode=mode, source="test", approval_policy="never")
+        assert checker.check(proxy.name, {"issue": 123}, context=never, tool=proxy) == PermissionLevel.ALWAYS_DENY
 
 
 def test_bypass_skips_workspace_path_policy_for_local_file_tools(

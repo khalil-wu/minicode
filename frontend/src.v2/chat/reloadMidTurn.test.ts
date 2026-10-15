@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 /**
  * A renderer reload during a running turn restores the in-flight assistant from
  * the backend's periodic projection (termination_reason "run_in_progress").

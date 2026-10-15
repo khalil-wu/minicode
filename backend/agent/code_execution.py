@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from copy import deepcopy
 from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any
 from uuid import uuid4
 
 from backend.agent.code_execution_vm import CodeVM
+from backend.agent.code_execution_output import native_content_items, normalize_runtime_item, selected_media
 from backend.agent.code_execution_store import CodeCellReceipt
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
@@ -65,7 +68,8 @@ class CodeExecutionRuntime:
         self._closed = False
 
     def _policy(self, registry: ToolRegistry, base: ToolsetPolicy, requested=()) -> ToolsetPolicy:
-        loaded = {name for name in requested if name in self.state.loaded_deferred_tools and registry.get_tool(name) is not None
+        loaded = {registry.get_tool_spec(name).policy_identity or name
+                  for name in requested if name in self.state.loaded_deferred_tools and registry.get_tool(name) is not None
                   and base.is_available(registry.get_tool_spec(name))}
         return replace(base, enabled_tools=base.enabled_tools | loaded, code_mode_only=False, code_mode_enabled=True, nested_surface=True).with_disabled_tools(self.state.disabled_tools | CODE_TOOLS)
 
@@ -83,6 +87,8 @@ class CodeExecutionRuntime:
                 toolset_policy=replace(policy, include_deferred_directly=True))
             catalog = [{"name": schema["function"]["name"], "description": schema["function"]["description"],
                         "parameters": schema["function"]["parameters"],
+                        **({"output_schema": schema["_minicode_output_schema"]}
+                           if "_minicode_output_schema" in schema else {}),
                         **({"freeform": schema["_minicode_freeform"]} if "_minicode_freeform" in schema else {})} for schema in schemas]
             names = frozenset(entry["name"] for entry in catalog)
             cell_id = "cell_" + uuid4().hex
@@ -97,6 +103,7 @@ class CodeExecutionRuntime:
         return await self.wait(cell_id, yield_time_ms=yield_time_ms)
 
     async def wait(self, cell_id: str, *, yield_time_ms: int, terminate: bool = False) -> ToolResult:
+        started = time.monotonic()
         live_cell = self.cells.get(cell_id)
         cell = live_cell or self.store.receipts.get(cell_id)
         if cell is None:
@@ -126,20 +133,24 @@ class CodeExecutionRuntime:
         cell.output.clear()
         contexts = list(cell.hook_context)
         cell.hook_context.clear()
-        images = [{"media_type": item["media_type"], "data": item["data"],
-                   **{key: item[key] for key in ("artifact_id", "source", "tool_call_id", "call_source", "operation") if key in item}}
-                  for item in output if item["kind"] == "image"]
-        audios = [{"media_type": item["media_type"], "data": item["data"]} for item in output if item["kind"] == "audio"]
+        images = selected_media(output, "image")
+        audios = selected_media(output, "audio")
         text = [item["text"] for item in output if item["kind"] == "text"]
+        text_sources = [item.get("tool_call_ids", item.get("tool_call_id", "")) for item in output if item["kind"] == "text"]
         report = {"cell_id": cell.id, "status": cell.status, "output": text,
+                              "output_tool_call_ids": text_sources,
                               **({"error": cell.error} if cell.error else {}), "image_count": len(images), "audio_count": len(audios),
                               **({"discarded_unawaited_tool_calls": cell.discarded_calls} if cell.discarded_calls else {})}
         if live_cell is not None and cell.status == "running":
             report["pending_tools"] = list(live_cell.pending_tools.values())
-        return ToolResult(json.dumps(report, ensure_ascii=False), images=images, audios=audios, is_error=cell.status in {"failed", "cancelled"},
+        native = native_content_items(output, cell.error if cell.status == "failed" else "")
+        native_status = f"Script running with cell ID {cell.id}" if cell.status == "running" else "Script terminated" if cell.status == "cancelled" else "Script failed" if cell.status == "failed" else "Script completed"
+        return ToolResult(json.dumps(report, ensure_ascii=False), images=images, audios=audios, code_mode_output=native, is_error=cell.status in {"failed", "cancelled"},
                           status="cancelled" if cell.status == "cancelled" else "failed" if cell.status == "failed" else "success",
                           display_summary="Script yielded" if cell.status == "running" else f"Script {cell.status}",
-                          runtime_metadata={"code_cell": report, "hook_model_context": contexts})
+                          runtime_metadata={"code_cell": report, "hook_model_context": contexts,
+                            "code_mode_status": native_status, "code_mode_wall_time_seconds": time.monotonic() - started,
+                            "code_mode_raw_output": deepcopy(native)})
 
     async def _emit(self, cell: CodeCell, event: AgentEvent, source: ToolCallSource) -> None:
         await publish_tool_event(self.tool_context.run_context, event, source)
@@ -167,7 +178,8 @@ class CodeExecutionRuntime:
                 call_id = str(data.get("tool_call_id") or data.get("step_id") or data.get("id") or "")
                 source = sources.get(call_id, ToolCallSource("code_mode", cell.parent.tool_call_id, cell.id))
                 await self._emit(cell, AgentEvent(kind, dict(data)), source)
-            policy = self._policy(cell.registry, cell.policy, (request["name"] for request in batch)).with_availability_filter(tools=cell.allowed_names)
+            policy = self._policy(cell.registry, cell.policy, (request["name"] for request in batch)).with_availability_filter(
+                tools=(cell.registry.get_tool_spec(name).policy_identity or name for name in cell.allowed_names))
             nested = replace(self.tool_context, call_sources=sources, iteration_id=cell.parent.iteration_id,
                 model_execution=cell.parent.model_execution, llm=cell.parent.llm,
                 cancel_event=cell.cancel, result_sink=receive, emit_event=emit_event,
@@ -184,21 +196,24 @@ class CodeExecutionRuntime:
                     if event.type == "tool_result":
                         operation = cell.pending_tools.pop(call_id)
                         result = results.pop(call_id)
-                        value = {item.name: getattr(result, item.name) for item in fields(result) if item.name != "runtime_metadata"}
+                        value = {item.name: getattr(result, item.name) for item in fields(result) if item.name not in {"runtime_metadata", "mcp_result", "code_mode_output"}}
                         if result.images:
                             value["images"] = []
                             for image in result.images:
                                 artifact_id = image.get("artifact_id") or (result.artifact_id if len(result.images) == 1 else None)
-                                value["images"].append({**image, **({"artifact_id": artifact_id} if artifact_id else {})})
+                                value["images"].append({**image, "image_url": f"data:{image['media_type']};base64,{image['data']}", **({"artifact_id": artifact_id} if artifact_id else {})})
                                 if artifact_id:
                                     cell.image_artifacts[(artifact_id, image["media_type"], image["data"])] = {
                                         "source": "image_generation" if result.result_kind == "image_generation" else "tool",
                                         "tool_call_id": call_id, "call_source": asdict(source), "operation": operation,
                                     }
-                        mcp = result.runtime_metadata.get("mcp")
-                        if isinstance(mcp, dict):
-                            value["structured_content"] = mcp.get("structuredContent")
-                        await cell.replies.put({"id": request_ids[call_id], "value": value})
+                        if result.audios:
+                            value["audios"] = [{**audio, "audio_url": f"data:{audio['media_type']};base64,{audio['data']}"} for audio in result.audios]
+                        if result.mcp_result is not None:
+                            value = deepcopy(result.mcp_result)
+                        if not result.is_error and "code_mode_result" in result.runtime_metadata:
+                            value = result.runtime_metadata["code_mode_result"]
+                        await cell.replies.put({"id": request_ids[call_id], "value": value, "tool_call_id": call_id})
 
     async def _run(self, cell: CodeCell) -> None:
         vm = None
@@ -214,9 +229,11 @@ class CodeExecutionRuntime:
             while True:
                 # image() can forward a leaf artifact, but script-created IDs
                 # are not provenance. Retain only this cell's original bytes.
+                packet["output"] = [normalize_runtime_item(item) for item in packet["output"]]
                 for item in packet["output"]:
                     if item["kind"] == "image" and item.get("artifact_id"):
-                        ownership = cell.image_artifacts.get((item["artifact_id"], item["media_type"], item["data"]))
+                        pixels = selected_media([item], "image")
+                        ownership = cell.image_artifacts.get((item["artifact_id"], pixels[0]["media_type"], pixels[0]["data"])) if pixels else None
                         if ownership is None:
                             item.pop("artifact_id")
                         else:

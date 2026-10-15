@@ -46,6 +46,9 @@ def test_parallel_task_preserves_child_completion_and_result_identity(
         def release_subagent_task(self, *args, **kwargs):
             pass
 
+        def get_subagent(self, *args, **kwargs):
+            return None
+
     monkeypatch.setattr(agent_tools, "require_runtime_from_context", lambda context: Runtime())
     tool = agent_tools.TaskTool(artifact_store=object())
 
@@ -62,7 +65,7 @@ def test_parallel_task_preserves_child_completion_and_result_identity(
         )
 
     monkeypatch.setattr(tool, "_run_single_subtask", child)
-    context = SimpleNamespace(cancel_event=None, metadata={}, task_id="parent", session_id="session")
+    context = SimpleNamespace(cancel_event=None, metadata={}, task_id="parent", session_id="session", tool_call_id="parallel-call")
     result = asyncio.run(tool._run_parallel_subtasks(
         [{"description": "First", "prompt": "First"}, {"description": "Second", "prompt": "Second"}],
         context,

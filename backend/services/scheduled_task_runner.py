@@ -59,7 +59,7 @@ async def run_scheduled_task(
     if requested_conversation_id and conversation is None:
         invalid_conversation_reason = "The heartbeat conversation no longer exists."
     if conversation is not None:
-        bound_text = str(getattr(conversation, "workspace_root", "") or "").strip()
+        bound_text = str(getattr(conversation, "execution_cwd", "") or getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or "").strip()
         bound_root = Path(bound_text).expanduser() if bound_text else None
         if bound_root is None or main_worktree_root(bound_root) != main_worktree_root(workspace_root):
             invalid_conversation_reason = "The heartbeat conversation belongs to another project."
@@ -80,6 +80,7 @@ async def run_scheduled_task(
             workspace_root=str(workspace_root.resolve()),
             git_branch=git_branch_for(workspace_root),
             permission_mode=permission_mode,
+            thread_source="automation",
         )
     if str(getattr(run, "conversation_id", "") or "") != conversation.id:
         run.conversation_id = conversation.id
@@ -269,8 +270,11 @@ async def _run_scheduled_task_owned(
     if admitted is None:
         raise RuntimeError("The scheduled conversation disappeared before its prompt was saved.")
 
+    from backend.services.turn_notifications import heartbeat_user_message
+
+    query_message = heartbeat_user_message(task.id, now, task.prompt) if task.kind == "heartbeat" else task.prompt
     result = await run_owned_rest_chat(
-        message=str(getattr(task, "prompt", "") or ""),
+        message=query_message,
         max_iterations=None,
         bootstrap=bootstrap,
         query_engine=None,
@@ -281,6 +285,9 @@ async def _run_scheduled_task_owned(
         query_claim=query_claim,
         run_context=run_context,
         conversation_snapshot=snapshot,
+        automation_kind=task.kind,
+        notification_policy=task.notification_policy,
+        turn_trigger=run.turn_trigger,
     )
     if not conversation_query_guards().owns(query_claim):
         return {
@@ -301,11 +308,19 @@ async def _run_scheduled_task_owned(
         else "failed"
     )
     reply = str(result.get("reply") or "")
+    from backend.services.turn_notifications import completion_notification
+
+    notification = completion_notification(
+        status=status, last_agent_message=reply, thread_source=conversation.thread_source,
+        automation_kind=task.kind, notification_policy=task.notification_policy,
+    )
+    heartbeat_message = notification["heartbeat_assistant_message"]
+    visible_reply = heartbeat_message["visible_text"] if heartbeat_message is not None else reply
     errors = [str(item) for item in result.get("errors", []) if str(item).strip()]
     assistant_message = {
         "id": f"assistant_schedule_{getattr(run, 'id', '')}",
         "role": "assistant",
-        "content": reply,
+        "content": visible_reply,
         "timestamp": datetime.now(UTC).isoformat(),
         "terminal_status": status,
         "termination_reason": stopped_reason,
@@ -317,6 +332,7 @@ async def _run_scheduled_task_owned(
             "stopped_reason": stopped_reason,
             "iterations": int(result.get("iterations") or 0),
             "errors": errors,
+            "completion_notification": notification,
         },
     }
     next_snapshot = {
@@ -366,7 +382,9 @@ async def _run_scheduled_task_owned(
         # actual run happens in a nested managed worktree.
         "workspace_root": str(workspace_root.resolve()),
         "execution_workspace_root": str(execution_root),
-        "summary": reply,
+        "summary": visible_reply,
+        "completion_notification": notification,
+        "message_id": assistant_message["id"],
         **run_context.lifecycle_cleanup_evidence(),
         "error": stopped_reason if status in {"failed", "cancelled"} else "",
     }

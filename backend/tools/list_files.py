@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from typing import Any
+from contextlib import ExitStack
+from pathlib import Path
+import os
+import stat
 
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -10,7 +14,6 @@ from backend.tools.path_resolution import (
     PathTraversalError,
     _is_bypass_mode,
     _resolve_path,
-    denied_path_patterns,
 )
 from backend.workspace.path_filters import is_windows_reserved_path
 
@@ -44,6 +47,8 @@ class ListFilesTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory to list (default: workspace root)."},
+                    "directory": {"type": "string", "description": "Alternative directory path; use path when both are specified."},
+                    "recursive": {"type": "boolean", "description": "List descendants up to the entry limit; does not follow directory symlinks.", "default": False},
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -88,6 +93,8 @@ class ListFilesTool(BaseTool):
                         "type": "string",
                         "description": "Directory to list; defaults to the workspace root.",
                     },
+                    "directory": {"type": "string", "description": "Alternative directory path; use path when both are specified."},
+                    "recursive": {"type": "boolean", "description": "List descendants up to the entry limit; does not follow directory symlinks.", "default": False},
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -130,52 +137,41 @@ class ListFilesTool(BaseTool):
         # A listing is a read of the workspace surface, so it must hide whatever
         # read_file/grep_files/glob_files hide. Names alone still disclose
         # secrets (.env.production, secrets/api.txt, deploy.pem).
-        denied_patterns = denied_path_patterns(context)
         checker = getattr(context, "permission_checker", None) if context is not None else None
         permission = getattr(context, "permission", None) if context is not None else None
         is_allowed = (
             (lambda candidate: checker.is_path_allowed(str(candidate), context=permission))
-            if checker is not None and denied_patterns
+            if checker is not None
             else None
         )
         entries: list[str] = []
         entry_limit_reached = False
         try:
-            if recursive:
-                candidates = sorted(
-                    path.rglob("*"),
-                    key=lambda item: item.relative_to(path).as_posix().lower(),
-                )
-                for item in candidates:
+            # Native iterators stop at the requested prefix and close even when
+            # the limit is reached. Never materialize a whole directory to sort.
+            with ExitStack() as scans:
+                directories = [scans.enter_context(os.scandir(path))]
+                while directories:
+                    entry = next(directories[-1], None)
+                    if entry is None:
+                        directories.pop().close()
+                        continue
+                    item = Path(entry.path)
                     rel = item.relative_to(path)
                     if is_windows_reserved_path(rel):
                         continue
                     if is_allowed is not None and not is_allowed(item):
                         continue
-                    if len(entries) >= limit:
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                    entries.append(f"{rel.as_posix()}{'/' if is_directory else ''}")
+                    if len(entries) == limit:
                         entry_limit_reached = True
                         break
-                    try:
-                        suffix = "/" if item.is_dir() else ""
-                    except OSError:
-                        continue
-                    entries.append(f"{rel.as_posix()}{suffix}")
-            else:
-                for item in sorted(path.iterdir(), key=lambda candidate: candidate.name.lower()):
-                    if is_windows_reserved_path(item.name):
-                        continue
-                    if is_allowed is not None and not is_allowed(item):
-                        continue
-                    if len(entries) >= limit:
-                        entry_limit_reached = True
-                        break
-                    try:
-                        suffix = "/" if item.is_dir() else ""
-                    except OSError:
-                        continue
-                    entries.append(f"{item.name}{suffix}")
-        except (OSError, PermissionError):
-            return self._error_result(f"No permission to access directory: {directory}")
+                    if recursive and is_directory and not (os.name == "nt" and entry.stat(follow_symlinks=False).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                        directories.append(scans.enter_context(os.scandir(item)))
+        except OSError as exc:
+            return self._error_result(f"Cannot list directory {directory}: {exc}")
+        entries.sort(key=str.lower)
 
         if not entries:
             return self._success_result("(empty directory)")

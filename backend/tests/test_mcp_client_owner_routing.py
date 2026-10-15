@@ -10,6 +10,7 @@ from backend.agent.message import UserCommand
 from backend.bootstrap.app import AppBootstrap
 from backend.cancellation_signal import CancellationSignal
 from backend.mcp.client import MCPClient
+from backend.permissions.context import PermissionContext
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.handlers.mcp import _ProviderOAuthCallbacks
@@ -83,6 +84,11 @@ class _BootstrapElicitationSession:
         self.delivered = delivered
         self.sent: list[dict] = []
         self.terminal: list[dict] = []
+        self.conversation_repo = SimpleNamespace(get_conversation=lambda conversation_id: SimpleNamespace(id=conversation_id))
+
+    def permission_context_for_conversation(self, conversation, *, source):
+        assert source == "mcp.elicitation"
+        return PermissionContext(mode="confirm", approval_policy="on-request")
 
     async def send_payload(self, payload: dict, *, log_context: str) -> bool:
         assert log_context == "mcp:elicitation"
@@ -100,6 +106,7 @@ class _BootstrapElicitationSession:
         *,
         reason: str,
         conversation_id: str,
+        notification_claims=None,
     ) -> None:
         self.terminal.append({
             "request_ids": list(request_ids),
@@ -119,6 +126,11 @@ class _OAuthControlSession(SessionApprovalRuntimeMixin):
         self.terminal: list[dict] = []
         self.command_dispatcher = object.__new__(SessionCommandDispatcher)
         self.command_dispatcher._session = self
+        self.conversation_repo = SimpleNamespace(get_conversation=lambda conversation_id: SimpleNamespace(id=conversation_id))
+
+    def permission_context_for_conversation(self, conversation, *, source):
+        assert source == "mcp.elicitation"
+        return PermissionContext(mode="confirm", approval_policy="on-request")
 
     async def send_event(self, event) -> None:
         self.sent.append(event.to_ws_message())
@@ -141,6 +153,7 @@ class _OAuthControlSession(SessionApprovalRuntimeMixin):
         *,
         reason: str,
         conversation_id: str,
+        notification_claims=None,
     ) -> None:
         self.terminal.append({
             "request_ids": list(request_ids),
@@ -245,6 +258,8 @@ def test_bootstrap_mcp_elicitation_uses_registered_owned_protocol_and_cleans_up(
             "tool_use_id": payload["request_id"],
             "prompt": "Which runtime should be used?",
             "question": "Which runtime should be used?",
+            "mode": "form",
+            "mcp_server_name": "",
             "schema": {"type": "object", "properties": {"runtime": {"type": "string", "enum": ["use-node", "use-bun"]}}},
         }
         assert session.terminal == [{
@@ -268,7 +283,7 @@ def test_bootstrap_mcp_elicitation_fails_immediately_when_prompt_cannot_be_deliv
             {"conversation_id": "conversation-a"},
         )
 
-        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?"})
+        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?", "schema": {"type": "object", "properties": {}}})
 
         assert result == {
             "action": "cancel",
@@ -298,7 +313,7 @@ def test_bootstrap_mcp_elicitation_rejection_and_timeout_emit_terminal_events() 
             {"conversation_id": "conversation-a"},
         )
 
-        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?"})
+        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?", "schema": {"type": "object", "properties": {}}})
 
         assert result == {"action": "cancel", "error": "User cancelled the elicitation"}
         assert session.terminal[-1]["reason"] == "mcp_elicitation_rejected"
@@ -318,7 +333,7 @@ def test_bootstrap_mcp_elicitation_rejection_and_timeout_emit_terminal_events() 
             raise TimeoutError
 
         bootstrap._await_mcp_owner_operation = timeout
-        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?"})
+        result = await bootstrap._handle_mcp_elicitation({"prompt": "Continue?", "schema": {"type": "object", "properties": {}}})
 
         assert result == {"action": "cancel", "error": "User response timed out"}
         assert session.terminal[-1]["reason"] == "mcp_elicitation_timeout"

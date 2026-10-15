@@ -13,13 +13,17 @@ async def test_native_clangd_completes_directives_real_headers_members_and_funct
     (tmp_path / "main.cpp").write_text(disk, encoding="utf-8")
     (tmp_path / "project.hpp").write_text("int project_function();\n", encoding="utf-8")
     service = WorkspaceService(get_workspace_root=lambda: tmp_path)
+    revision = 0
 
     async def request(method, content, line=None, character=None, **extra):
+        nonlocal revision
+        revision += 1
         lines = content.split("\n")
         result = await editor_language_request(service, EditorLanguageRequest(
-            method=method, documents=[EditorDocument(path="main.cpp", content=content)],
+            window_owner_id="primary", window_instance_id="cpp-instance", client_id="cpp-renderer", snapshot_revision=revision,
+            method=method, documents=[EditorDocument(document_id="cpp-model", model_version=revision, path="main.cpp", content=content)],
             line=len(lines) - 1 if line is None else line,
-            character=len(lines[-1]) if character is None else character, **extra))
+            character=len(lines[-1]) if character is None else character, **extra), binding_token="cpp-proof")
         return result["result"]
 
     def items(result):
@@ -61,7 +65,8 @@ async def test_explicit_cpp_mode_and_c_mode_use_real_compiler_completions(tmp_pa
     text = "struct Data { int count; };\nint main(){ struct Data value; value."
     try:
         result = await editor_language_request(service, EditorLanguageRequest(method="completion",
-            documents=[EditorDocument(path=path, content=text, language=language)], line=1, character=len(text.split("\n")[-1])))
+            window_owner_id="primary", window_instance_id="cpp-mode-instance", client_id="cpp-mode-renderer", snapshot_revision=1,
+            documents=[EditorDocument(document_id="mode-model", model_version=1, path=path, content=text, language=language)], line=1, character=len(text.split("\n")[-1])), binding_token="cpp-mode-proof")
         values = result["result"] if isinstance(result["result"], list) else result["result"]["items"]
         assert "count" in {item["label"].strip() for item in values}
         assert (tmp_path / path).read_text(encoding="utf-8") == "// unchanged\n"

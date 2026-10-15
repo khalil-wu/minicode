@@ -1,4 +1,5 @@
 import { memo, useMemo } from "react";
+import { MessageCircle } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { agentsForReferences, projectAgentViews } from "../../lib/agent-view-model";
@@ -10,9 +11,11 @@ import "./CollaborationCell.css";
 export const CollaborationCell = memo(function CollaborationCell({
   cell,
   conversationId,
+  isTranscriptMode = false,
 }: {
   cell: CollaborationCellState;
   conversationId?: string;
+  isTranscriptMode?: boolean;
 }) {
   const agentIds = useMemo(() => [...new Set(cell.entries.map((entry) => entry.agentId))], [cell.entries]);
   const agents = useAppStore(useShallow((state) => {
@@ -36,7 +39,7 @@ export const CollaborationCell = memo(function CollaborationCell({
     const namedLabel = label && !opaqueIdentity.test(label) && !["Agent", "子智能体", "子任务"].includes(label) ? label : "";
     const title = agent?.title && agent.title !== "子任务" ? agent.title : "";
     const identity = cell.entries.find((entry) => entry.agentId === id)?.agentIdentity;
-    const name = id ? agent?.teammateName || title || namedLabel || identity?.split("/").filter(Boolean).at(-1) || id : "";
+    const name = id ? title || namedLabel || identity?.split("/").filter(Boolean).at(-1) || id : "";
     return [id, name] as const;
   }));
   const openAgent = (id: string) => {
@@ -46,16 +49,24 @@ export const CollaborationCell = memo(function CollaborationCell({
   };
 
   if (cell.action !== "completed") {
+    const parentMessage = isTranscriptMode && cell.action === "sent_message"
+      && cell.entries.some((entry) => ["parent", "team-lead"].includes(entry.agentId));
     const started = cell.entries.filter((entry, index, entries) => entry.agentId.trim()
       && (agentFor(entry.agentId) || entry.agentStatus)
       && entries.findIndex((candidate) => candidate.agentId === entry.agentId) === index);
     return <div className="collaboration-cell collaboration-delegated" data-action={cell.action} data-status={cell.status}>
+      {parentMessage && <div className="collaboration-parent-message" data-status={cell.status}>
+        <MessageCircle size={16} strokeWidth={1.6} aria-hidden="true" />
+        <span>{cell.status === "running" ? "正在向父代理发送消息" : cell.status === "success" ? "已向父代理发送消息" : "向父代理发送消息"}</span>
+      </div>}
       {started.map((entry) => {
         const agent = agentFor(entry.agentId);
         const label = agentNames.get(entry.agentId);
         const canOpen = conversationId === activeConversationId;
-        const hasStarted = cell.action === "delegated" && cell.status === "success"
-          && (agent?.effectiveStatus || entry.agentStatus) !== "pending";
+        const startedAt = entry.agentStartedAt ?? agent?.startedAt;
+        const hasStarted = cell.action === "delegated" && (entry.agentStartedAt !== undefined
+          ? entry.agentStartedAt > 0
+          : cell.status === "success" && startedAt !== undefined && startedAt > 0);
         const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} />
           <span className="collaboration-delegated-label"><span className="collaboration-delegated-name">{label}</span>
             {hasStarted && <span className="collaboration-delegated-start">开始工作</span>}
@@ -64,13 +75,13 @@ export const CollaborationCell = memo(function CollaborationCell({
           aria-label={`打开子智能体：${label}`} title={`查看 ${label} 的工作记录${agent ? ` · ${agent.statusLabel}` : ""}`}
           data-agent-status={agent?.effectiveStatus || entry.agentStatus} data-started={hasStarted} onClick={() => {
             if (!agent) useAppStore.getState().addSubagent({ id: entry.agentId, role: "subagent", status: entry.agentStatus!,
-              teammateName: label, agentPath: entry.agentIdentity }, conversationId);
+              displayName: label, agentPath: entry.agentIdentity }, conversationId);
             openAgent(agent?.id ?? entry.agentId);
           }}>{content}</button>
           : <div key={entry.agentId} className="collaboration-delegated-row" data-agent-status={agent?.effectiveStatus || entry.agentStatus} data-started={hasStarted}>{content}</div>;
       })}
       {cell.error && <details className="collaboration-delegated-error">
-        <summary>{cell.action === "delegated" ? "启动子智能体" : cell.action === "sent_message" ? "发送消息" : "停止子智能体"} · {cell.status === "cancelled" ? "已停止" : cell.status === "partial" ? "部分完成" : "失败"}</summary>
+        <summary>{cell.action === "delegated" ? "启动子智能体" : cell.action === "sent_message" ? "发送消息" : "停止子智能体"}</summary>
         <div role="alert">{cell.error}</div>
       </details>}
     </div>;
@@ -91,7 +102,7 @@ export const CollaborationCell = memo(function CollaborationCell({
           ? <button key={entry.agentId} type="button" className="collaboration-completion-row" aria-label={`打开子智能体：${label}`}
             aria-controls="right-panel-drawer" title={`查看 ${label} 的工作记录`} onClick={() => {
               if (!agent) useAppStore.getState().addSubagent({ id: entry.agentId, role: "subagent", status: entry.agentStatus!,
-                teammateName: entry.agentLabel, agentPath: entry.agentIdentity }, conversationId);
+                displayName: entry.agentLabel, agentPath: entry.agentIdentity }, conversationId);
               openAgent(agent?.id ?? entry.agentId);
             }}>{content}</button>
           : <div key={entry.agentId} className="collaboration-completion-row">{content}</div>;

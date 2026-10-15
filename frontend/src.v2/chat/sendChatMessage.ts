@@ -1,14 +1,17 @@
 import { getWebSocket } from "../hooks/useWebSocket";
 import { pushToast } from "../overlays/ToastContainer";
-import type { UserMessageCommand } from "../protocol/events";
+import type { CommandResultEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import { useAppStore } from "../stores";
 import type { AgentMode, ChatMessage, ComposerQuote, MessageAttachmentRef, MessageContextRef } from "../stores/types";
 import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { normalizeAgentErrorMessage } from "./errorMessages";
-import { uniqueMessageId } from "../stores/shared-helpers";
+import { conversationWorkspacePath, uniqueMessageId } from "../stores/shared-helpers";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { parseRuntimeSlashInput } from "../lib/runtime-commands";
+import { commandResultSucceeded, notifyClientCommandReceived, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { adoptGeneratedConversation } from "./conversationAdoption";
 
 interface SendChatMessageOptions {
   displayContent?: string;
@@ -18,6 +21,7 @@ interface SendChatMessageOptions {
   conversationId?: string;
   primaryFile?: string;
   agentMode?: AgentMode;
+  codeReview?: import("../protocol/code-review-types").CodeReviewScope;
   contextRefs?: MessageContextRef[];
   quotedMessage?: ComposerQuote | null;
   allowWhileStreaming?: boolean;
@@ -26,16 +30,18 @@ interface SendChatMessageOptions {
   assistantMessageId?: string;
   userMessageId?: string;
   retryFromMessageId?: string;
+  awaitAdmission?: boolean;
+  onAdmission?: (event: CommandResultEvent) => void;
+  onReceived?: () => void;
+  onRejected?: () => void;
 }
 
-let lastSendSignature = "";
-let lastSendAt = 0;
-const DUPLICATE_SEND_WINDOW_MS = 250;
+const pendingInputs = new Map<string, Parameters<typeof appendLocalUserTurn>[0] & {
+  workspaceRoot: string;
+  queueUpdate?: UserMessageQueueUpdatedEvent;
+}>();
 
-export const resetSendDeduplication = () => {
-  lastSendSignature = "";
-  lastSendAt = 0;
-};
+export const resetPendingUserMessagesForTests = () => pendingInputs.clear();
 
 const addSystemNotice = (content: string, conversationId?: string) => {
   useAppStore.getState().upsertSystemMessage(
@@ -98,32 +104,10 @@ const attachmentTransportRef = (payload: Record<string, unknown>): Record<string
   };
 };
 
-const contextRefSignature = (ref: MessageContextRef): Record<string, unknown> => {
-  if (ref.kind === "plugin") {
-    return { kind: ref.kind, config_name: ref.configName, path: ref.path };
-  }
-  if (ref.kind === "skill") {
-    return { kind: ref.kind, name: ref.name, path: ref.path ?? "" };
-  }
-  if (ref.kind === "browser_annotation") {
-    return {
-      kind: ref.kind,
-      url: ref.url,
-      note: ref.note,
-      selector: ref.selector ?? "",
-      targetId: ref.targetId ?? "",
-      xPercent: ref.xPercent ?? null,
-      yPercent: ref.yPercent ?? null,
-      widthPercent: ref.widthPercent ?? null,
-      heightPercent: ref.heightPercent ?? null,
-    };
-  }
-  return { kind: ref.kind, path: ref.path, range: ref.range, text: ref.text, workspaceRoot: ref.workspaceRoot };
-};
-
 const appendLocalUserTurn = ({
   content,
   backendContent,
+  codeReview,
   quotedMessage,
   conversationId,
   contextRefs,
@@ -132,9 +116,11 @@ const appendLocalUserTurn = ({
   userMessageId,
   retryFromMessageId,
   queued,
+  includeAssistant = true,
 }: {
   content: string;
   backendContent: string;
+  codeReview?: import("../protocol/code-review-types").CodeReviewScope;
   quotedMessage?: ComposerQuote | null;
   conversationId?: string;
   contextRefs: MessageContextRef[];
@@ -143,21 +129,26 @@ const appendLocalUserTurn = ({
   userMessageId: string;
   retryFromMessageId?: string;
   queued: boolean;
+  includeAssistant?: boolean;
 }) => {
   useAppStore.setState((state) => {
     const targetId = conversationId || state.conversationId || undefined;
+    const currentMessages = targetId && state.sideChats[targetId] ? state.sideChats[targetId].messages
+      : targetId && targetId !== state.conversationId ? state.conversationMessages[targetId] ?? [] : state.messages;
+    // Restore may already have hydrated the durable admission before its reply
+    // is replayed. Stable input identity must never append it a second time.
+    const retryIndex = retryFromMessageId ? currentMessages.findIndex(message => message.id === retryFromMessageId) : -1;
+    const retainedMessages = retryIndex >= 0 ? currentMessages.slice(0, retryIndex) : currentMessages;
+    const existingUser = retainedMessages.find(message => message.id === userMessageId);
+    const existingAssistant = retainedMessages.find(message => message.id === assistantMessageId);
+    if (existingUser && (!includeAssistant || (existingAssistant && (existingUser.queueState === "queued") === queued))) return state;
     const timestamp = Date.now();
-    const resetRunState = {
-      plan: null,
-      todos: [],
-      subagents: [],
-      agentProgress: [],
-    };
     const userMessage: ChatMessage = {
       id: userMessageId,
       role: "user",
       content,
       backendContent,
+      codeReview,
       quotedMessage: quotedMessage ? { ...quotedMessage } : null,
       contextRefs,
       attachmentRefs,
@@ -172,69 +163,58 @@ const appendLocalUserTurn = ({
       blocks: [],
       artifacts: [],
       timestamp,
-      isStreaming: !queued,
+      isStreaming: includeAssistant && !queued,
       ...(queued ? { queueState: "queued" as const, queueMessageId: assistantMessageId } : {}),
     };
-    const rewindForRetry = (messages: ChatMessage[]): ChatMessage[] => {
-      if (!retryFromMessageId) return messages;
-      const retryIndex = messages.findIndex((message) => message.id === retryFromMessageId);
-      return retryIndex >= 0 ? messages.slice(0, retryIndex) : messages;
+    const insertInput = (): ChatMessage[] => {
+      if (existingUser) {
+        const updated = retainedMessages.map(message => message.id === userMessageId ? { ...message,
+          queueState: queued ? "queued" as const : undefined, queueMessageId: queued ? assistantMessageId : undefined,
+        } : message);
+        return existingAssistant ? updated : [...updated, assistantMessage];
+      }
+      if (!includeAssistant) return [...retainedMessages, userMessage];
+      const assistantIndex = retainedMessages.findIndex(message => message.id === assistantMessageId);
+      return assistantIndex < 0 ? [...retainedMessages, userMessage, assistantMessage]
+        : [...retainedMessages.slice(0, assistantIndex), userMessage, ...retainedMessages.slice(assistantIndex)];
     };
 
     if (targetId && state.sideChats[targetId]) {
       const thread = state.sideChats[targetId];
+      const messages = insertInput();
       return {
-        ...(queued || !targetId ? {} : { turnDiffs: omitConversationTurnDiff(state.turnDiffs, targetId) }),
-        ...(!queued ? {
-          conversationAgentStates: {
-            ...state.conversationAgentStates,
-            [targetId]: resetRunState,
-          },
-        } : {}),
         sideChats: {
           ...state.sideChats,
           [targetId]: {
             ...thread,
-            isStreaming: queued ? thread.isStreaming : true,
-            messages: [...rewindForRetry(thread.messages), userMessage, assistantMessage],
+            isStreaming: queued ? thread.isStreaming : messages.some(message => message.isStreaming || message.isThinkingStreaming),
+            messages,
           },
         },
       };
     }
 
     if (!targetId || targetId === state.conversationId) {
-      const nextMessages = [...rewindForRetry(state.messages), userMessage, assistantMessage];
+      const nextMessages = insertInput();
       return {
-        ...(queued ? {} : resetRunState),
         messages: nextMessages,
-        isStreaming: queued ? state.isStreaming : true,
-        ...(queued || !state.conversationId ? {} : { turnDiffs: omitConversationTurnDiff(state.turnDiffs, state.conversationId) }),
+        isStreaming: queued ? state.isStreaming : nextMessages.some(message => message.isStreaming || message.isThinkingStreaming),
         ...(state.conversationId
           ? {
-              conversationAgentStates: {
-                ...(state.conversationAgentStates ?? {}),
-                [state.conversationId]: queued
-                  ? state.conversationAgentStates[state.conversationId] ?? resetRunState
-                  : resetRunState,
-              },
               conversationMessages: {
                 ...state.conversationMessages,
                 [state.conversationId]: nextMessages,
               },
               conversationStreaming: {
                 ...state.conversationStreaming,
-                [state.conversationId]: queued ? state.conversationStreaming[state.conversationId] ?? state.isStreaming : true,
+                [state.conversationId]: queued ? state.conversationStreaming[state.conversationId] ?? state.isStreaming : nextMessages.some(message => message.isStreaming || message.isThinkingStreaming),
               },
             }
           : {}),
       };
     }
 
-    const nextMessages = [
-      ...rewindForRetry(state.conversationMessages[targetId] ?? []),
-      userMessage,
-      assistantMessage,
-    ];
+    const nextMessages = insertInput();
     return {
       conversationMessages: {
         ...state.conversationMessages,
@@ -242,24 +222,10 @@ const appendLocalUserTurn = ({
       },
       conversationStreaming: {
         ...state.conversationStreaming,
-        [targetId]: queued ? state.conversationStreaming[targetId] ?? false : true,
+        [targetId]: queued ? state.conversationStreaming[targetId] ?? false : nextMessages.some(message => message.isStreaming || message.isThinkingStreaming),
       },
-      ...(queued ? {} : { turnDiffs: omitConversationTurnDiff(state.turnDiffs, targetId) }),
-      ...(queued ? {} : {
-        conversationAgentStates: {
-          ...(state.conversationAgentStates ?? {}),
-          [targetId]: resetRunState,
-        },
-      }),
     };
   });
-};
-
-const omitConversationTurnDiff = <T,>(items: Record<string, T>, conversationId: string): Record<string, T> => {
-  if (!(conversationId in items)) return items;
-  const next = { ...items };
-  delete next[conversationId];
-  return next;
 };
 
 const conversationSwitchBlockReason = (conversationId?: string): string | null => {
@@ -273,6 +239,7 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
   const switchReason = conversationSwitchBlockReason(conversationId);
   if (switchReason) return switchReason;
   const state = useAppStore.getState();
+  if (!state.composerDraftsReady) return "正在恢复输入草稿，请等待完成后发送。";
   const targetConversationId = conversationId ?? state.conversationId ?? state.runtimeSession?.active_conversation_id ?? undefined;
   if (
     hasLocalPendingPromptForConversation(
@@ -306,23 +273,6 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
   return null;
 };
 
-const recoverStaleStreamingState = (conversationId?: string): boolean => {
-  const state = useAppStore.getState();
-  const targetStreaming = conversationId
-    ? conversationId === state.conversationId
-      ? state.isStreaming
-      : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
-    : state.isStreaming;
-  if (!targetStreaming) return false;
-  const activeMessages = conversationId && conversationId !== state.conversationId
-    ? state.sideChats[conversationId]?.messages ?? state.conversationMessages[conversationId] ?? []
-    : state.messages;
-  const hasLiveAssistant = activeMessages.some((message) => message.isStreaming || message.isThinkingStreaming);
-  if (hasLiveAssistant) return false;
-  state.finishStreaming(conversationId);
-  return true;
-};
-
 export const sendChatMessage = (options: SendChatMessageOptions): boolean | Promise<boolean> => {
   const switchReason = conversationSwitchBlockReason(options.conversationId);
   if (switchReason) {
@@ -336,7 +286,7 @@ export const sendChatMessage = (options: SendChatMessageOptions): boolean | Prom
   const conversation = before.conversations.find((item) => item.id === conversationId);
   const workspaceRoot = conversationId === (before.conversationId || "")
     ? before.workingDirectory
-    : before.sideChats[conversationId]?.workspaceRoot || conversation?.worktreePath || conversation?.workspaceRoot || "";
+    : before.sideChats[conversationId]?.workspaceRoot || conversationWorkspacePath(conversation);
   if (!workspaceRootsEqual(change.workspaceRoot, workspaceRoot)) return false;
 
   return (async () => {
@@ -352,7 +302,7 @@ export const sendChatMessage = (options: SendChatMessageOptions): boolean | Prom
     if (conversationId === (current.conversationId || "")) {
       if (!workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return false;
     } else if ((!owner && !sideOwner)
-      || !workspaceRootsEqual(sideOwner?.workspaceRoot || owner?.worktreePath || owner?.workspaceRoot || "", workspaceRoot)) {
+      || !workspaceRootsEqual(sideOwner?.workspaceRoot || conversationWorkspacePath(owner), workspaceRoot)) {
       return false;
     }
     return sendConfirmedChatMessage({ ...options, conversationId: conversationId || undefined });
@@ -367,6 +317,7 @@ const sendConfirmedChatMessage = ({
   conversationId,
   primaryFile,
   agentMode,
+  codeReview,
   contextRefs = [],
   quotedMessage = null,
   allowWhileStreaming = false,
@@ -375,7 +326,11 @@ const sendConfirmedChatMessage = ({
   assistantMessageId: requestedAssistantMessageId,
   userMessageId: requestedUserMessageId,
   retryFromMessageId,
-}: SendChatMessageOptions): boolean => {
+  awaitAdmission = false,
+  onAdmission,
+  onReceived,
+  onRejected,
+}: SendChatMessageOptions): boolean | Promise<boolean> => {
   // Permission confirmation can outlive a later navigation request.
   const switchReason = conversationSwitchBlockReason(conversationId);
   if (switchReason) {
@@ -387,6 +342,10 @@ const sendConfirmedChatMessage = ({
   if (!contentForBackend && attachments.length === 0) return false;
 
   const state = useAppStore.getState();
+  if (!state.composerDraftsReady) {
+    pushToast("正在恢复输入草稿，请等待完成后发送。", "warning");
+    return false;
+  }
   const isRetry = Boolean(retryFromMessageId?.trim());
   const targetStreaming = conversationId
     ? conversationId === state.conversationId
@@ -402,25 +361,6 @@ const sendConfirmedChatMessage = ({
     .map(durableAttachmentRef);
   const transportAttachments = attachments.map(attachmentTransportRef);
   if (!allowWhileStreaming && !isRetry) {
-    if (recoverStaleStreamingState(conversationId)) {
-      return sendConfirmedChatMessage({
-        displayContent,
-        backendContent,
-        attachments,
-        attachmentRefs,
-        conversationId,
-        primaryFile,
-        agentMode,
-        contextRefs,
-        quotedMessage,
-        allowWhileStreaming,
-        busyBehavior,
-        skipLocalAppend,
-        assistantMessageId: requestedAssistantMessageId,
-        userMessageId: requestedUserMessageId,
-        retryFromMessageId,
-      });
-    }
     const reason = getChatSendBlockReason(conversationId);
     if (reason) {
       pushToast(reason, "warning");
@@ -440,35 +380,18 @@ const sendConfirmedChatMessage = ({
     ? state.conversations.find((item) => item.id === targetConversationId)
     : undefined;
   const isMainConversation = !targetConversationId || targetConversationId === state.conversationId;
-  const targetWorkspaceRoot = state.sideChats[targetConversationId]?.workspaceRoot || targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
+  const targetWorkspaceRoot = state.sideChats[targetConversationId]?.workspaceRoot || conversationWorkspacePath(targetConversation);
   const targetPrimaryFile = primaryFile || (isMainConversation && targetWorkspaceRoot ? state.activeTabPath : undefined);
   const targetPermissionMode = !targetConversationId
     ? state.permissionMode
     : undefined;
-  const targetAgentMode = agentMode ?? state.agentMode;
+  const targetAgentMode = agentMode ?? (isMainConversation ? state.agentMode
+    : state.conversationWorkbenchStates[targetConversationId]?.agentMode ?? targetConversation?.agentMode ?? "build");
 
-  const sendSignature = JSON.stringify({
-    conversationId: targetConversationId,
-    workspaceRoot: targetWorkspaceRoot,
-    primaryFile: targetPrimaryFile,
-    permissionMode: targetPermissionMode,
-    agentMode: targetAgentMode,
-    content: contentForBackend,
-    displayContent: contentForDisplay,
-    quotedMessage,
-    attachments: attachments.map((item) => String(item.artifact_id ?? item.artifactId ?? item.id ?? "")).filter(Boolean),
-    contextRefs: contextRefs.map(contextRefSignature),
-    retryFromMessageId: retryFromMessageId || "",
-  });
-  const now = Date.now();
-  if (sendSignature === lastSendSignature && now - lastSendAt < DUPLICATE_SEND_WINDOW_MS) {
-    pushToast("已忽略重复发送。", "warning");
-    return false;
-  }
   const assistantMessageId = requestedAssistantMessageId
-    || (skipLocalAppend ? "" : uniqueMessageId("a"));
+    || (skipLocalAppend && !awaitAdmission ? "" : uniqueMessageId("a"));
   const userMessageId = requestedUserMessageId
-    || (skipLocalAppend ? "" : uniqueMessageId("u"));
+    || (skipLocalAppend && !awaitAdmission ? "" : uniqueMessageId("u"));
 
   // A manual right-panel tab selection locks auto-routing for the rest of the
   // current interaction. A new user turn should re-enable auto-routing (so the
@@ -477,8 +400,9 @@ const sendConfirmedChatMessage = ({
     useAppStore.getState().setRightStackTabLocked(false);
   }
 
-  const command: UserMessageCommand = {
+  const command: UserMessageCommand & { client_command_id: string } = {
     type: "user_message",
+    client_command_id: uniqueMessageId("cmd"),
     content: contentForBackend,
     display_content: contentForDisplay,
     context_refs: contextRefs.map((ref) => ({ ...ref })),
@@ -487,7 +411,7 @@ const sendConfirmedChatMessage = ({
     ...(targetPrimaryFile ? { primary_file: targetPrimaryFile } : {}),
     ...(isMainConversation && targetWorkspaceRoot && state.activeTabPath ? { active_tab_path: state.activeTabPath } : {}),
     ...(targetPermissionMode ? { permission_mode: toBackendPermissionMode(targetPermissionMode) } : {}),
-    agent_mode: targetAgentMode,
+    ...(codeReview ? { code_review: codeReview } : { agent_mode: targetAgentMode }),
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(transportAttachments.length > 0 ? { attachments: transportAttachments } : {}),
     ...(contextRefs.some((ref) => ref.kind === "skill" && ref.path)
@@ -512,7 +436,7 @@ const sendConfirmedChatMessage = ({
     ...(queued ? { streaming_behavior: busyBehavior === "steer" ? "steer" : "follow_up" } : {}),
   };
 
-  if (!skipLocalAppend && !isRetry) {
+  if (!skipLocalAppend && !isRetry && !awaitAdmission) {
     appendLocalUserTurn({
       content: contentForDisplay,
       backendContent: contentForBackend,
@@ -520,6 +444,7 @@ const sendConfirmedChatMessage = ({
       conversationId,
       contextRefs,
       attachmentRefs: displayAttachmentRefs,
+      codeReview,
       assistantMessageId,
       userMessageId,
       retryFromMessageId,
@@ -531,32 +456,73 @@ const sendConfirmedChatMessage = ({
   }
 
   try {
+    if (awaitAdmission || (isRetry && !skipLocalAppend)) pendingInputs.set(command.client_command_id!, {
+      content: contentForDisplay, backendContent: contentForBackend, quotedMessage, codeReview,
+      conversationId: targetConversationId, contextRefs, attachmentRefs: displayAttachmentRefs,
+      assistantMessageId, userMessageId, retryFromMessageId, queued: isRetry ? false : queued,
+      workspaceRoot: state.workingDirectory,
+    });
+    if (awaitAdmission) {
+      let received = false;
+      const admission = sendClientCommandAwaitResult(command, "user_message", { silent: true, onReceived: () => {
+        received = true;
+        const current = useAppStore.getState();
+        const visibleEmptyOwner = !targetConversationId && !current.conversationId && workspaceRootsEqual(current.workingDirectory, state.workingDirectory);
+        if (!skipLocalAppend && !isRetry && (targetConversationId || visibleEmptyOwner)) appendLocalUserTurn({
+          content: contentForDisplay, backendContent: contentForBackend, quotedMessage, conversationId: targetConversationId || undefined,
+          contextRefs, attachmentRefs: displayAttachmentRefs, assistantMessageId, userMessageId,
+          queued, includeAssistant: false,
+        });
+        onReceived?.();
+      } });
+      return admission.then(event => {
+        handleUserMessageAdmission(event);
+        if (commandResultSucceeded(event) && (event.data?.admitted === true || event.data?.queued === true
+          || event.data?.native_completion === "completed")) {
+          onAdmission?.(event);
+          return true;
+        }
+        const cancelled = event.data?.cancelled === true;
+        if (event.data?.native_completion === "unknown"
+          || (!cancelled && commandResultSucceeded(event) && event.data?.admitted !== false)) {
+          pushToast(received ? "消息已保存，准入结果尚未确认；等待会话恢复原记录。"
+            : "消息接收尚未确认，输入已保留。请先核对会话再重试。", "warning", 6000);
+          return false;
+        }
+        onRejected?.();
+        const current = useAppStore.getState();
+        const owner = !targetConversationId && current.messages.some(message => message.id === assistantMessageId)
+          ? current.conversationId || undefined
+          : typeof event.data?.conversation_id === "string" ? event.data.conversation_id : targetConversationId;
+        const reason = event.message || (cancelled ? "用户已取消本次发送，输入已保留。" : "消息未被后端接收，输入已保留。");
+        if (current.getVisibleMessages(owner || undefined).some(message => message.id === assistantMessageId)) {
+          current.finishStreaming(owner || undefined, undefined, cancelled ? "interrupted" : "failed", assistantMessageId,
+            reason, true, undefined, cancelled ? String(event.data?.reason || "user_interrupted") : "admission_rejected");
+        } else if (!cancelled && received && !skipLocalAppend && !isRetry) {
+          addSystemNotice(reason, owner || undefined);
+        }
+        if (!cancelled && !(skipLocalAppend && parseRuntimeSlashInput(contentForBackend)?.command === "/compact")) {
+          pushToast(reason, event.level === "warning" ? "warning" : "error");
+        }
+        return false;
+      }, error => {
+        if (!received) {
+          onRejected?.();
+          pendingInputs.delete(command.client_command_id);
+        }
+        pushToast(received ? "消息已保存，处理结果尚未确认；重连后恢复原记录。"
+          : `消息接收尚未确认，输入已保留。重连后请先核对会话再重试。${error instanceof Error ? ` ${error.message}` : ""}`, "warning", 6000);
+        return false;
+      });
+    }
     if (!ws.send(command)) {
       throw new Error("Backend connection is not ready yet.");
     }
-    if (!skipLocalAppend && isRetry) {
-      appendLocalUserTurn({
-        content: contentForDisplay,
-        backendContent: contentForBackend,
-        quotedMessage,
-        conversationId,
-        contextRefs,
-        attachmentRefs: displayAttachmentRefs,
-        assistantMessageId,
-        userMessageId,
-        retryFromMessageId,
-        queued: false,
-      });
-      if (targetConversationId && assistantMessageId) {
-        useAppStore.getState().flushPendingProviderProgress(targetConversationId, assistantMessageId);
-      }
-    }
-    lastSendSignature = sendSignature;
-    lastSendAt = now;
     return true;
   } catch (err) {
-    useAppStore.getState().removeEmptyStreamingAssistant(conversationId, assistantMessageId);
-    if (!queued) {
+    pendingInputs.delete(command.client_command_id!);
+    if (!isRetry) useAppStore.getState().removeEmptyStreamingAssistant(conversationId, assistantMessageId);
+    if (!queued && !isRetry) {
       useAppStore.getState().finishStreaming(conversationId, undefined, "failed");
     }
     const message = normalizeAgentErrorMessage(err instanceof Error ? err.message : "消息发送失败。");
@@ -564,4 +530,66 @@ const sendConfirmedChatMessage = ({
     pushToast(message, "error");
     return false;
   }
+};
+
+const appendAdmittedInput = (input: Parameters<typeof appendLocalUserTurn>[0] & { workspaceRoot: string }, owner: string, queued: boolean, started = false) => {
+  const state = useAppStore.getState();
+  const firstForeground = !input.conversationId && !state.conversationId
+    && workspaceRootsEqual(state.workingDirectory, input.workspaceRoot);
+  if (firstForeground) {
+    const owned = state.conversationMessages[owner];
+    if (owned) useAppStore.setState({ messages: owned });
+  }
+  const appendOwner = firstForeground ? undefined : owner || input.conversationId;
+  appendLocalUserTurn({ ...input, conversationId: appendOwner, queued, includeAssistant: queued || started });
+  if (firstForeground) adoptGeneratedConversation(owner, input.assistantMessageId, input.userMessageId);
+  if (owner && !queued) useAppStore.getState().flushPendingProviderProgress(owner, input.assistantMessageId);
+};
+
+export const capturePendingUserMessageStart = (conversationId: string, assistantMessageId: string): void => {
+  for (const [commandId, input] of pendingInputs) {
+    if (input.assistantMessageId !== assistantMessageId) continue;
+    notifyClientCommandReceived(commandId);
+    appendAdmittedInput(input, conversationId, false, true);
+    return;
+  }
+};
+
+// Queue updates are already durable input facts. Publish the captured input
+// before the normal queue reducer so an immediately following dequeue/item
+// frame has its exact UID and assistant to update, even before command.result.
+export const capturePendingUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent): void => {
+  for (const input of pendingInputs.values()) {
+    if (input.retryFromMessageId || (input.conversationId && input.conversationId !== event.conversation_id)) continue;
+    if (input.assistantMessageId !== event.message_id && input.userMessageId !== event.user_message_id) continue;
+    input.queueUpdate = event;
+    if (event.status !== "cancelled") appendAdmittedInput(input, event.conversation_id, true);
+    return;
+  }
+};
+
+export const handleUserMessageAdmission = (event: CommandResultEvent & { client_command_id?: string }): void => {
+  const id = event.client_command_id || (typeof event.data?.client_command_id === "string" ? event.data.client_command_id : "");
+  if (event.command !== "user_message" || !id) return;
+  const input = pendingInputs.get(id);
+  if (!input) return;
+  if (!commandResultSucceeded(event) || (event.data?.admitted !== true && event.data?.queued !== true)) {
+    if (event.data?.native_completion !== "unknown" && (event.data?.cancelled === true
+      || event.data?.native_completion === "completed" || event.data?.native_completion === "refused"
+      || event.data?.admitted === false || !commandResultSucceeded(event))) pendingInputs.delete(id);
+    if (input.retryFromMessageId && event.data?.cancelled !== true && (event.level === "error" || event.level === "failed")) {
+      pushToast(event.message || "重新生成未被后端接受，原记录已保留。", "error");
+    }
+    return;
+  }
+  pendingInputs.delete(id);
+  if (input.queueUpdate) return;
+  const owner = typeof event.data?.conversation_id === "string" ? event.data.conversation_id : input.conversationId || "";
+  const admittedReview = event.data?.input as { code_review: import("../protocol/code-review-types").CodeReviewScope; display_content: string; content: string } | undefined;
+  if (admittedReview) {
+    input.codeReview = admittedReview.code_review;
+    input.content = admittedReview.display_content;
+    input.backendContent = admittedReview.content;
+  }
+  appendAdmittedInput(input, owner, event.data?.queued === true);
 };

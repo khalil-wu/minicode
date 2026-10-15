@@ -25,6 +25,7 @@ from backend.atomic_io import atomic_write_text
 from backend.async_cleanup import cancel_and_drain
 from backend.async_cleanup import to_thread_cancel_safe as _to_thread_cancel_safe
 from backend.llm.base import LLMMessage, SideQueryOptions
+from backend.ids import new_uuid7
 from backend.memory.consolidation_agent import run_memory_consolidation_agent
 from backend.memory.file_memory import FileMemory
 from backend.memory.job_store import JobClaim, MEMORY_DB_NAME, MemoryJobStore, Stage1Output
@@ -142,6 +143,13 @@ class Phase1Result:
 
 
 @dataclass(frozen=True)
+class MemoryStartupSource:
+    thread_id: str
+    sandbox_mode: str | None = None
+    subagent_header: str | None = None
+
+
+@dataclass(frozen=True)
 class Phase2WorkspaceState:
     changes: tuple[tuple[str, str], ...]
     artifacts_valid: bool
@@ -158,6 +166,8 @@ def schedule_memory_startup(
     current_conversation_id: str,
     token_budget: int | None = None,
     foreground_tasks: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
+    startup_sandbox_mode: str | None = None,
+    startup_subagent_header: str | None = None,
 ) -> asyncio.Task[Any] | None:
     """Start maintenance in a clean task context so turn usage is not inherited."""
 
@@ -175,7 +185,8 @@ def schedule_memory_startup(
         foreground_tasks=foreground_tasks,
     )
     task = asyncio.create_task(
-        coordinator.run_startup(current_conversation_id=current_conversation_id),
+        coordinator.run_startup(current_conversation_id=current_conversation_id,
+            startup_sandbox_mode=startup_sandbox_mode, startup_subagent_header=startup_subagent_header),
         name=f"memory-startup:{current_conversation_id}",
         context=contextvars.Context(),
     )
@@ -268,9 +279,13 @@ class MemoryGenerationCoordinator:
     def _now(self) -> int:
         return int(self._now_fn())
 
-    async def run_startup(self, *, current_conversation_id: str) -> None:
+    async def run_startup(self, *, current_conversation_id: str,
+                          startup_sandbox_mode: str | None = None,
+                          startup_subagent_header: str | None = None) -> None:
         """Run MiniCode's prune -> gate -> Phase 1 -> Phase 2 startup order."""
 
+        startup_source = (MemoryStartupSource(current_conversation_id, startup_sandbox_mode, startup_subagent_header)
+            if current_conversation_id else None)
         await self._wait_for_foreground()
         now = self._now()
         await _to_thread_cancel_safe(
@@ -292,7 +307,7 @@ class MemoryGenerationCoordinator:
             reverse=True,
         )
         await asyncio.gather(
-            *(self._run_phase1(conversation) for conversation in candidates[:MAX_STAGE1_ROLLOUTS])
+            *(self._run_phase1(conversation, startup_source=startup_source) for conversation in candidates[:MAX_STAGE1_ROLLOUTS])
         )
         await self._run_phase2()
 
@@ -389,7 +404,7 @@ class MemoryGenerationCoordinator:
             parsed = parsed.replace(tzinfo=UTC)
         return int(parsed.timestamp())
 
-    async def _run_phase1(self, conversation: Any) -> None:
+    async def _run_phase1(self, conversation: Any, *, startup_source: MemoryStartupSource | None) -> None:
         await self._wait_for_foreground()
         source_revision = self._source_revision(conversation)
         source_updated_at = self._source_updated_at(conversation)
@@ -411,7 +426,7 @@ class MemoryGenerationCoordinator:
                 await _to_thread_cancel_safe(self.store.abandon_stage1, claim)
                 return
             rollout = self._serialize_rollout(conversation)
-            result = await self._extract_phase1(conversation, rollout)
+            result = await self._extract_phase1(conversation, rollout, startup_source=startup_source)
             current = await _to_thread_cancel_safe(
                 self.repository.get_conversation_summary,
                 str(conversation.id),
@@ -501,7 +516,7 @@ class MemoryGenerationCoordinator:
             return max(1, int(self.token_budget * 4 * 0.70))
         return DEFAULT_ROLLOUT_TOKEN_LIMIT * 4
 
-    async def _extract_phase1(self, conversation: Any, rollout: str) -> Phase1Result:
+    async def _extract_phase1(self, conversation: Any, rollout: str, *, startup_source: MemoryStartupSource | None) -> Phase1Result:
         rollout_path = self._rollout_path(str(conversation.id))
         prompt = build_stage1_input(
             rollout_path=rollout_path,
@@ -512,6 +527,24 @@ class MemoryGenerationCoordinator:
             LLMMessage(role="system", content=STAGE1_SYSTEM_PROMPT),
             LLMMessage(role="user", content=prompt),
         ]
+        source_options: dict[str, Any] = {}
+        if startup_source is not None:
+            turn_id = new_uuid7()
+            source_options = {
+                "session_id": startup_source.thread_id,
+                "thread_id": startup_source.thread_id,
+                "turn_id": turn_id,
+                "source_window_id": f"{startup_source.thread_id}:0",
+                "source_subagent_header": startup_source.subagent_header,
+                "source_responses_metadata": {
+                    "turn_id": turn_id,
+                    "root_turn_id": turn_id,
+                    "request_kind": "memory",
+                    "thread_source": "memory_consolidation",
+                    "turn_trigger": "memory_consolidation",
+                    **({"sandbox_mode": startup_source.sandbox_mode} if startup_source.sandbox_mode is not None else {}),
+                },
+            }
         side_query = getattr(self.llm, "side_query", None)
         response = await (
             side_query(
@@ -521,6 +554,7 @@ class MemoryGenerationCoordinator:
                     query_source="background",
                     enable_prompt_cache=True,
                     output_schema=PHASE1_OUTPUT_SCHEMA,
+                    **source_options,
                 ),
             )
             if callable(side_query)
@@ -566,17 +600,6 @@ class MemoryGenerationCoordinator:
             outputs = await _to_thread_cancel_safe(self._eligible_phase2_outputs, outputs)
             outputs = outputs[:PHASE2_MAX_OUTPUTS]
             outputs.sort(key=lambda output: output.thread_id)
-            state = await _to_thread_cancel_safe(self._prepare_phase2_workspace, claim, outputs)
-            if not state.changes and state.artifacts_valid:
-                committed = await _to_thread_cancel_safe(
-                    self._commit_phase2_without_changes,
-                    claim,
-                    outputs,
-                )
-                if not committed:
-                    raise MemoryGenerationError("Phase 2 ownership changed before commit")
-                return
-
             # The editing workspace is temporary content, outside the live
             # application state protected from generic model file tools.
             from backend.security.sensitive_files import application_state_roots
@@ -590,11 +613,16 @@ class MemoryGenerationCoordinator:
                 dir=staging_parent,
             ))
             try:
-                await _to_thread_cancel_safe(
-                    shutil.copytree, self.memory_root, staged,
-                    dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns(f"{MEMORY_DB_NAME}*", "*.lock"),
+                state = await _to_thread_cancel_safe(
+                    self._prepare_phase2_workspace, claim, outputs, staged,
                 )
+                if not state.changes and state.artifacts_valid:
+                    committed = await _to_thread_cancel_safe(
+                        self._commit_phase2_without_changes, claim, outputs,
+                    )
+                    if not committed:
+                        raise MemoryGenerationError("Phase 2 ownership changed before commit")
+                    return
                 await self._consolidate_phase2(staged)
                 committed = await _to_thread_cancel_safe(
                     self._commit_phase2_artifacts, claim, outputs, staged,
@@ -675,33 +703,37 @@ class MemoryGenerationCoordinator:
         self,
         claim: JobClaim,
         outputs: list[Stage1Output],
+        staged: Path,
     ) -> Phase2WorkspaceState:
+        shutil.copytree(
+            self.memory_root, staged, dirs_exist_ok=True, symlinks=True,
+            ignore=shutil.ignore_patterns(f"{MEMORY_DB_NAME}*", "*.lock"),
+        )
+        self._ensure_git_workspace(staged)
         lock = self.file_memory.reset_lock
         try:
             with lock.acquire(timeout=5.0):
                 if not self.store.owns_phase2(claim):
                     raise MemoryGenerationError("Phase 2 ownership changed before workspace sync")
-                self._ensure_git_workspace()
                 self._sync_phase2_inputs(outputs)
-                diff = self._workspace_diff()
-                changes = tuple(self._workspace_changes())
-                artifacts_valid = self._artifacts_valid()
-                if changes or not artifacts_valid:
-                    atomic_write_text(
-                        resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE),
-                        self._render_workspace_diff(changes, diff),
-                    )
-                return Phase2WorkspaceState(
-                    changes=changes,
-                    artifacts_valid=artifacts_valid,
-                )
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
+        self._sync_phase2_inputs(outputs, staged)
+        diff = self._workspace_diff(staged)
+        changes = tuple(self._workspace_changes(staged))
+        artifacts_valid = self._artifacts_valid(staged)
+        if changes or not artifacts_valid:
+            atomic_write_text(
+                resolve_memory_path(staged, PHASE2_WORKSPACE_DIFF_FILE),
+                self._render_workspace_diff(changes, diff),
+            )
+        return Phase2WorkspaceState(changes=changes, artifacts_valid=artifacts_valid)
 
-    def _ensure_git_workspace(self) -> None:
-        git_path = resolve_memory_path(self.memory_root, ".git")
-        ignore_path = resolve_memory_path(self.memory_root, ".gitignore")
-        self.memory_root.mkdir(parents=True, exist_ok=True)
+    def _ensure_git_workspace(self, memory_root: Path | None = None) -> None:
+        root = self.memory_root if memory_root is None else memory_root
+        git_path = resolve_memory_path(root, ".git")
+        ignore_path = resolve_memory_path(root, ".gitignore")
+        root.mkdir(parents=True, exist_ok=True)
         ignore = (
             f"/{MEMORY_DB_NAME}\n"
             f"/{MEMORY_DB_NAME}-shm\n"
@@ -712,20 +744,21 @@ class MemoryGenerationCoordinator:
         if _read_text(ignore_path) != ignore:
             atomic_write_text(ignore_path, ignore)
         if not git_path.exists():
-            self._git("init", "--quiet")
-            self._git("config", "user.name", "MiniCode Memory")
-            self._git("config", "user.email", "memory@minicode.local")
-        if self._git("rev-parse", "--verify", "HEAD", check=False).returncode != 0:
-            self._git("add", "-A")
-            self._git("commit", "--quiet", "--allow-empty", "-m", "memory baseline")
+            self._git("init", "--quiet", cwd=root)
+            self._git("config", "user.name", "MiniCode Memory", cwd=root)
+            self._git("config", "user.email", "memory@minicode.local", cwd=root)
+        if self._git("rev-parse", "--verify", "HEAD", check=False, cwd=root).returncode != 0:
+            self._git("add", "-A", cwd=root)
+            self._git("commit", "--quiet", "--allow-empty", "-m", "memory baseline", cwd=root)
 
-    def _sync_phase2_inputs(self, outputs: list[Stage1Output]) -> str:
+    def _sync_phase2_inputs(self, outputs: list[Stage1Output], memory_root: Path | None = None) -> str:
+        root = self.memory_root if memory_root is None else memory_root
         records = {
             output.thread_id: self.repository.get_conversation_summary(output.thread_id)
             for output in outputs
         }
         sections = ["# Raw Memories", ""]
-        summaries_dir = resolve_memory_path(self.memory_root, "rollout_summaries")
+        summaries_dir = resolve_memory_path(root, "rollout_summaries")
         summaries_dir.mkdir(parents=True, exist_ok=True)
         expected_summaries: set[Path] = set()
         for output in sorted(outputs, key=lambda item: item.thread_id):
@@ -778,16 +811,17 @@ class MemoryGenerationCoordinator:
             if outputs
             else "# Raw Memories\n\nNo raw memories yet.\n"
         )
-        raw_path = resolve_memory_path(self.memory_root, "raw_memories.md")
+        raw_path = resolve_memory_path(root, "raw_memories.md")
         if _read_text(raw_path) != raw_memories:
             atomic_write_text(raw_path, raw_memories)
         return raw_memories
 
-    def _workspace_diff(self) -> str:
-        diff_path = resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE)
+    def _workspace_diff(self, memory_root: Path | None = None) -> str:
+        root = self.memory_root if memory_root is None else memory_root
+        diff_path = resolve_memory_path(root, PHASE2_WORKSPACE_DIFF_FILE)
         if diff_path.exists():
             diff_path.unlink()
-        self._git("add", "-N", "--", ".", check=False)
+        self._git("add", "-N", "--", ".", check=False, cwd=root)
         result = self._git(
             "diff",
             "--no-ext-diff",
@@ -795,6 +829,7 @@ class MemoryGenerationCoordinator:
             "--",
             ".",
             check=False,
+            cwd=root,
         )
         raw = result.stdout or ""
         encoded = raw.encode("utf-8", errors="replace")
@@ -803,8 +838,9 @@ class MemoryGenerationCoordinator:
         clipped = encoded[:PHASE2_DIFF_MAX_BYTES].decode("utf-8", errors="ignore")
         return clipped + "\n[workspace diff truncated at 4194304 bytes]\n"
 
-    def _workspace_changes(self) -> list[tuple[str, str]]:
-        result = self._git("diff", "--name-status", "--no-ext-diff", "--no-color", check=False)
+    def _workspace_changes(self, memory_root: Path | None = None) -> list[tuple[str, str]]:
+        root = self.memory_root if memory_root is None else memory_root
+        result = self._git("diff", "--name-status", "--no-ext-diff", "--no-color", check=False, cwd=root)
         changes: list[tuple[str, str]] = []
         for line in (result.stdout or "").splitlines():
             status, _, path = line.partition("\t")
@@ -858,6 +894,7 @@ class MemoryGenerationCoordinator:
         outputs: list[Stage1Output],
         staged: Path,
     ) -> bool:
+        self._commit_git_baseline(staged)
         lock = self.file_memory.reset_lock
         try:
             with lock.acquire(timeout=5.0):
@@ -873,7 +910,6 @@ class MemoryGenerationCoordinator:
                 # reset lock. Keep its current claim in the published tree.
                 for database in self.memory_root.glob(f"{MEMORY_DB_NAME}*"):
                     shutil.copy2(database, staged / database.name)
-                self._commit_git_baseline(staged)
                 previous = staged.with_name(f"{staged.name}.previous")
                 self.memory_root.replace(previous)
                 try:
@@ -885,13 +921,13 @@ class MemoryGenerationCoordinator:
                         self.memory_root.replace(staged)
                     previous.replace(self.memory_root)
                     raise
-                try:
-                    shutil.rmtree(previous, onerror=_remove_readonly_git_path)
-                except OSError:
-                    logger.warning("Published memories, but old tree cleanup failed: %s", previous, exc_info=True)
-                return True
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
+        try:
+            shutil.rmtree(previous, onerror=_remove_readonly_git_path)
+        except OSError:
+            logger.warning("Published memories, but old tree cleanup failed: %s", previous, exc_info=True)
+        return True
 
     def _commit_phase2_without_changes(
         self,
@@ -949,6 +985,7 @@ class MemoryGenerationCoordinator:
             ["git", *args],
             cwd=root,
             env=environment,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

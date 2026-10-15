@@ -159,6 +159,17 @@ describe("handleCommandResultEvent", () => {
     );
   });
 
+  it("updates automatic usage inspection without presenting it as a user slash command", () => {
+    handleCommandResultEvent({ type: "command.result", command: "usage", client_command_type: "session.usage.inspect",
+      level: "info", message: "Usage: context 20/100 tokens",
+      data: { budget: { used: 20, total: 100, breakdown: { prompt: 12, tools: 8 } } },
+    } as ServerEvent);
+    expect(useAppStore.getState().contextUsage).toMatchObject({ used: 20, limit: 100 });
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().agentProgress).toEqual([]);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it("does not apply usage budget data from an inactive conversation", () => {
     expect(handleCommandResultEvent({
       type: "command.result",
@@ -341,7 +352,8 @@ describe("handleCommandResultEvent", () => {
       createElement: vi.fn(() => ({ href: "", download: "", style: {}, click, remove })),
       body: { appendChild },
     });
-    vi.stubGlobal("window", { setTimeout: (callback: () => void) => { callback(); return 0; } });
+    const events = new EventTarget();
+    vi.stubGlobal("window", events);
     vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
 
     expect(handleCommandResultEvent({
@@ -360,6 +372,8 @@ describe("handleCommandResultEvent", () => {
     expect(click).toHaveBeenCalledOnce();
     expect(appendChild).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    events.dispatchEvent(new Event("pagehide"));
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:minicode-export");
     vi.unstubAllGlobals();
   });

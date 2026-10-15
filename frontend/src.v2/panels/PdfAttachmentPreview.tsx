@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { ChevronLeft, ChevronRight, Minus, Plus, RotateCw, ScanLine, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
@@ -12,6 +13,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 type PdfStatus = "loading" | "ready" | "error";
 
 export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name: string; onRetry?: () => void }) => {
+  const { t: tr } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const pdfViewerRef = useRef<PDFViewer | null>(null);
@@ -102,7 +104,7 @@ export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name
       .catch((reason: unknown) => {
         if (disposed) return;
         setStatus("error");
-        setError(reason instanceof Error ? reason.message : "无法加载 PDF 文件。");
+        setError(reason instanceof Error ? reason.message : tr("无法加载 PDF 文件。"));
       });
 
     return () => {
@@ -143,13 +145,13 @@ export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name
   };
 
   return (
-    <div className="mc-pdf-preview" aria-label={`PDF 预览 ${name}`}>
+    <div className="mc-pdf-preview" aria-label={tr("PDF 预览 {v0}", { v0: name })}>
       <div className="mc-pdf-toolbar">
-        <button type="button" className="mc-pdf-icon-button" title="上一页" aria-label="上一页" onClick={() => goToPage(pageNumber - 1)} disabled={status !== "ready" || pageNumber <= 1}>
+        <button type="button" className="mc-pdf-icon-button" title={tr("上一页")} aria-label={tr("上一页")} onClick={() => goToPage(pageNumber - 1)} disabled={status !== "ready" || pageNumber <= 1}>
           <ChevronLeft size={15} />
         </button>
         <label className="mc-pdf-page-control">
-          <input aria-label="当前页" value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput}
+          <input aria-label={tr("当前页")} value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                 event.preventDefault();
@@ -158,21 +160,21 @@ export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name
             }} inputMode="numeric" disabled={status !== "ready"} />
           <span>/ {pageCount || "--"}</span>
         </label>
-        <button type="button" className="mc-pdf-icon-button" title="下一页" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={status !== "ready" || pageCount === 0 || pageNumber >= pageCount}>
+        <button type="button" className="mc-pdf-icon-button" title={tr("下一页")} aria-label={tr("下一页")} onClick={() => goToPage(pageNumber + 1)} disabled={status !== "ready" || pageCount === 0 || pageNumber >= pageCount}>
           <ChevronRight size={15} />
         </button>
         <span className="mc-pdf-toolbar-spacer" />
-        <button type="button" className="mc-pdf-icon-button" title="缩小" aria-label="缩小" onClick={() => pdfViewerRef.current?.decreaseScale()} disabled={status !== "ready"}>
+        <button type="button" className="mc-pdf-icon-button" title={tr("缩小")} aria-label={tr("缩小")} onClick={() => pdfViewerRef.current?.decreaseScale()} disabled={status !== "ready"}>
           <Minus size={14} />
         </button>
-        <button type="button" className="mc-pdf-scale" title="适合宽度" aria-label="适合宽度" onClick={() => setViewerScale("page-width")} disabled={status !== "ready"}>
+        <button type="button" className="mc-pdf-scale" title={tr("适合宽度")} aria-label={tr("适合宽度")} onClick={() => setViewerScale("page-width")} disabled={status !== "ready"}>
           <ScanLine size={14} />
-          <span>{scale === "page-width" ? "适合宽度" : `${Math.round(Number(scale) * 100)}%`}</span>
+          <span>{scale === "page-width" ? tr("适合宽度") : `${Math.round(Number(scale) * 100)}%`}</span>
         </button>
-        <button type="button" className="mc-pdf-icon-button" title="放大" aria-label="放大" onClick={() => pdfViewerRef.current?.increaseScale()} disabled={status !== "ready"}>
+        <button type="button" className="mc-pdf-icon-button" title={tr("放大")} aria-label={tr("放大")} onClick={() => pdfViewerRef.current?.increaseScale()} disabled={status !== "ready"}>
           <Plus size={14} />
         </button>
-        <button type="button" className="mc-pdf-icon-button" title="旋转" aria-label="旋转" onClick={() => {
+        <button type="button" className="mc-pdf-icon-button" title={tr("旋转")} aria-label={tr("旋转")} onClick={() => {
           const viewer = pdfViewerRef.current;
           if (viewer) viewer.pagesRotation = (viewer.pagesRotation + 90) % 360;
         }} disabled={status !== "ready"}>
@@ -182,11 +184,11 @@ export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name
       {status === "error" && (
         <div className="mc-pdf-state mc-pdf-error" role="alert">
           <TriangleAlert size={18} />
-          <span>{error || "无法加载 PDF 文件。"}</span>
-          <button type="button" className="mc-pdf-scale" onClick={() => onRetry ? onRetry() : setRetryNonce((value) => value + 1)}>重试 PDF 预览</button>
+          <span>{error || tr("无法加载 PDF 文件。")}</span>
+          <button type="button" className="mc-pdf-scale" onClick={() => onRetry ? onRetry() : setRetryNonce((value) => value + 1)}>{tr("重试 PDF 预览")}</button>
         </div>
       )}
-      {status === "loading" && <div className="mc-pdf-state">正在加载 PDF 预览...</div>}
+      {status === "loading" && <div className="mc-pdf-state">{tr("正在加载 PDF 预览...")}</div>}
       <div className="mc-pdf-viewer-viewport">
         <div ref={containerRef} className="mc-pdf-viewer-container" data-pdf-status={status}>
           <div ref={viewerRef} className="pdfViewer" />

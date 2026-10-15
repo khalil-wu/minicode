@@ -3,6 +3,7 @@ import inspect
 import json
 import threading
 from pathlib import Path
+from queue import Empty
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -12,18 +13,18 @@ from fastapi.testclient import TestClient
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
-from backend.llm.base import LLMAdapter
+from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.main import app
 from backend.memory.file_memory import FileMemory
 from backend.memory.manager import MemoryManager
 
 
 class _ConversationNoopLLM(LLMAdapter):
-    async def stream_chat(self, messages, tools=None):
+    async def stream_chat(self, messages, tools=None, metadata=None):
         if False:
             yield None
 
-    async def simple_chat(self, messages):
+    async def simple_chat(self, messages, *, max_tokens=None):
         return ""
 
 
@@ -44,41 +45,121 @@ def test_parent_workspace_diff_is_durable_on_its_assistant_message_and_survives_
     trust_ledger = tmp_path / "trusted_workspaces.json"
     trust_ledger.write_text(json.dumps({"roots": [str(workspace)]}), encoding="utf-8")
     monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_ledger)
-    _install_noop_llm(monkeypatch)
+    from backend import config_helpers
+    from backend.conversations.repository import ConversationRepository
 
-    async def changes_runner(**kwargs):
-        root = Path(kwargs["state"].workspace_root)
-        (root / "parser.py").write_text("def parse(row): return row.split(',')\n", encoding="utf-8")
-        (root / "cli.py").write_text("print('ready')\n", encoding="utf-8")
-        kwargs["state"].reply = "Implemented the parser and CLI."
-        yield AgentEvent.reply(kwargs["state"].reply)
-        yield AgentEvent.done(status="completed")
+    config_helpers.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config_helpers.SETTINGS_FILE.write_text(json.dumps({
+        "agent": {"code_mode_only": False},
+        "llm": {"provider": "openai", "openai": {"model": "gpt-5.4", "base_url": "https://fixture.invalid/v1", "auth_header": False}},
+    }), encoding="utf-8")
+    monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
 
-    monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", changes_runner)
+    class WorkspaceDiffModel(LLMAdapter):
+        def __init__(self, settings):
+            self._settings = settings
+            self._provider_id = "openai"
+            self.calls = 0
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
+                    ToolCallEvent(id="owned-parser-change", name="write_file", arguments={
+                        "file_path": "parser.py", "content": "def parse(row): return row.split(',')\n",
+                    }),
+                    ToolCallEvent(id="owned-cli-change", name="write_file", arguments={
+                        "file_path": "cli.py", "content": "print('ready')\n",
+                    }),
+                ])
+                yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+            else:
+                yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Implemented the parser and CLI.", phase="final_answer")
+                yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop", end_turn=True)
+
+        async def simple_chat(self, messages, *, max_tokens=None):
+            return "Owned workspace diff task"
+
+    factory = lambda config, **_kwargs: WorkspaceDiffModel(config.llm)
+    monkeypatch.setattr("backend.main._create_session_llm", factory)
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", factory)
+
+    def receive(ws):
+        try:
+            message = ws._send_queue.get(timeout=30)
+        except Empty as exc:
+            raise AssertionError("Owned workspace diff wire did not advance within 30 seconds") from exc
+        if isinstance(message, BaseException):
+            raise message
+        ws._raise_on_close(message)
+        payload = json.loads(message["text"])
+        assert payload.get("type") != "error", payload
+        return payload
+
+    def receive_type(ws, event_type):
+        for _ in range(200):
+            payload = receive(ws)
+            if payload.get("type") == event_type:
+                return payload
+        raise AssertionError(f"Owned workspace diff wire did not contain {event_type}")
+
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=workspace-diff-refresh") as ws:
-            _receive_until_event(ws, "mcp_status")
-            _receive_until_event(ws, "llm.model.updated")
-            ws.send_json({"type": "conversation.create", "workspace_root": str(workspace), "memory_mode": "none", "permission_mode": "bypass"})
-            listing = _receive_until_event(ws, "conversation.list")
+            receive_type(ws, "mcp_status")
+            receive_type(ws, "llm.model.updated")
+            ws.send_json({"type": "conversation.create", "workspace_root": str(workspace), "memory_mode": "disabled", "permission_mode": "bypass"})
+            listing = receive_type(ws, "conversation.list")
             owner = listing["active_conversation_id"]
             ws.send_json({"type": "user_message", "content": "Implement the parser", "conversation_id": owner})
-            change = _receive_until_event(ws, "turn.diff.updated")
-            _receive_until_event(ws, "done")
+            run_events = []
+            for _ in range(200):
+                payload = receive(ws)
+                run_events.append(payload)
+                if payload.get("type") == "done":
+                    assert payload["status"] == "completed", payload
+                    break
+            else:
+                raise AssertionError("Owned workspace diff task never reached its terminal")
+            tool_results = [event for event in run_events if event.get("type") == "tool_result"]
+            assert {event["id"] for event in tool_results} == {"owned-parser-change", "owned-cli-change"}
+            assert all(not event["is_error"] for event in tool_results), tool_results
+            change = next(event for event in reversed(run_events) if event.get("type") == "turn.diff.updated")
             ws.send_json({"type": "conversation.list"})
-            completed = _receive_until_event(ws, "conversation.list")
+            completed = receive_type(ws, "conversation.list")
             assistant = next(message for message in completed["active_conversation"]["transcript"] if message["role"] == "assistant")
             saved = assistant["metadata"]["turn_diff"]
             assert saved["message_id"] == assistant["id"] == change["message_id"]
             assert saved["turn_id"] == change["turn_id"]
             assert "+++ b/parser.py" in saved["diff"] and "+++ b/cli.py" in saved["diff"]
-        with client.websocket_connect("/ws?session_id=workspace-diff-refresh") as ws:
-            _receive_until_event(ws, "mcp_status")
-            _receive_until_event(ws, "llm.model.updated")
+            assert (workspace / "parser.py").read_text(encoding="utf-8") == "def parse(row): return row.split(',')\n"
+            assert (workspace / "cli.py").read_text(encoding="utf-8") == "print('ready')\n"
+            cold_record = ConversationRepository(tmp_path / "conversations").get_conversation(owner)
+            cold_assistant = next(message for message in cold_record.transcript if message["id"] == assistant["id"])
+            assert cold_assistant["metadata"]["turn_diff"] == saved
+        with client.websocket_connect("/ws?session_id=workspace-diff-cold-restore") as ws:
+            receive_type(ws, "mcp_status")
+            receive_type(ws, "llm.model.updated")
             ws.send_json({"type": "session.restore", "last_conversation_id": owner})
-            restored = _receive_until_event(ws, "session.restored")
+            restored = receive_type(ws, "session.restored")
             persisted = next(message for message in restored["messages"] if message["id"] == assistant["id"])
             assert persisted["metadata"]["turn_diff"] == saved
+
+
+def _receive_json(ws) -> dict[str, object]:
+    try:
+        message = ws._send_queue.get(timeout=30)
+    except Empty as exc:
+        raise AssertionError("Conversation fixture wire did not advance within 30 seconds") from exc
+    if isinstance(message, BaseException):
+        raise message
+    ws._raise_on_close(message)
+    return json.loads(message["text"])
+
+
+def _assert_no_unexpected_failure(payload) -> None:
+    assert payload.get("type") != "error", payload
+    assert not (payload.get("type") == "command.result" and payload.get("level") == "error"), payload
+    assert not (payload.get("type") == "done" and payload.get("status") in {"failed", "cancelled", "interrupted"}), payload
 
 
 def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, object]:
@@ -100,21 +181,24 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
         "command.result",
     }
     for _ in range(max_attempts):
-        payload = ws.receive_json()
+        payload = _receive_json(ws)
         if payload.get("type") == "runtime.capabilities":
             assert "conversation_id" in payload
             assert isinstance(payload["capabilities"], dict)
+        if payload.get("type") == "command.result" and payload.get("level") == "error":
+            return payload
         if payload.get("type") in bookkeeping_events:
             continue
         return payload
     raise AssertionError("did not receive a non task.update websocket event in time")
 
 
-def _receive_until_event(ws, event_type: str, *, max_attempts: int = 20) -> dict[str, object]:
+def _receive_until_event(ws, event_type: str, *, max_attempts: int = 20, **fields) -> dict[str, object]:
     for _ in range(max_attempts):
-        payload = ws.receive_json()
-        if payload.get("type") == event_type:
+        payload = _receive_json(ws)
+        if payload.get("type") == event_type and all(payload.get(key) == value for key, value in fields.items()):
             return payload
+        _assert_no_unexpected_failure(payload)
     raise AssertionError(f"did not receive {event_type!r} websocket event in time")
 
 
@@ -125,12 +209,13 @@ def _receive_conversation_switched(
     max_attempts: int = 20,
 ) -> dict[str, object]:
     for _ in range(max_attempts):
-        payload = ws.receive_json()
+        payload = _receive_json(ws)
         if (
             payload.get("type") == "conversation.switched"
             and payload.get("conversation_id") == conversation_id
         ):
             return payload
+        _assert_no_unexpected_failure(payload)
     raise AssertionError(f"did not receive conversation.switched for {conversation_id!r} in time")
 
 
@@ -155,12 +240,13 @@ def _receive_conversation_list_for_active(
     max_attempts: int = 20,
 ) -> dict[str, object]:
     for _ in range(max_attempts):
-        payload = ws.receive_json()
+        payload = _receive_json(ws)
         if (
             payload.get("type") == "conversation.list"
             and payload.get("active_conversation_id") == conversation_id
         ):
             return payload
+        _assert_no_unexpected_failure(payload)
     raise AssertionError(f"did not receive conversation.list for active {conversation_id!r} in time")
 
 
@@ -171,12 +257,13 @@ def _receive_permission_rules_updated(
     max_attempts: int = 20,
 ) -> dict[str, object]:
     for _ in range(max_attempts):
-        payload = ws.receive_json()
+        payload = _receive_json(ws)
         if (
             payload.get("type") == "permission.rules.updated"
             and payload.get("conversation_id") == conversation_id
         ):
             return payload
+        _assert_no_unexpected_failure(payload)
     raise AssertionError(f"did not receive permission.rules.updated for {conversation_id!r} in time")
 
 
@@ -334,6 +421,164 @@ def test_conversation_clone_is_deep_and_does_not_duplicate_worktree_ownership(tm
     assert restored_parent.context_snapshot["history"][0]["content"] == "start"
 
 
+def _owned_patch_message(owner: str, message_id: str, turn_id: str, *, path: str, revision: int = 7) -> dict:
+    patch = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n-before\n+after\n"
+    )
+    return {
+        "id": message_id, "role": "assistant", "content": f"Updated {path}",
+        "terminal_status": "completed", "timestamp": 1,
+        "metadata": {"turn_diff": {
+            "thread_id": owner, "conversation_id": owner,
+            "message_id": message_id, "turn_id": turn_id, "revision": revision,
+            "source": "workspace_snapshot", "workspace_root": "C:/source-project",
+            "diff": patch, "truncated": False,
+        }},
+    }
+
+
+def test_clone_rebinds_durable_turn_diff_and_its_deferred_projection_without_changing_source(tmp_path) -> None:
+    from backend.conversations.public_projection import project_public_conversation
+    from backend.conversations.repository import ConversationRepository
+
+    repo = ConversationRepository(base_dir=tmp_path)
+    message = _owned_patch_message("conv_patch_parent", "answer_original", "turn_original", path="main.py")
+    parent = repo.create_conversation(
+        conversation_id="conv_patch_parent", title="Diff parent", transcript=[message],
+    )
+    clone = repo.clone_conversation(parent.id)
+    assert clone is not None
+    # Reopen the committed generations, so neither assertions nor lazy patch
+    # retrieval can accidentally use the source object's in-memory body.
+    reopened = ConversationRepository(base_dir=tmp_path)
+    stored_parent = reopened.get_conversation(parent.id)
+    stored_clone = reopened.get_conversation(clone.id)
+    assert stored_parent is not None and stored_clone is not None
+    assert stored_parent.transcript[0]["metadata"]["turn_diff"] == message["metadata"]["turn_diff"]
+    clone_diff = stored_clone.transcript[0]["metadata"]["turn_diff"]
+    assert clone_diff["thread_id"] == clone_diff["conversation_id"] == clone.id
+    assert clone_diff["message_id"] == "answer_original"
+    assert clone_diff["turn_id"] == "turn_original"
+    assert clone_diff["diff"] == message["metadata"]["turn_diff"]["diff"]
+    projected = project_public_conversation(stored_clone)
+    deferred = projected["transcript"][0]["metadata"]["turn_diff"]
+    assert deferred["thread_id"] == deferred["conversation_id"] == projected["id"] == clone.id
+    assert deferred["deferred"] is True and deferred["diff"] is None
+    assert deferred["revision"] == 7 and deferred["truncated"] is False
+    assert deferred["files"][0]["path"] == "main.py"
+    loaded = reopened.get_message_turn_diff(clone.id, "answer_original", turn_id="turn_original", revision=7)
+    assert loaded is not None
+    assert loaded["thread_id"] == loaded["conversation_id"] == clone.id
+    assert loaded["diff"] == message["metadata"]["turn_diff"]["diff"]
+
+
+def test_patch_owner_rebinding_does_not_turn_unchanged_clone_prefix_into_merge_divergence(tmp_path) -> None:
+    from backend.conversations.repository import ConversationRepository
+
+    repo = ConversationRepository(base_dir=tmp_path)
+    inherited = _owned_patch_message("conv_patch_merge", "answer_inherited", "turn_inherited", path="base.py")
+    parent = repo.create_conversation(conversation_id="conv_patch_merge", title="Merge parent", transcript=[inherited])
+    clone = repo.clone_conversation(parent.id)
+    assert clone is not None
+    child_patch = _owned_patch_message(clone.id, "answer_child", "turn_child", path="child.py", revision=8)
+    repo.append_transcript_message(clone.id, child_patch)
+    source, target, status = repo.merge_conversation_fast_forward(clone.id, parent.id)
+    assert status == "merged"
+    assert source is not None and target is not None
+    assert source.merged_into_conversation_id == parent.id
+    assert [message["id"] for message in target.transcript] == ["answer_inherited", "answer_child"]
+    assert target.transcript[0]["metadata"]["turn_diff"] == inherited["metadata"]["turn_diff"]
+    reopened = ConversationRepository(base_dir=tmp_path)
+    for owner in (parent.id, clone.id):
+        for message_id, turn_id, revision, patch in (
+            ("answer_inherited", "turn_inherited", 7, inherited),
+            ("answer_child", "turn_child", 8, child_patch),
+        ):
+            loaded = reopened.get_message_turn_diff(owner, message_id, turn_id=turn_id, revision=revision)
+            assert loaded is not None
+            assert loaded["thread_id"] == loaded["conversation_id"] == owner
+            assert loaded["diff"] == patch["metadata"]["turn_diff"]["diff"]
+    _source, _target, repeated_status = reopened.merge_conversation_fast_forward(clone.id, parent.id)
+    assert repeated_status == "already_up_to_date"
+
+
+def test_empty_parent_clone_merges_its_first_owned_patch_after_cold_reopen(tmp_path) -> None:
+    from backend.conversations.repository import ConversationRepository
+
+    repo = ConversationRepository(base_dir=tmp_path)
+    parent = repo.create_conversation(conversation_id="conv_empty_patch_parent", title="Empty parent")
+    clone = repo.clone_conversation(parent.id)
+    assert clone is not None and clone.parent_message_index is None
+    message = _owned_patch_message(clone.id, "answer_first_child", "turn_first_child", path="first.py")
+    repo.append_transcript_message(clone.id, message)
+    cold = ConversationRepository(base_dir=tmp_path)
+    untouched_parent = cold.get_conversation(parent.id)
+    assert untouched_parent is not None and untouched_parent.transcript == []
+    source, target, status = cold.merge_conversation_fast_forward(clone.id, parent.id)
+    assert status == "merged"
+    assert source is not None and target is not None
+    assert source.merged_into_conversation_id == parent.id
+    assert [item["id"] for item in target.transcript] == ["answer_first_child"]
+    reopened = ConversationRepository(base_dir=tmp_path)
+    for owner in (parent.id, clone.id):
+        loaded = reopened.get_message_turn_diff(owner, "answer_first_child", turn_id="turn_first_child", revision=7)
+        assert loaded is not None
+        assert loaded["thread_id"] == loaded["conversation_id"] == owner
+        assert loaded["diff"] == message["metadata"]["turn_diff"]["diff"]
+
+
+def test_export_import_rebinds_each_history_patch_to_its_actual_imported_owner(tmp_path) -> None:
+    from backend.conversations.import_export import import_conversation_tree
+    from backend.conversations.public_projection import project_public_conversation
+    from backend.conversations.repository import ConversationRepository
+
+    repo = ConversationRepository(base_dir=tmp_path / "source")
+    inherited = _owned_patch_message("conv_patch_export", "answer_export", "turn_export", path="export.py")
+    parent = repo.create_conversation(conversation_id="conv_patch_export", title="Export parent", transcript=[inherited])
+    branch = repo.clone_conversation(parent.id, title="Export branch")
+    assert branch is not None
+    child_patch = _owned_patch_message(branch.id, "answer_export_child", "turn_export_child", path="export_child.py", revision=8)
+    repo.append_transcript_message(branch.id, child_patch)
+    exported = repo.export_conversation_tree(branch.id, include_descendants=True)
+    assert exported is not None
+    # Existing exports can contain inherited clone history attributed to the
+    # old source. The importing record, rather than this source ID, owns its
+    # indexed patch body after every record receives a fresh identity.
+    exported_branch = next(record for record in exported["conversations"] if record["id"] == branch.id)
+    exported_branch["transcript"][0]["metadata"]["turn_diff"]["thread_id"] = parent.id
+    exported_branch["transcript"][0]["metadata"]["turn_diff"]["conversation_id"] = parent.id
+    destination = ConversationRepository(base_dir=tmp_path / "imported")
+    result = import_conversation_tree(destination, exported)
+    imported_branch_id = result["conversation_id"]
+    cold = ConversationRepository(base_dir=tmp_path / "imported")
+    imported_branch = cold.get_conversation(imported_branch_id)
+    assert imported_branch is not None
+    imported_parent_id = imported_branch.parent_conversation_id
+    assert imported_branch_id not in {branch.id, parent.id}
+    assert imported_parent_id not in {branch.id, parent.id, imported_branch_id}
+    assert result["count"] == 2
+    for owner, message_id, turn_id, revision, original in (
+        (imported_parent_id, "answer_export", "turn_export", 7, inherited),
+        (imported_branch_id, "answer_export", "turn_export", 7, inherited),
+        (imported_branch_id, "answer_export_child", "turn_export_child", 8, child_patch),
+    ):
+        record = cold.get_conversation(owner)
+        assert record is not None
+        deferred_message = next(message for message in project_public_conversation(record)["transcript"] if message["id"] == message_id)
+        deferred = deferred_message["metadata"]["turn_diff"]
+        assert deferred["thread_id"] == deferred["conversation_id"] == owner
+        assert deferred["deferred"] is True and deferred["diff"] is None
+        loaded = cold.get_message_turn_diff(owner, message_id, turn_id=turn_id, revision=revision)
+        assert loaded is not None
+        assert loaded["thread_id"] == loaded["conversation_id"] == owner
+        assert loaded["diff"] == original["metadata"]["turn_diff"]["diff"]
+    original = repo.get_conversation(parent.id)
+    assert original is not None
+    assert original.transcript[0]["metadata"]["turn_diff"] == inherited["metadata"]["turn_diff"]
+
+
 def test_conversation_merge_fast_forwards_only_an_unchanged_parent(tmp_path) -> None:
     from backend.conversations.repository import ConversationRepository
 
@@ -459,36 +704,36 @@ def test_session_restore_ignores_last_workspace_when_conversation_is_unbound(tmp
     assert result["workspace"] is None
 
 
-def test_conversation_repository_repairs_legacy_mojibake_on_load(tmp_path) -> None:
+def test_conversation_repository_preserves_valid_legacy_utf8_on_load(tmp_path) -> None:
     import json
 
     from backend.conversations.repository import ConversationRepository
 
     base_dir = tmp_path / "conversations"
     base_dir.mkdir()
-    conversation_id = "conv_mojibake"
-    bad_hello = "\u6d63\u72b2\u30bd"
-    good_hello = "\u4f60\u597d"
-    bad_project_name = "Minist\u93b5\u5b2a\u5553\u93c1\u677f\u74e7\u7487\u55d7\u57c6"
-    good_project_name = "Minist\u624b\u5199\u6570\u5b57\u8bc6\u522b"
-    workspace_root = tmp_path / bad_project_name
+    conversation_id = "conv_legacy_utf8"
+    literal_text = "\u6d63\u72b2\u30bd"
+    ordinary_text = "\u4f60\u597d"
+    project_name = "Minist\u93b5\u5b2a\u5553\u93c1\u677f\u74e7\u7487\u55d7\u57c6"
+    workspace_root = tmp_path / project_name
+    content = f"{ordinary_text} / {literal_text}"
 
     meta = {
         "id": conversation_id,
-        "title": bad_hello,
+        "title": literal_text,
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
         "message_count": 1,
         "workspace_root": str(workspace_root),
-        "summary": bad_hello,
+        "summary": ordinary_text,
     }
     transcript = {
-        "id": "user_mojibake",
+        "id": "user_legacy_utf8",
         "role": "user",
-        "content": bad_hello,
-        "blocks": [{"type": "text", "content": bad_hello}],
+        "content": content,
+        "blocks": [{"type": "text", "content": content}],
     }
-    snapshot = {"history": [{"role": "user", "content": bad_hello}]}
+    snapshot = {"history": [{"role": "user", "content": content}]}
 
     (base_dir / f"{conversation_id}.meta.json").write_text(
         json.dumps(meta, ensure_ascii=False),
@@ -502,16 +747,19 @@ def test_conversation_repository_repairs_legacy_mojibake_on_load(tmp_path) -> No
         json.dumps(snapshot, ensure_ascii=False),
         encoding="utf-8",
     )
+    source_paths = [base_dir / f"{conversation_id}{suffix}" for suffix in (".meta.json", ".transcript.jsonl", ".snapshot.json")]
+    original_bytes = {path: path.read_bytes() for path in source_paths}
 
     record = ConversationRepository(base_dir=base_dir).get_conversation(conversation_id)
 
     assert record is not None
-    assert record.title == good_hello
-    assert record.summary == good_hello
-    assert good_project_name in record.workspace_root
-    assert record.transcript[0]["content"] == good_hello
-    assert record.transcript[0]["blocks"][0]["content"] == good_hello
-    assert record.context_snapshot["history"][0]["content"] == good_hello
+    assert record.title == literal_text
+    assert record.summary == ordinary_text
+    assert record.workspace_root == str(workspace_root)
+    assert record.transcript[0]["content"] == content
+    assert record.transcript[0]["blocks"][0]["content"] == content
+    assert record.context_snapshot["history"][0]["content"] == content
+    assert {path: path.read_bytes() for path in source_paths} == original_bytes
 
 
 def test_conversation_repository_does_not_fabricate_text_for_legacy_tool_only_assistant(tmp_path) -> None:
@@ -966,48 +1214,70 @@ def test_legacy_split_record_migrates_with_previous_generation_fallback(tmp_path
     from backend.conversations.models import ConversationRecord
     from backend.conversations.repository import ConversationRepository
 
+    before = "before migration · 你好 / 浣犲ソ"
+    after = "after migration · 中文🙂"
     legacy = ConversationRecord(
         id="conv_legacy_split",
-        title="Legacy split",
-        transcript=[{"id": "legacy", "role": "user", "content": "before migration"}],
-        context_snapshot={"history": [{"role": "user", "content": "before migration"}]},
+        title="Legacy split · 你好 / 浣犲ソ",
+        transcript=[{"id": "legacy", "role": "user", "content": before}],
+        context_snapshot={"history": [{"role": "user", "content": before}]},
     )
     (tmp_path / f"{legacy.id}.meta.json").write_text(
-        json.dumps(legacy.to_meta_dict()),
+        json.dumps(legacy.to_meta_dict(), ensure_ascii=False),
         encoding="utf-8",
     )
     (tmp_path / f"{legacy.id}.transcript.jsonl").write_text(
-        json.dumps(legacy.transcript[0]) + "\n",
+        json.dumps(legacy.transcript[0], ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     (tmp_path / f"{legacy.id}.snapshot.json").write_text(
-        json.dumps(legacy.context_snapshot),
+        json.dumps(legacy.context_snapshot, ensure_ascii=False),
         encoding="utf-8",
     )
+    source_paths = [tmp_path / f"{legacy.id}{suffix}" for suffix in (".meta.json", ".transcript.jsonl", ".snapshot.json")]
+    original_bytes = {path: path.read_bytes() for path in source_paths}
 
     repo = ConversationRepository(base_dir=tmp_path)
     repo.append_transcript_message(
         legacy.id,
-        {"id": "new", "role": "assistant", "content": "after migration"},
+        {"id": "new", "role": "assistant", "content": after},
     )
 
-    manifest = json.loads(
-        (tmp_path / f"{legacy.id}.manifest.json").read_text(encoding="utf-8")
-    )
+    manifest_path = tmp_path / f"{legacy.id}.manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
     assert manifest["current_generation"] == 2
     assert manifest["previous_generation"] == 1
-    assert not (tmp_path / f"{legacy.id}.meta.json").exists()
+    assert {path: path.read_bytes() for path in source_paths} == original_bytes
     previous_lines = (
         tmp_path / f"{legacy.id}.g1.transcript.jsonl"
     ).read_text(encoding="utf-8").strip().splitlines()
     current_lines = (
         tmp_path / f"{legacy.id}.g2.transcript.jsonl"
     ).read_text(encoding="utf-8").strip().splitlines()
-    assert [json.loads(line)["content"] for line in previous_lines] == ["before migration"]
+    assert [json.loads(line)["content"] for line in previous_lines] == [before]
     assert [json.loads(line)["content"] for line in current_lines] == [
-        "before migration",
-        "after migration",
+        before,
+        after,
     ]
+    current = ConversationRepository(base_dir=tmp_path).get_conversation(legacy.id)
+    assert current is not None
+    assert current.revision == manifest["current_generation"]
+    assert [message["content"] for message in current.transcript] == [before, after]
+    assert current.context_snapshot["history"][0]["content"] == before
+
+    # The retained legacy source has only the old message. A cold reader must
+    # first use the manifest's newer state, then its actual previous generation
+    # when the current generation is damaged; it must not reread a legacy row.
+    (tmp_path / f"{legacy.id}.g2.transcript.jsonl").write_text("{broken", encoding="utf-8")
+    fallback = ConversationRepository(base_dir=tmp_path).get_conversation(legacy.id)
+    assert fallback is not None
+    assert fallback.revision == manifest["previous_generation"]
+    assert fallback.title == legacy.title
+    assert [message["content"] for message in fallback.transcript] == [before]
+    assert fallback.context_snapshot["history"][0]["content"] == before
+    assert {path: path.read_bytes() for path in source_paths} == original_bytes
+    assert manifest_path.read_bytes() == manifest_bytes
 
 
 def test_conversation_generation_retention_and_delete_cleanup(tmp_path) -> None:
@@ -1189,13 +1459,13 @@ def test_websocket_exposes_conversation_lifecycle(monkeypatch, tmp_path) -> None
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_conversations") as ws:
-            first = ws.receive_json()
+            first = _receive_json(ws)
             assert first["type"] == "mcp_status"
-            second = ws.receive_json()
+            second = _receive_json(ws)
             assert second["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.list"})
-            third = ws.receive_json()
+            third = _receive_json(ws)
             assert third["type"] == "conversation.list"
             assert third["conversations"] == []
             assert third["active_conversation_id"] is None
@@ -1266,7 +1536,7 @@ def test_websocket_delete_uses_metadata_when_retained_history_is_corrupt(monkeyp
             _receive_conversation_switched(ws, healthy.id)
             ws.send_json({"type": "conversation.delete", "conversation_id": target.id})
             for _ in range(60):
-                payload = ws.receive_json()
+                payload = _receive_json(ws)
                 if payload.get("type") == "command.result" and payload.get("command") == "conversation.delete":
                     outcome = payload
                     break
@@ -1355,7 +1625,7 @@ def test_websocket_delete_fallback_serializes_with_the_later_user_switch(monkeyp
                 assert switch_ingress.wait(timeout=2)
                 if fallback_deadline_expires:
                     for _ in range(60):
-                        payload = ws.receive_json()
+                        payload = _receive_json(ws)
                         if payload.get("type") == "command.result" and payload.get("command") == "conversation.delete":
                             assert payload["level"] == "warning"
                             assert any(error.endswith(":fallback_activation") for error in payload["data"]["cleanup_errors"])
@@ -1371,7 +1641,7 @@ def test_websocket_delete_fallback_serializes_with_the_later_user_switch(monkeyp
             _receive_conversation_switched(ws, selected.id)
             ws.send_json({"type": "conversation.list"})
             for _ in range(60):
-                payload = ws.receive_json()
+                payload = _receive_json(ws)
                 if payload.get("type") == "conversation.list" and payload.get("active_conversation_id") == selected.id:
                     break
             else:
@@ -1407,8 +1677,8 @@ def test_websocket_context_fork_resolves_frontend_message_id(monkeypatch, tmp_pa
     session_id = f"session_test_context_fork_{tmp_path.name}"
     with TestClient(app) as client:
         with client.websocket_connect(f"/ws?session_id={session_id}") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.switch", "conversation_id": parent.id})
             switched = _receive_conversation_switched(ws, parent.id)
@@ -1470,8 +1740,8 @@ def test_websocket_session_tree_clone_merge_and_export_are_end_to_end(monkeypatc
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_session_tree") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.clone", "conversation_id": parent.id})
             cloned_list = _receive_until_event(ws, "conversation.list")
@@ -1544,8 +1814,8 @@ def test_websocket_session_restore_emits_active_conversation_snapshot(monkeypatc
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_restore_active") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({
                 "type": "session.restore",
@@ -1612,6 +1882,12 @@ def test_websocket_restore_preserves_history_without_an_unavailable_workspace(
                 assert previous_manager is not global_manager
                 assert live_session.mcp_manager is previous_manager
             ws.send_json({"type": "session.restore", "last_conversation_id": target.id})
+            workspace_refusal = _receive_until_event(ws, "command.result", command="workspace.activate")
+            assert workspace_refusal["level"] == "error"
+            assert workspace_refusal["conversation_id"] == target.id
+            assert workspace_refusal["data"]["error_code"] == (
+                "workspace_untrusted" if workspace_state == "untrusted" else "workspace_missing"
+            )
             restored = _receive_until_event(ws, "session.restored")
             switched = _receive_conversation_switched(ws, target.id)
             ws.send_json({"type": "session.sync"})
@@ -1628,7 +1904,7 @@ def test_websocket_restore_preserves_history_without_an_unavailable_workspace(
             ws.send_json({"type": "terminal.list", "conversation_id": target.id})
             terminal_result = None
             for _attempt in range(60):
-                payload = ws.receive_json()
+                payload = _receive_json(ws)
                 if payload.get("type") == "command.result" and payload.get("command") == "terminal.list":
                     terminal_result = payload
                     break
@@ -1705,8 +1981,8 @@ def test_websocket_completed_conversation_restores_after_same_session_reconnect(
 
     with TestClient(app) as client:
         with client.websocket_connect(f"/ws?session_id={session_id}") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
             ws.send_json({
                 "type": "session.restore",
                 "last_conversation_id": conversation.id,
@@ -1717,8 +1993,8 @@ def test_websocket_completed_conversation_restores_after_same_session_reconnect(
         # Reconnect inside the manager grace period with the same renderer
         # session id.  This is the browser-refresh path, not a fresh session.
         with client.websocket_connect(f"/ws?session_id={session_id}") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
             ws.send_json({
                 "type": "session.restore",
                 "last_conversation_id": conversation.id,
@@ -1757,8 +2033,8 @@ def test_websocket_session_restore_rebases_a_client_cursor_ahead_of_server_histo
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_cursor_rebase") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "session.restore", "last_seq": 42})
             restored = _receive_until_event(ws, "session.restored")
@@ -1791,8 +2067,8 @@ def test_websocket_conversation_list_keeps_blank_active_session_with_existing_hi
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_existing_list_restore") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.list"})
             listing = _receive_until_event(ws, "conversation.list")
@@ -1823,8 +2099,8 @@ def test_websocket_conversation_list_does_not_activate_archived_history(monkeypa
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_archived_only_list") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.list"})
             listing = _receive_until_event(ws, "conversation.list")
@@ -1843,8 +2119,8 @@ def test_websocket_archiving_last_active_conversation_returns_blank(monkeypatch,
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_archive_last_active") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.create", "memory_mode": "none"})
             created = _receive_until_event(ws, "conversation.list")
@@ -1867,8 +2143,8 @@ def test_blank_session_goal_command_does_not_create_conversation(monkeypatch, tm
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_blank_goal") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.goal.set", "text": "ship it"})
             result = _receive_until_event(ws, "command.result")
@@ -1889,8 +2165,8 @@ def test_blank_session_permission_rules_do_not_create_conversation(monkeypatch, 
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_blank_permission_rules") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json(
                 {
@@ -1917,8 +2193,8 @@ def test_websocket_restores_permission_mode_when_switching_conversation(monkeypa
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_permission_mode_switch") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.create", "memory_mode": "none"})
             initial = _receive_created_conversation(ws)
@@ -1930,7 +2206,7 @@ def test_websocket_restores_permission_mode_when_switching_conversation(monkeypa
             mode_updated = False
             listing_after_mode = None
             for _ in range(12):
-                payload = ws.receive_json()
+                payload = _receive_json(ws)
                 if payload.get("type") == "permission.mode.updated":
                     mode_updated = payload.get("mode") == "plan"
                 elif payload.get("type") == "conversation.list":
@@ -1963,8 +2239,8 @@ def test_websocket_restores_permission_rules_when_switching_conversation(monkeyp
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_permission_rules_switch") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.create", "memory_mode": "none"})
             initial = _receive_created_conversation(ws)
@@ -2018,8 +2294,8 @@ def test_agent_events_include_conversation_context(monkeypatch, tmp_path) -> Non
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_conversation_events") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
             ws.send_json({"type": "conversation.create", "memory_mode": "none"})
             initial = _receive_created_conversation(ws)
             conversation_id = initial["active_conversation_id"]
@@ -2071,8 +2347,8 @@ def test_new_conversation_does_not_inherit_previous_turn_memory(monkeypatch, tmp
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_summary_memory_image") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json(
                 {
@@ -2121,8 +2397,8 @@ def test_new_conversations_never_chain_legacy_fact_inheritance(monkeypatch, tmp_
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_nested_summary_memory") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "conversation.create", "memory_mode": "none"})
             initial = _receive_created_conversation(ws)
@@ -2169,8 +2445,8 @@ def test_regenerate_replaces_transcript_tail_instead_of_appending_duplicate_turn
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_regenerate_replace") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "hello"})
             assert _receive_next_non_task_update(ws)["type"] == "item.completed"
@@ -2223,35 +2499,43 @@ def test_regenerate_with_invalid_source_message_returns_error_without_mutating_t
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_regenerate_invalid_source") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "hello"})
             assert _receive_next_non_task_update(ws)["type"] == "item.completed"
             assert _receive_next_non_task_update(ws)["type"] == "done"
             assert _receive_next_non_task_update(ws)["type"] == "conversation.summary.updated"
 
+            ws.send_json({"type": "conversation.list"})
+            before_retry = _receive_until_event(ws, "conversation.list")
+            original_transcript = before_retry["active_conversation"]["transcript"]
             ws.send_json(
                 {
                     "type": "user_message",
                     "content": "hello",
                     "retry_from_message_id": "missing_user_message",
+                    "conversation_id": before_retry["active_conversation_id"],
+                    "client_command_id": "invalid-retry-command",
+                    "user_message_id": "user-invalid-retry",
+                    "assistant_message_id": "assistant-invalid-retry",
                 }
             )
-            error_event = _receive_next_non_task_update(ws)
-            assert error_event["type"] == "error"
-            # Terminal for this request: no run starts, so no `done` follows.
-            # The client treats a recoverable error as non-terminal evidence and
-            # keeps the optimistic streaming assistant it created before the
-            # send alive, which left the conversation permanently "running" and
-            # blocked every later send until a reload.
-            assert error_event["recoverable"] is False
-            assert "missing_user_message" in error_event["message"]
+            refusal = _receive_until_event(ws, "command.result", client_command_id="invalid-retry-command")
+            assert refusal["command"] == "user_message"
+            assert refusal["level"] == "error"
+            assert refusal["data"]["admitted"] is False
+            assert refusal["data"]["retry_from_message_id"] == "missing_user_message"
+            assert refusal["data"]["user_message_id"] == "user-invalid-retry"
+            assert refusal["data"]["assistant_message_id"] == "assistant-invalid-retry"
+            assert "missing_user_message" in refusal["message"]
+            assert _fake_regenerate_agent_loop.state["calls"] == 1
 
             ws.send_json({"type": "conversation.list"})
             listing = _receive_next_non_task_update(ws)
 
     final_transcript = listing["active_conversation"]["transcript"]
+    assert final_transcript == original_transcript
     assert [message["role"] for message in final_transcript] == ["user", "assistant"]
     assert final_transcript[1]["content"] == "first reply"
 
@@ -2267,8 +2551,8 @@ def test_conversation_transcript_persists_assistant_process_blocks(monkeypatch, 
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_process_blocks_restore") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "optimize this project"})
             assert _receive_next_non_task_update(ws)["type"] == "thinking_delta"
@@ -2310,8 +2594,8 @@ def test_conversation_transcript_persists_web_evidence_citations(monkeypatch, tm
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_web_evidence_citation") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "check weather"})
             assert _receive_next_non_task_update(ws)["type"] == "tool_call"
@@ -2357,8 +2641,8 @@ def test_conversation_transcript_keeps_failed_tool_turn_structured(monkeypatch, 
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_failed_tool_only") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "check weather"})
             assert _receive_next_non_task_update(ws)["type"] == "tool_call"
@@ -2430,8 +2714,8 @@ def test_conversation_transcript_keeps_run_error_separate_from_answer(monkeypatc
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_failed_tool_call_by_error") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "check weather"})
             assert _receive_next_non_task_update(ws)["type"] == "tool_call"
@@ -2464,8 +2748,8 @@ def test_conversation_transcript_marks_process_blocks_failed_on_agent_error(monk
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws?session_id=session_test_failed_process_blocks") as ws:
-            assert ws.receive_json()["type"] == "mcp_status"
-            assert ws.receive_json()["type"] == "llm.model.updated"
+            assert _receive_json(ws)["type"] == "mcp_status"
+            assert _receive_json(ws)["type"] == "llm.model.updated"
 
             ws.send_json({"type": "user_message", "content": "break during planning"})
             assert _receive_next_non_task_update(ws)["type"] == "agent.progress"
@@ -2555,15 +2839,15 @@ async def _admit_fake_turn(kwargs) -> None:
     context = kwargs["context_builder"]
     history_start = context.history_length
     context.append_user(kwargs.get("user_message", ""))
-    commit = kwargs.get("metadata", {}).get("commit_turn_admission")
-    if callable(commit):
-        result = commit(
-            boundary_input=SimpleNamespace(consumed_steer=None),
-            history_start=history_start,
-            history_end=context.history_length,
-        )
-        if inspect.isawaitable(result):
-            await result
+    metadata = kwargs["metadata"]
+    boundary = SimpleNamespace(consumed_steer=None)
+    await metadata["commit_turn_admission"](
+        boundary_input=boundary,
+        history_start=history_start,
+        history_end=context.history_length,
+    )
+    await metadata["report_turn_admission"](boundary_input=boundary)
+    await metadata["publish_turn_admission"](boundary_input=boundary)
 
 
 async def _fake_conversation_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
@@ -2635,6 +2919,7 @@ async def _fake_process_blocks_agent_loop(*args, **kwargs) -> AsyncIterator[Agen
 
 
 async def _fake_web_evidence_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
+    await _admit_fake_turn(kwargs)
     yield AgentEvent.tool_call(
         "tool_fetch_1",
         "web_fetch",
@@ -2656,6 +2941,7 @@ async def _fake_web_evidence_agent_loop(*args, **kwargs) -> AsyncIterator[AgentE
 
 
 async def _fake_failed_tool_only_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
+    await _admit_fake_turn(kwargs)
     yield AgentEvent.tool_call(
         "tool_search_failed",
         "web_search",
@@ -2672,6 +2958,7 @@ async def _fake_failed_tool_only_agent_loop(*args, **kwargs) -> AsyncIterator[Ag
 
 
 async def _fake_successful_tool_without_final_reply_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
+    await _admit_fake_turn(kwargs)
     yield AgentEvent.tool_call(
         "tool_search_success",
         "web_search",
@@ -2689,6 +2976,7 @@ async def _fake_successful_tool_without_final_reply_agent_loop(*args, **kwargs) 
 
 
 async def _fake_tool_call_then_error_only_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
+    await _admit_fake_turn(kwargs)
     yield AgentEvent.tool_call(
         "tool_search_failed_by_run_error",
         "web_search",
@@ -2700,6 +2988,7 @@ async def _fake_tool_call_then_error_only_agent_loop(*args, **kwargs) -> AsyncIt
 
 
 async def _fake_failed_process_agent_loop(*args, **kwargs) -> AsyncIterator[AgentEvent]:
+    await _admit_fake_turn(kwargs)
     yield AgentEvent.progress(
         "Choosing the next step",
         stage="planning",

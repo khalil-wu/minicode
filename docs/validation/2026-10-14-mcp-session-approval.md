@@ -1,0 +1,13 @@
+# Source MCP session approval — 2026-10-14
+
+Reference: `mcp_tool_call.rs::session_mcp_tool_approval_key`, `normalize_approval_decision_for_mode`, `request_mcp_tool_approval_if_needed` at checkout `822e58cc3d666166c7446c5b1ea2e52f5d09594c`.
+
+The prior generic request/digest cache remembered only an identical argument object. Native Source Auto approvals now belong to the thread and key on raw server, plugin attribution and tool name. Custom MCPs have no hosted connector/link identity. Prompt and Writes have no key and cannot remember; their composer controls offer one invocation. A fresh strict grant still requests review, and explicit static restrictions and hard denies remain authoritative.
+
+The final authorization boundary borrows the real AgentSession/WS conversation store. Only a successful explicit approval of the unchanged frozen request writes it. The generic WebSocket argument cache excludes native MCP requests, so it cannot restore the wrong semantics. Other conversations and subagent sessions do not inherit the store accidentally. Source hosted Apps account keys are not synthesized from untrusted server metadata. Permanent approval is still a gap.
+
+Validation: first backend batch 111 passed / 4 fixture failures, second MCP producer file 51 passed. Latest identity union for this scope is 115 passed, 0 failed/error/skipped. Frontend first 4-file batch had 119 passed / 2 accessible-name fixture failures; latest InlineAgentPrompt file is 51 passed, bringing the 4-file union to 121 passed. TypeScript and Vite passed.
+
+`output/playwright/codex-control-audit-20261013/production-mcp-session-run01` uses a separate offscreen Electron profile, an actual JSON-RPC stdio process, real WebSocket owners and a real calls.jsonl file. Only model HTTP responses are controlled. Two scenarios passed, four PNGs, no page errors. The UI's “允许此次对话” response permitted a second call with changed arguments and a new WS turn with two more distinct calls; exactly one control request was emitted and all four native calls reached the file. Normal user windows/drafts/history were untouched. Existing permission/Guardian desktop evidence separately covers draft preservation.
+
+Permanent approval has since been completed and independently validated in [2026-10-14-mcp-persistent-approval.md](2026-10-14-mcp-persistent-approval.md). The earlier “Permanent approval is still a gap” sentence describes the initial session-only batch. The later production run covers real user-config writes, current frozen-call execution across policy reload, a cold Electron/backend/MCP restart with zero further prompts, both owners' drafts, and Prompt/Writes remaining one invocation.

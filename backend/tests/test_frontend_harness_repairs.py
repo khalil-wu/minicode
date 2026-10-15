@@ -216,7 +216,8 @@ def test_delete_checks_then_cleans_local_resources_then_removes_worktree(tmp_pat
     events = []
     session = SimpleNamespace(
         emit_command_result=AsyncMock(),
-        conversation_repo=SimpleNamespace(delete_conversation=lambda _: events.append("delete") or True),
+        conversation_repo=SimpleNamespace(delete_conversation=lambda _: events.append("delete") or True,
+            store_instance_id=lambda: "frontend-harness-fixture"),
     )
     request = ConversationDeleteRequest("owner", True, False, True)
     target = SimpleNamespace(id="owner")

@@ -1,0 +1,7 @@
+.guardian-approval-menu { position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; z-index: 60; padding: 6px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-raised); box-shadow: var(--shadow-medium); max-height: 320px; overflow-y: auto; }
+.guardian-approval-menu > p { margin: 0; padding: 8px; color: var(--text-secondary); }
+.guardian-approval-menu > button { display: flex; flex-direction: column; gap: 4px; width: 100%; border: 0; border-radius: 6px; padding: 8px; color: var(--text-primary); background: none; font: inherit; text-align: left; cursor: pointer; }
+.guardian-approval-menu > button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guardian-approval-menu > button > span + span { color: var(--text-secondary); }
+.guardian-approval-menu > button:hover, .guardian-approval-menu > button:focus-visible { background: var(--surface-hover); }
+.guardian-approval-menu > button:disabled { cursor: default; opacity: .6; }

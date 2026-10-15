@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from backend.async_cleanup import to_thread_cancel_safe
+from backend.atomic_io import await_task_despite_cancellation
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 import uuid
 from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass
@@ -12,12 +15,16 @@ from pathlib import Path
 from typing import Any
 
 from backend.agent.message import AgentEvent, UserCommand
+from backend.agent.execution_journal import execution_journal_owner, turn_user_prompt_id, turn_input_consumption_id, turn_input_rejection_id
 from backend.services.misc_command_service import is_conversation_effort_command
 from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
 from backend.ws.command_results import emit_command_error
+from backend.ws.command_scope import CommandScope, bind_execution_command_scope
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.event_outbox import EventOutbox
+from backend.ws.conversation_stream import bind_response_origin
 from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode, normalize_user_input_metadata
+from backend.agent.conversation_query_guard import ConversationTransition, conversation_query_guards
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +33,40 @@ COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
 RECENT_CLIENT_COMMAND_IDS_MAX = 2_000
 
 
+def _admitted_input_origin(admission: dict[str, Any], projection: dict[str, Any] | None, runtime: Any) -> str:
+    origin = str(admission.get("client_queue_key") or "")
+    if origin:
+        return origin
+    # A legacy steer is consumed by another window's run. Its parent run's
+    # session is not evidence of who submitted that input.
+    if projection is None or projection.get("steered"):
+        return ""
+    run = runtime.get_run(str(admission.get("run_id") or ""))
+    if run is None or not run.session_id:
+        return ""
+    from backend.ws.durable_user_queue import DurableUserMessageQueue
+    return DurableUserMessageQueue.queue_key_for_session(run.session_id)
+
+
+def _same_admitted_input(
+    projection: dict[str, Any], submitted_content: str,
+    attachments: list[dict[str, Any]], input_metadata: dict[str, Any],
+) -> bool:
+    return (
+        str(projection.get("submitted_content", projection.get("content", ""))) == submitted_content
+        and list(projection.get("attachments") or []) == attachments
+        and all(projection.get(key) == value for key, value in input_metadata.items())
+    )
+
+
 @dataclass
 class _UserMessageAdmission:
     command: UserCommand
+    original_command: UserCommand | None = None
     interrupted: bool = False
+    cancel_persistence: asyncio.Task[None] | None = None
+    stop_target: dict[str, Any] | None = None
+    stop_acceptance: asyncio.Future[None] | None = None
 
 COMMAND_BACKLOG_BYPASS_TYPES = {
     "control_response",
@@ -37,6 +74,21 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
     "interrupt",
     "mcp.inventory.cancel",
 }
+
+_FORWARDED_CONVERSATION_COMMAND_TYPES = frozenset({
+    "interrupt", "control_response", "control_cancel_request", "approval.file_diff",
+    "user_message.queue.cancel", "user_message.queue.steer", "send_message", "followup_task",
+    "thread/approveGuardianDeniedAction", "context.compact",
+    "subagent.cancel", "subagent.plan_review",
+})
+
+
+def _normalize_command_owner(command: UserCommand) -> None:
+    # These are the existing explicit-owner spellings. Normalize once before
+    # lifecycle locking and routing so a later reader cannot reinterpret them.
+    owner = command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+    if owner:
+        command.data["conversation_id"] = str(owner).strip()
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "llm.model.set",
@@ -49,14 +101,16 @@ _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "workspace.switch",
     "context.compact",
     "context.fork",
+    "thread/approveGuardianDeniedAction",
     "user_message.queue.cancel",
     "user_message.queue.steer",
+    "send_message", "followup_task", "subagent.cancel", "subagent.plan_review",
 }
 
 
 def _requires_selected_conversation(command_type: str) -> bool:
     return command_type.startswith(("subagent.", "terminal.", "preview.", "checkpoint.", "inspector.")) or command_type in {
-        "send_message", "agent.resume", "approval.file_diff", "context.compact", "context.fork", "context.side_query",
+        "send_message", "followup_task", "agent.resume", "approval.file_diff", "context.compact", "context.fork", "context.side_query",
     }
 
 
@@ -114,6 +168,7 @@ def _command_targets_conversation_delete_fence(
     targets: set[str] = set()
     for key in (
         "conversation_id",
+        "owner_conversation_id", "ownerConversationId",
         "preferred_conversation_id",
         "source_conversation_id",
         "target_conversation_id",
@@ -135,6 +190,7 @@ def _command_lifecycle_conversations(session: Any, command: UserCommand) -> tupl
         str(command.data.get(key) or "").strip()
         for key in (
             "conversation_id", "preferred_conversation_id", "source_conversation_id",
+            "owner_conversation_id", "ownerConversationId",
             "target_conversation_id", "parent_conversation_id",
         )
     }
@@ -177,7 +233,9 @@ class SessionCommandDispatcher:
         )
         self._command_semaphore = asyncio.Semaphore(20)
         self._command_tasks: set[asyncio.Task[Any]] = set()
+        self._execution_command_tasks: set[asyncio.Task[Any]] = set()
         self._user_message_admissions: dict[asyncio.Task[Any], _UserMessageAdmission] = {}
+        self._regeneration_transitions: dict[asyncio.Task[Any] | None, ConversationTransition] = {}
         self._active_client_command_ids: set[str] = set()
         self._reported_durable_queue_load_error = ""
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
@@ -261,12 +319,12 @@ class SessionCommandDispatcher:
                 # until restore/switch has committed that owner.
                 continue
             await self._send_client_command_ack(command, duplicate=True)
-            self._schedule_durable_client_command(command_id, connection_generation)
+            self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
 
     def _recovered_command_owner_ready(self, command: UserCommand) -> bool:
         # These commands establish a conversation or address a target rather
         # than requiring it to be the current command scope.
-        if command.type in {"session.restore", "session.sync", "user_message"} or command.type.startswith("conversation."):
+        if command.type in {"session.restore", "session.sync", "user_message", "thread/approveGuardianDeniedAction"} or command.type.startswith("conversation."):
             return True
         owner = str(command.data.get("owner_conversation_id")
             or command.data.get("ownerConversationId") or command.data.get("conversation_id") or "").strip()
@@ -332,6 +390,17 @@ class SessionCommandDispatcher:
                 )
                 continue
 
+            if command.type == "user_message":
+                for field in ("_client_queue_key", "_legacy_user_message_identity", "_queued_user_message_dispatch", "_submitted_content", "_guardian_acceptance_order"):
+                    command.data.pop(field, None)
+            command_id = self._client_command_id(command)
+            if command.type == "user_message" and command_id:
+                command.data["_client_queue_key"] = self._session.run_manager.durable_client_commands.path.stem
+                cancellation = await self.cancelled_user_message(command_id)
+                if cancellation is not None:
+                    await self._send_client_command_ack(command, duplicate=True)
+                    await self.emit_cancelled_user_message(command)
+                    continue
             if self._client_command_seen(command):
                 await self._send_client_command_ack(command, duplicate=True)
                 logger.info(
@@ -348,7 +417,7 @@ class SessionCommandDispatcher:
                 continue
 
             self.prune_command_tasks()
-            command_backlog_full = len(self._command_tasks) >= self._max_command_tasks
+            command_backlog_full = len(self._command_tasks) + len(self._execution_command_tasks) >= self._max_command_tasks
             command_can_bypass_backlog = command.type in COMMAND_BACKLOG_BYPASS_TYPES
             command_is_droppable_refresh = command.type in COMMAND_BACKLOG_DROPPABLE_TYPES
             if command_backlog_full and not command_can_bypass_backlog:
@@ -388,7 +457,7 @@ class SessionCommandDispatcher:
                 if durable_queue.has_client_command(command_id):
                     await self._send_client_command_ack(command, duplicate=True)
                     if self._recovered_command_owner_ready(command):
-                        self._schedule_durable_client_command(command_id, connection_generation)
+                        self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
                     continue
                 if _requires_selected_conversation(command.type) and not (
                     command.data.get("owner_conversation_id") or command.data.get("ownerConversationId") or command.data.get("conversation_id")
@@ -422,7 +491,7 @@ class SessionCommandDispatcher:
                 # ACK means the server durably owns the command. A crash before
                 # task creation leaves it pending for replay.
                 await self._send_client_command_ack(command)
-                self._schedule_durable_client_command(command_id, connection_generation)
+                self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
                 continue
 
             self._schedule_transient_client_command(command, connection_generation)
@@ -435,12 +504,18 @@ class SessionCommandDispatcher:
         async def _guarded_handle() -> None:
             await self._dispatch_client_command(command, connection_generation)
 
-        self.track_command_task(asyncio.create_task(_guarded_handle()))
+        task = asyncio.create_task(_guarded_handle())
+        if command.type == "user_message":
+            self.track_execution_command_task(task)
+        else:
+            self.track_command_task(task)
 
     def _schedule_durable_client_command(
         self,
         client_command_id: str,
         connection_generation: int,
+        *,
+        command_type: str,
     ) -> None:
         command_id = _clean_command_id(client_command_id)
         if not command_id or command_id in self._active_client_command_ids:
@@ -454,7 +529,10 @@ class SessionCommandDispatcher:
             self._active_client_command_ids.discard(command_id)
 
         task.add_done_callback(_release_active)
-        self.track_command_task(task)
+        if command_type == "user_message":
+            self.track_execution_command_task(task)
+        else:
+            self.track_command_task(task)
 
     async def _run_durable_client_command(
         self,
@@ -463,6 +541,10 @@ class SessionCommandDispatcher:
     ) -> None:
         durable_queue = self._session.run_manager.durable_client_commands
         if durable_queue is None:
+            return
+        cancellation = await self.cancelled_user_message(client_command_id)
+        if cancellation is not None:
+            await self.emit_cancelled_user_message(UserCommand(**cancellation["command"]))
             return
         command = durable_queue.claim_client_command(client_command_id)
         if command is None:
@@ -498,8 +580,13 @@ class SessionCommandDispatcher:
                 )
 
     async def _dispatch_client_command(self, command: UserCommand, connection_generation: int) -> bool:
+        _normalize_command_owner(command)
+        navigation_receipt = self._session.session_lifecycle.admit_foreground_navigation(command)
+        if command.type == "user_message" and self._client_command_id(command) and not command.data.get("_client_queue_key"):
+            command.data["_client_queue_key"] = self._session.run_manager.durable_client_commands.path.stem
         task = asyncio.current_task()
-        admission = _UserMessageAdmission(command) if command.type == "user_message" else None
+        admission = _UserMessageAdmission(command, UserCommand(type=command.type,
+            data=json.loads(json.dumps({key: value for key, value in command.data.items() if not key.startswith("_")}, ensure_ascii=False)))) if command.type == "user_message" else None
         if admission is not None:
             self._user_message_admissions[task] = admission
         try:
@@ -531,18 +618,24 @@ class SessionCommandDispatcher:
             async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
                 with self._session.event_outbox.bind_client_command(
                     self._client_command_id(command), command.type, owner=owner,
-                ):
+                ), self._session.session_lifecycle.bind_foreground_navigation(navigation_receipt):
                     return await self._handle_command(command, connection_generation=connection_generation)
         except asyncio.CancelledError:
             if admission is None or not admission.interrupted:
                 raise
+            if admission.cancel_persistence is not None:
+                await await_task_despite_cancellation(admission.cancel_persistence)
             await self._seal_unstarted_user_message(
                 str(command.data.get("conversation_id") or self._session.active_conversation_id or ""),
                 reason="user_interrupted", status="cancelled",
                 message_id=str(command.data.get("assistant_message_id") or ""),
             )
+            if self._client_command_id(command):
+                await self.emit_cancelled_user_message(command)
             return True
         finally:
+            with self._session.session_lifecycle.bind_foreground_navigation(navigation_receipt):
+                self._session.session_lifecycle.finish_foreground_navigation()
             self._user_message_admissions.pop(task, None)
 
     async def interrupt_user_message_admission(self, conversation_id: str, message_id: str) -> bool:
@@ -551,17 +644,75 @@ class SessionCommandDispatcher:
             owner = str(data.get("conversation_id") or self._session.active_conversation_id or "")
             if owner != conversation_id or str(data.get("assistant_message_id") or "") != message_id:
                 continue
-            # Persist the accepted Stop before signalling its command task.
-            # A process exit during workspace cleanup must not replay this input.
+            # Bind the durable Stop fence before signalling the concrete task.
+            # Workspace cleanup and the receipt await this same operation.
             if not admission.interrupted:
-                if self._client_command_id(admission.command):
-                    self._mark_client_command_seen(admission.command, require_persistence=True)
-                self._session.run_manager.set_user_queue_paused(conversation_id, message_id)
+                admission.cancel_persistence = asyncio.create_task(to_thread_cancel_safe(
+                    self._persist_user_admission_stop, admission.command,
+                    conversation_id=conversation_id, message_id=message_id,
+                ))
                 admission.interrupted = True
                 task.cancel()
             await asyncio.shield(task)
             return True
         return False
+
+    def _persist_user_admission_stop(
+        self, command: UserCommand, *, conversation_id: str, message_id: str,
+    ) -> None:
+        if self._client_command_id(command):
+            self.record_cancelled_user_message(command, reason="user_interrupted")
+        self._session.run_manager.set_user_queue_paused(conversation_id, message_id)
+
+    def record_cancelled_user_message(self, command: UserCommand, *, reason: str) -> None:
+        client = self._session.run_manager.durable_client_commands
+        shared = self._session.run_manager.durable_queue
+        origin = str(command.data.get("_client_queue_key") or client.path.stem)
+        record = shared.cancelled_client_command(self._client_command_id(command), client_queue_key=origin) if shared is not None else None
+        if record is None:
+            record = client.prepare_client_cancellation(command, reason=reason, client_queue_key=origin)
+        if "client_queue_key" not in record:
+            record = {**record, "client_queue_key": origin}
+        original = UserCommand(type=record["command"]["type"], data={**record["command"]["data"], "_client_queue_key": origin})
+        if shared is not None:
+            record = shared.cancel_client_command(original, reason=reason, cancellation=record)
+        if origin == client.path.stem:
+            client.cancel_client_command(original, reason=reason, cancellation=record)
+
+    async def cancelled_user_message(self, command_id: str, *, client_queue_key: str = "") -> dict[str, Any] | None:
+        """The conversation queue's Stop intent is authoritative after a crash."""
+        def resolve() -> dict[str, Any] | None:
+            shared = self._session.run_manager.durable_queue
+            client = self._session.run_manager.durable_client_commands
+            origin = client_queue_key or client.path.stem
+            record = shared.cancelled_client_command(command_id, client_queue_key=origin) if shared is not None else None
+            if record is not None:
+                if origin == client.path.stem:
+                    client.cancel_client_command(UserCommand(**record["command"]), reason=record["reason"], cancellation=record)
+                return record
+            record = client.cancelled_client_command(command_id) if origin == client.path.stem else None
+            if record is not None and shared is not None:
+                record = {**record, "client_queue_key": origin}
+                shared.cancel_client_command(UserCommand(**record["command"]), reason=record["reason"], cancellation=record)
+            return record
+        return await to_thread_cancel_safe(resolve)
+
+    async def emit_cancelled_user_message(self, command: UserCommand) -> None:
+        command_id = self._client_command_id(command)
+        if not command_id:
+            return
+        cancellation = await self.cancelled_user_message(command_id, client_queue_key=str(command.data.get("_client_queue_key") or ""))
+        if cancellation is None:
+            raise RuntimeError(f"Cancelled input {command_id} has no durable Stop receipt")
+        data = cancellation["command"]["data"]
+        await self._session.send_event(AgentEvent(type="command.result", data={
+            "command": "user_message", "level": "success", "message": "",
+            "client_command_id": data["client_command_id"], "conversation_id": data.get("conversation_id", ""),
+            "data": {"admitted": False, "cancelled": True, "reason": cancellation["reason"],
+                     "conversation_id": data.get("conversation_id", ""),
+                     "user_message_id": data.get("user_message_id", command.data.get("user_message_id", "")),
+                     "assistant_message_id": data.get("assistant_message_id", command.data.get("assistant_message_id", ""))},
+        }))
 
     def prune_command_tasks(self) -> None:
         for task in list(self._command_tasks):
@@ -571,6 +722,19 @@ class SessionCommandDispatcher:
     def track_command_task(self, task: asyncio.Task[Any]) -> None:
         self._command_tasks.add(task)
         task.add_done_callback(self._command_tasks.discard)
+        task.add_done_callback(self._on_command_task_done)
+
+    @property
+    def execution_command_tasks(self) -> set[asyncio.Task[Any]]:
+        return self._execution_command_tasks
+
+    def track_execution_command_task(self, task: asyncio.Task[Any], *, conversation_id: str = "") -> None:
+        """Retain accepted input before its first coroutine step, including Home."""
+        self._execution_command_tasks.add(task)
+        task.add_done_callback(self._execution_command_tasks.discard)
+        manager = self._session.ws_manager
+        if manager is not None:
+            manager.retain_execution_admission(self._session, task, conversation_id=conversation_id)
         task.add_done_callback(self._on_command_task_done)
 
     @staticmethod
@@ -663,6 +827,7 @@ class SessionCommandDispatcher:
         command: UserCommand,
         connection_generation: int | None = None,
     ) -> bool:
+        _normalize_command_owner(command)
         generation = (
             self._session.connection_generation
             if connection_generation is None
@@ -733,7 +898,10 @@ class SessionCommandDispatcher:
                   exc_info=True,
               )
               try:
-                  await emit_command_error(self._session, command.type, exc)
+                  if command.type == "user_message":
+                      await self._reject_regeneration(command, str(command.data.get("conversation_id") or ""), str(exc))
+                  else:
+                      await emit_command_error(self._session, command.type, exc)
               except Exception:
                   logger.error(
                       "Could not report the failure of command %s to the client",
@@ -741,6 +909,22 @@ class SessionCommandDispatcher:
                       exc_info=True,
                   )
               return False
+          finally:
+              self._finish_command_transition()
+
+    def _finish_command_transition(self) -> None:
+        transition = self._regeneration_transitions.pop(asyncio.current_task(), None)
+        if transition is not None and conversation_query_guards().release_transition(transition):
+            self._session.schedule_next_queued_user_message(transition.conversation_id)
+
+    async def _execute_forwarded_command(self, command: UserCommand) -> None:
+        # The transport/admission remains in the submitting dispatcher. Any
+        # transition created by this execution dispatcher retains its own
+        # finally, including refusal, exception and pre-run cancellation.
+        try:
+            await self._handle_command_inner(command)
+        finally:
+            self._finish_command_transition()
 
     async def _handle_control_response(self, command: UserCommand) -> None:
         """Acknowledge decision acceptance, not completion of the approved tool."""
@@ -779,6 +963,13 @@ class SessionCommandDispatcher:
         if owner_error:
             await emit_command_error(self._session, command.type, owner_error)
             return
+        pending_request = self._session.turn_wait_state.pending_approval_payloads[request_id].get("request", {})
+        if pending_request.get("subtype") == "request_user_input" and payload.get("action") == "cancel":
+            from backend.ws.handlers.misc import handle_interrupt_command
+
+            await handle_interrupt_command(self._session, payload)
+            await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
+            return
         if not self._session._resolve_pending_approval(request_id, payload):
             await emit_command_error(
                 self._session, command.type,
@@ -799,7 +990,7 @@ class SessionCommandDispatcher:
             (success, updated_target_conversation_id)
         """
         from backend.services.workspace_service import (
-            conversation_workspace_path,
+            conversation_execution_path,
             parse_user_message_workspace_request,
             workspace_path_needs_activation,
         )
@@ -820,7 +1011,7 @@ class SessionCommandDispatcher:
             if target_conversation_id
             else self._session.active_conversation
         )
-        bound_workspace = conversation_workspace_path(target_conversation)
+        bound_workspace = conversation_execution_path(target_conversation)
         if bound_workspace:
             if not workspace_path_needs_activation(requested_workspace_path, Path(bound_workspace)):
                 return True, target_conversation.id
@@ -846,6 +1037,7 @@ class SessionCommandDispatcher:
                 announce=False,
                 wait_for_initialize=True,
                 error_command=None,
+                project_root=str(requested_workspace_path),
             )
             if not activated:
                 return False, target_conversation_id
@@ -976,12 +1168,76 @@ class SessionCommandDispatcher:
         command_id = self._client_command_id(command)
         if command_id:
             durable_queue = self._session.run_manager.durable_client_commands
-            if durable_queue is not None and durable_queue.has_client_command(command_id):
+            if (durable_queue is not None and command.data.get("_client_queue_key") == durable_queue.path.stem
+                    and durable_queue.has_client_command(command_id)):
                 if not durable_queue.bind_client_command_owner(command_id, conversation_id):
                     raise RuntimeError("The current dispatcher does not own this durable input")
         command.data["conversation_id"] = conversation_id
+        manager = self._session.ws_manager
+        if manager is not None and conversation_id:
+            manager.bind_execution_admission(self._session, asyncio.current_task(), conversation_id)
+
+    async def _reject_regeneration(self, command: UserCommand, conversation_id: str, message: str) -> None:
+        await self._session.send_event(AgentEvent(type="command.result", data={
+            "command": "user_message", "level": "error", "message": message,
+            "client_command_id": self._client_command_id(command),
+            "conversation_id": conversation_id,
+            "data": {"admitted": False, "conversation_id": conversation_id,
+                     "user_message_id": command.data.get("user_message_id", ""),
+                     "assistant_message_id": command.data.get("assistant_message_id", ""),
+                     "retry_from_message_id": command.data.get("retry_from_message_id", "")},
+        }))
+
+    async def _emit_native_user_message_completion(
+        self, command: UserCommand, slash_command: str, results: list[dict[str, str]],
+    ) -> None:
+        command_id = self._client_command_id(command)
+        if not command_id:
+            return
+        negative = next((result for result in results if result["level"].lower() in {"error", "failed"}), None)
+        if negative is None:
+            negative = next((result for result in results if result["level"].lower() == "warning"), None)
+        completion = "refused" if negative is not None else "completed" if results else "unknown"
+        outcome = negative if negative is not None else results[-1] if results else None
+        conversation_id = str(command.data.get("conversation_id") or self._session.active_conversation_id or "")
+        self._bind_user_message_owner(command, conversation_id)
+        await self._session.send_event(AgentEvent(type="command.result", data={
+            "command": "user_message", "client_command_id": command_id,
+            "conversation_id": conversation_id,
+            "level": outcome["level"] if outcome is not None else "warning",
+            "message": outcome["message"] if negative is not None else (
+                "本地命令完成结果尚未确认，输入已保留。" if completion == "unknown" else ""
+            ),
+            "data": {
+                "admitted": False, "native_completion": completion,
+                "native_completed": completion == "completed", "slash_command": slash_command,
+                "conversation_id": conversation_id, "user_message_id": command.data.get("user_message_id", ""),
+                "assistant_message_id": command.data.get("assistant_message_id", ""),
+                "command_results": results,
+            },
+        }))
+
+    async def _forward_conversation_command(self, command: UserCommand, conversation_id: str) -> bool:
+        manager = self._session.ws_manager
+        owner = manager.execution_session_for_conversation(conversation_id) if manager is not None else None
+        if owner is None or owner is self._session:
+            return False
+        command.data["conversation_id"] = conversation_id
+        workspace = self._session.session_lifecycle.workspace_root_for_conversation(
+            self._session.conversation_repo.get_conversation_summary(conversation_id))
+        with (bind_response_origin(self._session.session_id, self._client_command_id(command)),
+              bind_execution_command_scope(owner.session_id, CommandScope(conversation_id, str(workspace or ""), self._client_command_id(command))),
+              owner.event_outbox.bind_connection_generation(None),
+              owner.event_outbox.bind_client_command(self._client_command_id(command), command.type,
+                  owner=(conversation_id, str(workspace or "")))):
+            await owner.command_dispatcher._execute_forwarded_command(command)
+        return True
 
     async def _handle_command_inner(self, command: UserCommand) -> None:
+        if command.type in _FORWARDED_CONVERSATION_COMMAND_TYPES:
+            conversation_id = str(command.data.get("conversation_id") or self._session.active_conversation_id or "")
+            if await self._forward_conversation_command(command, conversation_id):
+                return
         if self._session._extension_shutdown_requested and command.type not in {
             "control_response",
             "control_cancel_request",
@@ -994,6 +1250,8 @@ class SessionCommandDispatcher:
             return
 
         if command.type == "user_message":
+            if self._client_command_id(command) and not command.data.get("_client_queue_key"):
+                command.data["_client_queue_key"] = self._session.run_manager.durable_client_commands.path.stem
             content = str(command.data.get("content", ""))
             requested_conversation_id = str(
                 command.data.get("conversation_id") or ""
@@ -1002,7 +1260,11 @@ class SessionCommandDispatcher:
             if requested_conversation_id:
                 target = self._session.conversation_repo.get_conversation(requested_conversation_id)
                 if target is None:
-                    await emit_conversation_not_found(self._session, requested_conversation_id)
+                    if command.data.get("retry_from_message_id"):
+                        await self._reject_regeneration(command, requested_conversation_id,
+                            "The conversation no longer exists; regeneration has not been admitted.")
+                    else:
+                        await emit_conversation_not_found(self._session, requested_conversation_id)
                     return
                 target_conversation_id = target.id
 
@@ -1030,6 +1292,11 @@ class SessionCommandDispatcher:
                 return
             command.data.update(input_metadata)
 
+            from backend.conversations.models import normalize_conversation_agent_mode
+            requested_agent_mode = (
+                normalize_conversation_agent_mode(command.data["agent_mode"])
+                if "agent_mode" in command.data and "code_review" not in input_metadata else None
+            )
             raw_permission_mode = command.data.get("permission_mode")
             requested_permission_mode: str | None = None
             if raw_permission_mode is not None and not (
@@ -1066,6 +1333,7 @@ class SessionCommandDispatcher:
                 permission_plan = plan_permission_mode_update(
                     {"mode": requested_permission_mode, "conversation_id": target_conversation_id},
                     active_conversation_id=self._session.active_conversation_id or "",
+                    config=self._session.config,
                 )
                 if permission_plan.error_event is not None:
                     await self._session.send_event(permission_plan.error_event)
@@ -1079,12 +1347,38 @@ class SessionCommandDispatcher:
                 command.data.get("workspace_root") or ""
             ).strip()
 
+            manager = self._session.ws_manager
+            owner = manager.execution_session_for_conversation(target_conversation_id) if manager is not None else None
+            if owner is not None and owner is not self._session:
+                # The sending window admits only references granted to this
+                # actual conversation/cwd. No attachment bytes, permission
+                # cache, browser identity or session runtime is transferred.
+                target = self._session.conversation_repo.get_conversation_summary(target_conversation_id)
+                attachment_workspace = requested_workspace_root or str(
+                    self._session.session_lifecycle.workspace_root_for_conversation(target) or "")
+                unavailable = [item for item in attachments if self._session.attachment_store.get_payload(
+                    item["artifact_id"], conversation_id=target_conversation_id,
+                    workspace_root=attachment_workspace) is None]
+                if unavailable:
+                    from backend.agent.attachment_policy import AttachmentUnavailableError
+                    await emit_command_error(self._session, "user_message", AttachmentUnavailableError(unavailable),
+                        data={"conversation_id": target_conversation_id, "reason": "attachments_rejected"})
+                    return
+                command.data["attachments"] = attachments
+                self._bind_user_message_owner(command, target_conversation_id)
+                if await self._forward_conversation_command(command, target_conversation_id):
+                    return
+
             message_metadata: dict[str, Any] = {
                 key: str(command.data.get(key) or "").strip()
                 for key in ("primary_file", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
             message_metadata.update(input_metadata)
+            if command.data.get("_client_queue_key"):
+                message_metadata["_client_queue_key"] = command.data["_client_queue_key"]
+            if "_guardian_acceptance_order" in command.data:
+                message_metadata["_guardian_acceptance_order"] = command.data["_guardian_acceptance_order"]
             selected_skills = [
                 {
                     "name": str(item.get("name") or "").strip(),
@@ -1120,80 +1414,107 @@ class SessionCommandDispatcher:
                 ("agent_role", "agent_role"),
             ):
                 value = str(command.data.get(source_key) or "").strip()
-                if value:
+                if value and not (source_key == "agent_mode" and "code_review" in input_metadata):
                     message_metadata[target_key] = value
             client_command_id = self._client_command_id(command)
-            stable_command_suffix = "".join(
-                character
-                for character in client_command_id
-                if character.isascii() and (character.isalnum() or character in {"-", "_"})
+            origin = str(message_metadata.get("_client_queue_key") or "")
+            if client_command_id and not origin:
+                raise ValueError("The queued input has no provable submitting window. Automatic replay stopped; its original input and attachments were retained.")
+            stable_command_suffix = hashlib.sha256(
+                f"{origin}\0{client_command_id}".encode("utf-8")
+            ).hexdigest() if client_command_id else uuid.uuid4().hex
+            user_message_id = str(command.data.get("user_message_id") or "").strip()
+            assistant_message_id = str(command.data.get("assistant_message_id") or "").strip()
+            current_for_admission = (
+                self._session.conversation_repo.get_conversation(target_conversation_id)
+                if (client_command_id or requested_agent_mode is not None) and target_conversation_id else None
             )
-            assistant_message_id = str(
-                command.data.get("assistant_message_id") or ""
-            ).strip() or (
-                f"assistant_{stable_command_suffix}"
-                if stable_command_suffix
-                else f"assistant_{uuid.uuid4().hex}"
-            )
-            message_metadata["assistant_message_id"] = assistant_message_id
-            command.data["assistant_message_id"] = assistant_message_id
-            user_message_id = str(
-                command.data.get("user_message_id")
-                or ""
-            ).strip() or (
-                f"user_{stable_command_suffix}"
-                if stable_command_suffix
-                else f"user_{uuid.uuid4().hex}"
-            )
-            message_metadata["user_message_id"] = user_message_id
-            command.data["user_message_id"] = user_message_id
+            if requested_agent_mode is not None:
+                if command.data.get("_queued_user_message_dispatch"):
+                    if "_agent_mode_selection_revision" in command.data:
+                        message_metadata["_agent_mode_selection_revision"] = command.data["_agent_mode_selection_revision"]
+                elif current_for_admission is not None:
+                    message_metadata["_agent_mode_selection_revision"] = current_for_admission.agent_mode_revision
+            journal = None
+            existing_user = None
+            prompt = None
             if client_command_id:
                 message_metadata["client_command_id"] = client_command_id
-                current_for_admission = (
-                    self._session.conversation_repo.get_conversation(target_conversation_id)
-                    if target_conversation_id
-                    else None
-                )
-                snapshot = dict(
-                    current_for_admission.context_snapshot if current_for_admission is not None else {}
-                )
-                admission = dict(
-                    (snapshot.get("turn_admissions") or {}).get(user_message_id) or {}
-                )
-                existing_user = next(
-                    (
-                        item
-                        for item in list(
-                            current_for_admission.transcript if current_for_admission is not None else []
-                        )
-                        if isinstance(item, dict)
-                        and str(item.get("id") or "").strip() == user_message_id
-                        and str(item.get("role") or "").strip() == "user"
-                    ),
-                    None,
-                )
-                if existing_user is not None:
-                    same_payload = (
-                        str(existing_user.get("submitted_content", existing_user.get("content", "")))
-                        == str(command.data.get("_submitted_content", content))
-                        and list(existing_user.get("attachments") or []) == attachments
-                        and all(existing_user.get(key) == value for key, value in input_metadata.items())
-                    )
-                    same_owner = (
-                        str(admission.get("client_command_id") or "")
-                        == client_command_id
-                    )
+                from backend.agent.runtime import default_runtime
+                runtime = default_runtime()
+                store_id = self._session.conversation_repo.store_instance_id()
+                journal = runtime.execution_journal(execution_journal_owner(
+                    "conversation", store_id, target_conversation_id,
+                )) if target_conversation_id else None
+                snapshot = current_for_admission.context_snapshot if current_for_admission is not None else {}
+                users = {str(item.get("id") or ""): item for item in (
+                    current_for_admission.transcript if current_for_admission is not None else []
+                ) if isinstance(item, dict) and item.get("role") == "user"}
+                candidates = [user_message_id or f"user_{stable_command_suffix}"]
+                legacy_suffix = "".join(character for character in client_command_id
+                    if character.isascii() and (character.isalnum() or character in {"-", "_"}))
+                if not user_message_id and legacy_suffix:
+                    candidates.append(f"user_{legacy_suffix}")
+                if not user_message_id and command.data.get("_legacy_user_message_identity"):
+                    # Old request IDs may contain only Unicode letters, so R6
+                    # used random message IDs. Inspect its recorded admission,
+                    # only in this explicit persisted upgrade window.
+                    candidates.extend(str(message_id) for message_id, boundary in (snapshot.get("turn_admissions") or {}).items()
+                        if boundary.get("client_command_id") == client_command_id)
+                    if journal is not None:
+                        candidates.extend(str(event.payload["user_message_id"]) for event in journal.read_events()
+                            if event.event_type == "user_prompt" and event.payload.get("client_command_id") == client_command_id)
+                candidates = list(dict.fromkeys(candidates))
+                for candidate in candidates:
+                    candidate_user = users.get(candidate)
+                    candidate_prompt = journal.get_event(turn_user_prompt_id(store_id, target_conversation_id, candidate)) if journal is not None else None
+                    candidate_admission = dict((snapshot.get("turn_admissions") or {}).get(candidate) or {})
+                    if not candidate_admission and candidate_prompt is not None:
+                        candidate_admission = dict((candidate_prompt.payload.get("context_snapshot", {}).get("turn_admissions") or {}).get(candidate) or {})
+                    projection = candidate_user or (candidate_prompt.payload if candidate_prompt is not None else None)
+                    if projection is None:
+                        continue
+                    same_payload = _same_admitted_input(projection,
+                        str(command.data.get("_submitted_content", content)), attachments, input_metadata)
+                    recorded_origin = _admitted_input_origin(candidate_admission, candidate_user, runtime)
+                    same_owner = str(candidate_admission.get("client_command_id") or "") == client_command_id and recorded_origin == origin
                     if not (same_payload and same_owner):
-                        conflict = AgentEvent.error(
-                            "This user_message_id was already admitted with different content or ownership.",
-                            recoverable=True,
-                            error_type="conversation",
-                            error_code="turn_admission_conflict",
-                        )
-                        conflict.data["conversation_id"] = target_conversation_id
-                        conflict.data["user_message_id"] = user_message_id
-                        await self._session.send_event(conflict)
-                        return
+                        if candidate == candidates[0] or same_owner:
+                            raise ValueError("This user_message_id was already admitted with different content or ownership; the input was retained.")
+                        if same_payload and not recorded_origin and command.data.get("_legacy_user_message_identity"):
+                            raise ValueError("The legacy admitted input has no provable submitting window. Automatic replay stopped; its original input and attachments were retained.")
+                        continue
+                    user_message_id = candidate
+                    assistant_message_id = assistant_message_id or str(candidate_admission.get("assistant_message_id")
+                        or (candidate_prompt.payload.get("assistant_message_id") if candidate_prompt is not None else "")
+                        or (f"assistant_{legacy_suffix}" if "client_queue_key" not in candidate_admission and legacy_suffix else ""))
+                    if not assistant_message_id and "client_queue_key" not in candidate_admission:
+                        raise ValueError("The legacy admitted input's original assistant identity cannot be recovered. Automatic replay stopped; its original input and attachments were retained.")
+                    existing_user, prompt = candidate_user, candidate_prompt
+                    break
+            user_message_id = user_message_id or f"user_{stable_command_suffix}"
+            assistant_message_id = assistant_message_id or f"assistant_{stable_command_suffix}"
+            message_metadata.update(user_message_id=user_message_id, assistant_message_id=assistant_message_id)
+            command.data.update(user_message_id=user_message_id, assistant_message_id=assistant_message_id)
+            if journal is not None:
+                rejection = journal.get_event(turn_input_rejection_id(user_message_id, client_command_id))
+                if rejection is not None:
+                    await self._session.send_event(AgentEvent(type="command.result", data=rejection.payload["result"]))
+                    return
+                consumption = journal.get_event(turn_input_consumption_id(user_message_id, client_command_id))
+                if consumption is not None and (existing_user is not None or prompt is not None):
+                    await self._session.send_event(AgentEvent(type="command.result", data={
+                        "command": "user_message", "level": "success", "message": "",
+                        "client_command_id": client_command_id,
+                        "conversation_id": target_conversation_id,
+                        "data": {"admitted": True, "consumed": True, "replayed": True,
+                                 "conversation_id": target_conversation_id,
+                                 "user_message_id": user_message_id,
+                                 "assistant_message_id": assistant_message_id,
+                                 "run_id": consumption.payload["run_id"]},
+                    }))
+                    return
+                if existing_user is not None:
                     message_metadata["_turn_admission_restored"] = True
                     content = str(existing_user.get("content") or "")
                     if "submitted_content" in existing_user:
@@ -1201,6 +1522,11 @@ class SessionCommandDispatcher:
 
             if "_submitted_content" in command.data:
                 message_metadata["submitted_content"] = command.data["_submitted_content"]
+            message_metadata["_submitted_command"] = {
+                "type": command.type,
+                "data": {**{key: value for key, value in command.data.items() if not key.startswith("_")},
+                         "content": command.data.get("_submitted_content", command.data.get("content", ""))},
+            }
 
             retry_from_message_id = str(command.data.get("retry_from_message_id", "")).strip()
             slash_input = str(input_metadata.get("display_content", content)).strip()
@@ -1217,6 +1543,7 @@ class SessionCommandDispatcher:
                 cmd_arg = parts[1] if len(parts) > 1 else ""
                 registry = self._session.command_registry
                 handler = registry.get_extension_slash(cmd_name, scope_id=target_conversation_id)
+                builtin_review = False
                 if handler is None:
                     from backend.commands.catalog import get_composer_command_catalog
                     from backend.commands.slash_commands import build_slash_command_handler
@@ -1239,44 +1566,56 @@ class SessionCommandDispatcher:
                         command_root, resolve_active_workspace=False)
                     entry = next((entry for entry in catalog
                                   if f"/{entry['command']}".casefold() == cmd_name.casefold()), None)
+                    builtin_review = entry is not None and cmd_name == "/review" and entry.get("source") == "builtin"
                     handler = build_slash_command_handler(entry) if entry is not None else None
                 if handler is not None:
-                    handled, content_override = await self._session.command_registry.dispatch_slash(
-                        self._session,
-                        cmd_name,
-                        cmd_arg,
-                        attachments,
-                        scope_id=target_conversation_id,
-                        handler=handler,
-                    )
+                    with self._session.event_outbox.capture_command_results(include_data=builtin_review) as command_results:
+                        handled, content_override = await self._session.command_registry.dispatch_slash(
+                            self._session,
+                            cmd_name,
+                            cmd_arg,
+                            attachments,
+                            scope_id=target_conversation_id,
+                            handler=handler,
+                        )
                     if handled:
+                        await self._emit_native_user_message_completion(command, cmd_name, command_results.results)
                         return
+                    if builtin_review:
+                        review_scope = command_results.results[-1]["data"]["code_review"]
+                        command.data["code_review"] = review_scope
+                        message_metadata["code_review"] = review_scope
+                        message_metadata["display_content"] = content_override.rsplit("## My request:", 1)[1].strip()
+                        command.data["display_content"] = message_metadata["display_content"]
+                        requested_agent_mode = None
+                        message_metadata.pop("agent_mode", None)
+                        message_metadata.pop("_agent_mode_selection_revision", None)
+                        command.data.pop("agent_mode", None)
                     prepared_content = content.rstrip()[:-len(slash_input)] + content_override
                     if prepared_content != content:
                         command.data["_submitted_content"] = content
                         message_metadata["submitted_content"] = content
                     content = prepared_content
+                    if builtin_review:
+                        command.data["content"] = prepared_content
 
             if content or attachments:
                 if not target_conversation_id:
                     self._session._ensure_active_conversation()
                     target_conversation_id = self._session.active_conversation_id or ""
+                    if requested_agent_mode is not None:
+                        message_metadata["_agent_mode_selection_revision"] = self._session.conversation_repo.get_conversation(target_conversation_id).agent_mode_revision
                 self._bind_user_message_owner(command, target_conversation_id)
                 queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
                 message_metadata["_queued_user_message_dispatch"] = queued_dispatch
                 if retry_from_message_id:
-                    # Regeneration is one server-owned state transition, matching
-                    # MiniCode thread rollback followed by turn/start. Drain the old
-                    # run and discard follow-ups before rewriting the transcript;
-                    # otherwise this command can be mistaken for an ordinary busy
-                    # follow-up and remain queued behind the answer it replaces.
+                    # Reserve cancellation, private rewind and native admission as
+                    # one transition. Accepted history and follow-ups stay durable
+                    # until the replacement input is committed.
                     current = self._session.conversation_repo.get_conversation(target_conversation_id)
                     if current is None:
-                        # The client is showing a spinner it can only clear on a
-                        # terminal event. Returning silently strands it, so
-                        # report the vanished conversation through the same
-                        # not-found path every other lookup failure uses.
-                        await emit_conversation_not_found(self._session, target_conversation_id)
+                        await self._reject_regeneration(command, target_conversation_id,
+                            "The conversation no longer exists; regeneration has not been admitted.")
                         return
                     retry_exists = any(
                         str(message.get("id") or "").strip() == retry_from_message_id
@@ -1285,20 +1624,21 @@ class SessionCommandDispatcher:
                         if isinstance(message, dict)
                     )
                     if not retry_exists:
-                        error_event = AgentEvent.error(
-                            f"Cannot regenerate from message '{retry_from_message_id}'",
-                            # Terminal for this request: no run starts, so no
-                            # `done` follows. A recoverable error is treated by
-                            # the client as non-terminal evidence, which left
-                            # the conversation permanently "running" and
-                            # blocked every later send until a reload.
-                            recoverable=False,
-                            error_type="tool",
-                        )
-                        error_event.data["conversation_id"] = target_conversation_id
-                        await self._session.send_event(error_event)
+                        await self._reject_regeneration(command, target_conversation_id,
+                            f"Cannot regenerate from message '{retry_from_message_id}'")
                         return
-                    self._session.run_manager.clear_user_message_queue(target_conversation_id)
+                    task_id = self._session.run_manager.run_task_ids.get(target_conversation_id, "")
+                    query_guards = conversation_query_guards()
+                    transition = query_guards.try_transition(
+                        target_conversation_id,
+                        owner_id=f"regenerate:{self._session.session_id}:{self._client_command_id(command)}",
+                        replacing_owner_id=f"ws:{self._session.session_id}:{task_id}" if task_id else "",
+                    )
+                    if transition is None:
+                        await self._reject_regeneration(command, target_conversation_id,
+                            "Another run is active on this conversation; stop it before regenerating.")
+                        return
+                    self._regeneration_transitions[asyncio.current_task()] = transition
                     if self._session.running_agent_task_for(target_conversation_id):
                         await self._session.cancel_agent_runs(
                             conversation_id=target_conversation_id,
@@ -1306,59 +1646,24 @@ class SessionCommandDispatcher:
                         )
                     current = self._session.conversation_repo.get_conversation(target_conversation_id)
                     if current is None:
-                        # Deleted while the old run was being drained. The
-                        # cancel above emits no client-visible terminal for the
-                        # regenerate request itself, so close it here too.
-                        await emit_conversation_not_found(self._session, target_conversation_id)
+                        await self._reject_regeneration(command, target_conversation_id,
+                            "The conversation no longer exists; regeneration has not been admitted.")
                         return
-                    from backend.ws.handlers.conversation import (
-                        _release_conversation_mutation,
-                        _try_claim_conversation_mutation,
-                    )
-
-                    # Regeneration rewrites the transcript. Fence that rewrite
-                    # against a scheduled task, REST run, or another window that
-                    # owns this conversation, exactly as truncate/delete do. This
-                    # window's own run was already drained above, so a claim held
-                    # here can only belong to a foreign owner; rewinding under it
-                    # would drop that run's turn on its next projection commit.
-                    mutation_claim = _try_claim_conversation_mutation(
-                        self._session,
-                        target_conversation_id,
-                        operation="regenerate",
-                    )
-                    if mutation_claim is None:
-                        error_event = AgentEvent.error(
-                            "Another run is active on this conversation; stop it before regenerating.",
-                            # No run starts and no `done` follows, so this must be
-                            # terminal evidence or the client stays "running".
-                            recoverable=False,
-                            error_type="conversation_busy",
-                        )
-                        error_event.data["conversation_id"] = target_conversation_id
-                        await self._session.send_event(error_event)
+                    if not query_guards.transition_ready(transition):
+                        await self._reject_regeneration(command, target_conversation_id,
+                            "The previous run is still cleaning up; regeneration has not been admitted.")
                         return
-                    try:
-                        prepared = self._session._prepare_retry_from_message(
-                            conversation=current,
-                            retry_from_message_id=retry_from_message_id,
-                        )
-                    finally:
-                        _release_conversation_mutation(mutation_claim)
+                    prepared = self._session._prepare_retry_from_message(
+                        conversation=current,
+                        retry_from_message_id=retry_from_message_id,
+                    )
+                    message_metadata["_conversation_transition"] = transition
+                    message_metadata["retry_from_message_id"] = retry_from_message_id
                     if prepared is None:
-                        error_event = AgentEvent.error(
-                            f"Cannot regenerate from message '{retry_from_message_id}'",
-                            # Terminal for this request: no run starts, so no
-                            # `done` follows. A recoverable error is treated by
-                            # the client as non-terminal evidence, which left
-                            # the conversation permanently "running" and
-                            # blocked every later send until a reload.
-                            recoverable=False,
-                            error_type="tool",
-                        )
-                        error_event.data["conversation_id"] = target_conversation_id
-                        await self._session.send_event(error_event)
+                        await self._reject_regeneration(command, target_conversation_id,
+                            f"Cannot regenerate from message '{retry_from_message_id}'")
                         return
+                    message_metadata["_retry_projection"] = prepared
                 running_for_target = self._session.running_agent_task_for(target_conversation_id)
                 pause_token = self._session.run_manager.user_queue_pause_token(target_conversation_id)
                 if not queued_dispatch and pause_token:
@@ -1377,12 +1682,18 @@ class SessionCommandDispatcher:
                     or self._session.run_manager.is_queue_dispatching(target_conversation_id)
                     or self._session.run_manager.has_pending_lifecycle_cleanup(target_conversation_id)
                 ) and not queued_dispatch:
+                    accepted_conversation = self._session.conversation_repo.get_conversation(target_conversation_id)
+                    guardian_order = self._session.guardian_host_for_conversation(target_conversation_id,
+                        evidence_checkpoint=accepted_conversation.context_snapshot.get("guardian_evidence")).evidence.reserve_order()
                     queued_command = UserCommand(
                         type="user_message",
                         data={
                             **command.data,
+                            **({"_agent_mode_selection_revision": message_metadata["_agent_mode_selection_revision"]}
+                               if "_agent_mode_selection_revision" in message_metadata else {}),
                             "content": content,
                             "conversation_id": target_conversation_id,
+                            "_guardian_acceptance_order": guardian_order,
                             **({"assistant_message_id": assistant_message_id} if assistant_message_id else {}),
                         },
                     )
@@ -1391,6 +1702,12 @@ class SessionCommandDispatcher:
                         or command.data.get("streamingBehavior")
                         or ""
                     ).strip().lower()
+                    if streaming_behavior == "steer" and requested_agent_mode is not None:
+                        stream_mode = (self._session._conversation_streams.get(target_conversation_id) or {}).get("agent_mode")
+                        if requested_agent_mode != stream_mode:
+                            # Steering cannot change the execution mode of an
+                            # already-running turn; the explicit mode owns a new turn.
+                            streaming_behavior = "follow_up"
                     if streaming_behavior == "steer" and requested_permission_mode is not None:
                         current = self._session.conversation_repo.get_conversation(target_conversation_id)
                         if current is not None and requested_permission_mode != current.permission_mode:
@@ -1425,6 +1742,13 @@ class SessionCommandDispatcher:
                             target_message_id=target_message_id,
                         )
                         if steered is not None:
+                            await self._session.send_event(AgentEvent(type="command.result", data={
+                                "command": "user_message", "level": "success", "message": "",
+                                "client_command_id": client_command_id, "conversation_id": target_conversation_id,
+                                "data": {"admitted": False, "queued": True, "turn_mode": "steer",
+                                         "conversation_id": target_conversation_id, "user_message_id": user_message_id,
+                                         "assistant_message_id": assistant_message_id},
+                            }))
                             await self._session.send_event(
                                 AgentEvent.user_message_queue_updated(
                                     status="dequeued",
@@ -1445,6 +1769,12 @@ class SessionCommandDispatcher:
                             )
                             return
                     position = self._session.run_manager.enqueue_user_message(target_conversation_id, queued_command)
+                    if (requested_agent_mode is not None and not message_metadata.get("_turn_admission_restored")
+                            and not str(message_metadata.get("agent_role") or "main").startswith("subagent:")):
+                        # This durable input is accepted now. Replaying it later
+                        # controls its own turn, never newer conversation defaults.
+                        self._session.conversation_repo.update_agent_mode(target_conversation_id, requested_agent_mode,
+                            expected_agent_mode_revision=message_metadata["_agent_mode_selection_revision"])
                     await self._session.send_event(
                         AgentEvent.user_message_queue_updated(
                             status="queued",
@@ -1454,6 +1784,13 @@ class SessionCommandDispatcher:
                             position=position,
                         )
                     )
+                    await self._session.send_event(AgentEvent(type="command.result", data={
+                        "command": "user_message", "level": "success", "message": "",
+                        "client_command_id": client_command_id,
+                        "conversation_id": target_conversation_id,
+                        "data": {"admitted": False, "queued": True, "conversation_id": target_conversation_id,
+                                 "user_message_id": user_message_id, "assistant_message_id": assistant_message_id},
+                    }))
                     return
 
                 if requested_workspace_root:

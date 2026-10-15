@@ -20,6 +20,7 @@ class SkillDetection:
     trigger_mode: str
     reason: str
     source_path: str = ""
+    unavailable_reason: str = ""
 
 
 class SkillManager:
@@ -49,13 +50,17 @@ class SkillManager:
         self._discovered = False
         self.discover()
 
-    def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT) -> SkillManager:
+    def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
         loader = deepcopy(self._loader)
         snapshot = SkillManager(loader)
         snapshot._discovered = self._discovered
         if isinstance(loader, SkillLoader) and project_root is not _KEEP_PROJECT_ROOT:
             loader.set_project_root(project_root)
+        if isinstance(loader, SkillLoader):
+            if config_stack is not None:
+                loader._config_stack = config_stack
+            loader.restrict_role(role_config or {}, role_features or {})
         # Discovery belongs to the turn boundary. A new turn sees installed,
         # edited and removed skills; the in-flight snapshot remains stable.
         snapshot.discover()
@@ -104,8 +109,15 @@ class SkillManager:
                     source_path=source_path,
                 ))
                 continue
-            if not meta.user_invocable or (name and meta.name != name):
-                raise ValueError(f"Selected Skill '{name}' at '{source_path}' is not available for this invocation")
+            if not meta.user_invocable:
+                candidates.append(SkillDetection(
+                    name=name or meta.name,
+                    trigger_mode="explicit",
+                    reason=f"用户显式选择 ${name or meta.name}",
+                    source_path=source_path,
+                    unavailable_reason="This Skill no longer allows explicit invocation.",
+                ))
+                continue
             key = self._skill_key(meta.source_path)
             if key in selected_paths:
                 continue
@@ -184,6 +196,15 @@ class SkillManager:
 
     def _skill_payload(self, full: SkillFull) -> dict[str, Any]:
         meta = full.meta
+        content = full.raw_content or full.content
+        warnings = []
+        if meta.agent_plugin and len(content.encode("utf-8")) > 8_000:
+            from backend.skills.executor import utf8_prefix
+
+            content = utf8_prefix(content, 8_000)
+            warning = f"Skill `{meta.name}` exceeded the main prompt context limit and was truncated."
+            logger.warning(warning)
+            warnings.append(warning)
         return {
             "name": meta.name,
             "path": str(meta.source_path),
@@ -191,8 +212,9 @@ class SkillManager:
             "description": meta.description,
             "mcp_dependencies": list(meta.mcp_dependencies),
             "mcp_dependency_specs": [dict(spec) for spec in meta.mcp_dependency_specs],
-            "content": full.raw_content or full.content,
-            "token_estimate": full.token_estimate,
+            "content": content,
+            "token_estimate": (len(content.encode("utf-8")) + 3) // 4 if warnings else full.token_estimate,
+            **({"warnings": warnings} if warnings else {}),
         }
 
     def get_layer1_summary(self) -> str:
@@ -202,6 +224,18 @@ class SkillManager:
         让 LLM 知道有哪些 Skill 可用。
         """
         return self._loader.get_all_layer1()
+
+    @property
+    def include_instructions(self) -> bool:
+        if not self._discovered:
+            self.discover()
+        return self._loader.skills_configuration.include_instructions
+
+    @property
+    def max_context_tokens(self) -> int | None:
+        if not self._discovered:
+            self.discover()
+        return self._loader.skills_configuration.max_context_tokens
 
     def list_metas(self) -> list[SkillMeta]:
         """Expose the discovered catalog for budget-aware prompt rendering."""

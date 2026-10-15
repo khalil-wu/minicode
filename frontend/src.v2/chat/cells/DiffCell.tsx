@@ -15,7 +15,7 @@ import { useTranscriptReadingPreference } from "../transcriptReadingState";
 import { loadMessageTurnDiff } from "../loadMessageTurnDiff";
 import { summarizeTurnDiff } from "../../lib/turn-diff";
 
-export function DiffCell({ cell, showActions = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; conversationId?: string; workspaceRoot?: string }) {
+export function DiffCell({ cell, showActions = true, allowRevert = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; allowRevert?: boolean; conversationId?: string; workspaceRoot?: string }) {
   const [showAllFiles, setShowAllFiles, userChangedFiles] = useTranscriptReadingPreference(`diff-files:${cell.id}`, false);
   const [reverting, setReverting] = useState(false);
   const [reverted, setReverted] = useState(false);
@@ -55,6 +55,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
     useAppStore.getState().setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
       conversationId: ownerConversationId ?? undefined,
+      workspaceRoot: workingDirectory,
       turnId: cell.deferredDiff?.turnId,
       messageId: cell.deferredDiff?.messageId,
       toolName: cell.source === "workspace_snapshot" ? "工作区比较" : "助手修改",
@@ -167,7 +168,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
         </div>
         {showActions && !cell.historical && (
           <div className="diff-cell-header-actions">
-            {activeConversationId === ownerConversationId && workspaceRootsEqual(activeWorkspace, workingDirectory) && <button
+            {allowRevert && activeConversationId === ownerConversationId && workspaceRootsEqual(activeWorkspace, workingDirectory) && <button
               type="button"
               className="diff-cell-action-button diff-cell-action-button-danger"
               onClick={() => void revertDiffFiles()}

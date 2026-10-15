@@ -93,9 +93,9 @@ def test_context_builder_adds_runtime_blocks_as_leading_instructions() -> None:
     asyncio.run(ctx.start_turn("inspect", state))
     messages = asyncio.run(ctx.build(state))
     system = messages[0].content
-    user = messages[1].content
+    user = next(message.content for message in messages if message.role == "user")
 
-    assert [message.role for message in messages] == ["system", "user"]
+    assert [message.role for message in messages] == ["system", "developer", "user"]
     assert "<environment_context>" not in system
     assert "<environment_context>" in user
     assert r"<cwd>C:\repo &amp; &lt;unsafe&gt;</cwd>" in user
@@ -106,8 +106,9 @@ def test_context_builder_adds_runtime_blocks_as_leading_instructions() -> None:
     assert "<timezone>Asia/Shanghai</timezone>" in user
     assert 'permission_profile type="bypass" source="unit&lt;test&gt;"' in user
     assert 'file_system type="unrestricted" workspace_scope="project"' in user
-    assert "<collaboration_mode>" in user
-    assert "# Collaboration Mode: Default" in user
+    assert "<collaboration_mode>" not in user
+    assert "# Collaboration Mode: Default" in messages[1].content
+    assert messages[1].role == "developer"
     assert "<agent_mode>" in user
     assert "mode: review" in user
     assert "# Agent Mode: Review" in user
@@ -137,6 +138,22 @@ def test_context_builder_does_not_invent_a_workspace_from_process_cwd(monkeypatc
     assert str(Path.cwd()) not in user
 
 
+@pytest.mark.parametrize("agent_mode,collaboration_mode", [("build", "default"), ("plan", "plan")])
+def test_build_and_plan_use_only_official_developer_mode_fragment(agent_mode, collaboration_mode) -> None:
+    from backend.agent.codex_prompts import codex_collaboration_mode
+
+    state = AgentState(user_message="Inspect the source")
+    state.prompt_context = {"agent_mode": agent_mode, "collaboration_mode": collaboration_mode}
+    context = ContextBuilder()
+    asyncio.run(context.start_turn(state.user_message, state))
+    messages = asyncio.run(context.build(state))
+
+    assert [message.content for message in messages if message.role == "developer"] == [codex_collaboration_mode(collaboration_mode)]
+    assert all("<agent_mode>" not in str(message.content) for message in messages)
+    assert all("# Agent Mode:" not in str(message.content) for message in messages)
+    assert messages[-1].content.endswith(state.user_message)
+
+
 def test_context_builder_exposes_host_resolved_user_directories(monkeypatch) -> None:
     monkeypatch.setenv("MINICODE_DESKTOP_DIR", r"C:\Desktop")
     monkeypatch.setenv("MINICODE_DOCUMENTS_DIR", r"C:\Users\ago\Documents")
@@ -145,7 +162,7 @@ def test_context_builder_exposes_host_resolved_user_directories(monkeypatch) -> 
 
     ctx = ContextBuilder()
     asyncio.run(ctx.start_turn(state.user_message, state))
-    runtime_system = asyncio.run(ctx.build(state))[1].content
+    runtime_system = next(message.content for message in asyncio.run(ctx.build(state)) if message.role == "user")
 
     assert "<user_directories>" in runtime_system
     assert r"<desktop>C:\Desktop</desktop>" in runtime_system
@@ -184,11 +201,11 @@ def test_context_builder_omits_turn_aborted_block_without_abort_signal() -> None
     ctx = ContextBuilder()
     asyncio.run(ctx.start_turn("hello", state))
     messages = asyncio.run(ctx.build(state))
-    user = messages[1].content
+    user = next(message.content for message in messages if message.role == "user")
 
-    assert [message.role for message in messages] == ["system", "user"]
+    assert [message.role for message in messages] == ["system", "developer", "user"]
     assert "<environment_context>" in user
-    assert "# Collaboration Mode: Default" in user
+    assert "# Collaboration Mode: Default" in messages[1].content
     assert "<turn_aborted>" not in user
 
 
@@ -210,11 +227,11 @@ def test_context_builder_keeps_runtime_instructions_transient_and_user_turn_stab
     first = asyncio.run(ctx.build(state))
     second = asyncio.run(ctx.build(state))
 
-    assert [message.role for message in first] == ["system", "user"]
+    assert [message.role for message in first] == ["system", "developer", "user"]
     assert first[-1].content.endswith(state.user_message)
     assert "<environment_context>" in first[-1].content
     assert "<turn_aborted>" in first[-1].content
-    assert [message.role for message in second] == ["system", "user"]
+    assert [message.role for message in second] == ["system", "developer", "user"]
     assert second[-1].content == first[-1].content
     assert ctx.history_length == 1
 
@@ -314,8 +331,9 @@ def test_context_builder_strips_all_old_runtime_block_types() -> None:
     asyncio.run(ctx.start_turn("first", first_state))
     first = asyncio.run(ctx.build(first_state))
     assert "<collaboration_mode>" in first[1].content
-    assert "<agent_mode>" in first[1].content
-    assert "<turn_aborted>" in first[1].content
+    assert first[1].role == "developer"
+    assert "<agent_mode>" in first[-1].content
+    assert "<turn_aborted>" in first[-1].content
 
     ctx.append_assistant("first reply")
     second_state = AgentState(user_message="second")
@@ -324,7 +342,7 @@ def test_context_builder_strips_all_old_runtime_block_types() -> None:
     second = asyncio.run(ctx.build(second_state))
     user_messages = [message.content for message in second if message.role == "user"]
 
-    assert "<collaboration_mode>" in user_messages[0]
+    assert "<collaboration_mode>" not in user_messages[0]
     assert "<agent_mode>" in user_messages[0]
     assert "<turn_aborted>" in user_messages[0]
     assert "<environment_context>" in user_messages[-1]
@@ -338,8 +356,8 @@ def test_context_builder_runtime_update_on_internal_loop_when_tool_context_chang
     asyncio.run(ctx.start_turn("work", state))
 
     first = asyncio.run(ctx.build(state))
-    assert [message.role for message in first] == ["system", "developer", "user"]
-    assert "Runtime contract: first tool set" in first[1].content
+    assert [message.role for message in first] == ["system", "developer", "developer", "user"]
+    assert "Runtime contract: first tool set" in first[2].content
     assert "<tool_runtime_context>" not in first[-1].content
 
     ctx.append_assistant("checking", provider_items=[])
@@ -357,13 +375,14 @@ def test_context_builder_runtime_update_on_internal_loop_when_tool_context_chang
     assert [message.role for message in second] == [
         "system",
         "developer",
+        "developer",
         "user",
         "assistant",
     ]
     assert user_messages[0].endswith("work")
     assert "<tool_runtime_context>" not in user_messages[0]
-    assert "Runtime contract: second tool set" in developer_messages[0]
-    assert "exact_tool" in developer_messages[0]
+    assert "Runtime contract: second tool set" in developer_messages[1]
+    assert "exact_tool" in developer_messages[1]
 
 
 def test_context_builder_does_not_persist_runtime_only_updates_as_user_messages() -> None:
@@ -410,14 +429,11 @@ def test_context_builder_stores_current_user_before_hook_context() -> None:
     first = asyncio.run(ctx.build(state))
     second = asyncio.run(ctx.build(state))
 
-    assert [message.role for message in first] == ["system", "user", "user"]
-    assert "<environment_context>" in first[1].content
-    assert first[1].content.endswith(state.user_message)
-    assert "[hook] additional context" in first[2].content
-    assert [message.content for message in second[1:]] == [
-        first[1].content,
-        first[2].content,
-    ]
+    assert [message.role for message in first] == ["system", "developer", "user", "user"]
+    assert "<environment_context>" in first[2].content
+    assert first[2].content.endswith(state.user_message)
+    assert "[hook] additional context" in first[3].content
+    assert [message.content for message in second] == [message.content for message in first]
 
 
 def test_context_snapshot_preserves_sanitized_provider_items() -> None:
@@ -565,7 +581,8 @@ def test_agent_loop_populates_plan_mode_environment_and_abort_blocks(tmp_path: P
     assert f"<root>{tmp_path}</root>" in user
     assert 'permission_profile type="plan" source="unit"' in user
     assert 'file_system type="read_only" workspace_scope="project"' in user
-    assert "# Collaboration Mode: Plan" in user
+    assert "<collaboration_mode>" not in user
+    assert any(message.role == "developer" and "# Collaboration Mode: Default" in message.content for message in llm.message_batches[0])
     assert "# Agent Mode: Explore" in user
     assert "Map the problem space" in user
     assert "<turn_aborted>" in user
@@ -611,7 +628,8 @@ def test_enter_plan_mode_updates_next_iteration_permissions(tmp_path: Path) -> N
     )
     assert 'permission_profile type="plan"' in second_runtime_system
     assert 'file_system type="read_only"' in second_runtime_system
-    assert "# Collaboration Mode: Plan" in second_runtime_system
+    assert "# Collaboration Mode: Default" in second_runtime_system
+    assert "# Plan Mode (Conversational)" not in second_runtime_system
     assert "exit_plan_mode" in llm.tool_names[1]
 
 

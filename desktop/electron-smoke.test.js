@@ -7,6 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { externalPeerEnvironment } = require("./test-peer-env");
 
 const electronPath = require("electron");
 
@@ -130,6 +131,7 @@ function createSmokePage(port) {
 }
 
 test("Electron app boots real BrowserWindow with preload runtime and guarded IPC", { timeout: 30000 }, async () => {
+  const peer = await externalPeerEnvironment();
   let resolveDone;
   let rejectDone;
   const done = new Promise((resolve, reject) => {
@@ -141,9 +143,9 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
 
   const server = http.createServer((req, res) => {
     requestPaths.push(`${req.method || "GET"} ${req.url || ""}`);
-    if (req.url === "/health") {
+    if (req.url === "/health" || req.url === "/readyz") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", ready: true }));
+      res.end(JSON.stringify({ status: "ok", ready: true, desktop_bridge_fingerprint: peer.fingerprint }));
       return;
     }
     if (req.url === "/" || req.url === "/index.html") {
@@ -194,6 +196,7 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     cwd: __dirname,
     env: {
       ...process.env,
+      ...peer.env,
       ELECTRON_ENABLE_LOGGING: "1",
       MINICODE_SKIP_BACKEND: "1",
       MINICODE_BACKEND_STARTUP_TIMEOUT_MS: "5000",

@@ -29,7 +29,7 @@ describe("SelectMenu", () => {
     expect(menu.parentElement).toBe(document.body);
     expect(container.contains(menu)).toBe(false);
     expect(menu.classList.contains("mc-select-menu-mono")).toBe(true);
-    expect(Number.parseFloat(menu.style.left) + Number.parseFloat(menu.style.width)).toBeLessThanOrEqual(window.innerWidth - 8);
+    expect(Number.parseFloat(menu.style.left) + Number.parseFloat(menu.style.minWidth)).toBeLessThanOrEqual(window.innerWidth - 8);
     expect(Number.parseFloat(menu.style.top) + Number.parseFloat(menu.style.maxHeight)).toBeLessThanOrEqual(window.innerHeight - 8);
     fireEvent.scroll(menu);
     expect(screen.queryByRole("listbox")).toBe(menu);
@@ -46,6 +46,39 @@ describe("SelectMenu", () => {
     fireEvent.keyDown(trigger, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("anchors an intrinsically wider option menu at the trigger end instead of the selected label width", () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      return this.classList.contains("mc-select-popover")
+        ? { left: 0, right: 380, top: 0, bottom: 80, width: 380, height: 80 } as DOMRect
+        : { left: 600, right: 720, top: 100, bottom: 132, width: 120, height: 32 } as DOMRect;
+    });
+    render(<SelectMenu ariaLabel="实际选项" align="end" value="short" onValueChange={vi.fn()}>
+      <option value="short">Short</option><option value="long">完整的已安装应用和真实版本名称</option>
+    </SelectMenu>);
+    fireEvent.click(screen.getByRole("button", { name: "实际选项，当前：Short" }));
+    const menu = screen.getByRole("listbox");
+    expect(menu.style.left).toBe("340px");
+    expect(menu.style.minWidth).toBe("220px");
+    expect(screen.getByRole("option", { name: "完整的已安装应用和真实版本名称" })).toBeTruthy();
+  });
+
+  it("uses the same actual option icon in the selected trigger and menu without changing the option value", async () => {
+    const change = vi.fn();
+    render(<SelectMenu ariaLabel="文件打开位置" value="vscode" onValueChange={change}
+      renderOptionIcon={(value) => <img src={`apps/${value}.svg`} alt="" />}>
+      <option value="vscode">VS Code</option><option value="visualStudio">Visual Studio</option>
+    </SelectMenu>);
+    const trigger = screen.getByRole("button", { name: "文件打开位置，当前：VS Code" });
+    expect(trigger.querySelector("img")?.getAttribute("src")).toBe("apps/vscode.svg");
+    fireEvent.click(trigger);
+    const selected = screen.getByRole("option", { name: "VS Code" });
+    expect(selected.querySelector("img")?.getAttribute("src")).toBe("apps/vscode.svg");
+    expect(selected.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("option", { name: "Visual Studio" }));
+    expect(change).toHaveBeenCalledExactlyOnceWith("visualStudio");
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it.each([false, true])("returns portal option focus before a dialog handles Tab (reverse=%s)", async (reverse) => {

@@ -12,6 +12,7 @@ import type {
 import { getPastedTextMetadata, PASTED_TEXT_INPUT_SOURCE } from "./pastedText";
 import { prepareNativeImageFile } from "./imagePreparation";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { composerWorkspaceKey } from "../stores/composer-drafts";
 
 const activeUploads = new Map<string, AbortController>();
 const cancelledUploads = new Set<string>();
@@ -109,12 +110,16 @@ const patchAttachment = (
       ? patchList(state.attachments, false)
       : state.attachments;
 
-    if (!ownerId) return { attachments };
+    if (!ownerId) {
+      const key = composerWorkspaceKey(seed?.workspaceRoot ?? state.workingDirectory);
+      const draft = state.workspaceComposerDrafts[key];
+      return { attachments, ...(draft ? { workspaceComposerDrafts: { ...state.workspaceComposerDrafts,
+        [key]: { ...draft, attachments: patchList(draft.attachments, false) },
+      } } : {}) };
+    }
     const existingWorkbench = state.conversationWorkbenchStates[ownerId];
-    const ownerWorkbench = existingWorkbench ?? {
-      ...cloneWorkbench(state),
-      attachments: [],
-    };
+    if (!existingWorkbench) return { attachments };
+    const ownerWorkbench = existingWorkbench;
     return {
       attachments,
       conversationWorkbenchStates: {
@@ -142,7 +147,7 @@ const adoptUploadOwner = (
   useAppStore.setState((state) => {
     const ownedBatch = batchAttachments.filter((attachment) => !cancelledUploads.has(attachment.id)).map((attachment) => {
       const live = state.attachments.find((item) => item.id === attachment.id);
-      const stored = Object.values(state.conversationWorkbenchStates)
+      const stored = [...Object.values(state.conversationWorkbenchStates), ...Object.values(state.workspaceComposerDrafts)]
         .flatMap((workbench) => workbench.attachments ?? [])
         .find((item) => item.id === attachment.id);
       return {
@@ -162,11 +167,14 @@ const adoptUploadOwner = (
           workspaceRoot: initialWorkspaceRoot || undefined,
           goal: null,
         }, ...state.conversations];
-    const shouldActivate = !initialConversationId && !state.conversationId
+    const shouldActivate = !initialConversationId && !state.conversationId && !state.pendingConversationCreateId
       && workspaceRootsEqual(state.workingDirectory, initialWorkspaceRoot);
     activated = shouldActivate;
     const baseWorkbench = state.conversationWorkbenchStates[ownerId]
-      ?? (shouldActivate ? cloneWorkbench(state) : initialWorkbench);
+      ?? (shouldActivate ? cloneWorkbench(state) : {
+        ...initialWorkbench,
+        ...(!initialConversationId ? state.workspaceComposerDrafts[composerWorkspaceKey(initialWorkspaceRoot)] : {}),
+      });
     const ownerWorkbench: ConversationWorkbenchState = {
       ...baseWorkbench,
       attachments: mergeAttachments(baseWorkbench.attachments ?? [], ownedBatch),
@@ -175,6 +183,8 @@ const adoptUploadOwner = (
       ...state.conversationWorkbenchStates,
       [ownerId]: ownerWorkbench,
     };
+    const workspaceComposerDrafts = { ...state.workspaceComposerDrafts };
+    if (!initialConversationId) delete workspaceComposerDrafts[composerWorkspaceKey(initialWorkspaceRoot)];
     const conversationMessages = {
       ...state.conversationMessages,
       [ownerId]: state.conversationMessages[ownerId] ?? [],
@@ -191,6 +201,7 @@ const adoptUploadOwner = (
 
     if (!shouldActivate) {
       return {
+        workspaceComposerDrafts,
         attachments: state.conversationId === ownerId
           ? state.attachments
           : state.attachments.filter((attachment) => !ownedBatch.some((owned) => owned.id === attachment.id)),
@@ -203,6 +214,7 @@ const adoptUploadOwner = (
     }
 
     return {
+      workspaceComposerDrafts,
       conversations,
       conversationId: ownerId,
       activeGoal: existingMeta?.goal ?? null,
@@ -340,6 +352,10 @@ const completeUpload = (
 export const uploadComposerFiles = (files: File[], sideConversationId?: string) => {
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const initialState = useAppStore.getState();
+  if (!initialState.composerDraftsReady) {
+    pushToast("正在恢复输入草稿，请等待完成后添加附件。", "warning");
+    return () => {};
+  }
   const initialConversationId = sideConversationId ?? String(initialState.conversationId || "").trim();
   const initialWorkspaceRoot = sideConversationId ? initialState.sideChats[sideConversationId].workspaceRoot ?? "" : initialState.workingDirectory;
   const created: ComposerAttachment[] = files.map((file) => {
@@ -422,7 +438,8 @@ export const retryComposerAttachment = (id: string): boolean => {
     ?? Object.values(state.sideChats).flatMap((thread) => thread.attachments ?? []).find((item) => item.id === id)
     ?? Object.values(state.conversationWorkbenchStates)
       .flatMap((workbench) => workbench.attachments ?? [])
-      .find((item) => item.id === id);
+      .find((item) => item.id === id)
+    ?? Object.values(state.workspaceComposerDrafts).flatMap(draft => draft.attachments).find(item => item.id === id);
   if (!attachment?.localFile) return false;
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   if (!sessionId) {
@@ -457,8 +474,19 @@ export const cancelComposerUpload = (id: string): void => {
     || Object.values(state.sideChats).some((thread) => thread.attachments?.some((attachment) => attachment.id === id && attachment.status === "uploading"))
     || Object.values(state.conversationWorkbenchStates).some((workbench) => (
       workbench.attachments?.some((attachment) => attachment.id === id && attachment.status === "uploading")
-    ));
+    )) || Object.values(state.workspaceComposerDrafts).some(draft => draft.attachments.some(attachment => attachment.id === id && attachment.status === "uploading"));
   if (pending || activeUploads.has(id)) cancelledUploads.add(id);
   activeUploads.get(id)?.abort();
   activeUploads.delete(id);
+};
+
+export const cancelConversationComposerUploads = (conversationId: string): void => {
+  const state = useAppStore.getState();
+  const attachments = [
+    ...(state.conversationId === conversationId ? state.attachments : []),
+    ...(state.conversationWorkbenchStates[conversationId]?.attachments ?? []),
+    ...(state.sideChats[conversationId]?.attachments ?? []),
+    ...Object.values(state.workspaceComposerDrafts).flatMap(draft => draft.attachments.filter(attachment => attachment.conversationId === conversationId)),
+  ];
+  for (const attachment of attachments) cancelComposerUpload(attachment.id);
 };

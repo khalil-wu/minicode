@@ -125,8 +125,9 @@ test("embedded browser bounds compensate for renderer zoom and stay clipped", ()
 
 test("embedded browser exposes a stable target list for frontend hydration", () => {
   const manager = require("./embedded-browser-manager");
+  manager.init({ getWindowByInstanceId: (instance) => instance === "fixture-window" ? { isDestroyed: () => false } : null });
   assert.equal(typeof manager.listTargets, "function");
-  assert.deepEqual(manager.listTargets("conv-browser-owner"), []);
+  assert.deepEqual(manager.listTargets("conv-browser-owner", "fixture-window"), []);
   assert.throws(() => manager.listTargets(), /conversation owner/i);
 });
 

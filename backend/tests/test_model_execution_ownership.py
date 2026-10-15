@@ -25,6 +25,8 @@ from backend.extensions.lifecycle_observer import ExtensionLifecycleObserver
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.llm.capabilities import capabilities_from_openai_settings
 from backend.llm.model_runtime import ModelDefinition
+from backend.llm.provider_contracts import ModelMetadataSource
+from backend.feature_flags import FeatureFlags
 from backend.permissions.checker import PermissionChecker
 from backend.tools.base import BaseTool, ToolResult, ToolSchema
 from backend.tools.code_execution import ToolExecTool, ToolWaitTool
@@ -83,10 +85,15 @@ class ModelCatalog:
             base_url="https://example.invalid/v1", reasoning=True,
             context_window=96000 if name == "model-a" else 32768, max_tokens=4096,
             reasoning_effort_levels=("low", "high"), default_reasoning_effort="low",
-            tool_mode=self.tool_modes.get(name, ""))
+            tool_mode=self.tool_modes.get(name, ""),
+            source_model_metadata=ModelMetadataSource("fixture-owned-model-catalog", "test_model_execution_ownership.py"),
+            extra={"model_messages": {"instructions_template": codex_model_instructions(name)}})
 
     def get_models(self, provider):
         return tuple(self.get_model(provider, name) for name in ("model-a", "model-b"))
+
+    def is_using_oauth(self, provider):
+        return False  # This fixture supplies explicit API-key model settings.
 
     async def refresh_oauth_credentials(self, provider):
         pass
@@ -136,10 +143,11 @@ class InspectModel(BaseTool):
 def setup(tmp_path, monkeypatch, behavior, extra_tools=(), tool_modes=None):
     settings = LLMSettings(api_key="fixture", provider="custom", base_url="https://example.invalid/v1",
         model="model-a", reasoning_effort="low", reasoning_effort_levels=("low", "high"), model_instructions="INSTRUCTION-model-a")
-    config = AppConfig(llm=settings, token_budget=TokenBudget(total=96000, response_reserve=4096),
+    config = AppConfig(llm=settings, feature_flags=FeatureFlags({"step_model_switching": True}), token_budget=TokenBudget(total=96000, response_reserve=4096),
         agent=AgentSettings(max_iterations=6, max_turn_seconds=20, stream_max_attempts=0, code_mode_only=False))
     model = Model(settings, behavior)
     catalog = ModelCatalog(tool_modes)
+    monkeypatch.setattr("backend.config.load_config", lambda **_: config)
     created = []
 
     def build(config, *, provider_override, model_override, model_runtime):
@@ -156,7 +164,8 @@ def setup(tmp_path, monkeypatch, behavior, extra_tools=(), tool_modes=None):
         registry.register(tool)
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
     owner = RunContext(agent_runtime=runtime, execution_journal=ExecutionJournal("model", base_dir=tmp_path / "journal"),
-        model_execution=ModelExecutionSnapshot(config=config, llm=model, provider="custom", model="model-a", thinking_level="low", model_runtime=catalog))
+        model_execution=ModelExecutionSnapshot(config=config, llm=model, provider="custom", model="model-a", thinking_level="low", model_runtime=catalog,
+            model_info=catalog.get_model("custom", "model-a")))
     builder = ContextBuilder(llm=model, token_budget=config.token_budget)
     session = AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
         permission_checker=PermissionChecker(PermissionSettings(), tmp_path), agent_settings=config.agent,
@@ -209,7 +218,7 @@ async def test_live_selection_changes_next_request_and_keeps_issued_tools_bound(
     assert fixture.model._settings.reasoning_effort == "low"
     assert len(fixture.model.inputs) == 1
     assert [len(model.inputs) for model in fixture.created] == [0, 2]
-    fixture.host.conversation_repo.update_model_selection.assert_called_with("model-conv", provider="custom", model="model-b", reasoning_effort="high")
+    fixture.host.conversation_repo.update_model_selection.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -254,8 +263,9 @@ async def test_yielded_cell_keeps_its_model_when_later_request_switches(tmp_path
             return ToolCallEvent(id="cell-from-a", name="tool_exec", arguments={
                 "code": "await tools.gate({}); text((await tools.inspect_model({})).content);", "yield_time_ms": 0})
         if len(model.inputs) == 1:
-            content = next(message for message in reversed(messages) if message.role == "tool").content
-            report = json.JSONDecoder().raw_decode(content[content.index("{"):])[0]
+            message = next(message for message in reversed(messages) if message.role == "tool")
+            receipt = next(record for record in fixture.owner.code_execution.state.tool_calls if record.tool_call_id == message.tool_call_id)
+            report = json.JSONDecoder().raw_decode(receipt.result_payload["summary"])[0]
             assert report["status"] == "running"
             ready.set()
             return ToolCallEvent(id="join-from-b", name="tool_wait", arguments={"cell_id": report["cell_id"], "yield_time_ms": 10000})

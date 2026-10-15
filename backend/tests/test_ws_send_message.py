@@ -18,7 +18,7 @@ from backend.tools.base import BaseTool, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 from backend.tools.registry import ToolRegistry
 from backend.tools.toolsets import ToolsetPolicy
-from backend.ws.handlers.misc import handle_send_message, handle_subagent_transcript
+from backend.ws.handlers.misc import handle_followup_task, handle_send_message, handle_subagent_transcript
 
 
 class _TaskTool:
@@ -45,6 +45,7 @@ class _Session:
         self.session_id = "session-1"
         self.tool_registry = _Registry(task_tool)
         self._workspace_root = tmp_path
+        self.conversation_repo = SimpleNamespace(get_conversation=lambda _id: SimpleNamespace(workspace_root=str(tmp_path), worktree_path=""))
         self.command_results: list[dict] = []
         self.events: list[dict] = []
         self.session_lifecycle = SimpleNamespace(
@@ -56,6 +57,12 @@ class _Session:
     def current_workspace_root(self):
         return self._workspace_root
 
+    def _conversation_tool_registry(self, _conversation_id):
+        return self.tool_registry
+
+    def permission_context_for_conversation(self, _conversation, *, source):
+        return self.permission_context
+
     def resolve_requested_workspace(self, requested_workspace=None):
         from pathlib import Path
 
@@ -63,6 +70,9 @@ class _Session:
 
     async def send_event(self, event) -> None:
         self.events.append(event.to_ws_message())
+
+    async def send_payload(self, payload, **kwargs) -> None:
+        self.events.append(payload)
 
     async def emit_command_result(self, command: str, message: str, **kwargs) -> None:
         self.command_results.append({"command": command, "message": message, **kwargs})
@@ -91,7 +101,7 @@ class _ResumeProbeTool(BaseTool):
         return ToolResult(content="probe")
 
 
-def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
+def test_ui_followup_task_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     task_tool = _TaskTool()
     session = _Session(tmp_path, task_tool)
     subagent = SimpleNamespace(
@@ -111,7 +121,7 @@ def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
 
-    handled = asyncio.run(handle_send_message(session, {
+    handled = asyncio.run(handle_followup_task(session, {
         "recipient": "subagent-ended",
         "message": "Check one more edge case.",
         "message_id": "message-1",
@@ -125,7 +135,7 @@ def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     assert call["context"].conversation_id == "conversation-1"
     assert call["context"].run_context.agent_runtime is runtime
     assert session.command_results[-1] == {
-        "command": "send_message",
+        "command": "followup_task",
         "message": "Stopped subagent resumed with the message.",
         "data": {
             "recipient": "subagent-ended",
@@ -135,7 +145,33 @@ def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     }
 
 
-def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, tmp_path) -> None:
+def test_ui_queue_only_preserves_completed_agent_until_explicit_followup(monkeypatch, tmp_path) -> None:
+    runtime = AgentRuntime(swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+    task_tool = _TaskTool()
+    session = _Session(tmp_path, task_tool)
+    monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
+    try:
+        runtime.start_run(run_id="parent-run", conversation_id="conversation-1", session_id="session-1")
+        child = runtime.start_subagent(subagent_id="worker", parent_run_id="parent-run", agent_type="general-purpose")
+        runtime.complete_subagent("worker", status="completed", summary="original answer", agent_path=child.agent_path, mailbox_epoch=child.mailbox_epoch)
+        request = {"target": "worker", "message": "keep this queued detail", "message_id": "queue-1"}
+        assert asyncio.run(handle_send_message(session, request)) is True
+        assert task_tool.calls == []
+        assert runtime.get_subagent("worker").status == "completed"
+        assert runtime.get_subagent("worker").mailbox_epoch == child.mailbox_epoch
+        stored = runtime.list_swarm_messages(participant_id="worker", conversation_id="conversation-1")
+        assert len(stored) == 1 and stored[0].delivery_mode == "queue_only"
+        assert session.command_results[-1]["command"] == "send_message"
+        assert not session.command_results[-1]["data"].get("resumed")
+        assert asyncio.run(handle_followup_task(session, {"target": "worker", "message": "start next task"})) is True
+        assert len(task_tool.calls) == 1
+        assert session.command_results[-1]["command"] == "followup_task"
+        assert task_tool.calls[0]["prompt"] == "start next task"
+    finally:
+        runtime.close(release_lease=True)
+
+
+def test_ui_followup_task_resumes_evicted_agent_from_durable_record(monkeypatch, tmp_path) -> None:
     task_tool = _TaskTool()
     session = _Session(tmp_path, task_tool)
     subagent = SimpleNamespace(
@@ -157,7 +193,7 @@ def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, 
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
 
-    asyncio.run(handle_send_message(session, {
+    asyncio.run(handle_followup_task(session, {
         "recipient": "subagent-evicted",
         "message": "Resume from disk.",
         "message_id": "message-2",
@@ -173,7 +209,7 @@ def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, 
 
 
 @pytest.mark.parametrize("reopen", [False, True])
-def test_ui_send_message_real_resume_restores_persisted_tool_policy(
+def test_ui_followup_task_real_resume_restores_persisted_tool_policy(
     monkeypatch,
     tmp_path,
     reopen,
@@ -281,7 +317,7 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
                 )
                 session.session_id = "reopened-session"
 
-            handled = await handle_send_message(
+            handled = await handle_followup_task(
                 session,
                 {
                     "recipient": subagent_id,

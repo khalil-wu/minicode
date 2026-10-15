@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleNoticeEvent } from "./noticeEvents";
 import { handleRuntimeEvent as handleRuntimeEventImpl } from "./runtimeEvents";
@@ -90,6 +91,31 @@ describe("runtime compaction events", () => {
     expect(useAppStore.getState().runtimeSession?.selected_model).toBe("new-model");
   });
 
+  it("projects another window's queued and steered input without changing this reader or draft", () => {
+    useAppStore.setState({ conversationId: "reader-b", messages: [], draft: "unsent local draft",
+      workingDirectory: "C:/reader-b", permissionMode: "ask", isStreaming: false,
+      conversationMessages: { "running-a": [] }, conversationStreaming: {}, runtimeSession: null });
+    handleRuntimeEvent({ type: "task.update", partial: true, session: {
+      active_conversation_id: "reader-b", workspace_root: "C:/reader-b", permission_mode: "confirm",
+      active_stream_conversation_ids: ["running-a"],
+      queued_user_messages: [{ conversation_id: "running-a", message_id: "queued-assistant", user_message_id: "queued-user",
+        content: "another window's real follow-up", attachments: [], position: 1, paused: false }],
+      pending_turn_inputs: [{ conversation_id: "running-a", mode: "steer", message_id: "steer-intent", user_message_id: "steered-user",
+        target_message_id: "running-answer", content: "another window's steer", attachments: [], position: 1, queued_at_ms: 20 }],
+    } } as ServerEvent);
+    const state = useAppStore.getState();
+    expect(state.conversationId).toBe("reader-b");
+    expect(state.workingDirectory).toBe("C:/reader-b");
+    expect(state.draft).toBe("unsent local draft");
+    expect(state.messages).toEqual([]);
+    expect(state.isStreaming).toBe(false);
+    expect(state.conversationMessages["running-a"]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "queued-user", content: "another window's real follow-up", queueState: "queued" }),
+      expect.objectContaining({ id: "steered-user", content: "another window's steer" }),
+    ]));
+    expect(state.conversationStreaming["running-a"]).toBe(true);
+  });
+
   it("admits a new run after a restore snapshot cleared its optimistic streaming flag", () => {
     useAppStore.setState({ isStreaming: false, messages: [{
       id: "new-assistant", role: "assistant", content: "", timestamp: 1, isStreaming: false,
@@ -171,7 +197,9 @@ describe("runtime compaction events", () => {
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0]).toMatchObject({
       role: "system",
-      content: "上下文已压缩，摘要已保存到会话记忆中。",
+      content: "",
+      systemNoticeTitle: "上下文已压缩",
+      systemNoticeProcessing: false,
     });
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "session.usage.inspect" });
   });
@@ -242,7 +270,7 @@ describe("runtime context fork, ledger, and side-query projections", () => {
     });
   });
 
-  it("projects branch activation into its real owner and preserves all fork facts", () => {
+  it("retains real fork facts in Inspector without adding internal branch IDs or token accounting to chat", () => {
     expect(handleRuntimeEvent({
       type: "context_forked",
       conversation_id: "conv-branch",
@@ -272,21 +300,15 @@ describe("runtime context fork, ledger, and side-query projections", () => {
     } as unknown as ServerEvent, "conv-source")).toBe(true);
 
     expect(useAppStore.getState().messages).toEqual([]);
-    expect(useAppStore.getState().conversationMessages["conv-branch"]).toEqual([
-      expect.objectContaining({
-        id: "context-forked:fork-activated",
-        role: "system",
-        content: expect.stringContaining("已创建并切换到上下文分支（conv-branch）"),
-      }),
-    ]);
-    expect(useAppStore.getState().conversationMessages["conv-branch"]?.[0]?.content).toContain(
-      "从第 5 条可见消息分叉，保留 8 条模型历史，估算 2,048 tokens",
-    );
-    expect(useAppStore.getState().conversationMessages["conv-source"]).toEqual([
-      expect.objectContaining({
-        id: "context-forked:fork-unactivated",
-        content: expect.stringContaining("已创建上下文分支（conv-draft）"),
-      }),
+    expect(useAppStore.getState().conversationMessages["conv-branch"]).toBeUndefined();
+    expect(useAppStore.getState().conversationMessages["conv-source"]).toBeUndefined();
+    expect(useAppStore.getState().inspectorEntries).toEqual([
+      expect.objectContaining({ targetId: "context-forked:fork-activated", payload: expect.objectContaining({
+        conversation_id: "conv-branch", branch_created: true, branch_activated: true, history_length: 8, estimated_tokens: 2048,
+      }) }),
+      expect.objectContaining({ targetId: "context-forked:fork-unactivated", payload: expect.objectContaining({
+        conversation_id: "conv-source", branch_conversation_id: "conv-draft", branch_created: true, branch_activated: false,
+      }) }),
     ]);
   });
 
@@ -440,14 +462,16 @@ describe("runtime token budget events", () => {
     ]);
   });
 
-  it("retains budget warnings in Inspector without repeating replayed toasts", () => {
+  it.each([{ replayed: false, willCompact: true }, { replayed: false, willCompact: false },
+    { replayed: true, willCompact: true }, { replayed: true, willCompact: false }])(
+    "retains real budget pressure and scheduling in Inspector without inventing a toast: %o", ({ replayed, willCompact }) => {
     expect(handleRuntimeEvent({
       type: "budget.warning",
       conversation_id: "conv-active",
       bucket: "context",
       percent: 0.9,
-      will_compact: true,
-      replayed: true,
+      will_compact: willCompact,
+      replayed,
     } as unknown as ServerEvent, "conv-active")).toBe(true);
 
     expect(pushToast).not.toHaveBeenCalled();
@@ -458,8 +482,8 @@ describe("runtime token budget events", () => {
         targetId: "budget-warning:conv-active:context",
         payload: expect.objectContaining({
           percent: 0.9,
-          will_compact: true,
-          replayed: true,
+          will_compact: willCompact,
+          replayed,
         }),
       }),
     ]);

@@ -1,9 +1,12 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import {
   mergeTerminalOutputByCursor,
   terminalExitCodeLabel,
   terminalSessionLabel,
 } from "./TerminalPanel";
+import { translate } from "../i18n";
+const tr = (key: Parameters<typeof translate>[1], values?: Parameters<typeof translate>[2]) => translate("zh-CN", key, values);
 
 describe("terminal scrollback hydration", () => {
   it("appends only live output beyond the snapshot cursor", () => {
@@ -55,9 +58,9 @@ describe("terminal session labels", () => {
       terminalMode: "pty" as const,
     };
 
-    expect(terminalSessionLabel(session, 0, 1)).toBe("powershell");
-    expect(terminalSessionLabel(session, 1, 2)).toBe("powershell 2");
-    expect(terminalSessionLabel({ ...session, terminalMode: "pipe" }, 0, 2)).toBe("powershell 1（基础）");
+    expect(terminalSessionLabel(tr, session, 0, 1)).toBe("powershell");
+    expect(terminalSessionLabel(tr, session, 1, 2)).toBe("powershell 2");
+    expect(terminalSessionLabel(tr, { ...session, terminalMode: "pipe" }, 0, 2)).toBe("powershell 1（基础）");
   });
 
   it("does not misreport an unknown process status as a successful zero exit", () => {

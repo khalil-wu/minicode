@@ -31,6 +31,7 @@ async def _retiring_session(tmp_path, monkeypatch, *, short_drain=False):
     cleanup_started = asyncio.Event()
     cleanup_returned = asyncio.Event()
     append = session.event_outbox._store.append_many
+    shutdown = session.session_lifecycle.shutdown
     sleep = asyncio.sleep
     pending = set()
 
@@ -44,7 +45,7 @@ async def _retiring_session(tmp_path, monkeypatch, *, short_drain=False):
 
     async def cleanup(*, reason):
         cleanup_started.set()
-        await _release_session(session)
+        await shutdown(reason=reason)
         cleanup_returned.set()
 
     monkeypatch.setattr(session.event_outbox._store, "append_many", held_append)

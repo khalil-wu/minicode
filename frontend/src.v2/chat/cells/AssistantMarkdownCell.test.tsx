@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantMarkdownCell } from "./AssistantMarkdownCell";
 import type { AssistantMarkdownCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
@@ -36,6 +36,11 @@ vi.mock("../../hooks/useWebSocket", () => ({
 
 vi.mock("../../protocol/ws-outbox", () => ({
   sendClientCommand: sendMock,
+  sendClientCommandAwaitResult: async (command: { type: string }) => {
+    sendMock(command);
+    return { type: "command.result", command: command.type, level: "success", message: "", data: {} };
+  },
+  commandResultSucceeded: (result: { level: string }) => result.level === "success",
 }));
 
 vi.mock("../../desktop/runtime", () => ({
@@ -55,6 +60,7 @@ vi.mock("../../overlays/DialogService", () => ({
 
 const originalOpenEditorFile = useAppStore.getState().openEditorFile;
 const originalSetRightStackTab = useAppStore.getState().setRightStackTab;
+beforeEach(() => useAppStore.setState({ appMode: "chat" }));
 
 afterEach(() => {
   cleanup();
@@ -141,13 +147,9 @@ describe("AssistantMarkdownCell sources", () => {
     expect(document.body.textContent).not.toContain("[1]");
     expect(document.querySelector(".assistant-inline-source-chip")).toBeNull();
     expect(document.querySelector(".assistant-cell-source-chip")).toBeTruthy();
-    const icon = container.querySelector<HTMLImageElement>('.brand-icon-remote')!;
-    expect(icon.src).toBe("https://www.nmc.cn/favicon.ico");
-    expect(icon.hidden).toBe(true);
+    expect(container.querySelector('.brand-icon-remote')?.getAttribute('src'))
+      .toBe('https://www.google.com/s2/favicons?domain=www.nmc.cn&sz=32');
     expect(container.querySelector('.assistant-cell-source-favicon svg')).toBeTruthy();
-    fireEvent.load(icon);
-    expect(container.querySelector('[data-brand="website"] img')).toBe(icon);
-    expect(icon.hidden).toBe(false);
   });
 
   it("renders provider-native sources even when the answer has no numeric markers", () => {

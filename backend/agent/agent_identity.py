@@ -40,6 +40,16 @@ class AgentPath:
     def value(self) -> str:
         return "/".join(self.segments)
 
+    @property
+    def logical_name(self) -> str:
+        """Source's absolute agent name within one rollout session.
+
+        The first coordination segment owns a root run incarnation; child
+        segments are the actual registered task names. Service state uses
+        the logical tree, while coordination retains its run/epoch identity.
+        """
+        return "/".join(("", "root", *self.segments[1:]))
+
     @classmethod
     def parse(cls, value: str) -> "AgentPath":
         segments = tuple(part for part in str(value or "").split("/") if part)

@@ -189,7 +189,8 @@ async def recover_max_output(
                             summary = await full_compact(restore_state=state)
                         except CompactionNoopError:
                             summary = ""
-                        context_compacted = bool(summary)
+                        from backend.agent.context import ContextBuilder
+                        context_compacted = bool(summary) or (isinstance(context_builder, ContextBuilder) and context_builder.token_budget_enabled)
                 if not context_compacted:
                     recovery_count = _MAX_OUTPUT_RECOVERY_LIMIT
                 else:
@@ -205,6 +206,7 @@ async def recover_max_output(
                         new_partial_text,
                         phase="final_answer",
                         provider_items=replay_items,
+                        answer_source="partial",
                     )
                 context_builder.append_user(_CONTINUATION_PROMPT)
                 state.max_output_recovery_count = recovery_count + 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -8,12 +9,46 @@ from urllib.parse import urlparse
 
 from backend.agent.provider_protocol import provider_raw_for_projection
 from backend.agent.state import ToolCallRecord
-from backend.conversations.public_projection import project_public_tool_call
+from backend.conversations.public_projection import project_public_tool_call, merge_delegation_facts
 from backend.secret_redaction import redact_secrets
 
 
 COMMAND_OUTPUT_PREVIEW_LIMIT = 60_000
 FINAL_TEXT_SOURCES = {'model_final', 'reply', 'partial'}
+_TEXT_PARTS = '_text_parts'
+
+
+def materialize_content_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Publish the original protocol shape from an internal streaming block."""
+    result = {key: value for key, value in block.items() if key != _TEXT_PARTS}
+    if _TEXT_PARTS in block:
+        result['content'] = ''.join(block[_TEXT_PARTS])
+    return result
+
+
+def append_process_delta(blocks: list[dict[str, Any]], item_id: str, delta: str) -> None:
+    for block in reversed(blocks):
+        if block.get('type') == 'process' and block.get('id') == item_id:
+            if _TEXT_PARTS not in block:
+                block[_TEXT_PARTS] = [str(block.get('content') or '')]
+                block['content'] = ''
+            block[_TEXT_PARTS].append(delta)
+            return
+
+
+def project_context_compaction_item(blocks: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    """Reduce the real lifecycle with its producer-owned clock and identity."""
+    block = {"type": "process", "id": item["id"], "itemKind": "context_compaction",
+             "content": "", "source": item["source"],
+             "status": "running" if item["status"] == "in_progress" else item["status"],
+             "startedAt": item["started_at"], "timestamp": item["started_at"]}
+    if "finished_at" in item:
+        block["finishedAt"] = item["finished_at"]
+    for index, existing in enumerate(blocks):
+        if existing.get("type") == "process" and existing.get("id") == item["id"]:
+            blocks[index] = block
+            return
+    blocks.append(block)
 
 
 def _int_or(value: Any, fallback: int) -> int:
@@ -28,7 +63,8 @@ def _is_answer_text_block(block: dict[str, Any]) -> bool:
         return False
     source = str(block.get('source') or '').strip().lower()
     if source:
-        return source in FINAL_TEXT_SOURCES
+        status = block.get('status')
+        return source in FINAL_TEXT_SOURCES and (status is None or status in {'completed', 'partial'})
     # Pre-phase transcripts did not carry a source. Preserve their completed
     # answer semantics, but never let explicitly typed commentary into the
     # copyable/persisted answer merely because its lifecycle completed.
@@ -50,6 +86,7 @@ def start_agent_message_block(
         'content': '',
         'status': 'in_progress',
         'isStreaming': True,
+        _TEXT_PARTS: [],
     }
     block.update({
         key: value
@@ -70,20 +107,16 @@ def append_agent_message_delta(
     for index in range(len(blocks) - 1, -1, -1):
         block = blocks[index]
         if block.get('type') == 'text' and block.get('itemId') == item_id:
-            blocks[index] = {
-                **block,
-                'content': str(block.get('content') or '') + delta,
-                'status': 'in_progress',
-                'isStreaming': True,
-                **{
-                    key: value
-                    for key, value in dict(metadata or {}).items()
-                    if key in {'source', 'phase', 'visibility'} and value is not None
-                },
-            }
+            if _TEXT_PARTS not in block:
+                block[_TEXT_PARTS] = [str(block.get('content') or '')]
+                block['content'] = ''
+            block[_TEXT_PARTS].append(delta)
+            block.update(status='in_progress', isStreaming=True)
+            block.update({key: value for key, value in dict(metadata or {}).items()
+                          if key in {'source', 'phase', 'visibility'} and value is not None})
             return
     start_agent_message_block(blocks, item_id, metadata)
-    blocks[-1]['content'] = delta
+    blocks[-1][_TEXT_PARTS].append(delta)
 
 
 def complete_agent_message_block(
@@ -149,19 +182,33 @@ def append_thinking_block(
             if key in normalized
         }
         if previous_metadata == incoming_metadata:
-            blocks[-1]['content'] = str(blocks[-1].get('content') or '') + content
+            block = blocks[-1]
+            if _TEXT_PARTS not in block:
+                block[_TEXT_PARTS] = [str(block.get('content') or '')]
+                block['content'] = ''
+            block[_TEXT_PARTS].append(content)
             return
-    block: dict[str, Any] = {'type': 'thinking', 'content': content}
+    block: dict[str, Any] = {'type': 'thinking', 'content': '', _TEXT_PARTS: [content]}
     block.update(normalized)
     blocks.append(block)
 
 
+def record_user_input_block(blocks: list[dict[str, Any]], user_message_id: str) -> None:
+    """Keep an admitted user item at its real position within the running turn."""
+    if any(block.get('type') == 'user_input' and block['userMessageId'] == user_message_id for block in blocks):
+        return
+    blocks.append({'type': 'user_input', 'userMessageId': user_message_id})
+
+
 def content_from_blocks(blocks: list[dict[str, Any]]) -> str:
-    return ''.join(
-        str(block.get('content') or '')
-        for block in blocks
-        if _is_answer_text_block(block)
-    )
+    # Parts of one item already share one block. Distinct completed messages
+    # remain visible records, while only the latest owns the accepted answer.
+    for block in reversed(blocks):
+        if _is_answer_text_block(block):
+            content = str(materialize_content_block(block).get('content') or '')
+            if content.strip():
+                return content
+    return ''
 
 
 @dataclass(slots=True)
@@ -189,6 +236,9 @@ class AgentTurnState:
     ) -> None:
         start_agent_message_block(self._blocks, item_id, metadata)
 
+    def record_context_compaction_item(self, item: dict[str, Any]) -> None:
+        project_context_compaction_item(self._blocks, item)
+
     def append_agent_message_delta(
         self,
         item_id: str,
@@ -215,6 +265,9 @@ class AgentTurnState:
 
     def append_thinking(self, content: str, metadata: dict[str, Any] | None = None) -> None:
         append_thinking_block(self._blocks, content, metadata)
+
+    def record_user_input(self, user_message_id: str) -> None:
+        record_user_input_block(self._blocks, user_message_id)
 
     def content(self) -> str:
         return content_from_blocks(self._blocks)
@@ -278,6 +331,14 @@ class AgentTurnState:
             'iteration_id': record.get('iterationId', ''),
             'phase': record.get('phase', ''),
         }
+        for source_key, target_key in (
+            ('streamingAnnouncement', 'streaming_announcement'),
+            ('commandPresentation', 'command_presentation'),
+            ('executionStartedAt', 'execution_started_at'),
+            ('commandActions', 'command_actions'),
+        ):
+            if source_key in record:
+                resume[target_key] = deepcopy(record[source_key])
         return resume
 
     def record_tool_call(self, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -308,9 +369,31 @@ class AgentTurnState:
         ):
             if data.get(source_key):
                 record[target_key] = str(data.get(source_key) or '')
+        existing = self._find_tool_call_record(tool_id, data)
+        for source_key, target_key in (
+            ('streaming_announcement', 'streamingAnnouncement'),
+            ('command_presentation', 'commandPresentation'),
+            ('execution_started_at', 'executionStartedAt'),
+            ('command_actions', 'commandActions'),
+        ):
+            if source_key in data:
+                record[target_key] = deepcopy(data[source_key])
+            elif existing is not None and target_key in existing:
+                record[target_key] = deepcopy(existing[target_key])
         record = project_public_tool_call(record)
         self._replace_tool_call_record(record)
         return record
+
+    def record_tool_execution_started(self, data: dict[str, Any]) -> bool:
+        """Keep the real native execution clock separate from planned display."""
+        record = self._find_tool_call_record(str(data['tool_call_id']), data)
+        if (record is None or 'commandPresentation' not in record
+                or record.get('status') not in {'pending', 'running', 'pending_approval'}):
+            return False
+        updated = dict(record)
+        updated.update(status='running', executionStartedAt=data['started_at'], streamingAnnouncement=False)
+        self._replace_tool_call_record(project_public_tool_call(updated))
+        return True
 
     def record_progress(self, data: dict[str, Any]) -> dict[str, Any] | None:
         message = str(data.get('message') or '').strip()
@@ -477,6 +560,9 @@ class AgentTurnState:
         self._upsert_process(process)
         return process
 
+    def record_process_delta(self, data: dict[str, Any]) -> None:
+        append_process_delta(self._blocks, str(data.get('item_id') or ''), str(data.get('delta') or ''))
+
     def _remove_process(self, process_id: str) -> None:
         target_id = str(process_id or '').strip()
         if not target_id:
@@ -521,6 +607,19 @@ class AgentTurnState:
         )
         self._replace_tool_call_record(project_public_tool_call(updated_record))
 
+    def record_subagent_lifecycle(self, data: dict[str, Any]) -> bool:
+        parent_call_id = str(data.get('parent_tool_call_id') or '')
+        delegation = data.get('delegation')
+        if not parent_call_id or delegation is None:
+            return False
+        record = self._find_tool_call_record(parent_call_id, {})
+        if record is None:
+            return False
+        updated = dict(record)
+        updated['delegations'] = merge_delegation_facts(record.get('delegations', []), [delegation])
+        self._replace_tool_call_record(project_public_tool_call(updated))
+        return True
+
     def record_tool_result(self, data: dict[str, Any]) -> None:
         tool_id = str(data.get('id') or '').strip()
         if not tool_id:
@@ -533,6 +632,19 @@ class AgentTurnState:
             'failed' if bool(data.get('is_error')) else 'success'
         )
         updated_record['summary'] = redact_secrets(str(data.get('summary') or ''))
+        for source_key, target_key in (
+            ('streaming_announcement', 'streamingAnnouncement'),
+            ('command_presentation', 'commandPresentation'),
+            ('execution_started_at', 'executionStartedAt'),
+            ('command_actions', 'commandActions'),
+            ('stdout_preview', 'stdoutPreview'),
+            ('stderr_preview', 'stderrPreview'),
+            ('exit_code', 'exitCode'),
+        ):
+            if source_key in data:
+                updated_record[target_key] = deepcopy(data[source_key])
+        if 'delegations' in data:
+            updated_record['delegations'] = merge_delegation_facts(existing_record.get('delegations', []), data['delegations'])
         if data.get('duration_ms') is not None:
             updated_record['durationMs'] = int(data.get('duration_ms') or 0)
         if data.get('artifact_id'):
@@ -730,12 +842,18 @@ class AgentTurnState:
         failed = terminal_status == 'failed'
         blocks: list[dict[str, Any]] = []
         for block in self._blocks:
-            next_block = dict(block)
+            next_block = materialize_content_block(block)
             if next_block.get('type') == 'progress' and next_block.get('status') == 'running':
                 next_block['status'] = 'failed' if failed else 'partial' if interrupted else 'completed'
                 next_block['timestamp'] = self._now_ms()
             elif next_block.get('type') == 'process' and next_block.get('status') == 'running':
-                next_block['status'] = 'failed' if failed else 'partial' if interrupted else 'completed'
+                if next_block.get('itemKind') == 'context_compaction':
+                    # A terminal turn cannot manufacture a missing compaction
+                    # completion, even when the replacement snapshot exists.
+                    next_block['status'] = 'interrupted'
+                    next_block['finishedAt'] = self._now_ms()
+                else:
+                    next_block['status'] = 'failed' if failed else 'partial' if interrupted else 'completed'
             elif next_block.get('type') == 'text' and next_block.get('isStreaming') is True:
                 content = str(next_block.get('content') or '')
                 source = str(next_block.get('source') or 'pending')

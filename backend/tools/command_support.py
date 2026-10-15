@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 import base64
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -50,7 +51,7 @@ def command_sandbox_recovery_hint(output: str, exit_code: int, *, sandbox_active
         return (
             "\n\n[sandbox] This command ran in a restricted sandbox and the failure looks sandbox-related. "
             "If it needs network or access outside the workspace, retry the SAME command with "
-            "with_escalated_permissions=true and a one-line justification; the user will be asked "
+            'sandbox_permissions="require_escalated" and a one-line justification; the user will be asked '
             "to approve. Do not escalate for ordinary command errors."
         )
     return ""
@@ -310,16 +311,118 @@ def _host_shell_command(command: str, *, cwd: str | Path | None = None) -> str:
     return command
 
 
+def command_login_allowed(workspace: Path | None) -> bool:
+    from backend.config import load_config_layer_stack
+
+    stack = load_config_layer_stack(cwd=workspace)
+    return stack.requirements.value_for("allow_login_shell", stack.effective_config().get("allow_login_shell", True))
+
+
+def stdin_approval_enabled(context: Any) -> bool:
+    from backend.config import load_config_layer_stack
+    from backend.feature_flags import load_feature_flags
+
+    stack = load_config_layer_stack(cwd=context.workspace_root)
+    flags = load_feature_flags(stack.effective_config(), managed_requirements=stack.requirements.feature_requirements)
+    return flags.enabled("write_stdin_approval", default=True)
+
+
+def stdin_wait_ms(value: Any, *, chars: str, context: Any) -> int:
+    if value is None:
+        wait_ms = 250
+    else:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**64 - 1:
+            raise ValueError("yield_time_ms must be a non-negative integer")
+        wait_ms = value
+    if chars:
+        return min(max(250, wait_ms), 30_000)
+    from backend.config import load_config_layer_stack
+
+    stack = load_config_layer_stack(cwd=context.workspace_root)
+    maximum = max(5000, stack.effective_config().get("background_terminal_max_timeout", 300_000))
+    return min(max(5000, wait_ms), maximum)
+
+
+def current_terminal_policy(context: Any) -> SandboxPolicy:
+    from backend.sandbox.policy import sandbox_policy_for_permission_context
+
+    run_context = context.run_context
+    provider = run_context.permission_context_provider if run_context is not None else None
+    if provider is not None:
+        permission = provider()
+        policy = sandbox_policy_for_permission_context(context.workspace_root, permission)
+    else:
+        permission = context.permission
+        policy = _workspace_sandbox_policy(Path(context.workspace_root), context, timeout=None)
+    return policy.escalated_preserving_denied_reads() if permission.mode == "bypass" else policy
+
+
+def command_shell_argv(
+    command: str,
+    *,
+    shell: str | None = None,
+    login: bool | None = None,
+    allow_login_shell: bool = True,
+    native_windows_sandbox: bool = False,
+    wrap_powershell: bool = True,
+) -> list[str]:
+    """Codex shell_detect + Shell::derive_exec_args, before sandbox wrapping.
+
+    The Source uses the model path to select a shell type, then discovers its
+    executable; an unknown/unavailable type selects its ultimate cmd/sh shell.
+    """
+    if login is True and not allow_login_shell:
+        raise ValueError("login shell is disabled by config; omit login or set it to false.")
+    use_login = allow_login_shell if login is None else login
+    names = {"powershell": "powershell", "pwsh": "powershell", "bash": "bash", "zsh": "zsh", "sh": "sh", "cmd": "cmd"}
+    selected = names.get(Path(shell).stem) if shell is not None else None
+
+    def discover(kind: str) -> str | None:
+        if kind == "powershell":
+            programs = [shutil.which("pwsh"), shutil.which("powershell")]
+            if sys.platform == "win32":
+                programs[1:1] = [str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell/7/pwsh.exe")]
+                programs.append(str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"))
+            else:
+                programs[1:1] = ["/usr/local/bin/pwsh"]
+            return next((program for program in programs if program and Path(program).is_file()
+                         and (not native_windows_sandbox or (Path(program).suffix.lower() == ".exe" and "/windowsapps/" not in program.replace("\\", "/").lower()))), None)
+        paths = {"bash": ("/bin/bash", "/usr/bin/bash"), "zsh": ("/bin/zsh",), "sh": ("/bin/sh",), "cmd": ()}
+        return next((program for program in (shutil.which(kind), *paths[kind]) if program and Path(program).is_file()), None)
+
+    if shell is None:
+        if sys.platform == "win32":
+            choices = ["powershell"]
+        else:
+            user_shell = os.environ.get("SHELL", "")
+            preferred = names.get(Path(user_shell).stem) if user_shell else None
+            choices = [preferred, *( ["zsh", "bash"] if sys.platform == "darwin" else ["bash", "zsh"])]
+        chosen = next(((kind, program) for kind in choices if kind and (program := discover(kind))), None)
+    else:
+        program = discover(selected) if selected is not None else None
+        chosen = (selected, program) if program is not None else None
+    if chosen is None:
+        chosen = ("cmd", "cmd.exe") if sys.platform == "win32" else ("sh", "/bin/sh")
+    kind, program = chosen
+    if kind == "powershell":
+        from backend.runtime_env import powershell_script
+
+        # Retain MiniCode's existing UTF-8/native-exit adapter; the selected
+        # shell and startup-profile flags still follow Source derive_exec_args.
+        return [program, *([] if use_login else ["-NoProfile"]), "-Command", powershell_script(command) if wrap_powershell else command]
+    if kind == "cmd":
+        return [program, "/c", command]
+    return [program, "-lc" if use_login else "-c", command]
+
+
 def _model_shell_description() -> str:
     if sys.platform == "win32":
         host_shell = "PowerShell 7" if shutil.which("pwsh.exe") else "Windows PowerShell 5.1"
         return (
-            "Execute a shell command. On Windows, the command language is PowerShell in both normal "
-            "workspace-sandbox and bypass modes; the sandbox changes permissions/network, not the "
-            "shell language. Use workspace-relative paths and cross-platform tools. "
-            f"In bypass or approved escalated mode it runs in host {host_shell}. "
+            f"Execute a shell command. The default Windows shell is {host_shell}; use shell to select a shell type. "
+            "The sandbox applies to the selected shell. Use workspace-relative paths and cross-platform tools. "
             "Use the cwd and env arguments instead of shell cd/env setup, and do not assume && is available. "
-            "On Windows, do not use POSIX-only head/tail/grep/sed/cat commands or inline "
+            "For the default PowerShell, do not use POSIX-only head/tail/grep/sed/cat commands or inline "
             "NAME=value command assignments; use Get-Content/Select-String, dedicated workspace tools, "
             "and the structured env field. If a POSIX command is not recognized, retry with its PowerShell "
             "equivalent instead of repeating it. "

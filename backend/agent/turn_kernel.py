@@ -30,6 +30,7 @@ from backend.agent.runtime_spans import runtime_span
 from backend.agent.state import AgentState, TerminalReason, TerminalStatus
 from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.agent.provider_attempt import ProviderAttempt, provider_progress_id
+from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.config import TokenBudget
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 
@@ -134,9 +135,10 @@ class TurnKernel:
         self._terminal_commit_failure_event: AgentEvent | None = None
         self._tool_context: ToolExecutionContext | None = None
         turn_input_queue = self.run_context.turn_input_queue
-        self._turn_input_queue = (
-            turn_input_queue if isinstance(turn_input_queue, TurnInputQueue) else TurnInputQueue()
-        )
+        if turn_input_queue is None:
+            turn_input_queue = TurnInputQueue()
+            self.run_context.turn_input_queue = turn_input_queue
+        self._turn_input_queue = turn_input_queue
         self._turn_input_queue.begin_turn(run_record.run_id)
         self._next_user_message = initial_user_message
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
@@ -178,14 +180,12 @@ class TurnKernel:
             run_id=str(metadata.get("run_id", "") or "") or None,
             mailbox_epoch=int(metadata.get("mailbox_epoch") or 0),
         )
-        # ``run_id`` owns the durable runtime record. ``turn_id`` remains the
-        # host/app-server turn identity when one was supplied; the two are
-        # intentionally distinct so runtime ownership cannot overwrite the
-        # transport identity used to route a turn's UI events.
+        # An explicitly supplied host turn remains authoritative. Otherwise
+        # the issuing run owns the turn; a UI message is only its projection.
         metadata["run_id"] = run_record.run_id
         metadata.setdefault(
             "turn_id",
-            str(metadata.get("assistant_message_id") or run_record.run_id),
+            run_record.run_id,
         )
         if session_id:
             metadata.setdefault("session_id", session_id)
@@ -262,7 +262,9 @@ class TurnKernel:
         if self._run_started_emitted:
             return ()
         self._run_started_emitted = True
-        return (AgentEvent.agent_run_started(self.run_record),)
+        started = AgentEvent.agent_run_started(self.run_record)
+        started.data["turn_id"] = str(self.metadata["turn_id"])
+        return (started,)
 
     def complete_run_record(
         self,
@@ -307,6 +309,20 @@ class TurnKernel:
     def defer_mailbox_to_next_turn(self) -> bool:
         return bool(self._turn_input_queue.defer_mailbox_to_next_turn(self.run_record.run_id))
 
+    def observe_completed_assistant_item(self, item: dict[str, Any]) -> bool:
+        """Codex final/untagged completed messages defer late mailbox input."""
+        if item.get("role") != "assistant" or item.get("phase") not in {None, "", "final_answer"}:
+            return False
+        text = "".join(str(part.get("text", "")) for part in item.get("content", [])
+                       if part.get("type") == "output_text")
+        if not scrub_thinking_tags(text).strip():
+            return False
+        return self.defer_mailbox_to_next_turn()
+
+    def accept_mailbox_after_tool_item(self) -> bool:
+        """Mirror Codex's accepted tool receipt without opening a new epoch."""
+        return self._turn_input_queue.accept_mailbox_delivery_for_current_turn(self.run_record.run_id)
+
     def complete_for_terminal_reason(self, reason: str | None) -> AgentEvent | None:
         terminal_status = self.state.terminal_status
         return self.complete_run_record(
@@ -348,7 +364,7 @@ class TurnKernel:
             else ""
         )
         if cancelled_final_text and not final_answer_committed:
-            context_builder.append_assistant(cancelled_final_text)
+            context_builder.append_assistant(cancelled_final_text, answer_source="partial")
             self.state.reply = cancelled_final_text
         events: list[AgentEvent] = []
         if stream_text.agent_message_started:
@@ -866,14 +882,9 @@ class TurnKernel:
         acknowledge = self.run_context.acknowledge_consumed_turn_input
         if not callable(acknowledge):
             return
-        try:
-            result = acknowledge(item)
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            # Keep the durable inflight item for at-least-once replay. The
-            # current run can continue because the input is already in context.
-            logger.warning("Failed to acknowledge consumed turn steer: %s", exc)
+        result = acknowledge(item)
+        if inspect.isawaitable(result):
+            await result
 
     def finalize_checkpoint(
         self,

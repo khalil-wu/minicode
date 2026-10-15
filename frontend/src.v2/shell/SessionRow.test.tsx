@@ -12,14 +12,13 @@ const callbacks = {
   onCancelRename: vi.fn(),
   onSetRenameValue: vi.fn(),
   onArchive: vi.fn(),
-  onClone: vi.fn(),
-  onMerge: vi.fn(),
-  onExport: vi.fn(),
+  onCopyLink: vi.fn(),
+  onCopyMarkdown: vi.fn(),
   onDelete: vi.fn(),
-  onCleanup: vi.fn(),
   onHandoff: vi.fn(),
   onReveal: vi.fn(),
   onCopy: vi.fn(),
+  onPin: vi.fn(), onReadState: vi.fn(), onProjectChange: vi.fn(), currentProject: "", projectOptions: [],
 };
 
 describe("SessionRow hydration status", () => {
@@ -137,7 +136,7 @@ describe("SessionRow hydration status", () => {
     fireEvent.click(row, { ctrlKey: true });
     fireEvent.click(row, { metaKey: true });
     expect(callbacks.onSwitch).toHaveBeenCalledTimes(3);
-    expect(callbacks.onSwitch).toHaveBeenCalledWith("conv-b");
+    expect(callbacks.onSwitch).toHaveBeenCalledWith("conv-b", "conv-b");
   });
 
   it("does not re-render an unchanged row when another row menu changes", () => {

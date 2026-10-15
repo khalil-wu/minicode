@@ -129,6 +129,47 @@ def _completed(events):
     return [event.data["item"] for event in events if event.type == "item.completed" and event.data["item"]["type"] == "agent_message"]
 
 
+@pytest.mark.parametrize("distinct_items", [True, False])
+@pytest.mark.parametrize("live", [True, False])
+def test_main_query_last_final_item_owns_reply_stop_and_history(tmp_path, monkeypatch, distinct_items, live):
+    from backend.hooks.manager import HookEvent, HookResult, load_hook_manager_for_workspace
+    from backend.services.subagent_service import build_subagent_transcript_messages
+
+    expected = "Second." if distinct_items else "First.Second."
+    query = make_boundary_query(tmp_path, [[
+        _text("First.", item="answer-first" if distinct_items else "", lifecycle="end"),
+        _text("Second.", item="answer-second" if distinct_items else "", lifecycle="end"),
+        _done(),
+    ]], settings=AgentSettings(max_iterations=3, live_text_streaming=live))
+    hooks = load_hook_manager_for_workspace(tmp_path)
+    candidates = []
+
+    async def accept_stop(user_message, candidate_text, **kwargs):
+        candidates.append(candidate_text)
+        return HookResult()
+
+    monkeypatch.setattr(hooks, "has_hooks", lambda event: event == HookEvent.STOP)
+    monkeypatch.setattr(hooks, "run_stop", accept_stop)
+    query.submission.runtime.run_context.hook_manager = hooks
+    events = asyncio.run(collect_boundary_query(query))
+    assert query.state.reply == expected
+    if not live:
+        assert not any(event.type == "agent_message.delta" for event in events)
+    assert candidates == [expected]
+    assert query.context.export_snapshot()["history"][-1]["content"] == expected
+    completed = _completed(events)
+    assert [item["text"] for item in completed] == (["First.", "Second."] if distinct_items else ["First.Second."])
+    assert all(item["source"] == "model_final" and item["status"] == "completed" for item in completed)
+    raw_events = [event.to_dict() for event in query.journal.read_events()]
+    assistant = next(event["payload"] for event in reversed(raw_events) if event["event_type"] == "assistant")
+    assert assistant["content"] == expected and assistant["item_id"] == completed[-1]["id"]
+    message = build_subagent_transcript_messages({"events": raw_events})[-1]
+    blocks = [block for block in message["blocks"] if block["type"] == "text"]
+    assert message["content"] == expected
+    assert [block["item_id"] for block in blocks] == [item["id"] for item in completed]
+    assert [block["content"] for block in blocks] == [item["text"] for item in completed]
+
+
 @pytest.mark.parametrize("suffix", ["`", "``", "```", "<thi", "<|"])
 def test_query_done_releases_held_literal_suffix_to_original_answer_item(tmp_path, suffix):
     expected = "Literal " + suffix
@@ -147,6 +188,16 @@ def test_query_nonlive_done_retains_literal_suffix_without_synthetic_delta(tmp_p
     assert query.state.reply == "Literal `"
     assert not any(event.type == "agent_message.delta" for event in events)
     assert _completed(events)[-1]["text"] == "Literal `"
+
+
+def test_nonlive_final_reclassification_keeps_the_same_item_prefix(tmp_path):
+    query = make_boundary_query(tmp_path, [[
+        _text("First.", phase=""), _text("", lifecycle="end"), _text("Second."), _done(),
+    ]], settings=AgentSettings(max_iterations=3, live_text_streaming=False))
+    events = asyncio.run(collect_boundary_query(query))
+    assert query.state.reply == "First.Second."
+    assert not any(event.type == "agent_message.delta" for event in events)
+    assert [(item["id"], item["text"]) for item in _completed(events)] == [("answer", "First.Second.")]
 
 
 def test_query_eof_releases_original_item_tail_before_protocol_failure_without_accepting_answer(tmp_path):
@@ -297,3 +348,45 @@ def test_query_steer_releases_held_delimiter_before_cancelling_original_item(tmp
     assert any(event.type == "agent_message.delta" and event.data["item_id"] == "steered-item" and event.data["delta"] == "`" for event in events)
     assert query.state.reply == "Steered reply"
     assert _completed(events)[-1]["id"] == "steer-result"
+
+
+@pytest.mark.parametrize("phase", ["final_answer", "", "commentary"])
+@pytest.mark.parametrize("later_tool", [False, True])
+def test_completed_assistant_item_mailbox_boundary_and_later_tool_receipt(tmp_path, phase, later_tool):
+    inputs = TurnInputQueue()
+    observations = []
+
+    async def first_round():
+        yield _text("A real completed message", item="completed-item", phase=phase)
+        yield _text("", item="completed-item", phase=phase, lifecycle="end")
+        observations.append(("part_end", inputs.mailbox_deliverable(), inputs.turn_epoch))
+        yield StreamEvent(type=StreamEventType.TEXT_CHUNK, item_id="completed-item", phase=phase,
+                          lifecycle="item_completed", provider_items=[{
+                              "type": "message", "role": "assistant", "phase": phase or None,
+                              "content": [{"type": "output_text", "text": "A real completed message"}],
+                          }])
+        observations.append(("item_done", inputs.mailbox_deliverable(), inputs.turn_epoch))
+        if later_tool:
+            yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls_committed=True,
+                              tool_calls=[ToolCallEvent("following-tool", "boundary_read", {})])
+            observations.append(("tool_done", inputs.mailbox_deliverable(), inputs.turn_epoch))
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+        else:
+            if phase == "commentary":
+                yield _text("Final reply", item="final-reply")
+            yield _done()
+
+    rounds = [first_round]
+    if later_tool:
+        rounds.append([_text("Final reply", item="final-reply"), _done()])
+    query = make_boundary_query(tmp_path, rounds)
+    query.submission.runtime.run_context.turn_input_queue = inputs
+    events = asyncio.run(collect_boundary_query(query))
+    assert observations[0][1] is True
+    assert observations[1][1] is (phase == "commentary")
+    assert len({row[2] for row in observations}) == 1
+    if later_tool:
+        assert observations[2][1] is True
+        assert any(event.type == "tool_result" and event.data["id"] == "following-tool" for event in events)
+    assert any(event.type == "agent.run.completed" for event in events)
+    assert query.state.reply == ("Final reply" if later_tool or phase == "commentary" else "A real completed message")

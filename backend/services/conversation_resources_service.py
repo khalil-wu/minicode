@@ -30,7 +30,10 @@ def conversation_resource_page(
             "media_type": meta.media_type, "size_bytes": meta.size,
             "occurred_at": meta.created_at * 1000, "execution_result": False,
         }
-    for artifact_id, metadata in session.attachment_store.list_metadata(conversation_id=conversation_id, workspace_root=workspace_root):
+    attachment_failures: list[tuple[str, Exception]] = []
+    for artifact_id, metadata in session.attachment_store.list_metadata(
+        conversation_id=conversation_id, workspace_root=workspace_root, read_errors=attachment_failures,
+    ):
         attachment = metadata.get("attachment", {})
         items[f"attachment:{artifact_id}"] = {
             "id": f"attachment:{artifact_id}", "artifact_id": artifact_id,
@@ -96,8 +99,15 @@ def conversation_resource_page(
     if after and start == 0:
         raise ChatApiServiceError(409, "The resource page changed. Refresh the list.")
     page = visible[start:start + limit]
+    # A malformed record cannot establish its owner. Report the incomplete
+    # inventory without disclosing another workspace's ids or local paths.
+    read_errors = [{
+        "artifact_id": "", "error_type": type(error).__name__,
+        "message": f"附件记录无法读取（{type(error).__name__}）；部分资源可能未列出。",
+    } for _, error in attachment_failures]
     return {"conversation_id": conversation_id, "workspace_root": workspace_root, "items": page,
-            "total": len(visible), "has_more": start + len(page) < len(visible), "after": page[-1]["id"] if page else ""}
+            "total": len(visible), "has_more": start + len(page) < len(visible), "after": page[-1]["id"] if page else "",
+            "read_errors": read_errors}
 
 
 def background_command_detail(session: Any, conversation_id: str, command_id: str, *, cursor: int, max_chars: int) -> dict[str, Any]:

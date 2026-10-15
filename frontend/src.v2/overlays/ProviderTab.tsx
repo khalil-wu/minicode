@@ -1,3 +1,4 @@
+import { useI18n, type Translate, type TranslationKey } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "lucide-react";
@@ -139,6 +140,7 @@ export const ProviderTab = ({
   searchTarget?: string;
   isActive?: boolean;
 }) => {
+  const { t: tr } = useI18n();
   const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const activeConversationId = useAppStore((state) => state.conversationId);
   const oauthFlow = useAppStore((state) => {
@@ -388,7 +390,7 @@ export const ProviderTab = ({
   const oauthAction = async (action: "login" | "logout") => {
     const owner = activeConversationId?.trim();
     if (!owner) {
-      pushToast("请先打开一个会话，再进行提供商 OAuth 登录。", "warning");
+      pushToast(tr("请先打开一个会话，再进行提供商 OAuth 登录。"), "warning");
       return;
     }
     if (!beginOperation("oauth")) return;
@@ -400,10 +402,10 @@ export const ProviderTab = ({
         conversation_id: owner,
       };
       const result = await sendClientCommandAwaitResult(command, command.type, { timeoutMs: 300_000 });
-      if (!commandResultSucceeded(result)) throw new Error(String((result as { message?: string }).message || "OAuth 操作失败"));
+      if (!commandResultSucceeded(result)) throw new Error(String((result as { message?: string }).message || tr("OAuth 操作失败")));
       setOauthConfigured(action === "login");
       useAppStore.getState().clearProviderOAuthFlow(owner, providerId);
-      pushToast(action === "login" ? "提供商已登录" : "已退出提供商登录", "success");
+      pushToast(action === "login" ? tr("提供商已登录") : tr("已退出提供商登录"), "success");
     } catch (error) {
       const message = formatProviderError(error);
       const state = useAppStore.getState();
@@ -416,7 +418,7 @@ export const ProviderTab = ({
         message,
         updatedAt: Date.now(),
       });
-      pushToast(`OAuth 操作失败：${message}`, "error");
+      pushToast(tr("OAuth 操作失败：{v0}", { v0: message }), "error");
     } finally {
       endOperation("oauth");
     }
@@ -424,7 +426,7 @@ export const ProviderTab = ({
 
   const openOAuthTarget = async (target: string) => {
     if (!isSafeOAuthUrl(target)) {
-      pushToast("OAuth 链接不是安全的 HTTP(S) 地址，已拒绝打开。", "error");
+      pushToast(tr("OAuth 链接不是安全的 HTTP(S) 地址，已拒绝打开。"), "error");
       return;
     }
     try {
@@ -436,9 +438,9 @@ export const ProviderTab = ({
         if (popup) popup.opener = null;
         opened = Boolean(popup);
       }
-      if (!opened) pushToast("浏览器未能打开授权链接，请检查弹窗设置后重试。", "warning");
+      if (!opened) pushToast(tr("浏览器未能打开授权链接，请检查弹窗设置后重试。"), "warning");
     } catch (error) {
-      pushToast(`打开授权链接失败：${formatProviderError(error)}`, "error");
+      pushToast(tr("打开授权链接失败：{v0}", { v0: formatProviderError(error) }), "error");
     }
   };
 
@@ -515,10 +517,10 @@ export const ProviderTab = ({
     const key = historyEntryKey(entry, index);
     if (!beginOperation("delete")) return;
     const confirmed = await showConfirm({
-      title: "删除提供商配置",
-      message: `确定删除“${historyLabel(entry)}”吗？保存的配置和凭据将被移除。`,
-      confirmLabel: "删除",
-      cancelLabel: "取消",
+      title: tr("删除提供商配置"),
+      message: tr("确定删除“{v0}”吗？保存的配置和凭据将被移除。", { v0: historyLabel(entry) }),
+      confirmLabel: tr("删除"),
+      cancelLabel: tr("取消"),
       danger: true,
     });
     if (!confirmed) {
@@ -539,7 +541,7 @@ export const ProviderTab = ({
           wire_api: entry.wire_api || "",
           clear_api_key: true,
         }),
-      }, { timeoutMessage: "删除提供商配置超时，请重试。" });
+      }, { timeoutMessage: tr("删除提供商配置超时，请重试。") });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText));
@@ -548,9 +550,9 @@ export const ProviderTab = ({
       settingsPayloadRef.current = savedPayload;
       onSettingsPayloadChange?.(savedPayload);
       applyProviderSection(provider, savedOrHistorySectionForUiProvider(savedPayload, provider));
-      pushToast("提供商配置已删除", "success");
+      pushToast(tr("提供商配置已删除"), "success");
     } catch (error) {
-      pushToast(`提供商删除失败：${formatProviderError(error)}`, "error");
+      pushToast(tr("提供商删除失败：{v0}", { v0: formatProviderError(error) }), "error");
     } finally {
       setDeletingHistoryKey("");
       endOperation("delete");
@@ -630,7 +632,7 @@ export const ProviderTab = ({
         method: "PUT",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload(draft, { activate: options.activate })),
-      }, { timeoutMessage: "保存提供商配置超时，请重试。" });
+      }, { timeoutMessage: tr("保存提供商配置超时，请重试。") });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText));
@@ -679,7 +681,7 @@ export const ProviderTab = ({
           conversation_id: conversationId, workspace_root: workspaceRoot,
           source: options.activate ? "settings.provider.activate" : "settings.provider.save",
         }, "llm.config.set", { silent: true });
-        if (!commandResultSucceeded(result)) throw new Error(result.message || "无法应用到发起会话");
+        if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法应用到发起会话"));
       }
       const composerModels = selectableModelsForProvider(
         section?.available_models ?? draft.availableModelList,
@@ -718,8 +720,8 @@ export const ProviderTab = ({
       if (!options.quiet) {
         pushToast(
           options.activate
-            ? `提供商已启用 · 模型：${active || draft.modelName}`
-            : `提供商已保存 · 模型：${active || draft.modelName}`,
+            ? tr("提供商已启用 · 模型：{v0}", { v0: active || draft.modelName })
+            : tr("提供商已保存 · 模型：{v0}", { v0: active || draft.modelName }),
           "success",
         );
       }
@@ -727,7 +729,7 @@ export const ProviderTab = ({
       if (!options.activate) { detailDrafts.current.delete(detailKey.current); detailKey.current = ""; }
       clearDetailDraftPin();
     } catch (error) {
-      pushToast(`${profileSaved ? "提供商已保存，但应用失败" : "提供商保存失败"}：${formatProviderError(error)}`, "error");
+      pushToast(`${profileSaved ? tr("提供商已保存，但应用失败") : tr("提供商保存失败")}：${formatProviderError(error)}`, "error");
     } finally {
       setSaving(false);
       endOperation("save");
@@ -814,7 +816,7 @@ export const ProviderTab = ({
     if (!nextId || isDraftModelId(nextId)) return isDraftModelId(previousId) ? "" : previousId;
     if (nextId === previousId) return previousId;
     if (availableModelList.some((item) => item === nextId && item !== previousId)) {
-      pushToast("这个模型已经添加。", "warning");
+      pushToast(tr("这个模型已经添加。"), "warning");
       return previousId;
     }
 
@@ -884,17 +886,17 @@ export const ProviderTab = ({
         method: "POST",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload({ ...draft, modelName: modelId }, { includeProvider: true })),
-      }, { timeoutMessage: "模型鉴权检查超时，请重试。" });
+      }, { timeoutMessage: tr("模型鉴权检查超时，请重试。") });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText));
       }
       const result = await res.json() as LLMCheckResult;
       setModelAuthState((current) => ({ ...current, [modelId]: result.ok ? "ok" : "error" }));
-      pushToast(`${modelId}：${result.ok ? "鉴权通过" : (result.message || "鉴权失败")}`, result.ok ? "success" : "error");
+      pushToast(`${modelId}：${result.ok ? tr("鉴权通过") : (result.message || tr("鉴权失败"))}`, result.ok ? "success" : "error");
     } catch (error) {
       setModelAuthState((current) => ({ ...current, [modelId]: "error" }));
-      pushToast(`模型鉴权失败：${formatProviderError(error)}`, "error");
+      pushToast(tr("模型鉴权失败：{v0}", { v0: formatProviderError(error) }), "error");
     } finally {
       endOperation("check");
     }
@@ -909,7 +911,7 @@ export const ProviderTab = ({
         method: "POST",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload(undefined, { includeProvider: true })),
-      }, { timeoutMessage: "发现模型超时，请检查接口后重试。" });
+      }, { timeoutMessage: tr("发现模型超时，请检查接口后重试。") });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText));
@@ -950,15 +952,15 @@ export const ProviderTab = ({
         };
         setModelsStatus("success");
         applyCapabilitySection(provider, nextSection, nextModel);
-        pushToast(`已获取 ${discovered.length} 个模型，可在新增映射中选择。`, "success");
+        pushToast(tr("已获取 {v0} 个模型，可在新增映射中选择。", { v0: discovered.length }), "success");
       } else {
         setModelsStatus("error");
         setModelsSource("");
-        pushToast(modelDiscoveryFailureSummary(data), data.retryable ? "warning" : "error");
+        pushToast(modelDiscoveryFailureSummary(tr, data), data.retryable ? "warning" : "error");
       }
     } catch (error) {
       setModelsStatus("error");
-      pushToast(`模型发现失败：${formatProviderError(error)}`, "error");
+      pushToast(tr("模型发现失败：{v0}", { v0: formatProviderError(error) }), "error");
     } finally {
       endOperation("models");
     }
@@ -969,9 +971,9 @@ export const ProviderTab = ({
     if (name) return name;
     try {
       const url = new URL(String(entry.base_url || ""));
-      return url.host || entry.base_url || entry.model || "已保存配置";
+      return url.host || entry.base_url || entry.model || tr("已保存配置");
     } catch {
-      return entry.base_url || entry.model || "已保存配置";
+      return entry.base_url || entry.model || tr("已保存配置");
     }
   };
 
@@ -980,14 +982,14 @@ export const ProviderTab = ({
       const url = new URL(value);
       return url.host || value;
     } catch {
-      return value || "未配置接口";
+      return value || tr("未配置接口");
     }
   };
 
   const providerTypeLabel = (nextProvider: ProviderId) =>
     nextProvider === "custom"
-      ? "自定义网关"
-      : PROVIDERS.find((item) => item.id === nextProvider)?.label ?? "提供商";
+      ? tr("自定义网关")
+      : PROVIDERS.find((item) => item.id === nextProvider)?.label ?? tr("提供商");
 
   const wireApiLabel = (wireApi: string) => {
     const normalized = wireApi.trim().toLowerCase();
@@ -1006,7 +1008,7 @@ export const ProviderTab = ({
   const fallbackCardTitle = (nextProvider: ProviderId, section: ProviderSection) => {
     if (nextProvider === "custom") {
       const host = section.base_url ? hostLabel(section.base_url) : "";
-      return host && host !== "未配置接口" ? host : "自定义网关";
+      return host && host !== tr("未配置接口") ? host : tr("自定义网关");
     }
     return providerTypeLabel(nextProvider);
   };
@@ -1033,7 +1035,7 @@ export const ProviderTab = ({
         provider: entryProvider,
         title: historyLabel(entry),
         subtitle: providerTypeLabel(entryProvider),
-        model: section.model || "选择模型",
+        model: section.model || tr("选择模型"),
         wireApi: effectiveCustomWireApi(
           entryProvider,
           section.base_url || "",
@@ -1065,19 +1067,19 @@ export const ProviderTab = ({
     if (!url || oauthTargets.some((target) => target.url === url)) return;
     oauthTargets.push({ url, label });
   };
-  addOAuthTarget(oauthFlow?.url, "授权页面");
-  addOAuthTarget(oauthFlow?.verificationUri, "设备验证页面");
-  for (const link of oauthFlow?.links ?? []) addOAuthTarget(link.url, link.label || "相关页面");
+  addOAuthTarget(oauthFlow?.url, tr("授权页面"));
+  addOAuthTarget(oauthFlow?.verificationUri, tr("设备验证页面"));
+  for (const link of oauthFlow?.links ?? []) addOAuthTarget(link.url, link.label || tr("相关页面"));
 
   const providerList = (
     <div className="provider-settings">
       <div className="provider-settings-header">
         <div className="provider-settings-heading">
-          <h3>模型提供商</h3>
+          <h3>{tr("模型提供商")}</h3>
         </div>
         <button type="button" onClick={addProvider} disabled={busy} className="provider-add-button">
           <Plus size={14} />
-          <span>添加提供商</span>
+          <span>{tr("添加提供商")}</span>
         </button>
       </div>
 
@@ -1104,7 +1106,7 @@ export const ProviderTab = ({
                 />
                 <span className="provider-card-copy">
                   <span className="provider-card-title">{card.title}</span>
-                  <span className="provider-card-url">{card.section.base_url || "未配置接口地址"}</span>
+                  <span className="provider-card-url">{card.section.base_url || tr("未配置接口地址")}</span>
                   <span className="provider-card-meta">
                     <span>{card.subtitle}</span>
                     <i aria-hidden="true" />
@@ -1118,8 +1120,8 @@ export const ProviderTab = ({
                   onClick={() => editProviderCard(card)}
                   disabled={busy}
                   className="provider-icon-action"
-                  aria-label={`编辑 ${card.title}`}
-                  title="编辑"
+                  aria-label={tr("编辑 {v0}", { v0: card.title })}
+                  title={tr("编辑")}
                 >
                   <Pencil size={14} />
                 </button>
@@ -1129,11 +1131,11 @@ export const ProviderTab = ({
                   disabled={active || busy}
                   className="provider-use-action"
                   data-active={active ? "true" : "false"}
-                  aria-label={active ? `${card.title} 已启用` : `使用 ${card.title}`}
-                  title={active ? "已启用" : "使用提供商"}
+                  aria-label={active ? tr("{v0} 已启用", { v0: card.title }) : tr("使用 {v0}", { v0: card.title })}
+                  title={active ? tr("已启用") : tr("使用提供商")}
                 >
                   {active ? <Check size={14} /> : <Play size={14} />}
-                  <span>{active ? "已启用" : "使用"}</span>
+                  <span>{active ? tr("已启用") : tr("使用")}</span>
                 </button>
                 {card.entry && card.historyIndex != null && (
                   <button
@@ -1141,10 +1143,10 @@ export const ProviderTab = ({
                     onClick={() => void deleteHistoryEntry(card.entry!, card.historyIndex!)}
                     disabled={busy}
                     className="provider-icon-action provider-delete-action"
-                    title="删除已保存的提供商"
+                    title={tr("删除已保存的提供商")}
                     aria-label={deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex)
-                      ? `正在删除提供商 ${card.title}`
-                      : `删除已保存的提供商 ${card.title}`}
+                      ? tr("正在删除提供商 {v0}", { v0: card.title })
+                      : tr("删除已保存的提供商 {v0}", { v0: card.title })}
                   >
                     {deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex)
                       ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
@@ -1158,8 +1160,8 @@ export const ProviderTab = ({
         </div>
       ) : (
         <div className="provider-empty-list">
-          <div className="provider-empty-title">尚未配置提供商</div>
-          <div>添加提供商，填写接口地址、API 密钥和模型即可开始使用。</div>
+          <div className="provider-empty-title">{tr("尚未配置提供商")}</div>
+          <div>{tr("添加提供商，填写接口地址、API 密钥和模型即可开始使用。")}</div>
         </div>
       )}
     </div>
@@ -1168,34 +1170,34 @@ export const ProviderTab = ({
   const providerDetails = (
     <div className="provider-settings provider-settings-detail">
       <div className="provider-detail-header">
-        <button type="button" onClick={openProviderList} disabled={busy} className="provider-detail-back" aria-label="返回提供商列表" title="返回提供商列表"><ArrowLeft /></button>
+        <button type="button" onClick={openProviderList} disabled={busy} className="provider-detail-back" aria-label={tr("返回提供商列表")} title={tr("返回提供商列表")}><ArrowLeft /></button>
         <div className="provider-detail-heading">
           <div>{draftTitle}</div>
-          <p>配置提供商的连接方式、凭据和默认模型。</p>
-          {detailKey.current && <span className="settings-unsaved">编辑草稿会保留</span>}
+          <p>{tr("配置提供商的连接方式、凭据和默认模型。")}</p>
+          {detailKey.current && <span className="settings-unsaved">{tr("编辑草稿会保留")}</span>}
         </div>
       </div>
 
       {searchTarget && ((searchTarget.startsWith("Responses") && effectiveWireApi !== "responses")
-        || (searchTarget === "扩展思考 Token 预算" && effectiveWireApi !== "anthropic")
-        || (searchTarget === "OAuth 登录" && !oauthSupported)) && <Section title={searchTarget}>
-          <p className="settings-page-note">{searchTarget === "OAuth 登录" ? "当前提供商未提供 OAuth 登录；可使用下方 API 密钥配置认证。" : `此选项仅适用于 ${searchTarget.startsWith("Responses") ? "Responses API" : "Anthropic Messages"}。请在提供商列表选择对应接口后配置。`}</p>
+        || (searchTarget === tr("扩展思考 Token 预算") && effectiveWireApi !== "anthropic")
+        || (searchTarget === tr("OAuth 登录") && !oauthSupported)) && <Section title={searchTarget}>
+          <p className="settings-page-note">{searchTarget === tr("OAuth 登录") ? tr("当前提供商未提供 OAuth 登录；可使用下方 API 密钥配置认证。") : tr("此选项仅适用于 {v0}。请在提供商列表选择对应接口后配置。", { v0: searchTarget.startsWith("Responses") ? "Responses API" : "Anthropic Messages" })}</p>
         </Section>}
 
-      <Section title="显示名称">
+      <Section title={tr("显示名称")}>
         <input
           type="text"
-          aria-label="提供商显示名称"
+          aria-label={tr("提供商显示名称")}
           value={displayName}
           disabled={busy}
           onChange={(e) => setDisplayName(e.target.value)}
-          placeholder={provider === "custom" && baseUrl ? hostLabel(baseUrl) : `${providerConfig.label} 配置`}
+          placeholder={provider === "custom" && baseUrl ? hostLabel(baseUrl) : tr("{v0} 配置", { v0: providerConfig.label })}
           spellCheck={false}
           style={{ ...inputStyle, fontFamily: "var(--font-ui)" }}
         />
       </Section>
 
-      <Section title="提供商类型">
+      <Section title={tr("提供商类型")}>
         <div style={presetGridStyle}>
           {PROVIDERS.map((item) => (
             <button
@@ -1213,10 +1215,10 @@ export const ProviderTab = ({
       </Section>
 
       {providerConfig.hasBaseUrl && (
-        <Section title="接口地址">
+        <Section title={tr("接口地址")}>
           <input
             type="text"
-            aria-label="接口地址"
+            aria-label={tr("接口地址")}
             value={baseUrl}
             disabled={busy}
             required
@@ -1230,10 +1232,10 @@ export const ProviderTab = ({
         </Section>
       )}
 
-      <Section title="API 密钥">
+      <Section title={tr("API 密钥")}>
         <input
           type="text"
-          aria-label="API 密钥"
+          aria-label={tr("API 密钥")}
           value={apiKey}
           disabled={busy}
           onChange={(event) => {
@@ -1248,9 +1250,11 @@ export const ProviderTab = ({
       </Section>
 
       {showApiFormat && (
-        <Section title="API 格式">
+        <Section title={tr("API 格式")}>
           <SelectMenu
-            ariaLabel="API 格式"
+            ariaLabel={tr("API 格式")}
+            className="settings-select settings-select-regular"
+            align="end"
             value={customWireApi}
             disabled={busy}
             onValueChange={(value) => updateWireApi(value as CustomWireApi)}
@@ -1263,39 +1267,36 @@ export const ProviderTab = ({
       )}
 
       {showFixedAnthropicFormat && (
-        <Section title="API 格式">
+        <Section title={tr("API 格式")}>
           <div style={readOnlyFormatStyle}>Anthropic Messages</div>
         </Section>
       )}
 
-      <Section title="模型" description="只显示你添加的模型；模型 ID 会原样出现在 Composer 中。">
+      <Section title={tr("模型")} description={tr("只显示你添加的模型；模型 ID 会原样出现在 Composer 中。")}>
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" onClick={discoverModels} disabled={!canDiscoverModels} title={hasRequiredBaseUrl ? "从接口获取模型列表" : "请先填写接口地址"} style={secondaryActionStyle}>
-              <RefreshCw size={14} />{modelsStatus === "loading" ? "正在获取…" : "获取模型列表"}
+            <button type="button" onClick={discoverModels} disabled={!canDiscoverModels} title={hasRequiredBaseUrl ? tr("从接口获取模型列表") : tr("请先填写接口地址")} style={secondaryActionStyle}>
+              <RefreshCw size={14} />{modelsStatus === "loading" ? tr("正在获取…") : tr("获取模型列表")}
             </button>
-            <button type="button" onClick={addModelMapping} disabled={busy} title="添加一个模型映射" style={secondaryActionStyle}>
-              <Plus size={14} />添加模型
-            </button>
+            <button type="button" onClick={addModelMapping} disabled={busy} title={tr("添加一个模型映射")} style={secondaryActionStyle}>
+              <Plus size={14} />{tr("添加模型")}</button>
           </div>
           {modelsStatus !== "idle" && (
             <div style={statusStyle(modelsStatus === "error" ? "error" : modelsStatus === "loading" ? "testing" : "success")}>
-              {modelsStatus === "loading" && "正在获取模型列表…"}
+              {modelsStatus === "loading" && tr("正在获取模型列表…")}
               {modelsStatus === "success" && modelsResult && (
                 <span>
-                  已获取 {discoveredModelList.length} 个候选模型
-                  {modelsResult.source_message ? ` · ${modelsResult.source_message}` : ""}
+                  {tr("已获取 {count} 个候选模型", { count: discoveredModelList.length })}{modelsResult.source_message ? ` · ${modelsResult.source_message}` : ""}
                 </span>
               )}
               {modelsStatus === "error" && (
-                <span>{modelsResult ? modelDiscoveryFailureSummary(modelsResult) : "模型列表获取失败；仍可手动填写模型 ID。"}</span>
+                <span>{modelsResult ? modelDiscoveryFailureSummary(tr, modelsResult) : tr("模型列表获取失败；仍可手动填写模型 ID。")}</span>
               )}
             </div>
           )}
           {availableModelList.length === 0 && (
             <div style={{ padding: "18px 12px", border: "1px dashed var(--border-subtle)", borderRadius: 8, color: "var(--text-tertiary)", fontSize: "var(--mc-font-body)", textAlign: "center" }}>
-              尚未添加模型
-            </div>
+              {tr("尚未添加模型")}</div>
           )}
           {availableModelList.map((modelId) => {
             const metadata = modelMetadata[modelId] ?? {};
@@ -1308,13 +1309,14 @@ export const ProviderTab = ({
               <div key={modelId} className="provider-model-mapping">
                 {discoveredModelList.length > 0 ? (
                   <SelectMenu
-                    ariaLabel={`${modelId} 实际请求模型`}
+                    ariaLabel={tr("{v0} 实际请求模型", { v0: modelId })}
                     value={isDraft ? "" : modelId}
                     disabled={busy}
                     onValueChange={(value) => updateModelMappingId(modelId, value)}
-                    className="mc-select-menu-mono"
+                    className="settings-select settings-select-regular mc-select-menu-mono"
+                    align="end"
                   >
-                    <option value="">选择实际请求模型</option>
+                    <option value="">{tr("选择实际请求模型")}</option>
                     {selectableCandidates.map((candidate) => (
                       <option
                         key={candidate}
@@ -1327,13 +1329,13 @@ export const ProviderTab = ({
                   </SelectMenu>
                 ) : (
                   <input
-                    aria-label={`${modelId} 实际请求模型`}
+                    aria-label={tr("{v0} 实际请求模型", { v0: modelId })}
                     defaultValue={isDraft ? "" : modelId}
                     disabled={busy}
                     onBlur={(event) => {
                       event.target.value = updateModelMappingId(modelId, event.target.value);
                     }}
-                    placeholder="实际请求模型 ID"
+                    placeholder={tr("实际请求模型 ID")}
                     spellCheck={false}
                     style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
                   />
@@ -1342,17 +1344,17 @@ export const ProviderTab = ({
                   type="number"
                   min={0}
                   step={1024}
-                  aria-label={`${modelId} 上下文窗口`}
+                  aria-label={tr("{v0} 上下文窗口", { v0: modelId })}
                   value={metadata.context_window || ""}
                   disabled={busy}
                   onChange={(event) => updateModelContext(modelId, event.target.value)}
-                  placeholder="例如 128000"
+                  placeholder={tr("例如 128000")}
                   style={inputStyle}
                 />
-                <button type="button" onClick={() => void checkModelAuth(modelId)} disabled={busy || isDraft || auth === "checking"} title={isDraft ? "请先选择或填写模型" : "检查该模型鉴权"} style={secondaryActionStyle}>
-                  <ShieldCheck size={14} />{auth === "checking" ? "检查中" : auth === "ok" ? "已通过" : auth === "error" ? "重试" : "鉴权"}
+                <button type="button" onClick={() => void checkModelAuth(modelId)} disabled={busy || isDraft || auth === "checking"} title={isDraft ? tr("请先选择或填写模型") : tr("检查该模型鉴权")} style={secondaryActionStyle}>
+                  <ShieldCheck size={14} />{auth === "checking" ? tr("检查中") : auth === "ok" ? tr("已通过") : auth === "error" ? tr("重试") : tr("鉴权")}
                 </button>
-                <button type="button" onClick={() => removeModelMapping(modelId)} disabled={busy} title="移除模型映射" style={secondaryActionStyle} aria-label={`移除 ${modelId}`}><Trash2 size={14} /></button>
+                <button type="button" onClick={() => removeModelMapping(modelId)} disabled={busy} title={tr("移除模型映射")} style={secondaryActionStyle} aria-label={tr("移除 {v0}", { v0: modelId })}><Trash2 size={14} /></button>
               </div>
             );
           })}
@@ -1360,17 +1362,17 @@ export const ProviderTab = ({
       </Section>
 
       {(oauthSupported || oauthFlow) && (
-        <Section title="OAuth 登录">
+        <Section title={tr("OAuth 登录")}>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={capabilityValueStyle}>{oauthConfigured ? "已登录" : oauthFlow ? oauthPhaseLabel(oauthFlow.phase) : "未登录"}</span>
+              <span style={capabilityValueStyle}>{oauthConfigured ? tr("已登录") : oauthFlow ? oauthPhaseLabel(tr, oauthFlow.phase) : tr("未登录")}</span>
             {oauthConfigured ? (
-              <button type="button" onClick={() => void oauthAction("logout")} disabled={busy} title="退出 OAuth 登录" style={secondaryActionStyle}>
-                <LogOut size={14} />{activeOperation === "oauth" ? "正在退出…" : "退出登录"}
+              <button type="button" onClick={() => void oauthAction("logout")} disabled={busy} title={tr("退出 OAuth 登录")} style={secondaryActionStyle}>
+                <LogOut size={14} />{activeOperation === "oauth" ? tr("正在退出…") : tr("退出登录")}
               </button>
             ) : (
-              <button type="button" onClick={() => void oauthAction("login")} disabled={busy} title="登录 OAuth 提供商" style={secondaryActionStyle}>
-                <LogIn size={14} />{activeOperation === "oauth" ? "正在登录…" : "登录"}
+              <button type="button" onClick={() => void oauthAction("login")} disabled={busy} title={tr("登录 OAuth 提供商")} style={secondaryActionStyle}>
+                <LogIn size={14} />{activeOperation === "oauth" ? tr("正在登录…") : tr("登录")}
               </button>
             )}
             </div>
@@ -1378,24 +1380,23 @@ export const ProviderTab = ({
             {oauthFlow && (
               <div style={oauthFlowPanelStyle} aria-live="polite">
                 <div style={oauthFlowHeaderStyle}>
-                  <strong>{oauthPhaseLabel(oauthFlow.phase)}</strong>
+                  <strong>{oauthPhaseLabel(tr, oauthFlow.phase)}</strong>
                   <span>{oauthFlow.provider}</span>
                 </div>
                 {oauthFlow.instructions && <p style={oauthFlowMessageStyle}>{oauthFlow.instructions}</p>}
                 {oauthFlow.message && <p style={oauthFlowMessageStyle}>{oauthFlow.message}</p>}
                 {oauthFlow.userCode && (
                   <div style={oauthDeviceCodeRowStyle}>
-                    <span>设备码</span>
+                    <span>{tr("设备码")}</span>
                     <code style={oauthDeviceCodeStyle}>{oauthFlow.userCode}</code>
                   </div>
                 )}
                 {(oauthFlow.intervalSeconds || oauthFlow.expiresInSeconds) && (
                   <div style={oauthMetaStyle}>
-                    {oauthFlow.intervalSeconds && <span>轮询间隔：{oauthFlow.intervalSeconds} 秒</span>}
+                    {oauthFlow.intervalSeconds && <span>{tr("轮询间隔：")}{oauthFlow.intervalSeconds} {tr("秒")}</span>}
                     {oauthFlow.expiresInSeconds && (
                       <span>
-                        有效期：{oauthFlow.expiresInSeconds} 秒
-                        {oauthRemainingSeconds !== undefined ? ` · 剩余 ${formatOAuthDuration(oauthRemainingSeconds)}` : ""}
+                        {tr("有效期：")}{oauthFlow.expiresInSeconds} {tr("秒")}{oauthRemainingSeconds !== undefined ? tr(" · 剩余 {v0}", { v0: formatOAuthDuration(oauthRemainingSeconds) }) : ""}
                       </span>
                     )}
                   </div>
@@ -1410,10 +1411,9 @@ export const ProviderTab = ({
                       type="button"
                       onClick={() => void openOAuthTarget(target.url)}
                       style={secondaryActionStyle}
-                      title={`在系统浏览器中打开${target.label}`}
+                      title={tr("在系统浏览器中打开{v0}", { v0: target.label })}
                     >
-                      <ExternalLink size={14} />打开
-                    </button>
+                      <ExternalLink size={14} />{tr("打开")}</button>
                   </div>
                 ))}
               </div>
@@ -1424,57 +1424,58 @@ export const ProviderTab = ({
 
       <details style={{ borderTop: "1px solid var(--border-subtle)", marginTop: 4 }}>
         <summary style={{ cursor: "pointer", padding: "10px 0", color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
-          高级设置
-        </summary>
+          {tr("高级设置")}</summary>
         <div style={{ display: "grid", gap: 10 }}>
       <Section
-        title="网络连接"
+        title={tr("网络连接")}
         description={proxyMode === "direct"
-          ? "该 Provider 将忽略 MiniCode 与系统进程代理，直接连接上方接口地址。"
-          : "遵循 MiniCode 的 LLM 代理、系统进程代理与 NO_PROXY 绕过规则。"}
+          ? tr("该 Provider 将忽略 MiniCode 与系统进程代理，直接连接上方接口地址。")
+          : tr("遵循 MiniCode 的 LLM 代理、系统进程代理与 NO_PROXY 绕过规则。")}
       >
         <SelectMenu
-          ariaLabel="网络连接"
+          ariaLabel={tr("网络连接")}
+          className="settings-select settings-select-regular"
+          align="end"
           value={proxyMode}
           disabled={busy}
           onValueChange={(value) => setProxyMode(value as ProviderProxyMode)}
         >
-          <option value="inherit">跟随全局代理</option>
-          <option value="direct">直连（忽略代理）</option>
+          <option value="inherit">{tr("跟随全局代理")}</option>
+          <option value="direct">{tr("直连（忽略代理）")}</option>
         </SelectMenu>
       </Section>
 
       {modelName && !isDraftModelId(modelName) && (
-        <Section title="当前模型行为" description={`选择默认模型；下方行为设置仅应用于 ${modelName}，随提供商配置保存。`}>
-          <SelectMenu ariaLabel="默认模型" value={modelName} onValueChange={selectModel} disabled={busy}>
+        <Section title={tr("当前模型行为")} description={tr("选择默认模型；下方行为设置仅应用于 {v0}，随提供商配置保存。", { v0: modelName })}>
+          <SelectMenu ariaLabel={tr("默认模型")} className="settings-select settings-select-regular" align="end" value={modelName} onValueChange={selectModel} disabled={busy}>
             {configuredModelList.map((id) => <option key={id} value={id}>{id}</option>)}
           </SelectMenu>
           <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
-            <span>工具调用模式</span>
-            <SelectMenu ariaLabel="工具调用模式" disabled={busy}
+            <span>{tr("工具调用模式")}</span>
+            <SelectMenu ariaLabel={tr("工具调用模式")} className="settings-select settings-select-regular" align="end" disabled={busy}
               value={modelMetadata[modelName]?.tool_mode ?? "default"}
               onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
                 ...previous[modelName], tool_mode: value === "default" ? undefined : value as ProviderModelMetadata["tool_mode"],
               } }))}>
-              <option value="default">跟随 MiniCode 默认</option>
-              <option value="direct">直接工具</option>
-              <option value="code_mode">直接工具与代码编排</option>
-              <option value="code_mode_only">仅代码编排</option>
+              <option value="default">{tr("跟随 MiniCode 默认")}</option>
+              <option value="direct">{tr("直接工具")}</option>
+              <option value="code_mode">{tr("直接工具与代码编排")}</option>
+              <option value="code_mode_only">{tr("仅代码编排")}</option>
             </SelectMenu>
           </label>
           {(effectiveWireApi === "responses" || effectiveWireApi === "anthropic") && (
             <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
-              <span>提供商联网搜索</span>
-              <SelectMenu ariaLabel="提供商联网搜索" disabled={busy}
+              <span>{tr("提供商联网搜索")}</span>
+              <SelectMenu ariaLabel={tr("提供商联网搜索")} className="settings-select settings-select-regular" align="end" disabled={busy}
                 value={modelMetadata[modelName]?.supports_hosted_web_search == null ? "auto" : modelMetadata[modelName]?.supports_hosted_web_search ? "supported" : "disabled"}
                 onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
                   ...previous[modelName], supports_hosted_web_search: value === "auto" ? null : value === "supported",
                 } }))}>
-                <option value="auto">自动识别官方接口</option>
-                <option value="supported">该接口支持联网搜索</option>
-                <option value="disabled">禁用</option>
+                <option value="auto">{tr("自动识别官方接口")}</option>
+                <option value="supported">{tr("该接口支持联网搜索")}</option>
+                <option value="disabled">{tr("禁用")}</option>
               </SelectMenu>
-              <small>兼容接口需确认支持联网搜索；未启用时可使用已配置的 Tavily 或 MCP 搜索工具。</small>
+              <small>{tr("兼容接口需确认支持联网搜索；未启用时可使用已配置的 Tavily 或 MCP 搜索工具。")}</small>
             </label>
           )}
           {effectiveWireApi === "responses" && (
@@ -1488,7 +1489,7 @@ export const ProviderTab = ({
                   setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], supports_custom_tools: enabled } }));
                 }}
               />
-              <span>原生补丁输入（需要模型及接口支持 custom tools）</span>
+              <span>{tr("原生补丁输入（需要模型及接口支持 custom tools）")}</span>
             </label>
           )}
           {effectiveWireApi === "responses" && (
@@ -1502,26 +1503,26 @@ export const ProviderTab = ({
                   setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], responses_websocket: enabled } }));
                 }}
               />
-              <span>WebSocket 增量传输（接口支持时启用）</span>
+              <span>{tr("WebSocket 增量传输（接口支持时启用）")}</span>
             </label>
           )}
           {effectiveWireApi === "responses" && (
             <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
-              <span>上下文压缩方式</span>
-              <SelectMenu ariaLabel="上下文压缩方式" disabled={busy}
+              <span>{tr("上下文压缩方式")}</span>
+              <SelectMenu ariaLabel={tr("上下文压缩方式")} className="settings-select settings-select-regular" align="end" disabled={busy}
                 value={modelMetadata[modelName]?.native_compaction == null ? "auto" : modelMetadata[modelName]?.native_compaction ? "native" : "local"}
                 onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
                   ...previous[modelName], native_compaction: value === "auto" ? null : value === "native",
                 } }))}>
-                <option value="auto">自动选择</option>
-                <option value="native">提供商原生压缩</option>
-                <option value="local">文本摘要</option>
+                <option value="auto">{tr("自动选择")}</option>
+                <option value="native">{tr("提供商原生压缩")}</option>
+                <option value="local">{tr("文本摘要")}</option>
               </SelectMenu>
-              <small>原生压缩需要接口支持；生成的加密上下文需继续使用同一提供商的 Responses 接口。</small>
+              <small>{tr("原生压缩需要接口支持；生成的加密上下文需继续使用同一提供商的 Responses 接口。")}</small>
             </label>
           )}
           <label style={{ display: "grid", gap: 6 }}>
-            <span>模型附加指令</span>
+            <span>{tr("模型附加指令")}</span>
             <textarea
               rows={4}
               disabled={busy}
@@ -1530,7 +1531,7 @@ export const ProviderTab = ({
                 const instructions = event.target.value;
                 setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], model_instructions: instructions } }));
               }}
-              placeholder="留空使用 MiniCode 默认指令；填写该模型需要的补充指导。"
+              placeholder={tr("留空使用 MiniCode 默认指令；填写该模型需要的补充指导。")}
               style={{ ...inputStyle, width: "100%", resize: "vertical" }}
             />
           </label>
@@ -1538,33 +1539,33 @@ export const ProviderTab = ({
       )}
 
       {responsesCachingEnabled && (
-        <Section title="Responses 提示词缓存" description="仅 Responses API 使用；Chat Completions 与 Anthropic Messages 不发送这个字段。">
+        <Section title={tr("Responses 提示词缓存")} description={tr("仅 Responses API 使用；Chat Completions 与 Anthropic Messages 不发送这个字段。")}>
           <SettingSelect
-            label="提示词缓存"
+            label={tr("提示词缓存")}
             value={promptCacheRetention || "off"}
             disabled={busy}
             onChange={(value) => setPromptCacheRetention(value === "off" ? "" : value)}
             options={[
-              { value: "24h", label: "保留 24 小时" },
-              { value: "in_memory", label: "仅内存" },
-              { value: "off", label: "关闭" },
+              { value: "24h", label: tr("保留 24 小时") },
+              { value: "in_memory", label: tr("仅内存") },
+              { value: "off", label: tr("关闭") },
             ]}
           />
         </Section>
       )}
 
       {effectiveWireApi === "responses" && (
-        <Section title="Responses 推理摘要" description="控制是否请求 Provider 返回可见的推理摘要。">
+        <Section title={tr("Responses 推理摘要")} description={tr("控制是否请求 Provider 返回可见的推理摘要。")}>
           <div style={{ display: "grid", gap: 10 }}>
             <SettingSelect
-              label="推理摘要"
+              label={tr("推理摘要")}
               value={responsesReasoningSummary || "off"}
               disabled={busy}
               onChange={setResponsesReasoningSummary}
               options={[
-                { value: "off", label: "关闭" },
-                { value: "auto", label: "自动" },
-                { value: "detailed", label: "详细" },
+                { value: "off", label: tr("关闭") },
+                { value: "auto", label: tr("自动") },
+                { value: "detailed", label: tr("详细") },
               ]}
             />
           </div>
@@ -1572,12 +1573,12 @@ export const ProviderTab = ({
       )}
 
       {(backendProvider(provider) === "anthropic" || effectiveWireApi === "anthropic") && (
-        <Section title="扩展思考 Token 预算" description="仅 Anthropic Messages 使用；0 表示关闭扩展思考，不是上下文窗口。">
+        <Section title={tr("扩展思考 Token 预算")} description={tr("仅 Anthropic Messages 使用；0 表示关闭扩展思考，不是上下文窗口。")}>
           <input
             type="number"
             min={0}
             step={512}
-            aria-label="思考预算"
+            aria-label={tr("思考预算")}
             value={thinkingBudget}
             disabled={busy}
             onChange={(e) => setThinkingBudget(Math.max(0, Number(e.target.value) || 0))}
@@ -1587,28 +1588,28 @@ export const ProviderTab = ({
         </Section>
       )}
 
-      <Section title="请求最大输出 Token" description="0 表示自动/未设置，MiniCode 会从请求中省略该字段；正数才会作为本次输出上限发送。">
+      <Section title={tr("请求最大输出 Token")} description={tr("0 表示自动/未设置，MiniCode 会从请求中省略该字段；正数才会作为本次输出上限发送。")}>
         <input
           type="number"
           min={0}
           step={256}
-          aria-label="请求最大输出 Token"
+          aria-label={tr("请求最大输出 Token")}
           value={maxTokens}
           disabled={busy}
           onChange={(event) => setMaxTokens(Math.max(0, Math.trunc(Number(event.target.value) || 0)))}
-          placeholder="0（自动）"
+          placeholder={tr("0（自动）")}
           style={inputStyle}
         />
       </Section>
 
-      <Section title="辅助模型">
+      <Section title={tr("辅助模型")}>
         <input
           type="text"
-          aria-label="辅助模型"
+          aria-label={tr("辅助模型")}
           value={smallFastModel}
           disabled={busy}
           onChange={(e) => setSmallFastModel(e.target.value)}
-          placeholder={modelName || "默认使用主模型"}
+          placeholder={modelName || tr("默认使用主模型")}
           style={inputStyle}
         />
       </Section>
@@ -1616,7 +1617,7 @@ export const ProviderTab = ({
       </details>
 
       <div className="provider-detail-actions" style={actionBarStyle}>
-        <button type="button" onClick={() => void saveProvider()} disabled={!canSaveProvider} title={!hasRequiredBaseUrl ? "请先填写接口地址" : !hasRequiredModel ? "请先添加模型" : hasIncompleteModelMapping ? "请完成或删除空模型行" : "保存提供商"} style={primaryActionStyle}><Save size={14} />{saving ? "正在保存…" : "保存"}</button>
+        <button type="button" onClick={() => void saveProvider()} disabled={!canSaveProvider} title={!hasRequiredBaseUrl ? tr("请先填写接口地址") : !hasRequiredModel ? tr("请先添加模型") : hasIncompleteModelMapping ? tr("请完成或删除空模型行") : tr("保存提供商")} style={primaryActionStyle}><Save size={14} />{saving ? tr("正在保存…") : tr("保存")}</button>
       </div>
     </div>
   );
@@ -1644,13 +1645,13 @@ const isSafeOAuthUrl = (value: string): boolean => {
   }
 };
 
-const oauthPhaseLabel = (phase: string): string => ({
-  auth_url: "等待浏览器授权",
-  device_code: "等待设备码验证",
-  info: "授权提示",
-  progress: "正在授权",
-  error: "授权失败",
-}[phase] || "OAuth 授权");
+const oauthPhaseLabel = (tr: Translate, phase: string): string => ({
+  auth_url: tr("等待浏览器授权"),
+  device_code: tr("等待设备码验证"),
+  info: tr("授权提示"),
+  progress: tr("正在授权"),
+  error: tr("授权失败"),
+}[phase] || tr("OAuth 授权"));
 
 const formatOAuthDuration = (seconds: number): string => {
   const remaining = Math.max(0, Math.floor(seconds));
@@ -1659,7 +1660,7 @@ const formatOAuthDuration = (seconds: number): string => {
   return `${minutes}:${tail}`;
 };
 
-const MODEL_DISCOVERY_FAILURE_LABELS: Record<string, string> = {
+const MODEL_DISCOVERY_FAILURE_LABELS: Record<string, TranslationKey> = {
   configuration_error: "配置不完整",
   authentication_failed: "鉴权失败",
   models_endpoint_not_found: "模型列表接口不存在",
@@ -1670,15 +1671,15 @@ const MODEL_DISCOVERY_FAILURE_LABELS: Record<string, string> = {
   model_discovery_failed: "模型发现失败",
 };
 
-const modelDiscoveryFailureSummary = (result: LLMModelsRefreshResult): string => {
+const modelDiscoveryFailureSummary = (tr: Translate, result: LLMModelsRefreshResult): string => {
   const kind = String(result.failure_kind || "model_discovery_failed").trim();
-  const label = MODEL_DISCOVERY_FAILURE_LABELS[kind] || "模型发现失败";
+  const label = tr(MODEL_DISCOVERY_FAILURE_LABELS[kind] || "模型发现失败");
   const details = [
     result.status_code ? `HTTP ${result.status_code}` : "",
     String(result.message || result.source_message || "").trim(),
     String(result.hint || "").trim(),
-    result.retryable ? "可以重试" : "",
-    "已保留手动输入的模型",
+    result.retryable ? tr("可以重试") : "",
+    tr("已保留手动输入的模型"),
   ].filter(Boolean);
   return [label, ...Array.from(new Set(details))].join(" · ");
 };
@@ -1698,7 +1699,7 @@ const SettingSelect = ({
 }) => (
   <div style={settingSelectRowStyle}>
     <span style={settingSelectLabelStyle}>{label}</span>
-    <SelectMenu ariaLabel={label} value={value} disabled={disabled} onValueChange={onChange}>
+    <SelectMenu ariaLabel={label} className="settings-select settings-select-regular" align="end" value={value} disabled={disabled} onValueChange={onChange}>
       {options.map((option) => (
         <option key={option.value} value={option.value}>{option.label}</option>
       ))}

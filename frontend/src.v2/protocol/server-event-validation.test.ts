@@ -610,6 +610,10 @@ describe("normalizeInboundServerEvent", () => {
       conversation_id: "conversation-1",
       state: "compacted",
     });
+    for (const state of ["compacting", "failed"]) {
+      expect(normalizeInboundServerEvent({ type: "conversation.compaction.updated", conversation_id: "conversation-1",
+        state, summary: state === "compacting" ? "正在压缩上下文。" : "HTTP 400" })).toMatchObject({ state });
+    }
     expect(normalizeInboundServerEvent({
       type: "conversation.summary.updated",
       conversation_id: "conversation-1",
@@ -1119,6 +1123,9 @@ describe("normalizeInboundServerEvent", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { type: _type, ...record } = checkpointEvent();
     expect(normalizeInboundServerEvent(checkpointEvent())).toMatchObject({ id: "cp-1" });
+    for (const path of ["C:\\workspace\\src\\app.ts", "D:\\plans\\outside.md", "\\\\server\\share\\plan.md", "/plans/plan.md"]) {
+      expect(normalizeInboundServerEvent(checkpointEvent({ paths: [path] }))).toMatchObject({ paths: [path] });
+    }
     expect(normalizeInboundServerEvent({
       type: "checkpoint.list",
       conversation_id: "conversation-1",
@@ -1136,7 +1143,7 @@ describe("normalizeInboundServerEvent", () => {
     const invalid = [
       checkpointEvent({ created_at: "not-a-date" }),
       checkpointEvent({ paths: [] }),
-      checkpointEvent({ paths: ["C:\\workspace\\src\\app.ts"] }),
+      checkpointEvent({ paths: ["bad\0path.ts"] }),
       checkpointEvent({ paths: ["src/../secret.ts"] }),
       checkpointEvent({ metadata: deepMetadata }),
       {

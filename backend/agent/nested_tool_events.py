@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from backend.agent.message import AgentEvent
 from backend.agent.query_journal import QueryJournalRecorder
 from backend.agent.run_context import RunContext
+from backend.agent.run_events import mark_model_only_tool_event
 from backend.async_cleanup import to_thread_cancel_safe
 
 _CALLBACK_DRAIN_TIMEOUT_SECONDS = 2.5
@@ -47,6 +48,7 @@ class NestedToolEvents:
     async def publish(self, event: AgentEvent) -> None:
         # Recording stays available during cleanup, after the consumer closes.
         # A tool must not overtake its durable claim even if its UI is slow.
+        mark_model_only_tool_event(event, self.run_context.active_tool_registry)
         await self.journal.record_event_async(event)
         if self._closed:
             raise asyncio.CancelledError

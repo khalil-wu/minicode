@@ -199,6 +199,7 @@ class PromptParts:
     context: str = ""
     project_guidelines: str = ""
     conditional_rules: str = ""
+    skill_context: str = ""
 
     def render_system(self) -> str:
         parts = [self.stable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, self.context]
@@ -216,13 +217,19 @@ class PromptParts:
             f"{instructions}\n</INSTRUCTIONS>"
         ) if instructions else ""
 
+    def render_skill_instructions(self) -> str:
+        return (
+            f"<skills_instructions>\n{self.skill_context.strip()}\n</skills_instructions>"
+            if self.skill_context.strip() else ""
+        )
+
     @classmethod
     def from_sections(cls, sections: list[PromptSection]) -> "PromptParts":
         def joined(layer: PromptLayer) -> str:
             return "\n\n".join(
                 s.content for s in sections
                 if s.layer == layer
-                and s.name not in {"project_guidelines", "conditional_rules"}
+                and s.name not in {"project_guidelines", "conditional_rules", "skill_context"}
                 and s.content.strip()
             )
 
@@ -234,6 +241,9 @@ class PromptParts:
             ),
             conditional_rules="\n\n".join(
                 s.content for s in sections if s.name == "conditional_rules" and s.content.strip()
+            ),
+            skill_context="\n\n".join(
+                s.content for s in sections if s.name == "skill_context" and s.content.strip()
             ),
         )
 
@@ -335,8 +345,8 @@ def _build_tool_runtime_guidance_uncached(
         host_api.append("Multiline commit messages and PR bodies can be passed as UTF-8 files with git commit -F <file> or gh pr create --body-file <file>.")
     if "monitor" in names:
         host_api.append("Continue an owned background command with monitor and its command_id.")
-    if "ask_user" in names:
-        host_api.append("Structured user questions use ask_user in this host.")
+    if "request_user_input" in names:
+        host_api.append("Structured user questions use request_user_input in this host.")
     if "apply_patch" in names:
         host_api.append("apply_patch takes the patch string in its advertised patch argument, not a command array.")
     if "grep_files" in names:
@@ -697,6 +707,8 @@ class PromptBuilderV2:
         model_instructions: str = "",
         model_slug: str = "",
         personality: str | None = None,
+        captured_model_messages: Any = None,
+        has_captured_model: bool = False,
     ) -> PromptParts:
         return PromptParts.from_sections(
             self.build_sections(
@@ -710,6 +722,8 @@ class PromptBuilderV2:
                 model_instructions=model_instructions,
                 model_slug=model_slug,
                 personality=personality,
+                captured_model_messages=captured_model_messages,
+                has_captured_model=has_captured_model,
             )
         )
 
@@ -727,6 +741,8 @@ class PromptBuilderV2:
         model_instructions: str = "",
         model_slug: str = "",
         personality: str | None = None,
+        captured_model_messages: Any = None,
+        has_captured_model: bool = False,
     ) -> list[PromptSection]:
         """Assemble the ordered, named prompt sections.
 
@@ -740,15 +756,17 @@ class PromptBuilderV2:
             if isinstance(prompt_context, dict)
             else ""
         )
-        lightweight_subagent = is_subagent and subagent_type in {
+        source_agent_role = bool(prompt_context.get("source_agent_role")) if isinstance(prompt_context, dict) else False
+        lightweight_subagent = is_subagent and not source_agent_role and subagent_type in {
             "explore",
             "plan",
         }
-        stable_cache_key = f"codex:{model_slug}:{personality}"
+        stable_cache_key = f"codex:{model_slug}:{personality}:{has_captured_model}:{_json_fingerprint(captured_model_messages)}"
         sections: list[PromptSection] = [
             system_prompt_section(
                 "stable_system",
-                lambda: build_stable_prompt(model_slug=model_slug, personality=personality),
+                lambda: (codex_model_instructions(model_slug, personality, model_messages=captured_model_messages)
+                    if has_captured_model else build_stable_prompt(model_slug=model_slug, personality=personality)),
                 layer="stable",
                 cache_key=stable_cache_key,
             ),
@@ -763,7 +781,7 @@ class PromptBuilderV2:
             ("skill_context", skill_context.strip() if skill_context else ""),
             ("project_guidelines", project_guidelines.strip() if project_guidelines else ""),
         ]
-        if is_subagent:
+        if is_subagent and not source_agent_role:
             context_candidates.append(("subagent_reporting", _SUBAGENT_REPORTING_PROMPT))
         # Bounded workers still follow project instructions. Parent memory and
         # conversation facts remain scoped by the delegated task contract.

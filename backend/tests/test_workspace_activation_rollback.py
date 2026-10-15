@@ -153,14 +153,10 @@ def test_workspace_activation_failure_rolls_back_context_root_and_watcher(monkey
     assert session.session_lifecycle.workspace_root == old_root.resolve()
     assert session.mcp_manager is bootstrap.old_manager
     assert active_root == old_root.resolve()
-    assert session.restarted == [new_root.resolve(), old_root.resolve()]
-    assert bootstrap.activated == [new_root.resolve(), old_root.resolve()]
+    assert session.restarted == []
+    assert bootstrap.activated == []
     assert bootstrap.begun == []
-    assert session.registry_refreshes == [
-        (new_root.resolve(), None, False),
-        (new_root.resolve(), bootstrap.new_manager, False),
-        (old_root.resolve(), bootstrap.old_manager, False),
-    ]
+    assert session.registry_refreshes == []
     assert session.events and "index failed" in session.events[-1].data["message"]
 
 

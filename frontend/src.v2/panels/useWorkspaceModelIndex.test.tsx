@@ -9,6 +9,7 @@ import { useWorkspaceModelIndex } from "./useWorkspaceModelIndex";
 const runtime = vi.hoisted(() => ({
   owners: [] as Array<{ root: string; applySnapshot: ReturnType<typeof vi.fn>; addConfigurations: ReturnType<typeof vi.fn>; noteFileChanges: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }>,
   configurationRequests: vi.fn(async (): Promise<string[]> => []),
+  dependencyRequests: vi.fn(async (): Promise<string[]> => []),
   configurationDiagnostics: vi.fn(async (): Promise<Array<{ path: string; message: string }>> => []),
   addConfigurationFiles: vi.fn(async () => {}),
 }));
@@ -18,7 +19,7 @@ vi.hoisted(() => {
 vi.mock("../protocol/workspace", () => ({ readWorkspaceProjectIndex: vi.fn(), readWorkspaceFile: vi.fn() }));
 vi.mock("./monacoLanguageServices", async (original) => ({
   ...await original<typeof import("./monacoLanguageServices")>(),
-  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: runtime.configurationRequests, configurationDiagnostics: runtime.configurationDiagnostics, addConfigurationFiles: runtime.addConfigurationFiles })),
+  syncWorkspaceTypeScriptModels: vi.fn(async () => ({ configurationRequests: runtime.configurationRequests, dependencyRequests: runtime.dependencyRequests, configurationDiagnostics: runtime.configurationDiagnostics, addConfigurationFiles: runtime.addConfigurationFiles })),
 }));
 vi.mock("./workspaceModelIndex", async (original) => ({
   ...await original<typeof import("./workspaceModelIndex")>(),
@@ -70,6 +71,7 @@ describe("workspace index request lifecycle", () => {
     vi.clearAllMocks();
     runtime.owners.length = 0;
     runtime.configurationRequests.mockResolvedValue([]);
+    runtime.dependencyRequests.mockResolvedValue([]);
     runtime.configurationDiagnostics.mockResolvedValue([]);
     runtime.addConfigurationFiles.mockResolvedValue(undefined);
     vi.mocked(readWorkspaceProjectIndex).mockResolvedValue(snapshot());
@@ -96,7 +98,7 @@ describe("workspace index request lifecycle", () => {
     await act(async () => finishFirst(snapshot()));
     expect(screen.getAllByText("ready:1")).toHaveLength(2);
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", false, signal);
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", false, signal, undefined, undefined);
     expect(runtime.owners[0].noteFileChanges.mock.calls.at(-1)![0]).toHaveLength(100);
     await act(async () => finishSecond(snapshot()));
     expect(screen.getAllByText("ready:1")).toHaveLength(2);
@@ -119,7 +121,7 @@ describe("workspace index request lifecycle", () => {
     await act(async () => finish(snapshot()));
     expect(screen.getAllByText("ready:1")).toHaveLength(2);
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(3));
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, signal);
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, signal, undefined, undefined);
     await waitFor(() => expect(screen.getAllByText("ready:1")).toHaveLength(2));
     expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(3);
   });
@@ -176,14 +178,14 @@ describe("workspace index request lifecycle", () => {
     render(<Fixture />);
     fireEvent.click(screen.getByText("初始化"));
     await screen.findByText("ready:1");
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, expect.any(AbortSignal));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, expect.any(AbortSignal), undefined, undefined);
     act(() => useAppStore.setState({ fileChanges: [{ path: "src/main.ts", event: "modified", timestamp: 1, workspaceRoot: "/project", sequence: 1 }] }));
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2));
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", false, expect.any(AbortSignal));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", false, expect.any(AbortSignal), undefined, undefined);
     await screen.findByText("ready:1");
     fireEvent.click(screen.getByText("刷新"));
     await waitFor(() => expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(3));
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, expect.any(AbortSignal));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/project", true, expect.any(AbortSignal), undefined, undefined);
     expect(screen.getByText("true:false")).toBeTruthy();
   });
 
@@ -244,7 +246,7 @@ describe("workspace index request lifecycle", () => {
     await act(async () => finish(snapshot()));
     expect(owner.dispose).toHaveBeenCalledOnce();
     expect(owner.applySnapshot).not.toHaveBeenCalled();
-    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/other", true, expect.any(AbortSignal));
+    expect(readWorkspaceProjectIndex).toHaveBeenLastCalledWith("/other", true, expect.any(AbortSignal), undefined, undefined);
     expect(readWorkspaceProjectIndex).toHaveBeenCalledTimes(2);
   });
 });

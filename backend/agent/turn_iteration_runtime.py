@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.agent.agent_identity import AgentPath
 from backend.agent.skill_activation import activate_turn_skills
 from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
@@ -102,6 +103,20 @@ class TurnIterationRuntime:
             getattr(owner, "tool_registry", None) if owner is not None else None
         ) or self.base_tool_registry
         self.base_tool_registry = active_registry
+        context_tool = active_registry.get_tool("new_context")
+        if snapshot is not None and self.context._context_window_source_config is not None:
+            from backend.agent.token_budget_activation import register_context_window_tools
+            self.context.bind_context_window_model(snapshot)
+            register_context_window_tools(active_registry, self.context._context_window_config)
+        else:
+            self.context.configure_context_window(context_tool.config if context_tool is not None else None)
+        self.context.bind_history_notes(
+            active_registry, snapshot,
+            session_id=self.tool_context.run_context.responses_session_id,
+            agent_name=AgentPath.parse(self.turn_kernel.run_record.agent_path).logical_name,
+        )
+        if self.tool_context.run_context.guardian_async_service is not None:
+            self.tool_context.run_context.guardian_async_service.schedule_prewarm(self.tool_context)
         return self.llm
 
     async def prepare(
@@ -160,6 +175,9 @@ class TurnIterationRuntime:
                 callable(getattr(self.llm, "supports_hosted_web_search", None))
                 and self.llm.supports_hosted_web_search()
             ),
+            supports_search_tool=(snapshot.model_info.supports_search_tool if snapshot is not None and snapshot.model_info is not None
+                else snapshot.config.llm.supports_search_tool if snapshot is not None
+                else getattr(getattr(self.llm, "_settings", None), "supports_search_tool", False)),
             tool_mode=(
                 "code_mode"
                 if getattr(self.agent_session, "active_tool_names", None) is not None
@@ -187,7 +205,10 @@ class TurnIterationRuntime:
             base_policy = active_policy or ToolsetPolicy.default()
             active_policy = replace(
                 base_policy,
-                enabled_tools=frozenset(base_policy.enabled_tools) | loaded_deferred_tools,
+                enabled_tools=frozenset(base_policy.enabled_tools) | frozenset(
+                    self.tool_registry.get_tool_spec(name).policy_identity or name
+                    for name in loaded_deferred_tools
+                ),
             )
         # The execution boundary reads the policy from metadata as well as
         # the schema builder.  Publish the *final* policy after deferred tools
@@ -258,6 +279,18 @@ class TurnIterationRuntime:
             schema_state.deferred_tools_prompt_block
         )
         events: list[AgentEvent] = model_events
+        if self.context.token_budget_enabled and self.context.needs_compaction(self.state, tool_schemas=tool_schemas):
+            # A new user steer is admitted after the previous window rolls
+            # over. Its original text must belong to the new active window.
+            from backend.agent.token_budget_runtime import run_context_window_compaction
+            async for event in run_context_window_compaction(self.context, self.state):
+                events.append(event)
+            if self.state.stopped_reason:
+                return TurnIterationPreparation(tool_schemas, schema_state, events)
+        await self.context.prepare_history_notes_thread_context(
+            state=self.state, session_id=self.tool_context.run_context.responses_session_id,
+            agent_name=AgentPath.parse(self.turn_kernel.run_record.agent_path).logical_name,
+        )
         boundary_input = await self.turn_kernel.take_boundary_input(
             initial_turn_pending=initial_turn_pending,
         )
@@ -274,6 +307,9 @@ class TurnIterationRuntime:
                         self.tool_context.run_context.mcp_manager if self.tool_context.run_context else None,
                         self.tool_context.approval_handler,
                         self.tool_context.run_context.publish_nested_event if self.tool_context.run_context else None,
+                        permission_context=self.tool_context.permission,
+                        permission_profile=self.tool_context.sandbox_policy.resolve(cwd=self.tool_context.workspace_root),
+                        prompted_dependencies=self.context.prompted_mcp_dependencies,
                     ):
                         events.append(skill_event)
                 original_attachments = self.state.attachments
@@ -282,9 +318,37 @@ class TurnIterationRuntime:
                         dict(item) for item in boundary_input.attachments
                     ]
                 try:
-                    await self.context.start_turn(boundary_input.content, self.state)
+                    admitted_message = await self.context.start_turn(boundary_input.content, self.state)
                 finally:
                     self.state.attachments = original_attachments
+                source = str(self.metadata.get("query_source") or "user")
+                if boundary_input.consumed_steer is not None:
+                    # A newly admitted input owns its provenance even when it
+                    # steers a turn originally started by a heartbeat/worker.
+                    origin = boundary_input.consumed_steer.input_origin
+                elif "input_origin" in self.metadata:
+                    origin = self.metadata["input_origin"]
+                else:
+                    origin = "agent" if (
+                        self.turn_kernel.run_record.parent_run_id
+                        or source.startswith(("memory", "side_query", "extension", "guardian"))
+                        or source == "auto_followup"
+                    ) else "user"
+                admitted_message.input_origin = origin
+                accepted_id = (
+                    boundary_input.consumed_steer.original_command.data.get("user_message_id")
+                    if boundary_input.consumed_steer is not None
+                    else self.metadata.get("user_message_id")
+                )
+                evidence = self.context.guardian_evidence
+                accepted_input = (boundary_input.consumed_steer.original_command.data
+                    if boundary_input.consumed_steer is not None else self.metadata)
+                order = accepted_input.get("_guardian_acceptance_order")
+                if order is None:
+                    order = evidence.reserve_order()
+                evidence.record_accepted_message("user", boundary_input.content,
+                    turn_id=str(self.metadata["turn_id"]), message_id=accepted_id,
+                    origin=origin, acceptance_order=order)
                 commit_turn_admission = self.metadata.get("commit_turn_admission")
                 if callable(commit_turn_admission):
                     committed = commit_turn_admission(
@@ -297,7 +361,17 @@ class TurnIterationRuntime:
             except BaseException:
                 self.context.load_snapshot(admission_snapshot)
                 raise
+            report_turn_admission = self.metadata.get("report_turn_admission")
+            if callable(report_turn_admission):
+                reported = report_turn_admission(boundary_input=boundary_input)
+                if hasattr(reported, "__await__"):
+                    await reported
             await self.turn_kernel.acknowledge_boundary_input(boundary_input)
+            publish_turn_admission = self.metadata.get("publish_turn_admission")
+            if callable(publish_turn_admission):
+                published = publish_turn_admission(boundary_input=boundary_input)
+                if hasattr(published, "__await__"):
+                    await published
             for content in pending_turn_context:
                 self.context.append_user_context(content)
             pending_turn_context.clear()

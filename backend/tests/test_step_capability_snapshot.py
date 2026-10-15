@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from backend.tests.test_model_execution_ownership import execute, setup
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
 from backend.tools.tool_search import ToolSearchTool
+from backend.tools.toolsets import ToolsetPolicy
 
 
 class _SnapshotTool(BaseTool):
@@ -119,27 +121,27 @@ def test_deferred_discovery_uses_the_admitted_registry_snapshot():
     state = AgentState(user_message="find an optional tool")
     context = ToolExecutionContext(
         permission=PermissionContext(mode="bypass"),
-        metadata={"_agent_state": state},
+        metadata={"_agent_state": state, "_toolset_policy": ToolsetPolicy(supports_search_tool=True)},
         tool_registry=admitted,
     )
 
     result = asyncio.run(
         ToolSearchTool(base).execute(
-            {"query": f"select:{optional.name}"},
+            {"query": optional.name},
             context=context,
         )
     )
 
-    payload = json.loads(result.content)
-    assert payload["matches"] == []
-    assert payload["activated"] == []
+    assert result.tool_search_output == []
+    assert state.loaded_deferred_tools == set()
     assert optional.name in base.list_tools()
     assert optional.name not in admitted.list_tools()
 
 
-def _cell_report(messages):
-    content = next(message.content for message in reversed(messages) if message.role == "tool")
-    return json.JSONDecoder().raw_decode(content[content.index("{"):])[0]
+def _cell_report(messages, owner):
+    message = next(message for message in reversed(messages) if message.role == "tool")
+    receipt = next(record for record in owner.code_execution.state.tool_calls if record.tool_call_id == message.tool_call_id)
+    return json.JSONDecoder().raw_decode(receipt.result_payload["summary"])[0]
 
 
 @pytest.mark.asyncio
@@ -160,9 +162,9 @@ async def test_yielded_cell_keeps_its_registry_and_selection_but_honors_live_per
     async def behavior(model, messages):
         if len(model.inputs) == 1:
             return ToolCallEvent(id="old-cell", name="tool_exec", arguments={"yield_time_ms": 0, "code":
-                'await tools.gate({}); text(JSON.parse((await tools.tool_search({query:"select:optional_snapshot_tool"})).content).matches); '
+                'await tools.gate({}); text((await tools.tool_search({query:"optional_snapshot_tool"})).tools.map(tool=>tool.name)); '
                 'const r=await tools.snapshot_tool({}); text({content:r.content,error:r.is_error});'})
-        report = _cell_report(messages)
+        report = _cell_report(messages, fixture.owner)
         reports.append(report)
         if len(model.inputs) == 2:
             assert report["status"] == "running"
@@ -176,6 +178,10 @@ async def test_yielded_cell_keeps_its_registry_and_selection_but_honors_live_per
         return None
 
     fixture = setup(tmp_path, monkeypatch, behavior, [old, Gate("gate"), optional])
+    snapshot = fixture.owner.model_execution
+    settings = replace(snapshot.config.llm, supports_search_tool=True)
+    fixture.model._settings = settings
+    fixture.owner.model_execution = replace(snapshot, config=replace(snapshot.config, llm=settings))
     fixture.session.tool_registry.register(ToolSearchTool(fixture.session.tool_registry))
     await execute(fixture, tmp_path)
     final = reports[-1]
@@ -210,7 +216,7 @@ async def test_extension_exec_from_an_old_cell_uses_its_calling_tool_plan(tmp_pa
         if len(model.inputs) == 1:
             return ToolCallEvent(id="cell", name="tool_exec", arguments={"yield_time_ms": 0,
                 "code": 'await tools.gate({}); text((await tools.wrapper({})).content);'})
-        report = _cell_report(messages)
+        report = _cell_report(messages, fixture.owner)
         if len(model.inputs) == 2:
             fixture.session.tool_registry.register(new, replace=True)
             fixture.session.active_tool_names = ("tool_wait",)

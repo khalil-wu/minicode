@@ -635,7 +635,7 @@ def main() -> int:
         ("AgentItemData", "status", parse_python_frozenset("_AGENT_ITEM_STATUSES", agent_message_src, AGENT_MESSAGE)),
         ("AgentRunData", "status", run_statuses),
         ("AgentRunData", "phase", parse_python_literal_in("AgentRunPhase", runtime_records_src, RUNTIME_RECORDS)),
-        ("SubagentDoneData", "status", run_statuses - {"running"}),
+        ("SubagentDoneData", "status", parse_python_literal_in("SubagentRunStatus", runtime_records_src, RUNTIME_RECORDS) - {"pending", "running"}),
     ]
     for class_name, field, authoritative in typed_dict_pairs:
         declared = parse_python_typeddict_field_literal(class_name, field, events_src)

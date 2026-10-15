@@ -126,7 +126,6 @@ describe("HistoryCellRenderer", () => {
 
     rerender(<HistoryCellRenderer
       isTranscriptMode
-      onStopExecution={vi.fn()}
       cell={{
         kind: "exec",
         id: "child-exec",
@@ -157,7 +156,7 @@ describe("HistoryCellRenderer", () => {
 });
 
 describe("ChatTurn live answer", () => {
-  it("opens processed history with nested work groups folded, even in detailed mode", () => {
+  it("folds completed detailed history and retains manually opened work", () => {
     const previousMode = useAppStore.getState().viewMode;
     useAppStore.setState({ viewMode: "verbose" });
     const turn: ChatTurnState = {
@@ -169,13 +168,16 @@ describe("ChatTurn live answer", () => {
       finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
     };
     render(<ChatTurn turn={turn} />);
-    const group = screen.getByRole("button", { name: "已查看" });
+    expect(screen.queryByRole("button", { name: "已读取文件" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    const group = screen.getByRole("button", { name: "已读取文件" });
     expect(group.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(group);
+    expect(group.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("first.md")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByRole("button", { name: "已查看" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("first.md")).toBeTruthy();
     useAppStore.setState({ viewMode: previousMode });
   });
@@ -231,7 +233,7 @@ describe("ChatTurn live answer", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText("这是正在流式输出的答案。")).toBeTruthy();
-    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByText("已搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
     expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
   });
 
@@ -343,10 +345,11 @@ describe("ChatTurn", () => {
     };
     const { container, rerender } = render(<ChatTurn turn={turn} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
-    expect(screen.getAllByRole("status", { name: /^已处理 / })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
     rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
+    fireEvent.click(screen.getByRole("button", { name: "已查看目录正在搜索文件" }));
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
-    expect(screen.getAllByRole("status", { name: /^已处理 / })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
   });
 
   it("opens a shortened file reference using the successful read in the owning turn", () => {
@@ -677,7 +680,7 @@ describe("ChatTurn", () => {
     };
     const { rerender } = render(<ChatTurn turn={runningTurn} />);
 
-    expect(screen.queryByRole("button", { name: "收起处理步骤" })).toBeNull();
+    expect(screen.getByRole("button", { name: "收起处理步骤" })).toBeTruthy();
     expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
     expect(screen.getByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
@@ -739,15 +742,15 @@ describe("ChatTurn", () => {
     const workArea = screen.getByLabelText("Agent 处理进度");
     const timeline = workArea.querySelector(".agent-loop-timeline");
     const summary = workArea.querySelector('[data-position="top"]');
-    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: /^已处理 / })).toBeTruthy();
+    expect(screen.getByText("已搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
     expect(timeline).toBeTruthy();
     expect(summary).toBeTruthy();
     expect(Array.from(workArea.children).indexOf(summary as Element))
       .toBeLessThan(Array.from(workArea.children).indexOf(timeline as Element));
   });
 
-  it("applies transcript defaults until the user chooses a disclosure state", () => {
+  it("uses transcript defaults only on mount and keeps the later disclosure choice", () => {
     const turn: ChatTurnState = {
       id: "turn-transcript-default",
       userCell: null,
@@ -779,11 +782,14 @@ describe("ChatTurn", () => {
 
     expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
     rerender(<ChatTurn turn={turn} defaultProcessExpanded />);
-    expect(screen.getByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeTruthy();
     rerender(<ChatTurn turn={turn} defaultProcessExpanded={false} />);
     rerender(<ChatTurn turn={turn} defaultProcessExpanded />);
+    expect(screen.getByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
     expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
   });
 });

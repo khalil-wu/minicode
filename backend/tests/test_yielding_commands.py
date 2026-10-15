@@ -182,7 +182,8 @@ def test_session_scoped_command_failure_keeps_full_output_for_replay(tmp_path):
             await manager.wait(command_id, conversation_id=context.session_id, wait_ms=10000)
             monitor = MonitorTool()
             first = await monitor.execute({"command_id": command_id, "cursor": 0, "max_chars": 128}, context)
-            assert first.is_error and first.status == "failed"
+            assert not first.is_error and first.status == "success"
+            assert first.runtime_metadata["process_status"] == "failed"
             assert first.runtime_metadata["exit_code"] == 7
             assert "FAILURE_AT_START" in first.content
             assert first.runtime_metadata["more_output"]
@@ -224,7 +225,8 @@ def test_command_output_budget_keeps_failure_summary_and_original_output(tmp_pat
         try:
             result = await tool.execute({"command": python_command(code), "max_chars": 128}, context)
             view = result.content if managed else result.artifact_preview
-            assert result.is_error
+            assert not result.is_error and result.status == "success"
+            assert result.runtime_metadata["process_status"] == "failed"
             assert "BEGIN_DIAGNOSTIC" in view and "FINAL_FAILURE" in view
             assert "bytes omitted" in view
             if managed:

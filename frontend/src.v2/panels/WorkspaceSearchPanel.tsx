@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft, Search, X } from "lucide-react";
@@ -45,6 +46,7 @@ export function WorkspaceSearchPanel({ onNavigate }: { onNavigate?: () => void }
 }
 
 function SearchWorkspace({ workspace, onNavigate }: { workspace: string; onNavigate?: () => void }) {
+  const { t: tr } = useI18n();
   const key = editorWorkspaceKey(workspace);
   const [session, setSession] = useState(() => sessions.get(key) ?? initialSession());
   const [busy, setBusy] = useState(false);
@@ -88,37 +90,37 @@ function SearchWorkspace({ workspace, onNavigate }: { workspace: string; onNavig
   const select = (ids: string[], checked: boolean) => { const selected = new Set(session.selected); for (const id of ids) checked ? selected.add(id) : selected.delete(id); update({ selected }); setApplied(false); };
   const apply = async () => {
     setBusy(true); setError("");
-    try { await applyWorkspaceBufferEdits(workspace, replacements, "项目内容替换"); update({ result: null, selected: new Set() }); setPreview(false); setApplied(true); onNavigate?.(); }
+    try { await applyWorkspaceBufferEdits(workspace, replacements, tr("项目内容替换")); update({ result: null, selected: new Set() }); setPreview(false); setApplied(true); onNavigate?.(); }
     catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { setBusy(false); }
   };
-  return <section className="workspace-search-panel" aria-label="项目内容搜索">
-    <header><button type="button" className="mc-icon-button" aria-label="返回项目文件" onClick={() => useAppStore.getState().closeWorkspaceSearch()}><ArrowLeft size={15} /></button><strong>项目内容搜索</strong></header>
+  return <section className="workspace-search-panel" aria-label={tr("项目内容搜索")}>
+    <header><button type="button" className="mc-icon-button" aria-label={tr("返回项目文件")} onClick={() => useAppStore.getState().closeWorkspaceSearch()}><ArrowLeft size={15} /></button><strong>{tr("项目内容搜索")}</strong></header>
     <form className="workspace-search-form" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-      <label className="workspace-search-input"><Search size={14} /><input ref={queryInput} aria-label="搜索项目内容" placeholder="查找文字或正则…" value={session.options.query} onChange={(event) => option({ query: event.target.value })} /></label>
+      <label className="workspace-search-input"><Search size={14} /><input ref={queryInput} aria-label={tr("搜索项目内容")} placeholder={tr("查找文字或正则…")} value={session.options.query} onChange={(event) => option({ query: event.target.value })} /></label>
       <div className="workspace-search-options">{([
-        ["regex", ".*", "正则表达式"], ["caseSensitive", "Aa", "区分大小写"], ["wholeWord", "ab", "全词匹配"],
-      ] as const).map(([name, label, title]) => <button key={name} type="button" aria-label={title} title={title} aria-pressed={session.options[name]} onClick={() => option({ [name]: !session.options[name] })}>{label}</button>)}<button type="submit" disabled={busy || !workspace || !session.options.query}>{busy ? "搜索中…" : "搜索"}</button></div>
-      <input aria-label="包含文件" placeholder="包含：src/**, **/*.ts" value={session.options.include} onChange={(event) => option({ include: event.target.value })} />
-      <input aria-label="排除文件" placeholder="排除：**/*.test.*, generated/**" value={session.options.exclude} onChange={(event) => option({ exclude: event.target.value })} />
-      <details className="workspace-search-replace"><summary>替换</summary><input aria-label="替换为" placeholder="替换为…" value={session.replacement} onChange={(event) => { update({ replacement: event.target.value }); setApplied(false); }} />{session.options.regex && <small>支持 $1、$&、$&lt;名称&gt; 和 \n</small>}
-        <button type="button" disabled={busy || !replacements.length || applied} onClick={() => { setPreviewPath(replacements[0].path); setPreview(true); }}>预览选中替换 · {replacements.length} 个文件</button></details>
+        ["regex", ".*", tr("正则表达式")], ["caseSensitive", "Aa", tr("区分大小写")], ["wholeWord", "ab", tr("全词匹配")],
+      ] as const).map(([name, label, title]) => <button key={name} type="button" aria-label={title} title={title} aria-pressed={session.options[name]} onClick={() => option({ [name]: !session.options[name] })}>{label}</button>)}<button type="submit" disabled={busy || !workspace || !session.options.query}>{busy ? tr("搜索中…") : tr("搜索")}</button></div>
+      <input aria-label={tr("包含文件")} placeholder={tr("包含：src/**, **/*.ts")} value={session.options.include} onChange={(event) => option({ include: event.target.value })} />
+      <input aria-label={tr("排除文件")} placeholder={tr("排除：**/*.test.*, generated/**")} value={session.options.exclude} onChange={(event) => option({ exclude: event.target.value })} />
+      <details className="workspace-search-replace"><summary>{tr("替换")}</summary><input aria-label={tr("替换为")} placeholder={tr("替换为…")} value={session.replacement} onChange={(event) => { update({ replacement: event.target.value }); setApplied(false); }} />{session.options.regex && <small>{tr("支持 $1、$&、$&lt;名称&gt; 和 \\n")}</small>}
+        <button type="button" disabled={busy || !replacements.length || applied} onClick={() => { setPreviewPath(replacements[0].path); setPreview(true); }}>{tr("预览选中替换 ·") + " "}{replacements.length} {tr("个文件")}</button></details>
     </form>
     {error && <p role="alert" className="workspace-search-error">{error}</p>}
-    {applied && <p role="status" className="workspace-search-notice">已修改编辑缓冲区。可在编辑器撤销；保存仍需手动。<button type="button" onClick={() => void search()}>重新搜索</button></p>}
-    {session.result && <div className="workspace-search-count">已显示 {session.result.match_count} 处匹配 · {files.length} 个文件{session.result.truncated && <strong> · 结果已截断，仅可替换显示的匹配</strong>}</div>}
-    {!workspace && <p className="workspace-search-notice">打开项目后可搜索文件正文。</p>}
+    {applied && <p role="status" className="workspace-search-notice">{tr("已修改编辑缓冲区。可在编辑器撤销；保存仍需手动。")}<button type="button" onClick={() => void search()}>{tr("重新搜索")}</button></p>}
+    {session.result && <div className="workspace-search-count">{tr("已显示") + " "}{session.result.match_count} {tr("处匹配 ·")}{files.length} {tr("个文件")}{session.result.truncated && <strong> {tr("· 结果已截断，仅可替换显示的匹配")}</strong>}</div>}
+    {!workspace && <p className="workspace-search-notice">{tr("打开项目后可搜索文件正文。")}</p>}
     <div className="workspace-search-results">{files.map((file) => <section key={file.path} className="workspace-search-file">
-      <header><input type="checkbox" aria-label={`选择 ${file.path} 的匹配`} disabled={file.read_only || applied} checked={file.matches.every((match) => session.selected.has(match.id))} onChange={(event) => select(file.matches.map((match) => match.id), event.target.checked)} /><strong title={file.path}>{file.path}</strong><span>{file.matches.length}</span>{file.from_buffer && <small>缓冲区</small>}{file.read_only && <small>只读</small>}</header>
-      {file.matches.map((match) => <div key={match.id} className="workspace-search-match"><input type="checkbox" aria-label={`选择 ${file.path} 第${match.line}行第${match.column}列`} disabled={file.read_only || applied} checked={session.selected.has(match.id)} onChange={(event) => select([match.id], event.target.checked)} />
+      <header><input type="checkbox" aria-label={tr("选择 {v0} 的匹配", { v0: file.path })} disabled={file.read_only || applied} checked={file.matches.every((match) => session.selected.has(match.id))} onChange={(event) => select(file.matches.map((match) => match.id), event.target.checked)} /><strong title={file.path}>{file.path}</strong><span>{file.matches.length}</span>{file.from_buffer && <small>{tr("缓冲区")}</small>}{file.read_only && <small>{tr("只读")}</small>}</header>
+      {file.matches.map((match) => <div key={match.id} className="workspace-search-match"><input type="checkbox" aria-label={tr("选择 {v0} 第{v1}行第{v2}列", { v0: file.path, v1: match.line, v2: match.column })} disabled={file.read_only || applied} checked={session.selected.has(match.id)} onChange={(event) => select([match.id], event.target.checked)} />
         <button type="button" title={match.snippet} onClick={() => { useAppStore.getState().openEditorFile(file.path, undefined, { exact: true, line: match.line, column: match.column, endLine: match.end_line, endColumn: match.end_column }); onNavigate?.(); }}><span>{match.line}:{match.column}</span><code>{match.snippet}</code></button></div>)}
-    </section>)}{session.result && files.length === 0 && <p>没有匹配项。</p>}</div>
-    {!!session.result?.issues.length && <details className="workspace-search-issues"><summary>{session.result.issues.length} 个文件未参与搜索</summary>{session.result.issues.map((issue) => <p key={issue.path}>{issue.path} · {issue.message}</p>)}</details>}
-    {preview && createPortal(<div className="overlay-backdrop workspace-replacement-backdrop"><section ref={dialog} className="workspace-replacement-dialog" role="dialog" aria-modal="true" aria-label="项目替换预览" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setPreview(false); } }}>
-      <header><strong>替换预览 · {replacements.length} 个文件</strong><button type="button" className="mc-icon-button" aria-label="关闭替换预览" onClick={() => setPreview(false)}><X size={16} /></button></header>
-      <div className="workspace-replacement-body"><nav aria-label="待替换文件">{replacements.map((file) => <button key={file.path} type="button" aria-current={file === currentPreview ? "page" : undefined} onClick={() => setPreviewPath(file.path)}>{file.path}<small>{file.edits.length} 处</small></button>)}</nav>
-        <div className="workspace-replacement-diff">{currentPreview && <Suspense fallback={<p>正在载入差异…</p>}><ReplacementDiff file={currentPreview} theme={theme} scale={codeTextScale} /></Suspense>}</div></div>
-      {error && <p role="alert" className="workspace-search-error">{error}</p>}<footer><span>仅应用选中的匹配；源文件保持未保存状态。</span><button type="button" onClick={() => setPreview(false)} disabled={busy}>取消</button><button type="button" onClick={() => void apply()} disabled={busy || !replacements.length}>{busy ? "正在应用…" : "应用到编辑缓冲区"}</button></footer>
+    </section>)}{session.result && files.length === 0 && <p>{tr("没有匹配项。")}</p>}</div>
+    {!!session.result?.issues.length && <details className="workspace-search-issues"><summary>{session.result.issues.length} {tr("个文件未参与搜索")}</summary>{session.result.issues.map((issue) => <p key={issue.path}>{issue.path} · {issue.message}</p>)}</details>}
+    {preview && createPortal(<div className="overlay-backdrop workspace-replacement-backdrop"><section ref={dialog} className="workspace-replacement-dialog" role="dialog" aria-modal="true" aria-label={tr("项目替换预览")} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setPreview(false); } }}>
+      <header><strong>{tr("替换预览 ·") + " "}{replacements.length} {tr("个文件")}</strong><button type="button" className="mc-icon-button" aria-label={tr("关闭替换预览")} onClick={() => setPreview(false)}><X size={16} /></button></header>
+      <div className="workspace-replacement-body"><nav aria-label={tr("待替换文件")}>{replacements.map((file) => <button key={file.path} type="button" aria-current={file === currentPreview ? "page" : undefined} onClick={() => setPreviewPath(file.path)}>{file.path}<small>{file.edits.length} {tr("处")}</small></button>)}</nav>
+        <div className="workspace-replacement-diff">{currentPreview && <Suspense fallback={<p>{tr("正在载入差异…")}</p>}><ReplacementDiff file={currentPreview} theme={theme} scale={codeTextScale} /></Suspense>}</div></div>
+      {error && <p role="alert" className="workspace-search-error">{error}</p>}<footer><span>{tr("仅应用选中的匹配；源文件保持未保存状态。")}</span><button type="button" onClick={() => setPreview(false)} disabled={busy}>{tr("取消")}</button><button type="button" onClick={() => void apply()} disabled={busy || !replacements.length}>{busy ? tr("正在应用…") : tr("应用到编辑缓冲区")}</button></footer>
     </section></div>, document.body)}
   </section>;
 }

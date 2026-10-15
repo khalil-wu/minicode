@@ -12,6 +12,8 @@ from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.skills.manager import SkillManager
 from backend.skills.loader import SkillMeta
+from backend.permissions.context import PermissionContext
+from backend.sandbox.policy import ResolvedSandboxPolicy, SandboxEnforcement
 
 def implicit_skill_for_tool(
     skill_manager: SkillManager,
@@ -70,8 +72,13 @@ async def activate_turn_skills(
     mcp_manager: Any | None = None,
     approval_handler: Any | None = None,
     publish_event: Any | None = None,
+    *,
+    permission_context: PermissionContext,
+    permission_profile: ResolvedSandboxPolicy,
+    prompted_dependencies: set[str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Select textual skill workflows without granting executable hook authority."""
+    prompted = prompted_dependencies if prompted_dependencies is not None else set()
     selected_skills = state.prompt_context.get("selected_skills", []) if isinstance(state.prompt_context, dict) else []
     detections = skill_manager.detect(
         user_message,
@@ -81,19 +88,30 @@ async def activate_turn_skills(
         name = detection.name
         trigger_mode = detection.trigger_mode
         source_path = detection.source_path
+        if detection.unavailable_reason:
+            yield AgentEvent(
+                type="system_notice",
+                data={"content": f"Skill '{name}' is unavailable at {source_path}: {detection.unavailable_reason}"},
+            )
+            continue
         payload = skill_manager.load_skill_payload(name, source_path=source_path or None)
         if payload is not None:
+            for warning in payload.get("warnings", []):
+                yield AgentEvent(type="system_notice", data={"content": warning})
             missing_dependencies = [
                 server for server in payload.get("mcp_dependencies", [])
                 if mcp_manager is None or mcp_manager.get_client(server) is None
             ]
-            if missing_dependencies and mcp_manager is not None and approval_handler is not None and publish_event is not None:
+            if missing_dependencies and mcp_manager is not None:
+                from backend.services.mcp_service import MCPServiceError, _manual_config_from_payload, install_skill_mcp_servers
+
                 specs = {
                     str(spec.get("value") or "").strip(): spec
                     for spec in payload.get("mcp_dependency_specs", [])
                 }
                 candidates: list[dict[str, Any]] = []
                 descriptions: list[str] = []
+                candidate_keys: list[str] = []
                 for server in missing_dependencies:
                     if mcp_manager.get_server_config(server) is not None:
                         continue
@@ -107,32 +125,53 @@ async def activate_turn_skills(
                         callback_port = spec.get("oauth_callback_port")
                         if callback_port is not None:
                             candidate["oauth"] = {"callback_port": callback_port}
-                        descriptions.append(f"- {server}: HTTP {address}")
+                        identifier = address
                     elif transport == "stdio" and str(spec.get("command") or "").strip():
                         command = str(spec["command"]).strip()
                         candidate = {"name": server, "transport": "stdio", "command": command, "args": [], "auto_start": True}
-                        descriptions.append(f"- {server}: stdio {command}")
+                        identifier = command
                     else:
                         continue
+                    dependency_key = f"mcp__{transport}__{identifier}"
+                    if dependency_key in prompted:
+                        continue
+                    if not mcp_manager.allows_user_server_install(_manual_config_from_payload(candidate)):
+                        continue
                     candidates.append(candidate)
+                    descriptions.append(server)
+                    candidate_keys.append(dependency_key)
                 if candidates:
-                    request_id = f"skill-mcp-{uuid4().hex}"
-                    await publish_event(AgentEvent(
-                        type="ask_user",
-                        data={
-                            "tool_call_id": request_id,
-                            "question": (
-                                f"Skill '{name}' needs these MCP servers from {source_path}:\n"
-                                + "\n".join(descriptions)
-                                + "\nInstall and connect them in your global MCP config?"
-                            ),
-                            "options": ["Install", "Skip"],
-                        },
-                    ))
-                    answer = await approval_handler(request_id)
-                    if str(answer.get("answer", answer.get("guidance", "")) or "").strip().lower() == "install":
-                        from backend.services.mcp_service import MCPServiceError, install_skill_mcp_servers
-
+                    # codex-mcp::mcp_permission_prompt_is_auto_approved with
+                    # the default (no per-tool approval override) context.
+                    install = permission_context.approval_policy == "never" and (
+                        permission_profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}
+                        or permission_profile.full_disk_write
+                    )
+                    if not install and permission_context.approval_policy != "never" and approval_handler is not None and publish_event is not None:
+                        request_id = f"skill-mcp-{uuid4().hex}"
+                        await publish_event(AgentEvent(
+                            type="request_user_input",
+                            data={
+                                "tool_call_id": request_id,
+                                "isBlocking": True,
+                                "questions": [{
+                                    "id": "skill_mcp_dependency_install",
+                                    "header": "Install MCP servers?",
+                                    "question": "The following MCP servers are required by the selected skills but are not installed yet: "
+                                        + ", ".join(sorted(descriptions)) + ". Install them now?",
+                                    "isOther": False,
+                                    "isSecret": False,
+                                    "options": [
+                                        {"label": "Install", "description": "Install and enable the missing MCP servers in your global config."},
+                                        {"label": "Continue anyway", "description": "Skip installation for now and do not show again for these MCP servers in this session."},
+                                    ],
+                                }],
+                            },
+                        ))
+                        prompted.update(candidate_keys)
+                        answer = await approval_handler(request_id)
+                        install = "Install" in answer.get("answers", {}).get("skill_mcp_dependency_install", {}).get("answers", [])
+                    if install:
                         try:
                             await install_skill_mcp_servers(mcp_manager, candidates)
                         except MCPServiceError as exc:

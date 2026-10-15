@@ -7,6 +7,9 @@ import { ChevronDown, Copy, Database, Download, FolderOpen, GitBranch, TerminalS
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'
 import { useAppStore } from '../../stores'
+import { copyText } from '../../lib/clipboard'
+import { saveBlobFile } from '../../lib/save-blob'
+import { pushToast } from '../../overlays/ToastContainer'
 import { focusInspectorEntry } from '../../chat/inspectorEntries'
 import type { AgentProgressEntry, ChatMessage, InspectorEntry, ProviderRawMetadata } from '../../stores/types'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
@@ -70,7 +73,7 @@ const ControlPlaneSection = () => {
   const guidelineReload = useAppStore((state) => conversationId ? state.guidelineReloadsByConversation[conversationId] : undefined)
   const recentWorkspaces = useAppStore((state) => state.recentWorkspaces)
   const conversation = conversations.find((item) => item.id === conversationId)
-  const workspaceRoot = conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory
+  const workspaceRoot = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory
   const [controlPlaneRefreshError, setControlPlaneRefreshError] = useState<string | null>(null)
   const [isRefreshingControlPlane, setIsRefreshingControlPlane] = useState(false)
   const refreshRequestRef = useRef(0)
@@ -271,8 +274,8 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
     setSessionReplayStatus('正在读取会话记录…')
     try {
       const payload = await fetchReplayExport({ sessionId, conversationId, limit: 500 })
-      await navigator.clipboard?.writeText(JSON.stringify(payload, null, 2))
-      setSessionReplayStatus(`已复制 ${payload.event_count} 条会话事件`)
+      if (await copyText(JSON.stringify(payload, null, 2), '会话记录')) setSessionReplayStatus(`已复制 ${payload.event_count} 条会话事件`)
+      else setSessionReplayStatus('会话记录未复制')
     } catch (error) {
       setSessionReplayStatus(error instanceof Error ? error.message : String(error))
     }
@@ -289,9 +292,9 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
           />
         {traceExportEnabled && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void navigator.clipboard?.writeText(exportJsonl())} />
+            <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void copyText(exportJsonl(), 'JSONL', '已复制 JSONL')} />
             <SmallButton icon={<Download size={14} />} label="下载 JSONL" onClick={() => downloadText('minicode-run-timeline.jsonl', exportJsonl(), 'application/x-ndjson')} />
-            <SmallButton icon={<Copy size={14} />} label="复制回放" onClick={() => void navigator.clipboard?.writeText(replayJsonl())} />
+            <SmallButton icon={<Copy size={14} />} label="复制回放" onClick={() => void copyText(replayJsonl(), '回放', '已复制回放')} />
             <SmallButton icon={<Download size={14} />} label="下载回放" onClick={() => downloadText('minicode-run-replay.jsonl', replayJsonl(), 'application/x-ndjson')} />
             <SmallButton icon={<Copy size={14} />} label="复制会话回放" onClick={() => void copySessionReplay()} />
           </div>
@@ -362,7 +365,7 @@ const ContextTab = () => {
   const gitRequestRef = useRef(0)
 
   const conversation = conversations.find((c) => c.id === conversationId)
-  const workspacePath = conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory || workspaceGit?.currentPath || ''
+  const workspacePath = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory || workspaceGit?.currentPath || ''
   const branch = conversation?.gitBranch || workspaceGit?.branch || '无分支'
   const hasWorkspacePath = Boolean(workspacePath.trim())
   const displayWorkspace = workspaceDisplayName(workspacePath, '本机')
@@ -448,7 +451,7 @@ const ContextTab = () => {
             )}
             <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
               <SmallButton icon={<FolderOpen size={14} />} label="打开位置" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
-              <SmallButton icon={<Copy size={14} />} label="复制路径" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
+              <SmallButton icon={<Copy size={14} />} label="复制路径" onClick={() => void copyText(workspacePath, '路径', '已复制路径')} />
               <SmallButton icon={<GitBranch size={14} />} label="刷新" onClick={refreshGitStatus} disabled={gitLoading} />
             </div>
           </InfoCard>
@@ -471,7 +474,7 @@ const ContextTab = () => {
             {terminalSessions.length > 0 && <InfoRow label="终端" value={String(terminalSessions.length)} />}
             {activeEditorPath && <InfoRow label="编辑器" value={activeEditorPath} mono />}
             {terminalSessions.length > 0 && (
-              <SmallButton icon={<TerminalSquare size={14} />} label="打开终端" onClick={() => setRightStackTab('terminal')} />
+              <SmallButton icon={<TerminalSquare size={14} />} label="打开终端" onClick={() => useAppStore.getState().openBottomTab('terminal')} />
             )}
           </InfoCard>
         </>
@@ -656,7 +659,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
                 {traceExportEnabled && (
                   <>
-                    <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void navigator.clipboard?.writeText(providerTraceExportJsonl(providerRaws))} />
+                    <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void copyText(providerTraceExportJsonl(providerRaws), 'JSONL', '已复制 JSONL')} />
                     <SmallButton icon={<Download size={14} />} label="下载 JSONL" onClick={() => downloadText('minicode-provider-traces.jsonl', providerTraceExportJsonl(providerRaws), 'application/x-ndjson')} />
                   </>
                 )}
@@ -1032,9 +1035,9 @@ const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: 
         {raw.prompt_cache_diagnostic?.reason && <InfoRow label="Cache Break" value={promptCacheDiagnostic} tone="warning" mono />}
         {traceExportEnabled && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
-            <SmallButton icon={<Copy size={14} />} label="Copy Trace" onClick={() => void navigator.clipboard?.writeText(exportJson())} />
-            <SmallButton icon={<Copy size={14} />} label="Request JSON" onClick={() => void navigator.clipboard?.writeText(safeRequestJson())} />
-            <SmallButton icon={<Copy size={14} />} label="cURL Skeleton" onClick={() => void navigator.clipboard?.writeText(curlSkeleton())} />
+            <SmallButton icon={<Copy size={14} />} label="复制调用记录" onClick={() => void copyText(exportJson(), '调用记录', '已复制调用记录')} />
+            <SmallButton icon={<Copy size={14} />} label="复制请求 JSON" onClick={() => void copyText(safeRequestJson(), '请求 JSON', '已复制请求 JSON')} />
+            <SmallButton icon={<Copy size={14} />} label="复制 cURL 模板" onClick={() => void copyText(curlSkeleton(), 'cURL 模板', '已复制 cURL 模板')} />
             <SmallButton icon={<Download size={14} />} label="Download" onClick={() => downloadText(`minicode-provider-trace-${safeFilePart(entry.targetId)}.json`, exportJson(), 'application/json')} />
           </div>
         )}
@@ -1123,16 +1126,10 @@ const localizedLedgerLabel = (label: string): string => ({
   attachments: '附件',
 }[label.trim().toLowerCase()] ?? label)
 
-const downloadText = (filename: string, content: string, type: string): void => {
-  const blob = new Blob([content], { type })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  URL.revokeObjectURL(url)
+const downloadText = async (filename: string, content: string, type: string): Promise<void> => {
+  try {
+    await saveBlobFile(new Blob([content], { type }), filename)
+  } catch (error) { pushToast(error instanceof Error ? error.message : String(error), 'error') }
 }
 
 const safeFilePart = (value: string): string =>

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppStore } from "../stores";
 import { GeneralTab } from "./GeneralTab";
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 const updateMocks = vi.hoisted(() => ({
   getStatus: vi.fn(),

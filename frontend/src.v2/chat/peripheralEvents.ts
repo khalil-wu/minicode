@@ -17,6 +17,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../lib/workspace-path";
 import { addInspectorPayload } from "./inspectorEntries";
+import { invalidateMountedWorkspaceIndex } from "../panels/workspaceIndexRegistry";
 
 const terminalEventConversationId = (event: ServerEvent): string => {
   const value = (event as unknown as { conversation_id?: unknown }).conversation_id;
@@ -67,6 +68,12 @@ const scheduleGitChangesRefresh = () => {
 export const handlePeripheralEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
+    case "workspace.project_index.invalidated": {
+      // A completed command can belong to the previous conversation while
+      // its real files still belong to the editor's mounted workspace.
+      if (workspaceRootsEqual(e.workspace_root, s.workingDirectory)) invalidateMountedWorkspaceIndex(e.workspace_root, e.index_instance_id, e.revision);
+      return true;
+    }
     case "terminal.output":
       // TerminalPanel subscribes to raw websocket events and owns terminal output.
       return true;
@@ -102,13 +109,6 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         s.requestGitChanges();
         sendClientCommand({ type: "git.pr_status", conversation_id: owner, workspace_root: rootPath });
         sendClientCommand({ type: "scheduler.list", conversation_id: owner, workspace_root: rootPath });
-        const projectLabel = [
-          ev.project.name || rootPath,
-          ev.project.project_type,
-          `${ev.file_count} files`,
-          ev.project.index_truncated ? "index truncated" : "",
-        ].filter(Boolean).join(" · ");
-        pushToast(`Opened workspace: ${projectLabel}`, "success", 3500);
       }
       return true;
     }
@@ -422,7 +422,10 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       const ev = e as SchedulerListEvent;
       if (!eventTargetsActiveWorkspace(e)) return true;
       if (ev.tasks) s.setScheduledTasks(ev.tasks);
-      if (ev.runs) s.setScheduledTaskRuns(ev.runs);
+      if (ev.runs) {
+        notifyScheduledCompletions(ev.workspace_root, ev.runs);
+        s.setScheduledTaskRuns(ev.runs);
+      }
       return true;
     }
     case "background.started": {
@@ -466,8 +469,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           7000,
         );
       }
-      if (!isReplayedEvent(e) && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
+      if (!isReplayedEvent(e)) {
         void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
+          kind: "question",
           title: "后台命令等待输入",
           body: shortBackgroundCommand(command),
           target: { kind: "conversation" as const, conversationId },
@@ -523,8 +527,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         conversationId,
         outputPreview: ev.output,
       });
-      if (!replayed && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
+      if (!replayed) {
         void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
+          kind: "completion",
           title: cleanupPending
             ? "后台命令未能确认退出"
             : status === "completed"
@@ -542,3 +547,4 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       return false;
   }
 };
+import { notifyScheduledCompletions } from "./completionNotifications";

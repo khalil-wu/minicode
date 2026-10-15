@@ -54,10 +54,16 @@ class ToolSpec:
     always_load: bool = False  # force direct visibility even when deferred
     required_args: tuple[str, ...] = ()
     policy_aliases: tuple[str, ...] = ()
+    policy_identity: str = ""
+    policy_deny_aliases: tuple[str, ...] = ()
 
     @property
     def policy_names(self) -> tuple[str, ...]:
-        return (self.name, *self.policy_aliases)
+        return (self.policy_identity or self.name, *self.policy_aliases)
+
+    @property
+    def restriction_policy_names(self) -> tuple[str, ...]:
+        return (*self.policy_names, self.name, *self.policy_deny_aliases)
 
 
 @dataclass(frozen=True)

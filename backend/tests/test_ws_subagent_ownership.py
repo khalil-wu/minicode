@@ -10,6 +10,7 @@ from backend.agent.runtime import AgentRuntime
 from backend.permissions.context import PermissionContext
 from backend.services.workspace_service import resolve_requested_workspace
 from backend.ws.handlers.misc import (
+    handle_followup_task,
     handle_send_message,
     handle_subagent_cancel,
     handle_subagent_status,
@@ -160,6 +161,7 @@ def test_reopened_session_reads_durable_nested_history_without_rehydrating_live_
     (handle_subagent_transcript, {"subagent_id": "nested-agent"}),
     (handle_subagent_cancel, {"subagent_id": "nested-agent"}),
     (handle_send_message, {"recipient": "nested-agent", "message": "Do not deliver", "message_id": "blocked-message"}),
+    (handle_followup_task, {"target": "nested-agent", "message": "Do not start", "message_id": "blocked-followup"}),
 ])
 @pytest.mark.parametrize("mismatch", ["conversation", "workspace"])
 def test_all_nested_commands_reject_cross_conversation_and_workspace(runtime, tmp_path, handler, payload, mismatch):
@@ -181,6 +183,7 @@ def test_all_nested_commands_reject_cross_conversation_and_workspace(runtime, tm
 @pytest.mark.parametrize("handler,payload", [
     (handle_subagent_cancel, {"subagent_id": "nested-agent"}),
     (handle_send_message, {"recipient": "nested-agent", "message": "Do not deliver"}),
+    (handle_followup_task, {"target": "nested-agent", "message": "Do not start"}),
 ])
 def test_mutation_keeps_the_live_execution_session_boundary(runtime, tmp_path, handler, payload):
     start_nested(runtime)
@@ -214,7 +217,7 @@ def test_follow_up_cannot_take_over_a_terminal_record_that_is_still_finishing(ru
         else:
             runtime.get_subagent(child.subagent_id).cleanup_pending = True
         try:
-            await handle_send_message(session, {"recipient": child.subagent_id, "message": "Continue"})
+            await handle_followup_task(session, {"target": child.subagent_id, "message": "Continue"})
             assert session.results[-1]["level"] == "error"
             assert "still finishing" in session.results[-1]["message"]
         finally:
@@ -240,7 +243,7 @@ def test_terminal_follow_up_still_requires_current_scope_and_new_session(runtime
         other = tmp_path / "other-project"
         other.mkdir()
         request["workspace_root"] = str(other)
-    asyncio.run(handle_send_message(session, request))
+    asyncio.run(handle_followup_task(session, request))
     assert session.results[-1]["level"] == "error"
     assert ("session" if mismatch == "missing-session" else mismatch) in session.results[-1]["message"]
     assert runtime.get_subagent(child.subagent_id).session_id == "session-1"

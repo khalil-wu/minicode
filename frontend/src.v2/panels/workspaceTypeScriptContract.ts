@@ -3,6 +3,7 @@ export const WORKSPACE_TYPESCRIPT_METADATA_URI = "minicode://workspace/index.jso
 export interface WorkspaceTypeScriptMetadata {
   workspaceRoot: string;
   sourceFileNames: string[];
+  dependencyFileNames?: string[];
   readOnlyFileNames: string[];
   caseSensitive: boolean;
 }

@@ -15,6 +15,7 @@
 // ──────────────────────────────────────────────────────────────────
 
 import type { RuntimeSessionSnapshot } from "./streaming-types";
+import type { CompletionNotification } from "./notification-types";
 import type { AgentCapabilitiesPayload } from "./capabilities";
 import type {
   ConversationRecordPayload,
@@ -325,7 +326,7 @@ export interface SchedulerListEvent {
   workspace_root: string;
   request_id?: string;
   tasks?: { id: string; name: string; prompt: string; schedule: string; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
-  runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string }[];
+  runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string; message_id?: string; completion_notification?: CompletionNotification | null }[];
 }
 
 export interface SkillsListEvent {
@@ -496,11 +497,53 @@ export interface ControlCanUseToolRequest {
   tool_name: string;
   input: Record<string, unknown>;
   tool_use_id: string;
+  request_digest?: string;
+  command?: string[];
+  display_command?: string;
+  cwd?: string;
+  reason?: string | null;
+  proposed_execpolicy_amendment?: string[] | null;
+  available_decisions?: Array<"approved" | "abort" | "approved_for_session" | { approved_execpolicy_amendment: { proposed_execpolicy_amendment: string[] } }>;
   diff?: string | Record<string, unknown>;
   source_agent?: string;
   source_thread?: string;
   source_tool?: string;
   network_unisolated?: boolean;
+  mcp_approval?: {
+    server: string;
+    tool_name: string;
+    approval_mode: "auto" | "prompt" | "writes" | "approve";
+    allow_session_remember: boolean;
+    allow_persistent_approval?: boolean;
+  };
+}
+
+export type FileSystemPermissionPath =
+  | { type: "path"; path: string }
+  | { type: "glob_pattern"; pattern: string }
+  | { type: "special"; value: { kind: "root" | "minimal" | "project_roots" | "tmpdir" | "slash_tmp" | "unknown"; subpath?: string; path?: string } };
+
+export interface AdditionalPermissionProfile {
+  network?: { enabled?: boolean | null } | null;
+  file_system?: {
+    entries?: Array<{ path: FileSystemPermissionPath; access: "read" | "write" | "deny" }>;
+    read?: string[] | null;
+    write?: string[] | null;
+    glob_scan_max_depth?: number | null;
+  } | null;
+}
+
+export interface ControlPermissionsRequest extends Omit<ControlCanUseToolRequest, "subtype"> {
+  subtype: "request_permissions";
+  permissions: AdditionalPermissionProfile;
+  reason?: string;
+  cwd?: string;
+  environment_id?: string;
+}
+
+export interface ControlWriteStdinRequest extends Omit<ControlCanUseToolRequest, "subtype"> {
+  subtype: "write_stdin";
+  stdin_action: Record<string, unknown>;
 }
 
 export interface ControlElicitationRequest {
@@ -512,6 +555,27 @@ export interface ControlElicitationRequest {
   options?: unknown[];
   choices?: unknown[];
   allowed_values?: unknown[];
+  mode?: "form" | "url";
+  url?: string;
+  elicitation_id?: string;
+  mcp_server_name?: string;
+  _meta?: Record<string, unknown>;
+}
+
+export interface RequestUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options?: Array<{ label: string; description: string }>;
+  isOther?: boolean;
+  isSecret?: boolean;
+}
+
+export interface ControlRequestUserInputRequest {
+  subtype: "request_user_input";
+  tool_use_id: string;
+  questions: RequestUserInputQuestion[];
+  isBlocking: boolean;
 }
 
 export interface ControlProviderAuthPromptRequest {
@@ -532,7 +596,10 @@ export interface ControlProviderAuthPromptRequest {
 export type ControlRequestPayload =
   | { subtype: "conversation_resources_cleanup"; workspace_root: string; operation?: "archive" | "delete" }
   | ControlCanUseToolRequest
+  | ControlPermissionsRequest
+  | ControlWriteStdinRequest
   | ControlElicitationRequest
+  | ControlRequestUserInputRequest
   | ControlProviderAuthPromptRequest;
 
 export interface ControlRequestEvent {
@@ -542,6 +609,7 @@ export interface ControlRequestEvent {
   request: ControlRequestPayload;
   turn_id?: string;
   message_id?: string;
+  task_id?: string;
   workspace_root?: string;
   permission_mode?: string;
   workspace_scope?: string;
@@ -642,6 +710,7 @@ export interface ControlResponseCommand {
   conversation_id?: string;
   turn_id?: string;
   message_id?: string;
+  task_id?: string;
   response: {
     subtype: "success";
     response: Record<string, unknown>;
@@ -690,6 +759,8 @@ export interface SchedulerListCommand extends WorkspaceOwnedCommand {
 
 export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
   type: "scheduler.add";
+  kind?: "cron" | "heartbeat";
+  notification_policy?: "failed_runs_only" | null;
   name: string;
   prompt: string;
   schedule: string;

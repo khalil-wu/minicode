@@ -286,12 +286,16 @@ def test_preview_refresh_validates_url_and_preserves_command_scope(
 ) -> None:
     conversation = SimpleNamespace(
         workspace_root=str(tmp_path),
+        execution_cwd=str(tmp_path),
         worktree_path="",
     )
 
     class _ConversationRepo:
         def get_conversation(self, conversation_id: str) -> Any:
             return conversation if conversation_id == "conversation-1" else None
+
+        def get_conversation_summary(self, conversation_id: str) -> Any:
+            return self.get_conversation(conversation_id)
 
     session = SimpleNamespace(
         session_id="session-1",
@@ -301,6 +305,7 @@ def test_preview_refresh_validates_url_and_preserves_command_scope(
         resolve_requested_workspace=lambda requested=None: Path(requested or tmp_path).resolve(),
     )
     session.session_lifecycle = SessionLifecycle(session)
+    session.session_lifecycle._workspace_root = tmp_path.resolve()
     from backend.preview import launcher
 
     process = launcher.PreviewLaunchProcess(
@@ -323,6 +328,7 @@ def test_preview_refresh_validates_url_and_preserves_command_scope(
         "url": "http://localhost:5173/app",
         "conversation_id": "conversation-1",
         "workspace_root": str(tmp_path.resolve()),
+        "execution_cwd": str(tmp_path.resolve()),
         "request_id": "refresh-1",
     }
 
@@ -642,7 +648,7 @@ def test_commands_list_keeps_captured_owner_and_workspace_across_await(
     ]
 
 
-def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage() -> None:
+def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage(monkeypatch) -> None:
     class _ContextBuilder:
         compacted = False
 
@@ -675,8 +681,9 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
                 "breakdown": {"history": used},
             }
 
-        async def compact(self, *, focus: str, restore_state: Any) -> str:
+        async def compact(self, *, focus: str, restore_state: Any, manual: bool) -> str:
             assert focus == "retain release evidence"
+            assert manual is True
             assert restore_state is agent_state
             self.compacted = True
             return "Retained release goal and latest verification evidence."
@@ -703,8 +710,12 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
             state: str,
             summary: str,
             expected_revision: int,
+            compaction_item: dict[str, Any],
+            operation_turn_id: str,
         ) -> Any:
             assert projection_lock.locked()
+            assert compaction_item["status"] == "completed"
+            assert operation_turn_id.startswith("compact-turn-")
             self.committed = (
                 conversation_id,
                 context_snapshot,
@@ -732,6 +743,9 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
         _conversation_projection_lock=lambda _conversation_id: projection_lock,
         ws_manager=None,
     )
+    from backend.tests.test_canonical_control_plane import _capture_compaction_fixture
+
+    _capture_compaction_fixture(monkeypatch, session)
 
     assert asyncio.run(handle_context_compact(
         session,
@@ -739,6 +753,17 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
     )) is True
 
     events = [call.args[0] for call in session.send_event.await_args_list]
+    item_id = events[0].data["compaction_item_id"]
+    assert events[0].data == {"conversation_id": "conversation-1", "state": "compacting", "summary": "正在压缩上下文。", "compaction_item_id": item_id}
+    items = [event for event in events if event.type in {"item.started", "item.completed"}]
+    assert [event.type for event in items] == ["item.started", "item.completed"]
+    assert all(event.data["item"]["id"] == item_id for event in items)
+    assert items[-1].data["item"]["status"] == "completed"
+    events = [event for event in events if event.type not in {"item.started", "item.completed"}]
+    events = events[1:]
+    results = [event for event in events if event.type == "command.result"]
+    assert [event.data for event in results] == [{"command": "context.compact", "level": "success", "message": "", "data": {"conversation_id": "conversation-1"}}]
+    events = [event for event in events if event.type != "command.result"]
     assert [event.type for event in events] == [
         "conversation.compaction.updated",
         "context_compacted",
@@ -749,6 +774,7 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
         "conversation_id": "conversation-1",
         "state": "compacted",
         "summary": "Retained release goal and latest verification evidence.",
+        "compaction_item_id": item_id,
     }
     assert events[1].data["conversation_id"] == "conversation-1"
     assert events[1].data["before_tokens"] == 900
@@ -783,6 +809,7 @@ class _FakeWebSocket:
 
 def _minimal_transport_session(tmp_path: Path) -> tuple[WebSocketSession, _FakeWebSocket]:
     session = object.__new__(WebSocketSession)
+    session.ws_manager = None
     websocket = _FakeWebSocket()
     session.session_id = "session-test"
     session.event_outbox = EventOutbox(
@@ -800,6 +827,7 @@ def _minimal_transport_session(tmp_path: Path) -> tuple[WebSocketSession, _FakeW
 
 def _minimal_event_session() -> WebSocketSession:
     session = object.__new__(WebSocketSession)
+    session.ws_manager = None
     session.session_id = "session-test"
     session._conversation_streams = {}
     session.turn_wait_state = TurnWaitState()

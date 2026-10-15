@@ -27,6 +27,8 @@ def owned_preview(tmp_path, monkeypatch):
     context = ToolExecutionContext(
         permission=PermissionContext(mode="bypass"), session_id=preview.session_id,
         conversation_id=preview.conversation_id, workspace_root=tmp_path,
+        metadata={"window_instance_id": "fixture-window", "window_owner_id": "primary"},
+        window_binding_token="fixture-binding",
     )
     return preview, context
 
@@ -78,6 +80,9 @@ async def test_browser_bridge_gets_runtime_authority_instead_of_model_payload(ow
     result = await BrowserControlTool().execute({
         "action": " NAVIGATE ", "url": preview.effective_url,
         "conversation_id": "forged", "operation_id": "forged",
+        "window_instance_id": "forged-window",
+        "window_owner_id": "forged-owner",
+        "window_binding_token": "forged-binding",
         "navigation_authorization": {"kind": "bypass", "session_id": "forged"},
     }, context)
     assert not result.is_error
@@ -85,6 +90,9 @@ async def test_browser_bridge_gets_runtime_authority_instead_of_model_payload(ow
     headers, payload = requests[0]
     assert headers["authorization"] == "Bearer backend-only-token"
     assert payload["conversation_id"] == context.conversation_id
+    assert payload["window_instance_id"] == "fixture-window"
+    assert payload["window_binding_token"] == "fixture-binding"
+    assert payload["window_owner_id"] == "primary"
     assert payload["action"] == "navigate"
     assert payload["operation_id"].startswith("browser_")
     assert payload["navigation_authorization"] == {
@@ -102,6 +110,15 @@ def test_metadata_origin_does_not_forge_a_registered_preview(tmp_path):
         metadata={"preview_origins": ["http://127.0.0.1:8000"]},
     )
     assert _owned_preview_navigation_authorization("http://127.0.0.1:8000/admin", context) is None
+
+
+@pytest.mark.asyncio
+async def test_model_window_argument_cannot_supply_missing_desktop_origin(monkeypatch):
+    monkeypatch.setenv("MINICODE_EMBEDDED_BROWSER_ENDPOINT", "http://127.0.0.1:43123")
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), conversation_id="owner")
+    result = await BrowserControlTool().execute({"action": "list_targets", "window_instance_id": "forged-window"}, context)
+    assert result.is_error
+    assert "originating desktop window" in result.content
 
 
 def test_browser_admission_token_never_reaches_tool_subprocesses(monkeypatch):
@@ -127,6 +144,7 @@ async def test_workspace_html_launch_is_the_same_registered_preview_authorized_f
         permission=PermissionContext(mode="bypass"), session_id="real-browser-preview-session",
         conversation_id="real-browser-preview-conversation", workspace_root=tmp_path,
         sandbox_policy=SandboxPolicy.bypass(),
+        metadata={"window_instance_id": "fixture-window"},
     )
     try:
         url, error = await _resolved_navigation_url("index.html", context)

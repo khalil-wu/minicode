@@ -503,6 +503,24 @@ describe("chat surface explicit projection", () => {
     ]);
   });
 
+  it("keeps empty typed command streams empty instead of rendering the model transport receipt", () => {
+    const turns = projectMessagesToTurns([message("assistant-1", "assistant", [{ type: "tool_call", record: {
+      id: "empty-command", name: "run_command", args: { command: "exit 0" }, status: "success", startedAt: 1,
+      resultKind: "command", stdoutPreview: "", stderrPreview: "", exitCode: 0,
+      outputPreview: "output_bytes: 0\nnext_cursor: 0\nmore_output: false", summary: "Exit code: 0\nMODEL RECEIPT",
+    } }])], false);
+    expect(turns[0]?.committedCells).toEqual([expect.objectContaining({ kind: "exec", stdoutFull: "", stderrFull: "", exitCode: 0 })]);
+  });
+
+  it("decodes the known historical command snapshot body while preserving command-printed protocol words", () => {
+    const body = "output_bytes: this was printed by the program\nnext_cursor: literal log";
+    const turns = projectMessagesToTurns([message("assistant-1", "assistant", [{ type: "tool_call", record: {
+      id: "legacy-snapshot", name: "run_command", args: { command: "echo log" }, status: "success", startedAt: 1,
+      resultKind: "command", outputPreview: `Exit code: 0\nBackground command cmd-real (completed)\noutput_bytes: 70\nnext_cursor: 70\nmore_output: false\n\n<untrusted_tool_result source="monitor">\n${body}\n</untrusted_tool_result>`,
+    } }])], false);
+    expect(turns[0]?.committedCells).toEqual([expect.objectContaining({ kind: "exec", stdoutFull: body })]);
+  });
+
   it("does not render typed stderr again through the combined output preview", () => {
     const stderr = "Expected ',', got '{'\nSyntaxError: missing ) after argument list";
     const turns = projectMessagesToTurns([

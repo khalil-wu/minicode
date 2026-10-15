@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "../stores";
 import { handleRuntimeEvent } from "./runtimeEvents";

@@ -23,78 +23,56 @@ export const AgentTurn = memo(function AgentTurn({
   wide = false,
   renderCell,
   defaultProcessExpanded,
-  historyControl,
-  loadedToolItems,
+  hasMoreHistory = false,
+  onLoadHistory,
 }: {
   turn: AgentLoopTurnProjection;
   wide?: boolean;
   renderCell: RenderAgentCell;
   defaultProcessExpanded?: boolean;
-  historyControl?: React.ReactNode;
-  loadedToolItems?: number;
+  hasMoreHistory?: boolean;
+  onLoadHistory?: () => void;
 }) {
-  // Incomplete, interrupted, failed, or answer-less turns are evidence, not a
-  // disclosure preference. They stay visible until a complete final answer
-  // establishes the only valid collapse boundary for the turn.
+  // Live and incomplete work starts open. Only a complete final answer folds
+  // it automatically; an explicit reading choice applies to every turn state.
   const initialProcessExpanded = !turn.hasCompleteFinalAnswer
     ? true
     : defaultProcessExpanded ?? turn.initialProcessExpanded;
-  const [processPreference, setProcessExpanded, userToggled] = useTranscriptReadingPreference(`process:${turn.processDetailMode}`, initialProcessExpanded);
+  const [processPreference, setProcessPreference, userToggled] = useTranscriptReadingPreference("process", {
+    complete: turn.hasCompleteFinalAnswer,
+    expanded: initialProcessExpanded,
+  });
   const searching = useTranscriptSearch();
-  const processExpanded = searching || processPreference;
-  const previousTurnId = useRef(turn.id);
-  const previousDetailMode = useRef(turn.processDetailMode);
-  const previousDefaultProcessExpanded = useRef(defaultProcessExpanded);
-  const previousStatus = useRef(turn.status);
-  const previousHasCompleteFinalAnswer = useRef(turn.hasCompleteFinalAnswer);
+  const reachedCompleteAnswer = turn.hasCompleteFinalAnswer && !processPreference.complete;
+  const lostCompleteAnswer = !turn.hasCompleteFinalAnswer && processPreference.complete;
+  // Completion belongs to the saved reading choice, so it also folds when a
+  // virtualized row first mounts after the final item arrived offscreen.
+  const nextExpanded = reachedCompleteAnswer && !userToggled.current ? defaultProcessExpanded ?? false
+    : lostCompleteAnswer && !userToggled.current ? true
+    : processPreference.expanded;
+  const processExpanded = searching || nextExpanded;
+  const previouslyExpanded = useRef(false);
+  useEffect(() => {
+    if (processExpanded && !previouslyExpanded.current) onLoadHistory?.();
+    previouslyExpanded.current = processExpanded;
+  }, [processExpanded, onLoadHistory]);
+  const setProcessExpanded = useCallback((next: boolean | ((value: boolean) => boolean)) => {
+    setProcessPreference((previous) => ({ ...previous, expanded: typeof next === "function" ? next(previous.expanded) : next }));
+  }, [setProcessPreference]);
 
   useEffect(() => {
-    const changedTurn = previousTurnId.current !== turn.id;
-    const changedMode = previousDetailMode.current !== turn.processDetailMode;
-    const changedDefault = previousDefaultProcessExpanded.current !== defaultProcessExpanded;
-    const reachedCompleteAnswer =
-      !previousHasCompleteFinalAnswer.current
-      && turn.hasCompleteFinalAnswer;
-    const lostCompleteAnswer = previousHasCompleteFinalAnswer.current && !turn.hasCompleteFinalAnswer;
-    const enteredRunning =
-      previousStatus.current !== "running"
-      && turn.status === "running";
-
-    if (changedTurn || changedMode) {
-      userToggled.current = false;
-      setProcessExpanded(initialProcessExpanded);
-    } else if (lostCompleteAnswer && !userToggled.current) {
-      setProcessExpanded(true);
-    } else if (changedDefault && turn.hasCompleteFinalAnswer && !userToggled.current) {
-      setProcessExpanded(initialProcessExpanded);
-    } else if (
-      reachedCompleteAnswer
-      && turn.processDetailMode !== "verbose"
-      && defaultProcessExpanded !== true
-      && !userToggled.current
-    ) {
-      setProcessExpanded(initialProcessExpanded);
-    } else if (
-      enteredRunning
-      && turn.processDetailMode !== "verbose"
-      && defaultProcessExpanded === undefined
-      && !userToggled.current
-    ) {
-      setProcessExpanded(true);
-    }
-
-    previousTurnId.current = turn.id;
-    previousDetailMode.current = turn.processDetailMode;
-    previousDefaultProcessExpanded.current = defaultProcessExpanded;
-    previousStatus.current = turn.status;
-    previousHasCompleteFinalAnswer.current = turn.hasCompleteFinalAnswer;
+    if (!reachedCompleteAnswer && !lostCompleteAnswer) return;
+    const next = {
+      complete: turn.hasCompleteFinalAnswer,
+      expanded: nextExpanded,
+    };
+    setProcessPreference(next);
   }, [
-    turn.id,
-    initialProcessExpanded,
-    turn.processDetailMode,
-    turn.status,
     turn.hasCompleteFinalAnswer,
-    defaultProcessExpanded,
+    reachedCompleteAnswer,
+    lostCompleteAnswer,
+    nextExpanded,
+    setProcessPreference,
   ]);
 
   // A settled file mutation is an outcome, not another activity row. Keep it
@@ -109,24 +87,22 @@ export const AgentTurn = memo(function AgentTurn({
   const visibleTimelineCells = useMemo(() => processExpanded
     ? timelineCells
     : [], [processExpanded, timelineCells]);
-  const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
+  const hasTimelineItems = turn.processCells.length > 0 || hasMoreHistory;
   const failureIsTimelineEvidence = useMemo(() => turn.processCells.some((cell) => cell.kind === "error"), [turn.processCells]);
   const showProcessStack =
     turn.hasProcessContent &&
-    visibleTimelineCells.length > 0;
+    processExpanded && (visibleTimelineCells.length > 0 || hasMoreHistory);
   const standaloneNotice = !turn.userCell && turn.status === "completed"
     && turn.processCells.length > 0
-    && turn.processCells.every((cell) => cell.kind === "status_notice");
+    && turn.processCells.every((cell) => cell.kind === "status_notice" || cell.kind === "context_compaction");
   const processSummary = standaloneNotice ? null : (
     <AgentProcessSummary
-      status={turn.hasCompleteFinalAnswer && turn.status === "running" ? "completed" : turn.status}
+      status={turn.status}
       processExpanded={processExpanded}
       hasTimelineItems={hasTimelineItems}
       durationMs={turn.durationMs}
       startedAt={turn.startedAt}
       failureMessage={failureIsTimelineEvidence && processExpanded ? undefined : turn.failureMessage}
-      canCollapse={turn.hasCompleteFinalAnswer}
-      canExpand={userToggled.current && !processExpanded}
       position="top"
       onToggle={() => {
         userToggled.current = true;
@@ -151,7 +127,7 @@ export const AgentTurn = memo(function AgentTurn({
         className: "chat-turn-user-cell agent-loop-user-cell",
       })}
 
-      {turn.hasProcessContent && (
+      {(turn.hasProcessContent || Boolean(turn.workItems?.length)) && (
         <section
           className="chat-turn-process agent-loop-process agent-loop-work-area"
           data-zone="work"
@@ -161,22 +137,34 @@ export const AgentTurn = memo(function AgentTurn({
           onClickCapture={(event) => {
             if ((event.target as Element).closest("button[aria-expanded], button.agent-loop-timeline-group-title, summary")) {
               userToggled.current = true;
-              setProcessExpanded(processPreference);
+              setProcessExpanded(nextExpanded);
             }
           }}
         >
-          {processSummary}
-          {processExpanded && historyControl}
+          {turn.hasProcessContent && processSummary}
 
-          {showProcessStack && (
+          {turn.workItems ? turn.workItems.map((item) => item.kind === "user"
+            ? renderCell({ key: item.id, cell: item.cell, className: "chat-turn-user-cell agent-loop-user-cell" })
+            : processExpanded && (
+              <AgentTimeline
+                key={item.id}
+                cells={item.cells}
+                renderCell={renderCell}
+                isRunning={turn.status === "running" && item === turn.workItems?.at(-1)}
+                expandWorkGroups={false}
+                showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
+                onUserDisclosure={onUserDisclosure}
+                onHistoryStartReached={item === turn.workItems?.find((entry) => entry.kind === "process") ? onLoadHistory : undefined}
+              />
+            )) : showProcessStack && (
             <AgentTimeline
-              loadedToolItems={loadedToolItems}
               cells={visibleTimelineCells}
               renderCell={renderCell}
               isRunning={turn.status === "running"}
-              expandWorkGroups={userToggled.current}
+              expandWorkGroups={false}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
               onUserDisclosure={onUserDisclosure}
+              onHistoryStartReached={onLoadHistory}
             />
           )}
 

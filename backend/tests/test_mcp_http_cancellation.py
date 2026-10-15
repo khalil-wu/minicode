@@ -16,7 +16,7 @@ def test_read_only_tool_timeout_is_not_retried() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, *_args, **_kwargs):
             self.calls += 1
             raise McpError(types.ErrorData(code=408, message="Timed out waiting for response"))
 
@@ -42,7 +42,7 @@ def test_mutating_tool_timeout_is_not_retried() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, *_args, **_kwargs):
             self.calls += 1
             raise McpError(types.ErrorData(code=408, message="Timed out waiting for response"))
 
@@ -67,7 +67,7 @@ def test_tool_call_cancellation_propagates_to_the_sdk_request() -> None:
     cancelled = asyncio.Event()
 
     class _Session:
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, *_args, **_kwargs):
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -103,7 +103,7 @@ def test_close_drains_active_sdk_tool_calls_before_transport_close() -> None:
     cancelled = asyncio.Event()
 
     class _Session:
-        async def call_tool(self, *_args, **_kwargs):
+        async def send_request(self, *_args, **_kwargs):
             started.set()
             try:
                 await asyncio.Event().wait()
