@@ -956,23 +956,26 @@ def test_user_message_workspace_switch_waits_for_workspace_activation(monkeypatc
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        conversation = session.conversation_repo.create_conversation(
-            conversation_id="conv_workspace_message",
-            title="Workspace message",
-        )
-        session.active_conversation_id = conversation.id
-
-        await session.command_dispatcher._handle_command(
-            UserCommand(
-                type="user_message",
-                data={
-                    "conversation_id": conversation.id,
-                    "content": "inspect the workspace",
-                    "workspace_root": str(workspace_root),
-                },
+        try:
+            conversation = session.conversation_repo.create_conversation(
+                conversation_id="conv_workspace_message",
+                title="Workspace message",
             )
-        )
-        return initialized.is_set(), captured
+            session.active_conversation_id = conversation.id
+
+            await session.command_dispatcher._handle_command(
+                UserCommand(
+                    type="user_message",
+                    data={
+                        "conversation_id": conversation.id,
+                        "content": "inspect the workspace",
+                        "workspace_root": str(workspace_root),
+                    },
+                )
+            )
+            return initialized.is_set(), captured
+        finally:
+            await session.session_lifecycle.shutdown(reason="workspace_activation_fixture")
 
     did_initialize, messages = asyncio.run(scenario())
 

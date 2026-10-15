@@ -942,6 +942,10 @@ class WebSocketManager:
         session = self.execution_host_for_session(session_id)
         if session is None:
             return False
+        # A retained core can outlive the ASGI transport. Protocol states may
+        # still say CONNECTED after its channel has closed; only the currently
+        # attached, live transport belongs to this shutdown's close operation.
+        websocket = session.ws if self._sessions.get(session_id) is session and session.is_connected else None
         retiring = self._disconnect_tasks.get(session_id)
         if retiring is not None and not retiring.done():
             if self._sessions.get(session_id) is session:
@@ -985,9 +989,9 @@ class WebSocketManager:
                 if tail is not None:
                     await asyncio.shield(tail)
                 self.execution_contexts.release_host(owner)
-                if (session.ws.client_state == WebSocketState.CONNECTED
-                        and session.ws.application_state == WebSocketState.CONNECTED):
-                    await session.ws.close(code=1000, reason=reason)
+                if (websocket is not None and websocket.client_state == WebSocketState.CONNECTED
+                        and websocket.application_state == WebSocketState.CONNECTED):
+                    await websocket.close(code=1000, reason=reason)
             finally:
                 if self._execution_host_shutdown_tasks.get(session_id) is asyncio.current_task():
                     self._execution_host_shutdown_tasks.pop(session_id, None)

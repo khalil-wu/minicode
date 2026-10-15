@@ -3,7 +3,6 @@ import inspect
 import json
 import threading
 from pathlib import Path
-from queue import Empty
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -85,14 +84,7 @@ def test_parent_workspace_diff_is_durable_on_its_assistant_message_and_survives_
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", factory)
 
     def receive(ws):
-        try:
-            message = ws._send_queue.get(timeout=30)
-        except Empty as exc:
-            raise AssertionError("Owned workspace diff wire did not advance within 30 seconds") from exc
-        if isinstance(message, BaseException):
-            raise message
-        ws._raise_on_close(message)
-        payload = json.loads(message["text"])
+        payload = ws.receive_json()
         assert payload.get("type") != "error", payload
         return payload
 
@@ -146,14 +138,7 @@ def test_parent_workspace_diff_is_durable_on_its_assistant_message_and_survives_
 
 
 def _receive_json(ws) -> dict[str, object]:
-    try:
-        message = ws._send_queue.get(timeout=30)
-    except Empty as exc:
-        raise AssertionError("Conversation fixture wire did not advance within 30 seconds") from exc
-    if isinstance(message, BaseException):
-        raise message
-    ws._raise_on_close(message)
-    return json.loads(message["text"])
+    return ws.receive_json()
 
 
 def _assert_no_unexpected_failure(payload) -> None:

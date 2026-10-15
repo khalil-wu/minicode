@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import anyio
+from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.runtime import default_runtime
@@ -160,6 +163,48 @@ async def test_full_shutdown_does_not_close_a_physically_disconnected_asgi_socke
         assert await case.manager.shutdown_execution_host(case.owner.session_id)
         close.assert_not_awaited()
         assert case.manager.execution_contexts.context_for(state.conversation.id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retired", [False, True], ids=["live-transport", "retired-transport"])
+async def test_full_shutdown_uses_transport_ownership_after_asgi_stream_closes(tmp_path, monkeypatch, retired):
+    async with sessions(tmp_path, monkeypatch) as case:
+        incoming, incoming_reader = anyio.create_memory_object_stream[dict](float("inf"))
+        outgoing, outgoing_reader = anyio.create_memory_object_stream[dict](float("inf"))
+        async with incoming, incoming_reader, outgoing, outgoing_reader:
+            await incoming.send({"type": "websocket.connect"})
+            socket = WebSocket({"type": "websocket", "path": "/ws", "headers": [],
+                "query_string": ("session_id=" + case.owner.session_id).encode()},
+                incoming_reader.receive, outgoing.send)
+            connection = _connection(tmp_path / "asgi-transport", case.owner.session_id)
+            connection["websocket"] = socket
+            owner, _generation = await case.manager.connect(**connection)
+            assert owner is case.owner
+            state = await case.launch("asgi-close-owner")
+            close = AsyncMock(wraps=socket.close)
+            monkeypatch.setattr(socket, "close", close)
+            if retired:
+                await case.expire(owner)
+                # ASGI can finish without consuming websocket.disconnect. Its
+                # protocol states remain connected while the actual streams
+                # are closed, as in the current Starlette TestClient.
+                await outgoing.aclose()
+                await outgoing_reader.aclose()
+            assert owner.is_connected is (not retired)
+            assert socket.client_state is WebSocketState.CONNECTED
+            assert socket.application_state is WebSocketState.CONNECTED
+            assert await case.manager.shutdown_execution_host(owner.session_id)
+            assert case.manager.execution_contexts.context_for(state.conversation.id) is None
+            assert case.manager.execution_host_for_session(owner.session_id) is None
+            assert owner.llm.close_calls == 1
+            if retired:
+                close.assert_not_awaited()
+            else:
+                close.assert_awaited_once_with(code=1000, reason="execution_shutdown")
+                messages = [await outgoing_reader.receive()
+                    for _ in range(outgoing_reader.statistics().current_buffer_used)]
+                assert messages[0]["type"] == "websocket.accept"
+                assert messages[-1] == {"type": "websocket.close", "code": 1000, "reason": "execution_shutdown"}
 
 
 @pytest.mark.asyncio
