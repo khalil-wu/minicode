@@ -1,5 +1,5 @@
 .mc-pinned-sortable-list { position: relative; }
-.mc-sidebar-sortable-list { position: relative; }
+.mc-sidebar-sortable-list { position: relative; min-width: 0; }
 [data-sidebar-sort-id] { touch-action: none; }
 [data-sidebar-list-dragging] > .mc-pinned-slot > [data-sidebar-sort-id] { pointer-events: none; }
 [data-sidebar-sort-dragging] { opacity: .2; }

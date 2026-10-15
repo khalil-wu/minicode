@@ -71,6 +71,7 @@ export const sessionListWrapStyle: React.CSSProperties = {
   minWidth: 0,
   padding: "2px 0 10px",
   display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr)",
   alignContent: "start",
   gap: 7,
 };
