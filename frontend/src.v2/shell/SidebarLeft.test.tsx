@@ -23,7 +23,7 @@ vi.hoisted(() => {
 import { SidebarLeft } from "./SidebarLeft";
 import { HeaderBar } from "./HeaderBar";
 import { NavigationRail } from "./NavigationRail";
-import { useAppStore } from "../stores";
+import { useAppStore, waitEditorDraftRecovery } from "../stores";
 import { sendClientCommand, sendClientCommandAwaitResult, sendConversationDeleteCommand } from "../protocol/ws-outbox";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import type { ChatMessage } from "../stores/types";
@@ -595,6 +595,11 @@ describe("SidebarLeft session status", () => {
       workingDirectory: "C:\\Desktop\\MiniCode",
       draft: "unfinished prompt", editorTabs, panelSlots, activeTabPath: "README.md", activeEditorPath: "README.md",
     });
+    // Cold editor recovery is independent of the new-chat command. Capture
+    // its settled array so this checks the command's ownership boundary.
+    await waitEditorDraftRecovery();
+    const settledEditorTabs = useAppStore.getState().editorTabs;
+    expect(settledEditorTabs).toStrictEqual(editorTabs);
 
     render(<SidebarLeft />);
     vi.mocked(sendClientCommand).mockClear();
@@ -608,7 +613,7 @@ describe("SidebarLeft session status", () => {
     expect(state.appMode).toBe("cowork");
     expect(state.workingDirectory).toBe("C:\\Desktop\\MiniCode");
     expect(state).toMatchObject({ conversationId: "conv-restored", draft: "unfinished prompt", activeTabPath: "README.md", activeEditorPath: "README.md" });
-    expect(state.editorTabs).toBe(editorTabs);
+    expect(state.editorTabs).toBe(settledEditorTabs);
     expect(state.panelSlots).toBe(panelSlots);
     expect(state.conversations[0].workspaceRoot).toBeUndefined();
   });

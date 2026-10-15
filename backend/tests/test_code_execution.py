@@ -344,10 +344,39 @@ def test_busy_javascript_is_cancelled_without_blocking_the_event_loop(tmp_path, 
     monkeypatch.setattr("backend.agent.context.build_git_status_context_async", no_repository_probe)
 
     async def scenario():
-        model = ScriptModel('while (true) {}', yield_time_ms=0, terminate=True)
-        started = time.monotonic()
-        await run_model(tmp_path, model)
-        assert time.monotonic() - started < 3
+        step_entered = asyncio.Event()
+        original_step = CodeVM.step
+
+        async def observe_busy_step(vm, operation="", payload=None):
+            if operation == "start":
+                step_entered.set()
+            return await original_step(vm, operation, payload)
+
+        monkeypatch.setattr(CodeVM, "step", observe_busy_step)
+        cancellation_started = None
+        cancellation_finished = None
+
+        async def terminate_running_cell(report):
+            nonlocal cancellation_started
+            assert report["status"] == "running"
+            await step_entered.wait()
+            # This continuation must run while V8 is evaluating busy JS.
+            await asyncio.sleep(0)
+            cancellation_started = time.monotonic()
+            return ToolCallEvent(id="cancel-busy-script", name="tool_wait", arguments={
+                "cell_id": report["cell_id"], "yield_time_ms": 10000, "terminate": True})
+
+        async def observe_receipt(event):
+            nonlocal cancellation_finished
+            if event.type == "tool_result" and event.data["id"] == "cancel-busy-script":
+                cancellation_finished = time.monotonic()
+
+        model = ScriptModel('while (true) {}', yield_time_ms=0, after_first=terminate_running_cell)
+        await run_model(tmp_path, model, observe=observe_receipt)
+        assert cancellation_started is not None and cancellation_finished is not None
+        # Measure actual cancellation, excluding profile/context construction
+        # and disk teardown, which can be slow on a loaded Windows CI runner.
+        assert cancellation_finished - cancellation_started < 3
         assert model.reports[-1]["status"] == "cancelled", model.reports
     asyncio.run(scenario())
 
