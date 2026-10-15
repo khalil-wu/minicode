@@ -73,9 +73,11 @@ async def test_committed_native_history_and_journal_pair_on_next_wire(tmp_path, 
         result_ids = [item["tool_use_id"] for item in blocks if item.get("type") == "tool_result"]
         assert reasoning in blocks and hosted in blocks and hosted_result in blocks
     else:
-        adapter = object.__new__(OpenAIAdapter)
-        adapter._settings = LLMSettings(api_key="", provider="openai", wire_api="responses", supports_custom_tools=provider == "custom")
-        wire = adapter._build_responses_input(context._get_history_within_budget())
+        adapter = OpenAIAdapter(LLMSettings(api_key="", provider="openai", wire_api="responses", supports_custom_tools=provider == "custom"))
+        try:
+            wire = adapter._build_responses_input(context._get_history_within_budget())
+        finally:
+            await adapter.aclose()
         call_ids = [item["call_id"] for item in wire if item.get("type") in {"function_call", "custom_tool_call"}]
         result_ids = [item["call_id"] for item in wire if item.get("type") in {"function_call_output", "custom_tool_call_output"}]
         assert reasoning in wire

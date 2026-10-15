@@ -233,22 +233,16 @@ async def test_extension_reload_keeps_project_configuration(tmp_path, monkeypatc
     assert captured == {"workspace_root": tmp_path, "config": config, "mcp_manager": mcp}
 
 
-def queue_manager(queue):
-    manager = SessionRunManager.__new__(SessionRunManager)
-    manager._durable_queue = queue
-    manager._user_message_queues = {}
-    manager._inflight_user_messages = {}
-    manager._durable_turn_inputs = {}
-    manager._turn_input_queues = {"conv_probe": TurnInputQueue()}
-    manager._turn_input_queues["conv_probe"].begin_turn("r1")
-    return manager
-
-
 def test_failed_steer_write_is_not_published_or_saved_later(tmp_path, monkeypatch):
-    queue = DurableUserMessageQueue(session_id="fixture", root_dir=tmp_path)
+    repository = ConversationRepository(tmp_path / "conversations")
+    session = SimpleNamespace(session_id="fixture", conversation_repo=repository,
+        turn_wait_state=TurnWaitState())
+    manager = SessionRunManager(session)
+    queue = manager.durable_queue
     try:
         queue.save({}, {}, {})
-        manager = queue_manager(queue)
+        session.turn_wait_state.turn_input_queues["conv_probe"] = TurnInputQueue()
+        session.turn_wait_state.turn_input_queues["conv_probe"].begin_turn("r1")
         command = UserCommand("user_message", {"content": "steer once", "assistant_message_id": "a1", "user_message_id": "u1"})
         with monkeypatch.context() as patch:
             def fail(*args, **kwargs):
@@ -260,7 +254,8 @@ def test_failed_steer_write_is_not_published_or_saved_later(tmp_path, monkeypatc
         manager._persist_user_queues()
         assert json.loads(queue.path.read_text())["turn_inputs"] == {}
     finally:
-        queue.close()
+        manager.stop_notification_wake_intake()
+        manager.close_durable_queue()
 
 
 def test_transient_queue_read_denial_keeps_the_canonical_file(tmp_path, monkeypatch):

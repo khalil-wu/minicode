@@ -7,6 +7,7 @@ import pytest
 
 from backend import main
 from backend.agent import runtime
+from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.permissions import profiles
 from backend.sandbox.policy import SandboxEnforcement
 
@@ -27,6 +28,8 @@ async def test_interrupted_startup_closes_allocated_owners(tmp_path, monkeypatch
     events = []
 
     class Bootstrap:
+        begin_drain = main.AppBootstrap.begin_drain
+
         def __init__(self, **kwargs):
             pass
 
@@ -39,6 +42,7 @@ async def test_interrupted_startup_closes_allocated_owners(tmp_path, monkeypatch
 
     class Manager:
         async def shutdown(self, **kwargs):
+            assert conversation_query_guards().admission_closed
             events.append("sessions_closed")
 
     class Runtime:
@@ -61,6 +65,8 @@ async def test_session_shutdown_error_still_closes_services_and_releases_lease(m
     events = []
 
     class Bootstrap:
+        begin_drain = main.AppBootstrap.begin_drain
+
         def __init__(self, **kwargs):
             pass
 
@@ -72,6 +78,7 @@ async def test_session_shutdown_error_still_closes_services_and_releases_lease(m
 
     class Manager:
         async def shutdown(self, **kwargs):
+            assert conversation_query_guards().admission_closed
             raise RuntimeError("session teardown failed")
 
     class Runtime:

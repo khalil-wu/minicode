@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import aclosing
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.agent.message import AgentEvent
 from backend.agent.query_engine import QueryEngine
 from backend.agent.runtime import AgentRuntime
-from backend.config import AppConfig, LLMSettings, PermissionSettings
+from backend.config import PermissionSettings
 from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType
 from backend.permissions.checker import PermissionChecker
@@ -34,6 +35,11 @@ class _Model(LLMAdapter):
 
 @pytest.fixture
 def scheduled_case(tmp_path, monkeypatch):
+    from backend.config import SETTINGS_FILE
+
+    SETTINGS_FILE.write_text(json.dumps({
+        "llm": {"provider": "openai", "openai": {"model": "scheduled-test"}},
+    }), encoding="utf-8")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     repository = ConversationRepository(base_dir=tmp_path / "conversations")
@@ -43,7 +49,6 @@ def scheduled_case(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.services.scheduled_task_runner.git_branch_for", lambda path: "audit")
     monkeypatch.setattr("backend.services.chat_api_service.default_runtime", lambda: runtime)
     monkeypatch.setattr("backend.services.scheduled_task_runner.default_runtime", lambda: runtime)
-    monkeypatch.setattr("backend.services.chat_api_service.load_config", lambda **kwargs: AppConfig(llm=LLMSettings(api_key="")))
     monkeypatch.setattr("backend.agent.context.build_git_status_context_async", AsyncMock(return_value=""))
     monkeypatch.setattr("backend.tasks.scheduler.SCHEDULE_FILE", tmp_path / "state" / "scheduled_tasks.json")
     checker = PermissionChecker(PermissionSettings(), workspace_root=workspace)

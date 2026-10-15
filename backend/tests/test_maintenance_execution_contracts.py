@@ -134,6 +134,7 @@ def test_config_hook_runtime_error_prevents_settings_mutation(tmp_path, monkeypa
 
 def test_scheduled_worktree_cancellation_finishes_durable_binding(tmp_path, monkeypatch):
     from backend.services import conversation_payload_service, scheduled_task_runner
+    from backend.tasks.scheduler import ScheduledTask, ScheduledTaskRun
 
     entered, release = threading.Event(), threading.Event()
     destination = tmp_path / "scheduled-worktree"
@@ -151,11 +152,14 @@ def test_scheduled_worktree_cancellation_finishes_durable_binding(tmp_path, monk
         )
 
     monkeypatch.setattr(conversation_payload_service, "create_isolated_worktree_binding", create)
+    task = ScheduledTask(workspace_root=str(tmp_path), isolation="worktree",
+        permission_mode="confirm", conversation_id=conversation.id)
+    run = ScheduledTaskRun(id="scheduled-cancel", task_id=task.id, conversation_id=conversation.id)
 
     async def scenario():
         operation = asyncio.create_task(scheduled_task_runner.run_scheduled_task(
-            SimpleNamespace(workspace_root=str(tmp_path), isolation="worktree", permission_mode="confirm", conversation_id=conversation.id),
-            SimpleNamespace(id="scheduled-cancel", conversation_id=conversation.id),
+            task,
+            run,
             bootstrap=SimpleNamespace(),
         ))
         try:

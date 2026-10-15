@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +13,7 @@ from backend.agent.message import AgentEvent
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.runtime import AgentRuntime, TerminalCommitError
 from backend.agent.run_context import RunContext
+from backend.agent.state import AgentState
 from backend.agent.turn_input import TurnInputQueue
 from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
@@ -87,10 +87,9 @@ def test_strict_terminal_commit_never_mutates_memory_after_cas_rejection(tmp_pat
 def test_turn_kernel_exposes_terminal_commit_failure_without_completion(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     try:
-        state = SimpleNamespace(
+        state = AgentState(
+            user_message="hello",
             conversation_id="conversation-kernel-cas",
-            terminal_status=None,
-            stopped_reason=None,
         )
         kernel = TurnKernel.create(
             metadata={"run_id": "run-kernel-cas"},

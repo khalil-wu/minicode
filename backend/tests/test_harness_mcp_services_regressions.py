@@ -17,7 +17,7 @@ import pytest
 from backend.agent.tool_schema_derivation import derive_turn_tool_schema_state
 from backend.agent.prompting import build_tool_runtime_guidance
 from backend.agent.message import AgentEvent
-from backend.config import AgentSettings, TokenBudget
+from backend.config import AppConfig, LLMSettings
 from backend.commands import catalog, slash_commands
 from backend.commands.registry import CommandRegistry
 from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef
@@ -396,7 +396,8 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     monkeypatch.setattr(scheduled, "ConversationRepository", lambda: repository)
     monkeypatch.setattr(scheduled, "main_worktree_root", lambda root: Path(root).resolve())
     monkeypatch.setattr(scheduled, "run_owned_rest_chat", run)
-    monkeypatch.setattr(chat, "load_config", lambda **kwargs: SimpleNamespace(agent=AgentSettings(), token_budget=TokenBudget()))
+    config = AppConfig(llm=LLMSettings(api_key="", model="heartbeat-test"))
+    monkeypatch.setattr(chat, "load_config", lambda **kwargs: config)
     monkeypatch.setattr(chat, "ArtifactStore", object)
     monkeypatch.setattr(chat, "default_runtime", lambda: runtime)
     monkeypatch.setattr(scheduled, "default_runtime", lambda: runtime)

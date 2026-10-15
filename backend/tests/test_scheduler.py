@@ -266,8 +266,8 @@ def test_archive_pause_retains_history_and_stops_only_the_conversation_runs(monk
     from backend.conversations.repository import ConversationRepository
 
     repository = ConversationRepository()
-    owner = repository.create_conversation(workspace_root=str(project))
-    other = repository.create_conversation(workspace_root=str(project))
+    owner = repository.create_conversation(workspace_root=str(project), model_selection={"model": "archive-test"})
+    other = repository.create_conversation(workspace_root=str(project), model_selection={"model": "archive-test"})
 
     async def scenario() -> None:
         started = set()
