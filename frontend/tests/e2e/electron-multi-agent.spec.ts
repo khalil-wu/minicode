@@ -1,13 +1,42 @@
-import { _electron as electron, expect, test, type Page } from "@playwright/test";
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Socket } from "node:net";
 
 type JsonRecord = Record<string, unknown>;
+type ExternalPeer = { env: Record<string, string>; fingerprint: string };
+type WireRecord = { connection: number; direction: "client" | "server"; atMs: number; message: JsonRecord };
+
+const repoRoot = path.resolve(import.meta.dirname, "../../..");
+const desktopEntry = path.join(repoRoot, "desktop");
+const desktopMain = path.join(desktopEntry, "main.js");
+const desktopRequire = createRequire(path.join(desktopEntry, "package.json"));
+const electronExecutable = desktopRequire("electron") as string;
+const { externalPeerEnvironment } = desktopRequire("./test-peer-env.js") as {
+  externalPeerEnvironment: () => Promise<ExternalPeer>;
+};
+const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
+const ownerId = "conv-electron";
+const runningResult = "Desktop restart verification completed.";
+const lazyResult = "Recovered result body from lazy status lookup.";
+const recoveredResult = "Persisted result restored from the durable child journal.";
+
+const processBlock = (id: string, content: string, timestamp: number) => ({
+  type: "process", id, item_kind: "process_text", content, source: "model_preamble",
+  status: "completed", visibility: "timeline", timestamp,
+});
+const finalBlock = (id: string, content: string) => ({
+  type: "text", item_id: id, content, source: "model_final", status: "completed", is_streaming: false,
+});
+const completedChildMessages = (id: string, process: string, result: string, timestamp: number) => [{
+  id, turn_id: id, role: "assistant", content: result, timestamp, is_streaming: false,
+  completed_at: timestamp + 5, terminal_status: "completed",
+  blocks: [processBlock(`${id}-process`, process, timestamp), finalBlock(`${id}-answer`, result)],
+}];
 
 class TestWebSocket {
   private buffer = Buffer.alloc(0);
@@ -15,11 +44,13 @@ class TestWebSocket {
   constructor(
     private readonly socket: Socket,
     private readonly onMessage: (message: JsonRecord) => void,
+    private readonly onSend: (message: JsonRecord) => void,
   ) {
     socket.on("data", (chunk) => this.consume(chunk));
   }
 
   send(message: JsonRecord) {
+    this.onSend(message);
     const payload = Buffer.from(JSON.stringify(message));
     const length = payload.length;
     const header = length < 126
@@ -39,6 +70,7 @@ class TestWebSocket {
   private consume(chunk: Buffer) {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 2) {
+      const opcode = this.buffer[0]! & 0x0f;
       const second = this.buffer[1]!;
       const masked = Boolean(second & 0x80);
       let payloadLength = second & 0x7f;
@@ -59,33 +91,44 @@ class TestWebSocket {
       const payload = Buffer.from(this.buffer.subarray(offset, offset + payloadLength));
       this.buffer = this.buffer.subarray(offset + payloadLength);
       if (mask) {
-        for (let index = 0; index < payload.length; index += 1) {
-          payload[index] ^= mask[index % 4]!;
-        }
+        for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4]!;
       }
-      try {
-        this.onMessage(JSON.parse(payload.toString("utf8")) as JsonRecord);
-      } catch {
-        // Ignore non-JSON control frames in the test transport.
+      if (opcode === 0x08) {
+        this.socket.end(Buffer.from([0x88, 0]));
+        return;
       }
+      expect(opcode, "fixture transport receives complete JSON text frames").toBe(0x01);
+      this.onMessage(JSON.parse(payload.toString("utf8")) as JsonRecord);
     }
   }
 }
 
 class MultiAgentBackend {
   readonly commands: JsonRecord[] = [];
+  readonly wire: WireRecord[] = [];
+  readonly transportErrors: JsonRecord[] = [];
+  readonly closingConnections = new Set<number>();
   readonly server: Server;
   readonly sockets = new Set<Socket>();
+  readonly connections: TestWebSocket[] = [];
   port = 0;
-  connectionCount = 0;
+  private runningSeq = 2;
+  private runningProgressAdded = false;
+  private runningFinal = false;
+  private runningCompleted = false;
+  private lazyResultLoaded = false;
 
-  constructor() {
+  constructor(readonly peer: ExternalPeer) {
     this.server = createServer((req, res) => {
       res.setHeader("access-control-allow-origin", "*");
       res.setHeader("content-type", "application/json");
       if (req.method === "OPTIONS") {
         res.writeHead(204);
         res.end();
+        return;
+      }
+      if (req.url === "/readyz") {
+        res.end(JSON.stringify({ status: "ok", ready: true, desktop_bridge_fingerprint: peer.fingerprint }));
         return;
       }
       if (req.url === "/health") {
@@ -97,140 +140,52 @@ class MultiAgentBackend {
     this.server.on("upgrade", (request, socket) => {
       this.sockets.add(socket);
       socket.once("close", () => this.sockets.delete(socket));
-      const key = String(request.headers["sec-websocket-key"] || "");
       const accept = createHash("sha1")
-        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
         .digest("base64");
       socket.write([
-        "HTTP/1.1 101 Switching Protocols",
-        "Upgrade: websocket",
-        "Connection: Upgrade",
-        `Sec-WebSocket-Accept: ${accept}`,
-        "Sec-WebSocket-Protocol: minicode",
-        "",
-        "",
+        "HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`, "Sec-WebSocket-Protocol: minicode", "", "",
       ].join("\r\n"));
 
-      this.connectionCount += 1;
-      const connectionNumber = this.connectionCount;
+      const connection = this.connections.length + 1;
+      socket.on("error", (error: NodeJS.ErrnoException) => {
+        this.transportErrors.push({ connection, code: error.code, message: error.message,
+          duringNativeClose: this.closingConnections.has(connection) });
+      });
       let bootstrapped = false;
       const ws = new TestWebSocket(socket, (command) => {
         this.commands.push(command);
+        this.wire.push({ connection, direction: "client", atMs: Date.now(), message: command });
         if (typeof command.client_command_id === "string") {
-          ws.send({
-            type: "client.command.ack",
-            client_command_id: command.client_command_id,
-            command_type: String(command.type || ""),
-          });
-        }
-        if (command.type === "subagent.transcript") {
-          const isRunning = command.subagent_id === "subagent-running";
-          const isRecovered = command.subagent_id === "subagent-recovered";
-          const isHistorical = command.subagent_id === "subagent-historical";
-          ws.send({
-            type: "command.result",
-            command: "subagent.transcript",
-            level: "success",
-            message: "",
-            data: {
-              client_command_id: command.client_command_id,
-              subagent_id: command.subagent_id,
-              ...(isHistorical ? {
-                model: "gpt-6.1-sol",
-                provider: "custom",
-                reasoning_effort: "high",
-                agent_path: "/root/historical_review",
-              } : {}),
-              seq: isRunning ? 2 : isRecovered ? 1 : 0,
-              messages: isHistorical ? [{
-                id: "child-historical-result",
-                role: "assistant",
-                content: "Historical child journal loaded without an active worker.",
-                timestamp: 25,
-                terminal_status: "completed",
-              }] : isRecovered ? [{
-                id: "child-recovered-result",
-                role: "assistant",
-                content: "Persisted result restored through session replay.",
-                timestamp: 30,
-                terminal_status: "completed",
-              }] : isRunning ? [
-                {
-                  id: "child-running-user",
-                  role: "user",
-                  content: "Verify restart recovery",
-                  timestamp: 10,
-                },
-                {
-                  id: "child-running-process",
-                  role: "assistant",
-                  content: "",
-                  timestamp: 11,
-                  blocks: [{
-                    type: "process",
-                    id: "child-running-process",
-                    item_kind: "process_text",
-                    content: "Checking the Electron restart path",
-                    source: "model_preamble",
-                    status: "completed",
-                    visibility: "timeline",
-                    timestamp: 11,
-                  }],
-                },
-              ] : [],
-            },
-          });
-        }
-        if (command.type === "subagent.status" && command.subagent_id === "subagent-complete") {
-          ws.send({
-            type: "subagent.done",
-            conversation_id: "conv-electron",
-            subagent_id: "subagent-complete",
-            summary: "Review completed",
-            snapshot: {
-              result: {
-                content: "Recovered result body from lazy status lookup.",
-                duration_ms: 2400,
-                tool_call_count: 4,
-              },
-            },
-            transcript_snapshot: {
-              seq: 1,
-              messages: [{
-                id: "child-complete-result",
-                role: "assistant",
-                content: "Recovered result body from lazy status lookup.",
-                timestamp: 20,
-                blocks: [{
-                  type: "text",
-                  item_id: "child-complete-result",
-                  content: "Recovered result body from lazy status lookup.",
-                  source: "model_final",
-                  status: "completed",
-                }],
-              }],
-            },
-          });
-          ws.send({
-            type: "command.result",
-            command: "subagent.status",
-            level: "success",
-            message: "",
-            data: { client_command_id: command.client_command_id },
-          });
-        }
-        if (command.type === "conversation.list" && !bootstrapped) {
-          bootstrapped = true;
-          if (connectionNumber === 1) {
-            this.sendBootstrap(ws, connectionNumber);
-          } else {
-            this.sendConversationList(ws);
-          }
+          ws.send({ type: "client.command.ack", client_command_id: command.client_command_id, command_type: command.type });
         }
         if (command.type === "session.restore") {
-          this.sendRecoveryRestore(ws);
+          bootstrapped = true;
+          this.sendSessionSnapshot(ws, connection > 1, command);
+        } else if (command.type === "conversation.list") {
+          this.sendConversationList(ws);
+          if (!bootstrapped && connection === 1) {
+            bootstrapped = true;
+            this.sendSessionSnapshot(ws, false);
+          }
+        } else if (command.type === "subagent.transcript") {
+          const data = this.childTranscript(String(command.subagent_id));
+          ws.send({ type: "command.result", command: "subagent.transcript", level: "success", message: "",
+            data: { client_command_id: command.client_command_id, subagent_id: command.subagent_id, ...data } });
+        } else if (command.type === "subagent.status" && command.subagent_id === "subagent-complete") {
+          this.lazyResultLoaded = true;
+          const snapshot = { status: "completed", result: { status: "completed", content: lazyResult,
+            duration_ms: 2400, tool_call_count: 4 } };
+          ws.send({ type: "subagent.done", conversation_id: ownerId, subagent_id: "subagent-complete",
+            summary: "Review completed", snapshot, transcript_snapshot: this.childTranscript("subagent-complete") });
+          ws.send({ type: "command.result", command: "subagent.status", level: "success", message: "",
+            data: { client_command_id: command.client_command_id, subagent_id: command.subagent_id, snapshot } });
+        } else if (command.type === "ping") {
+          ws.send({ type: "pong" });
         }
-      });
+      }, (message) => this.wire.push({ connection, direction: "server", atMs: Date.now(), message }));
+      this.connections.push(ws);
     });
   }
 
@@ -250,362 +205,192 @@ class MultiAgentBackend {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  private sendBootstrap(ws: TestWebSocket, connectionNumber: number) {
-    this.sendConversationList(ws, true);
-    ws.send({
-      type: "llm.model.updated",
-      model: "gpt-5",
-      current_model: "gpt-5",
-      available_models: ["gpt-5"],
-    });
-    ws.send({
-      type: "conversation.switched",
-      conversation_id: "conv-electron",
-      conversation: this.activeConversation(),
-    });
-    ws.send({
-      type: "session.synced",
-      active_conversation_id: "conv-electron",
-      session: {
-        session_id: "session-electron",
-        active_conversation_id: "conv-electron",
-        active_stream_conversation_ids: ["conv-electron"],
-        pending_turn_inputs: [{
-          conversation_id: "conv-electron",
-          mode: "steer",
-          message_id: "assistant-steer",
-          user_message_id: "user-steer",
-          target_message_id: "assistant-current",
-          content: "Continue with the recovered verification path.",
-          queued_at_ms: 3,
-        }],
-      },
-    });
-
-    setTimeout(() => {
-      if (connectionNumber > 1) {
-        return;
-      }
-
-      ws.send({
-        type: "subagent.event",
-        conversation_id: "conv-electron",
-        subagent_id: "workflow-electron",
-        event: {
-          type: "workflow_started",
-          workflow_id: "workflow-electron",
-          name: "Desktop recovery",
-          mode: "pipeline",
-          steps: [
-            {
-              step_id: "review",
-              node_id: "review",
-              task_id: "subagent-complete",
-              title: "Review persisted state",
-              role: "reviewer",
-              objective: "Review persisted state",
-              ready: true,
-            },
-            {
-              step_id: "verify",
-              node_id: "verify",
-              task_id: "subagent-running",
-              title: "Verify restart recovery",
-              role: "verification",
-              objective: "Verify restart recovery",
-              depends_on_nodes: ["review"],
-              blocked_by: [],
-              ready: true,
-            },
-          ],
-        },
-      });
-      ws.send({
-        type: "subagent.start",
-        conversation_id: "conv-electron",
-        subagent_id: "subagent-running",
-        parent_id: "root",
-        role: "verification",
-        prompt: "Verify restart recovery",
-        objective: "Verify restart recovery",
-        workflow_id: "workflow-electron",
-        workflow_name: "Desktop recovery",
-        workflow_mode: "pipeline",
-        node_id: "verify",
-        task_id: "subagent-running",
-      });
-      ws.send({
-        type: "subagent.progress",
-        conversation_id: "conv-electron",
-        subagent_id: "subagent-running",
-        iteration: 2,
-        max_iterations: 5,
-        source_event_type: "agent.progress",
-        detail: "Checking the Electron restart path",
-        transcript_snapshot: {
-          seq: 2,
-          messages: [
-            {
-              id: "child-running-user",
-              role: "user",
-              content: "Verify restart recovery",
-              timestamp: 10,
-            },
-            {
-              id: "child-running-process",
-              role: "assistant",
-              content: "",
-              timestamp: 11,
-              blocks: [{
-                type: "process",
-                id: "child-running-process",
-                item_kind: "process_text",
-                content: "Checking the Electron restart path",
-                source: "model_preamble",
-                status: "completed",
-                visibility: "timeline",
-                timestamp: 11,
-              }],
-            },
-          ],
-        },
-      });
-      ws.send({
-        type: "subagent.start",
-        conversation_id: "conv-electron",
-        subagent_id: "subagent-complete",
-        parent_id: "root",
-        role: "reviewer",
-        prompt: "Review persisted state",
-        objective: "Review persisted state",
-        workflow_id: "workflow-electron",
-        workflow_name: "Desktop recovery",
-        workflow_mode: "pipeline",
-        node_id: "review",
-        task_id: "subagent-complete",
-      });
-      ws.send({
-        type: "subagent.done",
-        conversation_id: "conv-electron",
-        subagent_id: "subagent-complete",
-        summary: "Review completed",
-      });
-    }, 500);
+  publishLiveChildren() {
+    const ws = this.connections[0]!;
+    ws.send({ type: "subagent.event", conversation_id: ownerId, subagent_id: "workflow-electron", event: {
+      type: "workflow_started", workflow_id: "workflow-electron", name: "Desktop recovery", mode: "pipeline",
+      steps: [
+        { step_id: "review", node_id: "review", task_id: "subagent-complete", title: "Review persisted state",
+          role: "reviewer", objective: "Review persisted state", ready: true },
+        { step_id: "verify", node_id: "verify", task_id: "subagent-running", title: "Verify restart recovery",
+          role: "verification", objective: "Verify restart recovery", depends_on_nodes: ["review"], blocked_by: [], ready: true },
+      ],
+    } });
+    ws.send({ type: "subagent.start", conversation_id: ownerId, subagent_id: "subagent-running", parent_id: "root",
+      role: "verification", prompt: "Verify restart recovery", objective: "Verify restart recovery",
+      workflow_id: "workflow-electron", workflow_name: "Desktop recovery", workflow_mode: "pipeline",
+      node_id: "verify", task_id: "subagent-running", agent_path: "/root/verify" });
+    ws.send({ type: "subagent.progress", conversation_id: ownerId, subagent_id: "subagent-running",
+      iteration: 2, max_iterations: 5, source_event_type: "agent.progress", detail: "Checking the Electron restart path",
+      transcript_snapshot: this.childTranscript("subagent-running") });
+    ws.send({ type: "subagent.start", conversation_id: ownerId, subagent_id: "subagent-complete", parent_id: "root",
+      role: "reviewer", prompt: "Review persisted state", objective: "Review persisted state",
+      workflow_id: "workflow-electron", workflow_name: "Desktop recovery", workflow_mode: "pipeline",
+      node_id: "review", task_id: "subagent-complete" });
+    ws.send({ type: "subagent.done", conversation_id: ownerId, subagent_id: "subagent-complete", summary: "Review completed" });
   }
 
-  private activeConversation(includeHistorical = false) {
-    return {
-      id: "conv-electron",
-      title: "Electron agents",
-      updated_at: "2026-07-12T00:00:00.000Z",
+  publishRunningProgress() {
+    this.runningProgressAdded = true;
+    this.runningSeq = 3;
+    this.connections[0]!.send({ type: "subagent.progress", conversation_id: ownerId, subagent_id: "subagent-running",
+      transcript_delta: { kind: "events", base_seq: 2, seq: 3, events: [{
+        event_id: "native-child-reading", event_type: "system", seq: 3, ts_ms: 12, payload: {
+          transcript_only: true, kind: "process_text", item_id: "child-running-added", content: "Verified the restored child journal",
+          source: "model_preamble", status: "completed", visibility: "timeline",
+        },
+      }] } });
+  }
+
+  publishRunningFinal() {
+    this.runningFinal = true;
+    this.runningSeq = 4;
+    this.connections[0]!.send({ type: "subagent.progress", conversation_id: ownerId, subagent_id: "subagent-running",
+      transcript_delta: { kind: "events", base_seq: 3, seq: 4, events: [{
+        event_id: "native-child-final", event_type: "progress", seq: 4, ts_ms: 13, payload: {
+          kind: "assistant_message", item_id: "running-answer", content: runningResult, source: "model_final", status: "completed",
+        },
+      }] } });
+  }
+
+  publishRunningDone() {
+    this.runningCompleted = true;
+    this.runningSeq = 5;
+    this.connections[0]!.send({ type: "subagent.done", conversation_id: ownerId, subagent_id: "subagent-running",
+      result: { status: "completed", content: runningResult }, transcript_snapshot: this.childTranscript("subagent-running") });
+  }
+
+  private childTranscript(id: string): JsonRecord {
+    if (id === "subagent-running") {
+      return { seq: this.runningSeq, agent_path: "/root/verify", messages: [
+        { id: "child-running-user", role: "user", content: "Verify restart recovery", timestamp: 10 },
+        { id: "subagent-turn-first", turn_id: "first", role: "assistant", content: this.runningFinal ? runningResult : "",
+          timestamp: 11, is_streaming: !this.runningCompleted,
+          ...(this.runningCompleted ? { terminal_status: "completed", completed_at: 15 } : {}),
+          blocks: [processBlock("child-running-process", "Checking the Electron restart path", 11),
+            ...(this.runningProgressAdded ? [processBlock("child-running-added", "Verified the restored child journal", 12)] : []),
+            ...(this.runningFinal ? [finalBlock("running-answer", runningResult)] : [])] },
+      ] };
+    }
+    if (id === "subagent-complete") return { seq: this.lazyResultLoaded ? 1 : 0,
+      messages: this.lazyResultLoaded
+        ? completedChildMessages("child-complete-result", "Reviewed the durable desktop state", lazyResult, 20) : [] };
+    if (id === "subagent-recovered") return { seq: 1,
+      messages: completedChildMessages("child-recovered-result", "Loaded the persisted child journal", recoveredResult, 30) };
+    expect(id).toBe("subagent-historical");
+    return { seq: 1, model: "gpt-6.1-sol", provider: "custom", reasoning_effort: "high", agent_path: "/root/historical_review",
+      messages: completedChildMessages("child-historical-result", "Read the historical child journal",
+        "Historical child journal loaded without an active worker.", 25) };
+  }
+
+  private activeConversation(recovered = false) {
+    return { id: ownerId, title: "Electron agents", updated_at: "2026-10-15T00:00:00.000Z",
+      ...(recovered ? { context_snapshot: { ui_agent_state: { plan: null, todos: [], agentProgress: [], subagents: [{
+        id: "subagent-recovered", role: "verification", status: "done", objective: "Recover completed desktop verification",
+        summary: "Recovered after desktop restart", result_content: recoveredResult, result_available: true, completed_at: 35,
+      }] } } } : {}),
       messages: [
-        {
-          id: "message-electron",
-          role: "user",
-          content: "Verify the desktop multi-agent recovery path.",
-          artifacts: [],
-          timestamp: 1,
-        },
-        {
-          id: "assistant-current",
-          role: "assistant",
-          content: includeHistorical ? "The historical desktop review is complete." : "Checking the current desktop state...",
-          artifacts: [],
-          timestamp: 2,
-          ...(includeHistorical ? {
-            completed_at: 4,
-            terminal_status: "completed",
-            blocks: [
-              {
-                type: "progress",
-                id: "historical-completion",
-                stage: "status",
-                phase: "subagent",
-                status: "completed",
-                message: "Historical desktop review已完成",
-                subagent_id: "subagent-historical",
-                subagent_name: "Historical desktop review",
-                subagent_identity: "/root/historical_review",
-                subagent_status: "done",
-                timestamp: 3,
-                visibility: "timeline",
-              },
-              {
-                type: "text",
-                id: "historical-parent-final",
-                content: "The historical desktop review is complete.",
-                source: "model_final",
-                status: "completed",
-              },
-            ],
-          } : {}),
-        },
+        { id: "message-electron", role: "user", content: "Verify the desktop multi-agent recovery path.", artifacts: [], timestamp: 1 },
+        { id: "assistant-current", role: "assistant", artifacts: [], timestamp: 2, is_streaming: !recovered,
+          content: recovered ? "The historical desktop review is complete." : "Checking the current desktop state...",
+          ...(recovered ? { completed_at: 4, terminal_status: "completed", blocks: [
+            { type: "progress", id: "historical-completion", stage: "status", phase: "subagent", status: "completed",
+              message: "Historical desktop review已完成", subagent_id: "subagent-historical", subagent_name: "Historical desktop review",
+              subagent_identity: "/root/historical_review", subagent_status: "done", timestamp: 3, visibility: "timeline" },
+            finalBlock("historical-parent-final", "The historical desktop review is complete."),
+          ] } : {}) },
       ],
     };
   }
 
-  private sendConversationList(ws: TestWebSocket, includeActiveConversation = false) {
-    ws.send({
-      type: "conversation.list",
-      conversations: [{
-        id: "conv-electron",
-        title: "Electron agents",
-        updated_at: "2026-07-12T00:00:00.000Z",
-      }],
-      active_conversation_id: "conv-electron",
-      ...(includeActiveConversation ? { active_conversation: this.activeConversation() } : {}),
-    });
+  private sendConversationList(ws: TestWebSocket) {
+    ws.send({ type: "conversation.list", conversations: [{ id: ownerId, title: "Electron agents", updated_at: "2026-10-15T00:00:00.000Z" }],
+      active_conversation_id: ownerId });
   }
 
-  private sendRecoveryRestore(ws: TestWebSocket) {
-    ws.send({
-      type: "session.restored",
-      restored: true,
-      active_conversation_id: "conv-electron",
-      active_conversation: this.activeConversation(true),
-      conversation: this.activeConversation(true),
-      conversation_switched_follows: true,
-      last_seq: 0,
-      current_seq: 2,
-      replayed_events: 2,
-      session: {
-        session_id: "session-electron",
-        active_conversation_id: "conv-electron",
-        active_conversation: this.activeConversation(true),
-        active_stream_conversation_ids: [],
-        pending_turn_inputs: [],
-        subagents: [],
-      },
-    });
-    ws.send({
-      type: "conversation.switched",
-      conversation_id: "conv-electron",
-      conversation: this.activeConversation(true),
-    });
-    this.sendRecoveryReplay(ws);
-  }
-
-  private sendRecoveryReplay(ws: TestWebSocket) {
-    ws.send({
-      type: "session.replay",
-      last_seq: 0,
-      current_seq: 2,
-      replayed_events: 2,
-      events: [
-        {
-          type: "subagent.start",
-          event_id: "replay-subagent-start",
-          seq: 1,
-          previous_replay_seq: 0,
-          conversation_id: "conv-electron",
-          subagent_id: "subagent-recovered",
-          parent_id: "root",
-          role: "verification",
-          prompt: "Recover completed desktop verification",
-          objective: "Recover completed desktop verification",
-        },
-        {
-          type: "subagent.done",
-          event_id: "replay-subagent-done",
-          seq: 2,
-          previous_replay_seq: 1,
-          conversation_id: "conv-electron",
-          subagent_id: "subagent-recovered",
-          summary: "Recovered after desktop restart",
-          snapshot: {
-            result: {
-              content: "Persisted result restored through session replay.",
-              duration_ms: 1800,
-              tool_call_count: 2,
-            },
-          },
-          transcript_snapshot: {
-            seq: 1,
-            messages: [{
-              id: "child-recovered-result",
-              role: "assistant",
-              content: "Persisted result restored through session replay.",
-              timestamp: 30,
-              terminal_status: "completed",
-            }],
-          },
-        },
-      ],
-    });
+  private sendSessionSnapshot(ws: TestWebSocket, recovered: boolean, restore?: JsonRecord) {
+    const conversation = this.activeConversation(recovered);
+    const session = { session_id: "session-electron", active_conversation_id: ownerId, active_conversation: conversation,
+      active_stream_conversation_ids: recovered ? [] : [ownerId], active_subagents: [],
+      pending_turn_inputs: recovered ? [] : [{ conversation_id: ownerId, mode: "steer", message_id: "assistant-steer",
+        user_message_id: "user-steer", target_message_id: "assistant-current",
+        content: "Continue with the recovered verification path.", queued_at_ms: 3 }],
+    };
+    ws.send({ type: "llm.model.updated", model: "gpt-5", current_model: "gpt-5", available_models: ["gpt-5"] });
+    ws.send({ type: restore ? "session.restored" : "session.synced", restored: true, active_conversation_id: ownerId,
+      active_conversation: conversation, conversation, conversation_switched_follows: Boolean(restore), session,
+      last_seq: Number(restore?.last_seq ?? 0), current_seq: recovered ? 2 : 0, replayed_events: 0 });
+    ws.send({ type: "conversation.switched", conversation_id: ownerId, conversation, session });
+    this.sendConversationList(ws);
   }
 }
 
-const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const desktopEntry = path.join(repoRoot, "desktop");
-const desktopMain = path.join(desktopEntry, "main.js");
-const electronExecutable = createRequire(path.join(desktopEntry, "package.json"))("electron") as string;
-const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
-const userDataPrefix = "minicode-agent-e2e-";
-const isTransientWindowsLock = (error: unknown) =>
-  process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EBUSY";
-
-async function cleanupStaleUserDataDirs() {
-  const entries = await readdir(tmpdir(), { withFileTypes: true });
-  await Promise.all(entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith(userDataPrefix))
-    .map(async (entry) => {
-      try {
-        await rm(path.join(tmpdir(), entry.name), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-      } catch (error) {
-        if (!isTransientWindowsLock(error)) throw error;
-      }
-    }));
+async function writeHiddenDesktopEntry(userDataDir: string) {
+  const entry = path.join(userDataDir, "hidden-desktop-entry.cjs");
+  await writeFile(entry, `
+const Module = require('node:module');
+const desktopRequire = Module.createRequire(${JSON.stringify(path.join(desktopEntry, "package.json"))});
+const electron = desktopRequire('electron');
+const originalLoad = Module._load;
+const visibilityCalls = [];
+const HiddenBrowserWindow = new Proxy(electron.BrowserWindow, {
+  construct(Target, [options]) {
+    const window = new Target({ ...options, show: false,
+      webPreferences: { ...options.webPreferences, backgroundThrottling: false } });
+    for (const method of ['show', 'showInactive', 'focus', 'restore']) window[method] = () => visibilityCalls.push(method);
+    window.flashFrame = () => {};
+    return window;
+  }
+});
+const testElectron = { ...electron, BrowserWindow: HiddenBrowserWindow };
+Module._load = function(request, ...args) {
+  return request === 'electron' ? testElectron : originalLoad.call(this, request, ...args);
+};
+globalThis.__offscreenQa = { visibilityCalls };
+require(${JSON.stringify(desktopMain)});
+`);
+  return entry;
 }
 
-async function launchDesktop(backend: MultiAgentBackend, userDataDir: string) {
+async function launchDesktop(backend: MultiAgentBackend, userDataDir: string, entry: string) {
   const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...cleanEnv } = process.env;
-  const electronArgs = process.platform === "win32"
-    ? [desktopMain]
-    : ["--disable-gpu", "--no-sandbox", desktopMain];
-  return electron.launch({
-    executablePath: electronExecutable,
-    args: electronArgs,
-    cwd: desktopEntry,
-    env: {
-      ...cleanEnv,
-      MINICODE_SKIP_BACKEND: "1",
-      MINICODE_FRONTEND_URL: `http://127.0.0.1:${frontendPort}/`,
-      MINICODE_API_BASE_URL: `http://127.0.0.1:${backend.port}`,
-      MINICODE_WS_BASE_URL: `ws://127.0.0.1:${backend.port}`,
-      MINICODE_RUNTIME_TOKEN: `e2e-${randomUUID()}`,
-      MINICODE_USER_DATA_DIR: userDataDir,
-    },
+  return electron.launch({ executablePath: electronExecutable,
+    args: [...(process.platform === "win32" ? [] : ["--disable-gpu", "--no-sandbox"]), "--lang=zh-CN", entry], cwd: desktopEntry,
+    env: { ...cleanEnv, ...backend.peer.env, MINICODE_SKIP_BACKEND: "1",
+      MINICODE_FRONTEND_URL: `http://127.0.0.1:${frontendPort}/`, MINICODE_API_BASE_URL: `http://127.0.0.1:${backend.port}`,
+      MINICODE_WS_BASE_URL: `ws://127.0.0.1:${backend.port}`, MINICODE_RUNTIME_TOKEN: `e2e-${randomUUID()}`,
+      MINICODE_USER_DATA_DIR: userDataDir },
   });
 }
 
-async function openAgentsPanel(window: Awaited<ReturnType<Awaited<ReturnType<typeof launchDesktop>>["firstWindow"]>>) {
-  const agentsTab = window.getByRole("tab", { name: /^(?:Open Agents|打开子智能体)$/ });
-  if (await agentsTab.isVisible().catch(() => false)) {
+async function nativeWindowState(app: ElectronApplication) {
+  return app.evaluate(({ BrowserWindow }) => ({
+    windows: BrowserWindow.getAllWindows().map((window) => ({ id: window.id, visible: window.isVisible(), focused: window.isFocused() })),
+    visibilityCalls: (globalThis as typeof globalThis & { __offscreenQa: { visibilityCalls: string[] } }).__offscreenQa.visibilityCalls,
+  }));
+}
+
+async function captureDesktop(app: ElectronApplication, filePath: string) {
+  await app.windows()[0]!.locator(".subagents-detail").evaluate(async (detail) => {
+    const transitions = detail.getAnimations({ subtree: true })
+      .filter((animation) => animation.effect!.getTiming().iterations !== Infinity);
+    await Promise.all(transitions.map((animation) => animation.finished));
+  });
+  const png = await app.evaluate(async ({ BrowserWindow }) =>
+    (await BrowserWindow.getAllWindows()[0]!.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString("base64"));
+  await writeFile(filePath, Buffer.from(png, "base64"));
+}
+
+async function openAgentsPanel(window: Page) {
+  const agentsTab = window.getByRole("tab", { name: "打开子智能体", exact: true });
+  if (await agentsTab.isVisible()) {
     await agentsTab.click();
     return;
   }
-
-  const collaborationButton = window.getByRole("button", { name: /打开子智能体面板/ });
-  // Recovery events are intentionally streamed after the session baseline.
-  // Wait for the in-chat entry before falling back to the panel launcher.
-  const collaborationReady = await expect(collaborationButton)
-    .toBeVisible({ timeout: 6_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (collaborationReady) {
-    await collaborationButton.click();
-    await expect(agentsTab).toBeVisible();
-    return;
-  }
-
-  const addPanelButton = window.getByRole("button", { name: /^(?:Add panel|添加面板)$/ });
-  const openRightPanelButton = window.getByRole("button", { name: /^(?:Open right panel|打开右侧栏)$/ });
-  await expect(addPanelButton.or(openRightPanelButton)).toBeVisible();
-  if (await openRightPanelButton.isVisible()) {
-    await openRightPanelButton.click();
-  }
+  const openRightPanel = window.getByRole("button", { name: "打开右侧栏", exact: true });
+  if (await openRightPanel.isVisible()) await openRightPanel.click();
   await expect(window.getByRole("tablist", { name: "右侧栏面板" })).toBeVisible();
-  await addPanelButton.click();
+  await window.getByRole("button", { name: "添加面板", exact: true }).click();
   await window.getByRole("menuitem", { name: "子智能体", exact: true }).click();
   await expect(agentsTab).toBeVisible();
 }
@@ -614,91 +399,149 @@ async function expectReadonlyAgentDetail(window: Page, title: string) {
   const detail = window.getByRole("region", { name: `子智能体任务详情：${title}` });
   await expect(detail).toBeVisible();
   await expect(detail.getByRole("textbox")).toHaveCount(0);
-  await expect(detail.getByRole("button", {
-    name: /补充指令|刷新子智能体工作详情|停止子智能体|发送给子智能体/,
-  })).toHaveCount(0);
+  await expect(detail.getByRole("button", { name: /补充指令|刷新子智能体工作详情|停止子智能体|发送给子智能体/ })).toHaveCount(0);
   await expect(detail.locator(".subagents-detail-header-actions")).toHaveCount(0);
+  return detail;
 }
 
-test("real Electron workbench supports read-only child transcripts, lazy results, and persisted history recovery", async () => {
-  test.setTimeout(90_000);
-  const backend = new MultiAgentBackend();
-  await cleanupStaleUserDataDirs();
-  const userDataDir = await mkdtemp(path.join(tmpdir(), userDataPrefix));
+test("real Electron workbench supports read-only child transcripts, lazy results, and persisted history recovery", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const backend = new MultiAgentBackend(await externalPeerEnvironment());
+  const userDataDir = await mkdtemp(path.join(tmpdir(), "minicode-agent-e2e-"));
+  const ownedApps = new Set<ElectronApplication>();
+  const nativeStates: JsonRecord[] = [];
+  let completed = false;
+  const entry = await writeHiddenDesktopEntry(userDataDir);
   await backend.listen();
 
   try {
-    const app = await launchDesktop(backend, userDataDir);
+    const app = await launchDesktop(backend, userDataDir, entry);
+    ownedApps.add(app);
     const window = await app.firstWindow();
-    await expect.poll(() => backend.commands.some((command) => command.type === "conversation.list"), {
-      timeout: 15_000,
-    }).toBe(true);
+    await expect.poll(() => backend.commands.some((command) =>
+      ["session.restore", "conversation.list"].includes(String(command.type))), { timeout: 30_000 }).toBe(true);
     await expect(window.getByText("Continue with the recovered verification path.", { exact: true })).toBeVisible();
-    await expect(window.getByText("已引导当前任务", { exact: true })).toBeVisible();
+    const initialNative = await nativeWindowState(app);
+    nativeStates.push({ phase: "initial", ...initialNative });
+    expect(initialNative.windows).toHaveLength(1);
+    expect(initialNative.windows.every((state) => !state.visible && !state.focused)).toBe(true);
+    backend.publishLiveChildren();
     await openAgentsPanel(window);
 
     await expect(window.getByText("Desktop recovery", { exact: true })).toHaveCount(0);
     const runningTask = window.getByRole("button", { name: "打开子智能体任务：Verify restart recovery", exact: true });
     await expect(runningTask).toBeVisible();
-    await expect(runningTask).toContainText("运行中");
+    await expect(runningTask).toHaveAttribute("data-status", "running");
+    await expect(runningTask.locator(".subagents-row-status")).toHaveCount(0);
     await expect(window.getByRole("progressbar", { name: "Agent 执行进度" })).toHaveCount(0);
     await expect(window.locator("body")).not.toContainText(/workflow-electron|subagent-running|node_id|task_id|iteration|tool_call/i);
 
     await runningTask.click();
+    const runningDetail = await expectReadonlyAgentDetail(window, "Verify restart recovery");
+    const transcript = runningDetail.locator('[aria-label="子智能体工作记录"]');
+    await expect(transcript.getByText("Checking the Electron restart path", { exact: true })).toBeVisible();
+    await expect(transcript.locator('[data-message-id="child-running-user"]')).toHaveCount(0);
+    await expect.poll(() => backend.commands.some((command) => command.type === "subagent.transcript"
+      && command.subagent_id === "subagent-running" && command.conversation_id === ownerId)).toBe(true);
+    await runningDetail.getByRole("button", { name: "收起处理步骤", exact: true }).click();
+    backend.publishRunningProgress();
+    await expect(transcript.getByText("Checking the Electron restart path", { exact: true })).toHaveCount(0);
+    await expect(transcript.getByText("Verified the restored child journal", { exact: true })).toHaveCount(0);
+    await runningDetail.getByRole("button", { name: "展开处理步骤", exact: true }).click();
+    await expect(transcript.getByText("Checking the Electron restart path", { exact: true })).toBeVisible();
+    await expect(transcript.getByText("Verified the restored child journal", { exact: true })).toBeVisible();
+    await runningDetail.getByRole("button", { name: "收起处理步骤", exact: true }).click();
+    backend.publishRunningFinal();
+    await expect(transcript.getByText(runningResult, { exact: true })).toBeVisible();
+    await expect(transcript.getByText("Checking the Electron restart path", { exact: true })).toHaveCount(0);
+    backend.publishRunningDone();
+    await expect(transcript.getByText(runningResult, { exact: true })).toBeVisible();
+    await expect(runningDetail.getByRole("button", { name: "展开处理步骤", exact: true })).toBeVisible();
+    await window.getByRole("button", { name: "返回子智能体列表" }).click();
+    await window.getByRole("button", { name: "打开子智能体任务：Verify restart recovery", exact: true }).click();
     await expectReadonlyAgentDetail(window, "Verify restart recovery");
-    await expect(window.locator('[aria-label="子智能体工作记录"]')).toContainText("Checking the Electron restart path");
-    await expect.poll(() => backend.commands.some((command) =>
-      command.type === "subagent.transcript" && command.subagent_id === "subagent-running"
-      && command.conversation_id === "conv-electron",
-    )).toBe(true);
+    await expect(transcript.getByText("Checking the Electron restart path", { exact: true })).toHaveCount(0);
+    await expect(transcript.getByText(runningResult, { exact: true })).toBeVisible();
+    await captureDesktop(app, testInfo.outputPath("child-manual-fold.png"));
 
     await window.getByRole("button", { name: "返回子智能体列表" }).click();
     await window.getByRole("button", { name: "打开子智能体任务：Review persisted state", exact: true }).click();
-    await expectReadonlyAgentDetail(window, "Review persisted state");
-    await expect.poll(() => backend.commands.some((command) =>
-      command.type === "subagent.status" && command.subagent_id === "subagent-complete",
-    )).toBe(true);
-    await expect(window.getByText("Recovered result body from lazy status lookup.")).toBeVisible();
-
+    const lazyDetail = await expectReadonlyAgentDetail(window, "Review persisted state");
+    await expect.poll(() => backend.commands.some((command) => command.type === "subagent.status"
+      && command.subagent_id === "subagent-complete" && command.include_result === true && command.conversation_id === ownerId)).toBe(true);
+    await expect(lazyDetail.getByText(lazyResult, { exact: true })).toBeVisible();
+    await expect(lazyDetail.getByText("Reviewed the durable desktop state", { exact: true })).toHaveCount(0);
+    await lazyDetail.getByRole("button", { name: "展开处理步骤", exact: true }).click();
+    await expect(lazyDetail.getByText("Reviewed the durable desktop state", { exact: true })).toBeVisible();
+    await captureDesktop(app, testInfo.outputPath("lazy-result-expanded.png"));
+    backend.closingConnections.add(1);
     await app.close();
+    ownedApps.delete(app);
 
-    const restarted = await launchDesktop(backend, userDataDir);
+    const restarted = await launchDesktop(backend, userDataDir, entry);
+    ownedApps.add(restarted);
     const restartedWindow = await restarted.firstWindow();
+    await expect.poll(() => backend.wire.some((record) => record.connection === 2 && record.direction === "client"
+      && record.message.type === "session.restore" && record.message.last_conversation_id === ownerId
+      && Number(record.message.last_seq ?? 0) === 0), { timeout: 30_000 }).toBe(true);
+    await expect(restartedWindow.getByText("The historical desktop review is complete.", { exact: true })).toBeVisible();
     await openAgentsPanel(restartedWindow);
-    await expect(restartedWindow.getByRole("button", {
-      name: "打开子智能体任务：Recover completed desktop verification",
-      exact: true,
-    })).toBeVisible();
-    await restartedWindow.getByRole("button", {
-      name: "打开子智能体任务：Recover completed desktop verification",
-      exact: true,
-    }).click();
-    await expectReadonlyAgentDetail(restartedWindow, "Recover completed desktop verification");
-    await expect(restartedWindow.getByText("Persisted result restored through session replay.")).toBeVisible();
+    const recoveredTask = restartedWindow.getByRole("button", { name: "打开子智能体任务：Recover completed desktop verification", exact: true });
+    await expect(recoveredTask).toBeVisible();
+    await recoveredTask.click();
+    const recoveredDetail = await expectReadonlyAgentDetail(restartedWindow, "Recover completed desktop verification");
+    await expect(recoveredDetail.getByText(recoveredResult, { exact: true })).toBeVisible();
+    await expect.poll(() => backend.commands.some((command) => command.type === "subagent.transcript"
+      && command.subagent_id === "subagent-recovered" && command.conversation_id === ownerId)).toBe(true);
+    await expect(recoveredDetail.getByText("Loaded the persisted child journal", { exact: true })).toHaveCount(0);
+    await recoveredDetail.getByRole("button", { name: "展开处理步骤", exact: true }).click();
+    await expect(recoveredDetail.getByText("Loaded the persisted child journal", { exact: true })).toBeVisible();
 
     await restartedWindow.getByRole("button", { name: "返回子智能体列表" }).click();
-    await expect(restartedWindow.getByRole("button", {
-      name: "打开子智能体任务：Historical desktop review", exact: true,
-    })).toHaveCount(0);
+    await expect(restartedWindow.getByRole("button", { name: "打开子智能体任务：Historical desktop review", exact: true })).toHaveCount(0);
     await restartedWindow.locator('.chat-turn[data-message-id="assistant-current"]')
       .getByRole("button", { name: "展开处理步骤", exact: true }).click();
     await restartedWindow.getByRole("button", { name: "打开子智能体：Historical desktop review", exact: true }).click();
-    await expectReadonlyAgentDetail(restartedWindow, "Historical desktop review");
-    await expect.poll(() => backend.commands.some((command) =>
-      command.type === "subagent.transcript" && command.subagent_id === "subagent-historical"
-      && command.conversation_id === "conv-electron",
-    )).toBe(true);
-    await expect(restartedWindow.locator('[aria-label="子智能体工作记录"]'))
+    const historicalDetail = await expectReadonlyAgentDetail(restartedWindow, "Historical desktop review");
+    await expect.poll(() => backend.commands.some((command) => command.type === "subagent.transcript"
+      && command.subagent_id === "subagent-historical" && command.conversation_id === ownerId)).toBe(true);
+    await expect(historicalDetail.locator('[aria-label="子智能体工作记录"]'))
       .toContainText("Historical child journal loaded without an active worker.");
-    await expect(restartedWindow.getByText("6.1 Sol · high", { exact: true })).toBeVisible();
-    expect(backend.commands.some((command) => ["send_message", "subagent.cancel"].includes(String(command.type)))).toBe(false);
+    await expect(historicalDetail.getByText("6.1 Sol · high", { exact: true })).toBeVisible();
+    await expect(historicalDetail.getByText("Read the historical child journal", { exact: true })).toHaveCount(0);
+    await historicalDetail.getByRole("button", { name: "展开处理步骤", exact: true }).click();
+    await expect(historicalDetail.getByText("Read the historical child journal", { exact: true })).toBeVisible();
+    await captureDesktop(restarted, testInfo.outputPath("cold-history-recovered.png"));
+    const recoveredNative = await nativeWindowState(restarted);
+    nativeStates.push({ phase: "cold-restart", ...recoveredNative });
+    expect(recoveredNative.windows).toHaveLength(1);
+    expect(recoveredNative.windows.every((state) => !state.visible && !state.focused)).toBe(true);
+    expect(backend.connections).toHaveLength(2);
+    expect(backend.wire.some((record) => record.message.type === "session.replay")).toBe(false);
+    expect(backend.commands.some((command) => ["send_message", "user_message", "subagent.cancel"].includes(String(command.type)))).toBe(false);
+    backend.closingConnections.add(2);
     await restarted.close();
+    ownedApps.delete(restarted);
+    // Closing an owned Electron process resets its TCP socket on Windows.
+    // Keep that evidence and reject every reset/error while a native session is active.
+    expect(backend.transportErrors.filter((error) => error.code !== "ECONNRESET" || !error.duringNativeClose)).toEqual([]);
+    completed = true;
   } finally {
+    const remainingPages = await Promise.allSettled(Array.from(ownedApps).flatMap((app) => app.windows().map(async (window) => ({
+      url: window.url(), body: await window.locator("body").innerText({ timeout: 1_000 }),
+    }))));
+    for (const app of ownedApps) await app.close();
     await backend.close();
-    try {
-      await rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    } catch (error) {
-      if (!isTransientWindowsLock(error)) throw error;
-    }
+    const evidencePath = testInfo.outputPath("protocol-evidence.json");
+    await writeFile(evidencePath, JSON.stringify({ scope: "Real Electron renderer/native shell; deterministic loopback WebSocket fixture, not live agent harness execution",
+      completed, nativeStates, remainingPages: remainingPages.map((result) => result.status === "fulfilled" ? result : { status: result.status, reason: String(result.reason) }),
+      transportErrors: backend.transportErrors, wire: backend.wire }, null, 2));
+    await testInfo.attach("protocol-evidence", { path: evidencePath, contentType: "application/json" });
+    const desktopLogPath = testInfo.outputPath("desktop.log");
+    await writeFile(desktopLogPath, await readFile(path.join(userDataDir, "desktop.log"), "utf8"));
+    await testInfo.attach("desktop-log", { path: desktopLogPath, contentType: "text/plain" });
+    expect(path.dirname(userDataDir)).toBe(path.resolve(tmpdir()));
+    expect(path.basename(userDataDir)).toMatch(/^minicode-agent-e2e-/);
+    await rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

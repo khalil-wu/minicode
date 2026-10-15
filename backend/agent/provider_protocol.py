@@ -799,7 +799,7 @@ def build_provider_attempt_metadata(
             "agent_name": AgentPath.parse(run_record.agent_path).logical_name,
             "turn_id": metadata["turn_id"],
             "request_kind": "turn",
-            "turn_started_at_unix_ms": int(run_record.started_at * 1000),
+            "turn_started_at_unix_ms": run_record.started_at,
         }
         if context_builder.token_budget_enabled:
             window = context_builder._context_window_state

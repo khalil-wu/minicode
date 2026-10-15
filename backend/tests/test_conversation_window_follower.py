@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from starlette.websockets import WebSocketState
 
 from backend.agent.message import AgentEvent, UserCommand
 from backend.artifact.store import ArtifactStore
@@ -30,12 +31,13 @@ from backend.ws.stream_state import create_stream_state
 class Socket:
     def __init__(self):
         self.sent = []
+        self.client_state = self.application_state = WebSocketState.CONNECTED
 
     async def send_json(self, payload):
         self.sent.append(deepcopy(payload))
 
     async def close(self, **_kwargs):
-        pass
+        self.client_state = self.application_state = WebSocketState.DISCONNECTED
 
 
 @pytest_asyncio.fixture
@@ -85,11 +87,9 @@ async def windows(tmp_path):
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-    for session in sessions:
-        session.run_manager.run_tasks.clear()
-        session.run_manager.run_task_ids.clear()
-        session.run_manager.cancel_events.clear()
-        await session.session_lifecycle.shutdown(reason="follower-unit-complete")
+    await manager.shutdown(reason="follower-unit-complete")
+    assert not manager._execution_watch_tasks
+    assert not manager._execution_host_shutdown_tasks
     manager.reset_for_tests()
 
 
@@ -534,6 +534,7 @@ async def test_forwarded_regeneration_releases_execution_dispatcher_transition_o
     claim = guards.try_start(conversation.id, owner_id=f"ws:{owner.session_id}:actual-task")
     assert claim is not None
     entered, release = asyncio.Event(), asyncio.Event()
+    original_cancel_runs = owner.cancel_agent_runs
     async def cancel_run(**_kwargs):
         entered.set()
         if outcome == "error":
@@ -566,6 +567,7 @@ async def test_forwarded_regeneration_releases_execution_dispatcher_transition_o
         guards.end(next_claim)
         assert owner.start_agent_run.await_count == (1 if outcome == "ready" else 0)
     finally:
+        monkeypatch.setattr(owner, "cancel_agent_runs", original_cancel_runs)
         release.set()
         if not executing.done():
             executing.cancel()

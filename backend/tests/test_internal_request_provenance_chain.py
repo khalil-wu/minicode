@@ -346,6 +346,24 @@ async def test_host_source_snapshot_merge_preserves_authored_request_kind_and_ex
 
 
 @pytest.mark.asyncio
+async def test_actual_window_request_uses_the_issuing_runs_epoch_milliseconds(tmp_path):
+    async def respond(request, reader, writer):
+        await send_sse(writer, response_events(request.index))
+    async with http_endpoint(respond) as server:
+        adapter = OpenAIAdapter(LLMSettings(provider="custom", api_key="local-provenance-fixture", model="provenance-fixture",
+            base_url=server.url + "/v1", wire_api="responses", proxy_mode="direct"))
+        try:
+            async with foreground_scene(tmp_path, adapter, window=True) as foreground:
+                started = next(event for event in foreground.events if event.type == "agent.run.started")
+                run = foreground.owner.agent_runtime.get_run(started.data["run_id"])
+                emitted = json.loads(server.requests[0].body["client_metadata"]["x-codex-turn-metadata"])
+                assert emitted["turn_id"] == run.run_id
+                assert emitted["turn_started_at_unix_ms"] == started.data["started_at"] == run.started_at
+        finally:
+            await adapter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_generic_background_request_does_not_acquire_internal_memory_or_guardian_headers():
     async def respond(request, reader, writer):
         await send_sse(writer, response_events(request.index))

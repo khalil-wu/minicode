@@ -175,12 +175,12 @@ async def test_real_ws_rollover_keeps_session_rest_and_reopened_user_tool_reply_
     monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda *_args, **_kwargs: model)
     monkeypatch.setattr(session, "_build_conversation_tool_registry", lambda *_args, **_kwargs: registry)
     try:
-        assert await session.command_dispatcher._dispatch_client_command(UserCommand("user_message", {
+        assert await asyncio.create_task(session.command_dispatcher._dispatch_client_command(UserCommand("user_message", {
             "conversation_id": parent.id, "workspace_root": parent.workspace_root,
             "permission_mode": "bypass", "client_command_id": "window-ws-command",
             "user_message_id": "window-ws-user", "assistant_message_id": "window-ws-answer",
             "content": "Read the actual source file then start a fresh context window.",
-        }), session.connection_generation) is True
+        }), session.connection_generation)) is True
         running = session.run_manager.running_task_for(parent.id)
         if running is not None:
             await running
@@ -230,9 +230,9 @@ async def test_real_manual_ws_new_window_has_independent_operation_and_durable_s
         lambda *_args: (execution, tmp_path / "source-workspace", []))
     original = deepcopy(parent.transcript)
     try:
-        assert await session.command_dispatcher._dispatch_client_command(UserCommand("context.compact", {
+        assert await asyncio.create_task(session.command_dispatcher._dispatch_client_command(UserCommand("context.compact", {
             "conversation_id": parent.id, "client_command_id": "manual-window-command",
-        }), session.connection_generation) is True
+        }), session.connection_generation)) is True
         await session.event_outbox.drain_delivery()
         sent = connection["websocket"].sent
         assert not any(event.get("type") == "error" for event in sent), json.dumps([event for event in sent if event.get("type") == "error"])

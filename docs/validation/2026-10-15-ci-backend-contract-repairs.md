@@ -1,6 +1,6 @@
 # Backend CI contract repairs, 2026-10-15
 
-Status: the full Python 3.11 backend/root run is still in progress. This report does not claim GitHub CI or complete Codex equivalence is green.
+Status: the full Python 3.11 backend/root run is still in progress. The first repair batch was committed and pushed as `878b2721a379d7f441595811e5bfe3a0fefd461c`; the following scoped results also include subsequent corrections. This report does not claim GitHub CI or complete Codex equivalence is green.
 
 ## Original CI evidence
 
@@ -11,6 +11,7 @@ Run 38715302345 is preserved under `output/ci-repair-20261015/`. Both Ubuntu job
 - Provider attempt metadata construction now belongs to the existing `provider_protocol` module. The stream owner retains lifecycle orchestration. Authored Source request/session/window facts still win; the original input dictionaries remain unchanged. The real `TurnKernel.run_record` and typed `AgentSettings` supply their required fields directly. The kernel gate passes at 21994 bytes and 471 lines, with its original budgets unchanged.
 - Command cancellation goes through the registry task owner once. The former second observer of the same token inside the managed command wait could enter process cleanup just before registry cancellation interrupted it. Removing that duplicate observer preserves the concrete `CancelledError` handler, actual manager cancellation and exit proof. The canonical cancellation regression first failed with a still-running process and then passed after the change.
 - Windows process capture recognizes an exit occurring between `psutil.Process(pid)` and `parent.children(recursive=True)`, using the same existing terminal-state branch and still awaiting the owned child. The new case uses a real exited child and injects the tree-capture race. Running it against the unchanged HEAD implementation fails with `psutil.NoSuchProcess`; the repaired implementation passes.
+- A real HTTP request exposed a second metadata bug: `turn_started_at_unix_ms=1792062588161000` while the same actual run and public start event both carried `1792062588161`. `AgentRunRecord.started_at` already uses epoch milliseconds; multiplying it again was incorrect. The metadata builder now forwards that same original integer unchanged. Existing authored snapshot facts still win. Source's `turn_metadata.rs` stores this field directly as Unix milliseconds.
 
 The Source cancellation reference is `core/src/tools/parallel.rs` (dispatch cancellation and joining) and `core/src/unified_exec/oneshot.rs` (confirmed process termination). Run duration ownership follows `core/src/tasks/mod.rs` and `core/src/turn_timing.rs`, already audited in `2026-10-15-source-run-timing-owner.md`.
 
@@ -22,6 +23,8 @@ The original external Electron close produced an HTTP 503 without its response b
 - Direct command process cases use `backend/tests/native_command_harness.py`: actual model/config/permission/exec-policy owners, actual native authorization, bound final request and canonical tool execution. It never invents an approval or native decision. Builtin permission routing comes from `permission_settings_from_config({})`, preserving the distinction between defaults and explicit user rules.
 - Private-history admissions include their actual fixture run IDs. Search capability is authored in the actual model catalog and captured model definition. Terminal fixtures also use the actual default permission producer.
 - Existing provider metadata tests compare projected duration to the actual run completion clock. Shell metadata tests no longer expect the retired command-text side-effect heuristic; native execution policy remains responsible for the final command decision.
+- Real command actions, PTY/shell and stdin hook fixtures now use the canonical native admission producer instead of direct registry execution without a frozen request. The original call ID, selected shell, process output, actual exit 7, hook identity, durable records and both transcript projections remain asserted. Exit 7 remains a real failed process, independently of a successfully completed tool invocation.
+- End-of-test session cleanup closes the actual execution host. The two WebSocket context-window commands execute in actual separate command tasks, matching the production wire scheduler rather than borrowing the lifetime of the entire pytest task. The follower fixture calls the manager's real full shutdown and restores its deliberately failing cancellation method before cleanup; it does not clear live task registries or use a closed-loop exception fallback.
 
 ## Verification evidence
 
@@ -29,8 +32,12 @@ The original external Electron close produced an HTTP 503 without its response b
 - `windows-harness-native-after.log/.xml`: 373 passed, 16 failed, 15 existing sandbox integration skips. Eleven failures came from the first loaded revision of the new test helper missing the required fixture API key; the other five exposed the stale contracts above. This is retained as a failed run, not counted as green.
 - `backend-failures-recheck.log/.xml`: 76 passed, one command cancellation failure. This batch includes the corrected producer cases, projectless command case, LSP/editor cases and process-race regression.
 - `command-cancellation-final.log/.xml`: the remaining canonical command cancellation case passes after the production repair. Its real process is cancelled and cleanup is complete.
+- `backend-source-contracts-recheck.log/.xml`: 25 passed; the four remaining registry/schema failures were assigned to Root and are recorded in Root's separate evidence. Duration ownership, native wrapper approval identity and builtin/default permission producer corrections in this batch pass.
+- `backend-native-callers-final.log/.xml`: 140 passed, one WebSocket fixture failure plus its teardown error. Actual command projections, shells, pipes, PTY, cancellation, stdin and cold connection files pass. The remaining WebSocket caller is corrected and passes in `backend-owner-lifecycle-recheck.log/.xml` (both automatic and manual context-window cases). The latter run also retained two follower fault-injection teardown errors, repaired by the next batch.
+- `source-window-ms-before.log/.xml`: one real HTTP negative case, with the incorrect 16-digit start value and the true 13-digit issuing-run value above.
+- `backend-window-ms-owner-final.log/.xml`: 33/33 pass: the real default HTTP start metadata, both existing authored snapshot/window modes and the entire 30-case follower file, with its actual lifecycle cleanup.
 - `subprocess-race-before.log`: expected negative evidence against unchanged HEAD, one failure with `psutil.NoSuchProcess`.
-- `backend-root-python311-full.log/.xml`: full current backend/root validation, 8311 collected cases; final result pending.
+- `backend-root-python311-full.log/.xml`: the full backend/root snapshot collected before later corrections, 8311 cases; final result pending. Its original failure list includes nodes already repaired and revalidated in the scoped batches above; it is not counted as a green run or a count of remaining defects.
 
 Counts from overlapping batches are not added. The 15 sandbox integration skips remain unverified, not passed. The Windows local full run also does not substitute for the Ubuntu GitHub jobs.
 
