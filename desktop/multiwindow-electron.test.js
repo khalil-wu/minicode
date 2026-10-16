@@ -14,8 +14,15 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
   const profile = process.env.MINICODE_MULTIWINDOW_TEST_PROFILE;
   app.setPath("userData", profile);
   desktopPreferences.init(path.join(profile, "preferences.json"), { localeOverride: "zh-CN" });
+  // This fixture owns the asynchronous PTY/bridge/server drain, just as
+  // main.js owns it during production shutdown. Do not let Electron's
+  // default last-window behavior quit before that drain completes.
+  app.on("window-all-closed", () => {});
   app.whenReady().then(async () => {
     const closes = new Map();
+    app.once("will-quit", () => {
+      process.stdout.write("[multiwindow] graceful Electron will-quit reached\n");
+    });
     let resolveSecond;
     const secondReady = new Promise((resolve) => { resolveSecond = resolve; });
     const server = http.createServer((_request, response) => {
@@ -112,8 +119,15 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       assert.equal(manager.getWindowByInstanceId(a.windowInstanceId), null);
       process.stdout.write("Real Electron new-window menu, runtime bootstrap, native browser bridge, PTY ownership and independent closure passed.\n");
       await Promise.all(manager.getMainWindows().map((window) => new Promise((resolve) => { window.once("closed", resolve); window.close(); })));
+      process.stdout.write("[multiwindow] all native windows closed\n");
       await Promise.all(Array.from(closes.values()));
-      await bridge.stop(); server.close(); app.exit(0);
+      process.stdout.write("[multiwindow] all owned PTY exits acknowledged\n");
+      await bridge.stop();
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      process.stdout.write("[multiwindow] bridge and HTTP server closed; requesting normal app.quit\n");
+      // app.exit tears down Node immediately, including node-pty's native
+      // exit callback. Follow Electron's normal shutdown after owner cleanup.
+      app.quit();
     } catch (error) {
       process.stderr.write(`${error.stack || error}\n`);
       await Promise.all(manager.getMainWindows().map((window) => new Promise((resolve) => { window.once("closed", resolve); window.close(); })));
@@ -132,8 +146,14 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
     child.stdout.on("data", (value) => { output += value; }); child.stderr.on("data", (value) => { output += value; });
     const timer = setTimeout(() => child.kill(), 50000);
     try {
-      const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
-      assert.equal(code, 0, output);
+      const result = await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      });
+      assert.deepEqual(result, { code: 0, signal: null }, output);
+      assert.match(output, /\[multiwindow\] all owned PTY exits acknowledged/);
+      assert.match(output, /\[multiwindow\] bridge and HTTP server closed; requesting normal app.quit/);
+      assert.match(output, /\[multiwindow\] graceful Electron will-quit reached/);
       process.stdout.write(output);
     } finally {
       clearTimeout(timer);

@@ -2,6 +2,8 @@
 
 ## 2026-10-16 当前范围与入口
 
+最新后续收尾见[Node、桌面投影与安装候选](2026-10-16-node-desktop-followup-delivery.md)：r13 41/41 且真实 startup ERROR=[]，生产 Electron Node 两轮及稳定整图布局已验。0c CI 的 Desktop multiwindow 用例提前退出已定位为 fixture 自身未接管自动 quit/末尾强退，现只修该测试并严格要求清理标记和退出码/信号；新的 Linux CI 结果单独读取。backend 冻结仍为 0c，不因退出测试改动而冒称新包或原 native 错误已过。
+
 最新完整 CI 为 `25e98f7a` / `38910536542`，八项成功；后端 6935 passed / 108 skipped、前端 4350 tests，原证据在 `output/ci-25e98f7a-20261016/`。r12 冷验虽然 40 断言通过，仍有三次实际前置 Node 启动错误，因此已暂停交付。原 host 的合法 None、SDK fork 与配置/catalog 准入修复已提交本地 `e7a9fc86`，主范围后经 Root 提供 Source 补验按节点最新为 55 passed / 1 installed stub skip，子链 32 passed / 2 native proxy skip；不是全量重跑。Node 内核已重构为 supervisor Inspector+原请求 ALS+真实 Worker exit ACK，并修直接 CPU dispatcher 死锁、初始 ready 与异常退出结算；本机分批结果在 Node 报告。现在继续新完整 CI、r13 冷验和生产 Electron 的真实 Node 投影；不能借旧绿灯或 r12 四十项断言。下段保留先前检查点和实现顺序。
 
 最新完整 CI 历史检查点为 `ee80a807` 的 `38905092822`：六个 job 成功、backend 与 Windows 两个失败，原始日志/XML 位于 `output/ci-ee80a807-20261016/`。Linux OS managed 路由已通过真实 namespace/proxy/cancel，Windows worktree 的 cwd/metadata/模型快照链已修复；不能继续沿用下文历史的“Linux 尚未接通”或“Unicode 编码失败”作为当前结论。后续 `83cf0d43` 拒绝启动终态、`c0f3f684` Node 22 中断与 JS 过程标题、`f5d1ed65` 三色外观、`418c130d` SDK 长会话及实际审批/取消均已提交并局部验证。SDK 89 个不同 case、外观唯一 195、聊天相关 80 分别通过，最终构建实际 Electron 的配色键盘/模式/重载/原字体与草稿也通过。现在等待修复后的完整新 CI 和冻结后的 r12 独立 wheel 冷验；不能追写为原 CI 通过，也不称整产品等价。

@@ -1,5 +1,7 @@
 # 原生命令投影与内部证据链：最终交付
 
+本轮后续收尾入口：[Node、桌面投影与安装候选](2026-10-16-node-desktop-followup-delivery.md)。r13 新包独立 41/41、startup ERROR=[]，实际生产 Electron 的两轮 Node、标题、图片及完成折叠/草稿已验；0c CI 的多窗口测试提前退出另已修 fixture，完整新 CI 按独立运行核对。下方“r13 尚待”及 r12 记录保留为各阶段事实，不代表最新候选。
+
 ## 2026-10-16 当前后续批：Node、工作树、设置与 Linux 路由
 
 最近完整检查点已更新到 `25e98f7a` 的 [CI 38910536542](https://github.com/khalil-wu/minicode/actions/runs/38910536542)：**8/8 jobs success**。backend 6935 passed / 108 skipped，root 1768 passed / 51 skipped，Windows 362 passed / 15 skipped，frontend 363 files / 4350 tests，desktop 161 passed / 9 skipped + 6 smoke，Electron 1 passed，两项 native build/验证成功。原 logs/XML 和计数见 `output/ci-25e98f7a-20261016/CI-REPORT.md`。它不是下述安装问题消失的证据：r12 的 40 功能断言通过，但实际日志有三次 Node 前置启动错误，已标 stale/hold。后续 `e7a9fc86` 修复原 host 捕获、SDK fork 和动态配置/catalog 准入；内核另已移除 Worker-local Inspector、修复直接 CPU dispatcher 死锁和异常退出结算。最终本机消费者 43 passed / 1 native skip，新八项在 Node 22/Electron 各通过，三运行时各 100 双 reset + 20 direct CPU 通过；详见[分批 Node 报告](2026-10-16-node-companion.md)。新源码仍需自己的完整 CI 与新候选安装冷验。
