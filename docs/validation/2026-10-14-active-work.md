@@ -2,6 +2,8 @@
 
 ## 2026-10-16 当前范围与入口
 
+本轮收尾已验证：实现 `8dfff051` / [CI 38920283863](https://github.com/khalil-wu/minicode/actions/runs/38920283863)八项成功，backend 6946 passed / 108 skipped、frontend 4350 tests、desktop smoke 6/6；原 Ubuntu 多窗口退出失败的修正有真实全部清理标记和正常 child.close 断言。r13 后端独立安装 41/41、startup ERROR=[]，与实现的冻结输入匹配；生产 Electron Node 两轮/图像/标题/final 折叠/草稿和稳定整图已验。准确边界和剩余范围见[最终后续交付](2026-10-16-node-desktop-followup-delivery.md)，下方待验表述均属于此前阶段，不能继续当当前未完成项。
+
 最新后续收尾见[Node、桌面投影与安装候选](2026-10-16-node-desktop-followup-delivery.md)：r13 41/41 且真实 startup ERROR=[]，生产 Electron Node 两轮及稳定整图布局已验。0c CI 的 Desktop multiwindow 用例提前退出已定位为 fixture 自身未接管自动 quit/末尾强退，现只修该测试并严格要求清理标记和退出码/信号；新的 Linux CI 结果单独读取。backend 冻结仍为 0c，不因退出测试改动而冒称新包或原 native 错误已过。
 
 最新完整 CI 为 `25e98f7a` / `38910536542`，八项成功；后端 6935 passed / 108 skipped、前端 4350 tests，原证据在 `output/ci-25e98f7a-20261016/`。r12 冷验虽然 40 断言通过，仍有三次实际前置 Node 启动错误，因此已暂停交付。原 host 的合法 None、SDK fork 与配置/catalog 准入修复已提交本地 `e7a9fc86`，主范围后经 Root 提供 Source 补验按节点最新为 55 passed / 1 installed stub skip，子链 32 passed / 2 native proxy skip；不是全量重跑。Node 内核已重构为 supervisor Inspector+原请求 ALS+真实 Worker exit ACK，并修直接 CPU dispatcher 死锁、初始 ready 与异常退出结算；本机分批结果在 Node 报告。现在继续新完整 CI、r13 冷验和生产 Electron 的真实 Node 投影；不能借旧绿灯或 r12 四十项断言。下段保留先前检查点和实现顺序。

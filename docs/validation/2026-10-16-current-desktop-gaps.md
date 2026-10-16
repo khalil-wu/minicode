@@ -1,8 +1,8 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
-核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新完整 CI 检查点为 `25e98f7a` 的 [run 38910536542](https://github.com/khalil-wu/minicode/actions/runs/38910536542)，八项全部成功，backend 6935 passed / 108 skipped，frontend 4350 tests。原 `ee80a807` 六成功、两失败保留为历史。后续 r12 安装验收仍发现前置 Node 启动错误；原 host 捕获及重构后的内核控制已完成本机验证，正在新完整 CI 和新候选验收，不能借旧绿灯算通过。r12 明确暂停交付。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
+核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新实现检查点 `8dfff051` 的[完整 CI 38920283863](https://github.com/khalil-wu/minicode/actions/runs/38920283863)八项全部成功，backend 6946 passed / 108 skipped，frontend 4350 tests，desktop smoke 6/6。r13 后端候选另独立安装 41/41、startup ERROR=[]，原 host/内核修复及实际桌面投影均有各自证据。旧 `ee80a807`、r12 启动错误及 `0c10889e` Desktop 失败保留为历史，r12 仍暂停交付。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
 
-本轮最新收尾以[Node 与桌面后续交付](2026-10-16-node-desktop-followup-delivery.md)为准：r13 后端候选已独立 41/41、启动 ERROR=[]；实际生产 Electron 的 Node 两轮、标题、图片、最终自动折叠、草稿及稳定图片布局均有证据。`0c10889e` CI 另外发现多窗口测试提前退出，已修 fixture 并保留原失败，新提交的完整 Linux 复验单独核对，不把它误记为 Node 内核回归失败。
+本轮最新收尾以[Node 与桌面后续交付](2026-10-16-node-desktop-followup-delivery.md)为准。实际生产 Electron 的 Node 两轮、标题、图片、最终自动折叠、草稿及稳定图片布局均有证据。`0c10889e` CI 发现的多窗口测试提前退出已修 fixture，并在 `8dfff051` Ubuntu 完整运行中核对全部清理标记及正常退出，不将它误记为 Node 内核回归失败。
 
 ## 已确认的能力缺口
 

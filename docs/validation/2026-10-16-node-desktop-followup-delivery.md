@@ -2,6 +2,8 @@
 
 本页记录本轮实际交付范围，不表示整款 MiniCode 已与 Codex 等价。后端参照 checkout `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；桌面视觉及交互参照实际截图和提取资源。官方账号按用户要求排除。字体、字号和字重保持原样。
 
+实现提交 **`8dfff0515bc6063e56f64571627efd27c9f2fe1c`** 的[完整 CI 38920283863](https://github.com/khalil-wu/minicode/actions/runs/38920283863)已 **8/8 jobs success**。后端 **6946 passed / 108 skipped**，前端 **363 files / 4350 tests**，root **1768 passed / 51 skipped**，Windows **362 passed / 15 skipped**，desktop **161 passed / 9 skipped + 6/6 smoke**，Electron **1 passed**，两项 native build/验证成功。原 API、八份 job logs、两份原 XML 和多窗口实际退出凭据在 `output/ci-8dfff051-20261016/`。本页最后更新只追加验收记录，不改变该实现或 r13 冻结输入。
+
 ## 实际变化
 
 - SDK 的 Node 状态归长期 SDKSession，WS 归实际 conversation thread，子会话保留独立内核。公开审批回调透传完整，两次实际请求均在批准后执行；关闭原 Node ACK 先于环境释放。
@@ -48,6 +50,6 @@ Node 投影 fixture 从一开始使用公开 bypass，因此真实策略 Never�
 
 该用例在最后窗口关闭时提前进入 Electron 默认退出，且末尾强制 app.exit；成功短行位于异步清理之前。fixture 现接管 window-all-closed，等待原 PTY、bridge、HTTP server 的 ACK 后正常 app.quit。父测试等待 close，严格核对 `{code:0,signal:null}` 和三个清理/quit 标记，catch 仍失败。仅修改测试，没有固定等待、重试或生产错误隐藏。本机原用例 1/1 通过，完整诊断及保留的 Windows AttachConsole 错误见 `output/desktop-exit-20261016/report.md`。
 
-退出修正后的完整 CI 使用独立提交及原始运行记录，见[本分支 CI](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927)。最终结论按相应冻结 SHA 的原 API、logs、XML 读取；本页不将 Windows 窄验当作 Linux Napi 错误已消失的证据。
+退出修正后的 `8dfff051` 完整 CI 已通过。Ubuntu 原 multiwindow 用例为 smoke 第五项成功，真实日志依次出现 PTY ACK、bridge/HTTP close、graceful will-quit；父测试对 `child.close` 的 `{code:0,signal:null}` 严格断言通过，未再观察到原 Napi/terminate。`multiwindow-runtime-evidence.json` 保留源码、日志位置及运行事实，不以源码预期代替运行结果。旧 `0c10889e` 失败仍保留，不被后续绿灯覆盖。
 
 仍未证明或未实现的范围统一在[当前差距](2026-10-16-current-desktop-gaps.md)：系统 Computer Use、完整代码主题/分享、私有 MCP App relay、外机 SSH/WSL、WFP/原生权限和最新全界面全部交互状态，不以本批通过数推算完成率。
