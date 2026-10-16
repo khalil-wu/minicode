@@ -1,5 +1,5 @@
 import type { ClientCommand } from "./events";
-import type { AdditionalPermissionProfile } from "./common-types";
+import type { AdditionalPermissionProfile, NetworkApprovalDecision } from "./common-types";
 
 export type ApprovalAction = "approve" | "reject" | "partial";
 export interface PromptOwner {
@@ -17,6 +17,7 @@ export interface ApprovalResponseOptions {
   execPolicyAmendment?: string[];
   requestDigest?: string;
   sourceCommandDecision?: "approved" | "abort";
+  networkDecision?: NetworkApprovalDecision;
   plan?: string;
   commandPrompts?: Array<{ tool: "run_command"; prompt: string }>;
   owner?: PromptOwner;
@@ -45,6 +46,7 @@ export const buildApprovalResponseCommand = (
   if (action === "approve" && options?.rememberForFuture) response.remember_for_future = true;
   if (options?.requestDigest) response.request_digest = options.requestDigest;
   if (options?.sourceCommandDecision) response.decision = options.sourceCommandDecision;
+  if (options?.networkDecision) response.decision = options.networkDecision;
   if (action === "approve" && options?.execPolicyAmendment) {
     response.decision = { approved_execpolicy_amendment: { proposed_execpolicy_amendment: [...options.execPolicyAmendment] } };
   }
@@ -62,6 +64,15 @@ export const buildApprovalResponseCommand = (
     },
   };
 };
+
+export const buildNetworkApprovalResponseCommand = (
+  requestId: string,
+  decision: NetworkApprovalDecision,
+  options: Pick<ApprovalResponseOptions, "requestDigest" | "owner">,
+): ClientCommand => buildApprovalResponseCommand(requestId,
+  decision === "abort" || (typeof decision === "object"
+    && decision.network_policy_amendment.network_policy_amendment.action === "deny") ? "reject" : "approve",
+  { ...options, networkDecision: decision });
 
 export const buildAskUserResponseCommand = (
   requestId: string,

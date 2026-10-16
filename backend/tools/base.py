@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
@@ -101,6 +101,9 @@ class ToolResult:
     # History/Notes service already applies the issuing model's budget before
     # encryption. Preserve its native body independently of local log text.
     history_notes_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
+    # Native output produced by a host-owned tool (for example skills.list).
+    # This carries no MCP or user-owned Skill authority.
+    native_tool_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.
@@ -592,6 +595,9 @@ class BaseTool(ABC):
     # contain workspace paths; the permission layer applies one boundary policy
     # without classifying tools by name.
     workspace_path_fields: tuple[str, ...] = ()
+    # Executor-backed tools select from the captured turn attachments. MCP
+    # tools retain their own per-server authority instead of inheriting this.
+    requires_execution_environment: bool = False
     allow_workspace_root_path: bool = False
     allow_tool_result_path: bool = False
     # UI/event projection hints. These are non-model-facing and let each tool own
@@ -658,6 +664,14 @@ class BaseTool(ABC):
     def model_schema_revision(self) -> Any:
         """Current configuration revision for cached model-facing schemas."""
         return 0
+
+    def model_schema_for_policy(self, policy) -> ToolSchema:
+        schema = self.model_schema()
+        if self.requires_execution_environment and policy.environment_count is not None and policy.environment_count > 1:
+            return replace(schema, parameters={**schema.parameters, "properties": {
+                **schema.parameters.get("properties", {}), "environment_id": {"type": "string",
+                    "description": "Environment id from <environment_context>. Omit to use the primary environment."}}})
+        return schema
 
     def runtime_description(self) -> str:
         """Human/UI-facing description. Defaults to ``description``."""
@@ -920,6 +934,8 @@ def validate_tool_input(tool: BaseTool, args: Any) -> str:
 
     try:
         schema = tool.get_execution_schema().parameters
+        if tool.requires_execution_environment:
+            schema = {**schema, "properties": {**schema.get("properties", {}), "environment_id": {"type": "string"}}}
         validator_class = validator_for(schema)
         validator_class.check_schema(schema)
         errors = sorted(

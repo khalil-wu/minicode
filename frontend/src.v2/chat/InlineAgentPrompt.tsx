@@ -15,7 +15,9 @@ import {
   X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
-import { buildApprovalResponseCommand, buildAskUserResponseCommand, buildElicitationResponseCommand, buildPermissionsResponseCommand } from "../protocol/prompt-responses";
+import { buildApprovalResponseCommand, buildNetworkApprovalResponseCommand, buildAskUserResponseCommand, buildElicitationResponseCommand, buildPermissionsResponseCommand } from "../protocol/prompt-responses";
+import type { NetworkApprovalDecision } from "../protocol/common-types";
+import { openPreferredWebLink } from "../lib/open-preferred-target";
 import {
   commandResultSucceeded,
   sendClientCommandAwaitResult,
@@ -89,6 +91,7 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
       {visiblePlanApproval && <PlanApprovalCard key={visiblePlanApproval.requestId} request={visiblePlanApproval} />}
       {visibleGenericApproval && (visibleGenericApproval.permissionRequest
         ? <PermissionsApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} />
+        : visibleGenericApproval.networkApprovalContext ? <NetworkApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} />
         : <ToolApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} queue={queuedGenericApprovals} />)}
       {visibleAskUser && (visibleAskUser.planReview
         ? <SubagentPlanReviewCard key={visibleAskUser.requestId} request={visibleAskUser} review={visibleAskUser.planReview} />
@@ -146,6 +149,45 @@ const PermissionsApprovalCard = ({ request }: { request: PendingApproval }) => {
     </div>
     <ApprovalActions responding={responding} onDeny={() => void respond(false)} onAllow={() => void respond(true)}
       onAllowConversation={() => void respond(true, "session")} />
+  </section>;
+};
+
+const NetworkApprovalCard = ({ request }: { request: PendingApproval }) => {
+  const { t: tr } = useI18n();
+  const [responding, setResponding] = useState(false);
+  const subagents = useAppStore((s) => s.subagents);
+  const context = request.networkApprovalContext!;
+  const choices = request.availableDecisions!;
+  const amendment = choices.find((choice): choice is Extract<NetworkApprovalDecision, object> => typeof choice === "object"
+    && "network_policy_amendment" in choice && choice.network_policy_amendment.network_policy_amendment.action === "allow");
+  const actor = approvalSourceLabel(tr, request, subagents) || "MiniCode";
+  const url = context.protocol === "http" || context.protocol === "https" ? `${context.protocol}://${context.host}` : null;
+  const [titleBefore, titleAfter] = tr("允许 {actor} 与 {destination} 建立连接？", { actor, destination: "{destination}" }).split("{destination}");
+  const respond = async (decision: NetworkApprovalDecision) => {
+    setResponding(true);
+    try {
+      const result = await sendPromptResponseCommand(buildNetworkApprovalResponseCommand(request.requestId, decision,
+        { requestDigest: request.requestDigest, owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } }));
+      if (!commandResultSucceeded(result)) throw new Error(result.message || tr("审批未被后端接受"));
+      useAppStore.getState().clearApproval(request.requestId);
+    } catch (error) {
+      useAppStore.getState().markApprovalError(request.requestId, error instanceof Error ? error.message : tr("审批提交失败"));
+      setResponding(false);
+    }
+  };
+  return <section className="inline-approval-bar inline-native-network-approval" aria-label="Agent is waiting for input" aria-busy={responding}>
+    <div className="inline-approval-heading"><NativeApprovalSourceIcon kind="hand" /><span>{tr("互联网访问")}</span></div>
+    <div className="inline-approval-main" role="alert" aria-atomic="true">
+      <div className="inline-prompt-title">{titleBefore}{url
+        ? <a href={url} onClick={event => { event.preventDefault(); void openPreferredWebLink(url, request.conversationId); }}>{url}</a>
+        : context.host}{titleAfter}</div>
+      <div className="inline-prompt-subtitle">{tr("{host} 不在当前网络允许列表中", { host: context.host })}</div>
+      {request.status === "error" && request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
+    </div>
+    <ApprovalActions sourceCommand responding={responding} onDeny={() => void respond("abort")}
+      onAllow={choices.includes("approved") ? () => void respond("approved") : undefined}
+      nativeScopeApproval={choices.includes("approved_for_session") ? { label: tr("允许此对话"), onAllow: () => void respond("approved_for_session") } : undefined}
+      leadingApproval={amendment ? { label: tr("始终允许"), onAllow: () => void respond(amendment) } : undefined} />
   </section>;
 };
 
@@ -355,8 +397,8 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   );
 };
 
-const NativeApprovalSourceIcon = ({ kind }: { kind: "terminal" | "info" }) => {
-  const size = kind === "terminal" ? 18 : 14;
+const NativeApprovalSourceIcon = ({ kind }: { kind: "terminal" | "info" | "hand" }) => {
+  const size = kind === "info" ? 14 : 18;
   const url = `url('${import.meta.env.BASE_URL}apps/approval-${kind}.svg')`;
   return <span aria-hidden="true" data-native-approval-source-icon={kind} style={{ display: "inline-flex", width: size, height: size, flexShrink: 0,
     background: "currentColor", maskImage: url, WebkitMaskImage: url, maskPosition: "center", maskRepeat: "no-repeat", maskSize: "contain" }} />;
@@ -397,8 +439,8 @@ const NativeCommandApprovalPreview = ({ command }: { command: string }) => {
   </div>;
 };
 
-const NativeApprovalScopeMenu = ({ responding, onAllow, onAllowPrefix, prefixLabel }: {
-  responding: boolean; onAllow: () => void; onAllowPrefix: () => void; prefixLabel: string;
+const NativeApprovalScopeMenu = ({ responding, onAllow, scopedAction }: {
+  responding: boolean; onAllow?: () => void; scopedAction: { label: string; onAllow: () => void; tooltip?: string };
 }) => {
   const { t: tr } = useI18n();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -411,22 +453,24 @@ const NativeApprovalScopeMenu = ({ responding, onAllow, onAllowPrefix, prefixLab
       onClick={() => setOpen(value => !value)}><ChevronDown size={14} aria-hidden="true" /></Button>
     {open && <ContextMenu id={menuId} ariaLabel={tr("选择允许范围")} className="inline-approval-native-scope-menu" position={{ x: 0, y: 0 }}
       anchor={triggerRef.current!} side="top" returnFocusTo={triggerRef.current!} onClose={() => setOpen(false)} items={[
-        { label: tr("允许一次"), onClick: onAllow, disabled: responding },
-        { label: tr("允许类似命令"), onClick: onAllowPrefix, disabled: responding,
-          rightIcon: <NativeApprovalSourceIcon kind="info" />, rightIconTooltip: tr("允许在此对话中使用以 {command} 开头的命令", { command: prefixLabel }) },
+        ...(onAllow ? [{ label: tr("允许一次"), onClick: onAllow, disabled: responding }] : []),
+        { label: scopedAction.label, onClick: scopedAction.onAllow, disabled: responding,
+          ...(scopedAction.tooltip ? { rightIcon: <NativeApprovalSourceIcon kind="info" />, rightIconTooltip: scopedAction.tooltip } : {}) },
       ]} />}
   </>;
 };
 
 const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onAllowFuture,
-  denyLabel, allowLabel, prefixApproval, sourceCommand = false,
+  denyLabel, allowLabel, prefixApproval, nativeScopeApproval, leadingApproval, sourceCommand = false,
 }: {
   responding: boolean;
   onDeny: () => void;
-  onAllow: () => void;
+  onAllow?: () => void;
   onAllowConversation?: () => void;
   onAllowFuture?: () => void;
   prefixApproval?: { onAllow: () => void; prefixLabel: string };
+  nativeScopeApproval?: { label: string; onAllow: () => void };
+  leadingApproval?: { label: string; onAllow: () => void };
   denyLabel?: string;
   allowLabel?: string;
   sourceCommand?: boolean;
@@ -440,27 +484,32 @@ const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onA
       const target = event.target as HTMLElement;
       if (target.closest('input, textarea, select, button, [contenteditable="true"], [role="menu"], [role="listbox"]')) return;
       if (event.key === "Escape" || event.key === "Enter") {
+        if (event.key === "Enter" && !onAllow) return;
         event.preventDefault();
-        (event.key === "Escape" ? onDeny : onAllow)();
+        (event.key === "Escape" ? onDeny : onAllow!)();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [responding, onDeny, onAllow]);
   return <div ref={actionsRef} className="inline-approval-actions">
+    {leadingApproval && <Button variant="secondary" size="sm" className="inline-approval-leading" disabled={responding}
+      onClick={leadingApproval.onAllow}>{leadingApproval.label}</Button>}
     <Button variant="secondary" size="sm" onClick={onDeny} disabled={responding} aria-label={denyLabel ?? tr("拒绝使用工具")}
       className="inline-approval-deny">{tr("拒绝")}{(!sourceCommand || !responding) && <kbd>Esc</kbd>}</Button>
-    <div className="inline-approval-allow-group">
-      <Button variant="primary" size="sm" onClick={onAllow} disabled={responding} loading={sourceCommand && responding} aria-label={allowLabel ?? tr("允许使用工具")}
-        className="inline-approval-allow">{responding && !sourceCommand ? tr("正在提交…") : tr("允许一次")}{(!sourceCommand || !responding) && <kbd>↵</kbd>}</Button>
-      {prefixApproval ? <NativeApprovalScopeMenu responding={responding} onAllow={onAllow} onAllowPrefix={prefixApproval.onAllow} prefixLabel={prefixApproval.prefixLabel} />
+    {(onAllow || nativeScopeApproval) && <div className="inline-approval-allow-group">
+      {onAllow && <Button variant="primary" size="sm" onClick={onAllow} disabled={responding} loading={sourceCommand && responding} aria-label={allowLabel ?? tr("允许使用工具")}
+        className="inline-approval-allow">{responding && !sourceCommand ? tr("正在提交…") : tr("允许一次")}{(!sourceCommand || !responding) && <kbd>↵</kbd>}</Button>}
+      {prefixApproval || nativeScopeApproval ? <NativeApprovalScopeMenu responding={responding} onAllow={onAllow}
+        scopedAction={prefixApproval ? { label: tr("允许类似命令"), onAllow: prefixApproval.onAllow,
+          tooltip: tr("允许在此对话中使用以 {command} 开头的命令", { command: prefixApproval.prefixLabel }) } : nativeScopeApproval!} />
         : (onAllowConversation || onAllowFuture) && <SelectMenu value="once" ariaLabel={tr("选择允许范围")} align="end" disabled={responding}
-        className="inline-approval-scope" onValueChange={(scope) => scope === "future" ? onAllowFuture?.() : scope === "conversation" ? onAllowConversation?.() : onAllow()}>
+        className="inline-approval-scope" onValueChange={(scope) => scope === "future" ? onAllowFuture?.() : scope === "conversation" ? onAllowConversation?.() : onAllow?.()}>
         <option value="once">{tr("允许一次")}</option>
         {onAllowConversation && <option value="conversation">{tr("允许此次对话")}</option>}
         {onAllowFuture && <option value="future">{tr("始终允许此工具")}</option>}
       </SelectMenu>}
-    </div>
+    </div>}
   </div>;
 };
 

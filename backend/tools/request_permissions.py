@@ -19,6 +19,7 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 
 class RequestPermissionsTool(BaseTool):
+    requires_execution_environment = True
     name = "request_permissions"
     description = (
         "Request additional filesystem or network permissions from the user and wait for the client to grant a subset of the requested permission profile. "
@@ -55,14 +56,23 @@ class RequestPermissionsTool(BaseTool):
         return PermissionLevel.AUTO
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        if context is None or context.workspace_root is None:
+        if context is None or context.turn_environment is None and context.workspace_root is None:
             return ToolResult("request_permissions requires a primary environment", is_error=True)
         environment_id = args.get("environment_id", context.environment_id)
         if environment_id != context.environment_id:
             return ToolResult(f"Unknown environment id: {environment_id}", is_error=True)
-        cwd = Path(context.metadata.get("cwd") or context.workspace_root)
-        roots = (Path(context.workspace_root),)
-        temporary_directories = local_permission_temporary_directories()
+        scope = context.permission.environment_scope
+        if scope is not None:
+            from backend.workspace.executor_paths import ExecutorPath
+
+            cwd = scope.resolve_path(scope.cwd_uri)
+            roots = tuple(ExecutorPath.parse(path, platform_os=scope.platform_os) for path in scope.workspace_root_uris)
+            temporary_directories = tuple(ExecutorPath.parse(path, platform_os=scope.platform_os)
+                for path in scope.temporary_directory_uris or ())
+        else:
+            cwd = Path(context.metadata.get("cwd") or context.workspace_root)
+            roots = (Path(context.workspace_root),)
+            temporary_directories = local_permission_temporary_directories()
         try:
             requested = normalize_permission_profile(args["permissions"], cwd=cwd, workspace_roots=roots)
         except ValueError as exc:
@@ -101,7 +111,7 @@ class RequestPermissionsTool(BaseTool):
             "request_digest": digest, "policy_identity": context.authorization_policy_identity or self.policy_identity,
             "turn_id": context.turn_id, "conversation_id": context.conversation_id,
             "message_id": str(context.metadata.get("assistant_message_id") or ""),
-            "workspace_root": str(context.workspace_root), "permission_mode": permission.mode,
+            "workspace_root": str(roots[0]) if roots else "", "permission_mode": permission.mode,
             "workspace_scope": permission.workspace_scope,
         })
         response = await await_preflight(

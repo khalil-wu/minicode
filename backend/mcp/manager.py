@@ -3,6 +3,7 @@ from __future__ import annotations
 from backend.async_cleanup import to_thread_cancel_safe
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -56,6 +57,7 @@ _MCP_SERVER_FIELDS = frozenset({
     "tool_timeout_sec", "required", "supports_parallel_tool_calls",
     "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
     "requires_user_action", "setup_hint", "docs_url",
+    "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
 })
 
 
@@ -178,6 +180,20 @@ class MCPServerConfig:
     tool_output_token_limits: dict[str, int] = field(default_factory=dict)
     enabled: bool = True
     disabled_reason: str = ""
+    environment_id: str = "local"
+    env_vars: tuple[tuple[str, str], ...] = ()
+    credential_policy: str = "HostFallbackAllowed"
+    selected_root_id: str | None = None
+    plugin_id: str | None = None
+    plugin_server_name: str | None = None
+    bearer_token_env_var: str | None = None
+    env_http_headers: dict[str, str] = field(default_factory=dict)
+
+    def oauth_credential_name(self) -> str:
+        if self.environment_id == "local":
+            return "local:" + self.name if self.name.startswith(("executor:", "local:", "ema-idp:")) else self.name
+        encode = lambda value: base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+        return f"executor:{encode(self.environment_id)}:{encode(self.name)}"
 
 
 def validate_mcp_server_config(config: MCPServerConfig) -> None:
@@ -195,6 +211,22 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
     # normalized value on the config prevents aliases accepted at ingress from
     # falling through to the stdio branch when the client is constructed.
     config.transport = transport
+    if not isinstance(config.environment_id, str):
+        raise ValueError("environment_id must be a string")
+    if not isinstance(config.enabled, bool):
+        raise ValueError("enabled must be a boolean")
+    if config.credential_policy not in {"HostFallbackAllowed", "ExecutorOnly"}:
+        raise ValueError("invalid MCP credential policy")
+    if config.bearer_token_env_var is not None and not isinstance(config.bearer_token_env_var, str):
+        raise ValueError("bearer_token_env_var must be a string")
+    for name, source in config.env_vars:
+        if not isinstance(name, str) or not name.strip() or source not in {"local", "remote"}:
+            raise ValueError("env_vars requires names with local or remote sources")
+        if source == "remote" and config.environment_id == "local":
+            raise ValueError("remote env_vars requires a remote environment")
+    if not isinstance(config.env_http_headers, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+        for key, value in config.env_http_headers.items()):
+        raise ValueError("env_http_headers must map strings to strings")
     if config.command is None:
         config.command = "python" if transport == "stdio" else ""
     for field_name in ("startup_timeout_sec", "tool_timeout_sec"):
@@ -246,6 +278,8 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
                 ("headers", config.headers),
                 ("headers_helper", config.headers_helper),
                 ("oauth", config.oauth_client_id or config.oauth_callback_port),
+                ("bearer_token_env_var", config.bearer_token_env_var),
+                ("env_http_headers", config.env_http_headers),
             )
             if _has_nonempty_config_value(value)
         ]
@@ -279,6 +313,7 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
             ("command", config.command),
             ("args", config.args),
             ("env", config.env),
+            ("env_vars", config.env_vars),
             ("cwd", config.cwd),
         )
         if _has_nonempty_config_value(value)
@@ -356,6 +391,7 @@ class MCPServerState:
         )
         return {
             "name": self.config.name,
+            "environment_id": self.config.environment_id,
             "status": self.status.value,
             "tools_count": len(self.tools),
             # MCP capability flags are negotiated during initialize. Expose
@@ -463,8 +499,18 @@ class MCPServerManager:
         managed_settings_dir: Path | None = None,
         requirements_path: Path | None = None,
         workspace_root: Path | None | object = _DYNAMIC_WORKSPACE,
+        environment_runtime=None,
+        runtime_configs: tuple[MCPServerConfig, ...] | None = None,
+        startup_policy: str = "Eager",
+        cached_catalog: tuple[tuple[MCPServerConfig, list[MCPToolDef], list[MCPToolDef], str], ...] = (),
     ) -> None:
         self._config_path = config_path or MCP_CONFIG_FILE
+        self.environment_runtime = environment_runtime
+        self._runtime_configs = runtime_configs
+        self._startup_policy = startup_policy
+        self._cached_catalog = {config.name: (config, deepcopy(tools), deepcopy(raw_tools), instructions)
+            for config, tools, raw_tools, instructions in cached_catalog}
+        self._lazy_servers: set[str] = set()
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
         self._elicitation_handler = elicitation_handler
@@ -507,6 +553,8 @@ class MCPServerManager:
         return get_explicit_active_workspace_root()
 
     def load_config(self) -> list[MCPServerConfig]:
+        if self._runtime_configs is not None:
+            return [self.environment_runtime.apply_authority(config) for config in self._runtime_configs]
         workspace_root = self.workspace_root
         from backend.config import load_config_layer_stack
 
@@ -623,6 +671,9 @@ class MCPServerManager:
     ) -> list[MCPServerConfig]:
         allowed: list[MCPServerConfig] = []
         for config in configs:
+            if not config.enabled:
+                allowed.append(config)
+                continue
             if not policy.allows(config):
                 config.enabled = False
                 config.disabled_reason = "Blocked by MiniCode MCP policy"
@@ -823,16 +874,28 @@ class MCPServerManager:
         approval_status: str = "not_applicable",
         config_path: Path | None = None,
         project_workspace: Path | None = None,
+        credential_policy: str = "HostFallbackAllowed",
+        executor_source: bool = False,
+        selected_root_id: str | None = None,
+        plugin_id: str | None = None,
+        plugin_server_name: str | None = None,
     ) -> MCPServerConfig:
         if not isinstance(raw_config, Mapping):
             raise ValueError(f"MCP server '{name}' from {source} must be an object")
         from backend.runtime_env import vault_subprocess_env
 
-        environment = {**os.environ, **vault_subprocess_env(f"mcp:{name}")}
+        environment_id = raw_config.get("environment_id", "local")
+        if not isinstance(environment_id, str):
+            raise ValueError(f"MCP server '{name}' environment_id must be a string")
+        environment = {} if executor_source else {**os.environ, **vault_subprocess_env(f"mcp:{name}")}
         configured_env = raw_config.get("env", {})
         if isinstance(configured_env, Mapping):
             environment.update(_resolve_mapping_placeholders(dict(configured_env), environment))
-        conf = _resolve_mapping_placeholders(dict(raw_config), environment)
+        conf = dict(raw_config) if executor_source else _resolve_mapping_placeholders(dict(raw_config), environment)
+        if "http_headers" in conf:
+            conf["headers"] = conf.pop("http_headers")
+        if "http_headers_helper" in conf:
+            conf["headers_helper"] = conf.pop("http_headers_helper")
         unknown_fields = sorted(set(conf) - _MCP_SERVER_FIELDS)
         if unknown_fields:
             raise ValueError(
@@ -852,7 +915,7 @@ class MCPServerManager:
                 f"MCP server '{name}' from {source} has an invalid transport: {exc}"
             ) from exc
         incompatible_fields = (
-            ("url", "headers", "headers_helper", "oauth")
+            ("url", "headers", "headers_helper", "oauth", "bearer_token_env_var", "env_http_headers")
             if transport == "stdio"
             else ("command", "args", "env", "env_vars", "cwd")
         )
@@ -903,6 +966,17 @@ class MCPServerManager:
             raise ValueError(
                 f"MCP server '{name}' from {source} headers_helper must be a string"
             )
+        if environment_id != "local" and raw_headers_helper:
+            raise ValueError("HTTP headers helpers can only run in the local environment")
+        env_http_headers = conf.get("env_http_headers") or {}
+        if not isinstance(env_http_headers, Mapping) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in env_http_headers.items()):
+            raise ValueError("env_http_headers must map strings to strings")
+        env_http_headers = dict(env_http_headers)
+        if executor_source and env_http_headers:
+            raise ValueError("env_http_headers requires executor-side environment resolution for an executor-owned HTTP MCP")
+        for header, variable in env_http_headers.items():
+            if environment.get(variable, "").strip():
+                headers[header] = environment[variable]
         raw_oauth = conf.get("oauth", {})
         if raw_oauth is None:
             raw_oauth = {}
@@ -930,6 +1004,7 @@ class MCPServerManager:
                 f"MCP server '{name}' from {source} oauth.callback_port must be an integer"
             )
         env_vars = conf.get("env_vars")
+        named_env_vars = []
         if env_vars is not None:
             if not isinstance(env_vars, list):
                 raise ValueError(
@@ -937,39 +1012,34 @@ class MCPServerManager:
                 )
             for item in env_vars:
                 if isinstance(item, str):
-                    target, source_name = item.strip(), item.strip()
+                    target, source_name = item, "remote" if executor_source and environment_id != "local" else "local"
                 elif isinstance(item, Mapping):
-                    target_value = item.get("name")
-                    source_value = item.get("source", target_value)
-                    if not isinstance(target_value, str) or not isinstance(source_value, str):
-                        raise ValueError(
-                            f"MCP server '{name}' from {source} env_vars mappings require string name/source"
-                        )
-                    unknown_env_fields = sorted(set(item) - {"name", "source"})
-                    if unknown_env_fields:
-                        raise ValueError(
-                            f"MCP server '{name}' from {source} env_vars contains unsupported fields: "
-                            + ", ".join(str(field) for field in unknown_env_fields)
-                        )
-                    target = target_value.strip()
-                    source_name = source_value.strip()
+                    target = item.get("name")
+                    source_name = item.get("source") or ("remote" if executor_source and environment_id != "local" else "local")
+                    if set(item) - {"name", "source"}:
+                        raise ValueError(f"MCP server '{name}' env_vars contains unsupported fields")
                 else:
-                    raise ValueError(
-                        f"MCP server '{name}' from {source} env_vars entries must be strings or objects"
-                    )
-                if not target or not source_name:
-                    raise ValueError(
-                        f"MCP server '{name}' from {source} env_vars contains an empty name/source"
-                    )
-                if source_name not in environment:
-                    raise ValueError(
-                        f"MCP server '{name}' from {source} requires missing environment variable '{source_name}'"
-                    )
-                env.setdefault(target, environment[source_name])
+                    raise ValueError(f"MCP server '{name}' env_vars entries must be strings or objects")
+                if not isinstance(target, str) or not target.strip() or "\x00" in target:
+                    raise ValueError(f"MCP server '{name}' env_vars contains an invalid name")
+                if source_name not in {"local", "remote"}:
+                    raise ValueError(f"env_vars entry `{target}` source must be local or remote")
+                if environment_id == "local" and source_name == "remote":
+                    raise ValueError(f"env_vars entry `{target}` cannot use source `remote` in a local environment")
+                if executor_source and environment_id != "local" and source_name == "local":
+                    raise ValueError(f"env_vars entry `{target}` cannot use source `local` in an executor-owned plugin")
+                named_env_vars.append((target, source_name))
+                if source_name == "local" and target in environment:
+                    env.setdefault(target, environment[target])
+        from backend.runtime_env import _NON_INHERITABLE_ENV_NAMES, _scrub_non_inheritable_env
+
+        named_env_vars = [(target, source_name) for target, source_name in named_env_vars
+            if target.upper() not in _NON_INHERITABLE_ENV_NAMES]
+        _scrub_non_inheritable_env(env)
         raw_cwd = conf.get("cwd")
         if raw_cwd is not None and not isinstance(raw_cwd, str):
             raise ValueError(f"MCP server '{name}' from {source} cwd must be a string")
-        cwd = (
+        cwd = raw_cwd if environment_id != "local" else (
             _resolve_mcp_cwd(
                 base_dir,
                 raw_cwd,
@@ -1031,6 +1101,9 @@ class MCPServerManager:
             )
         config = MCPServerConfig(
             name=name,
+            environment_id=environment_id, env_vars=tuple(named_env_vars), credential_policy=credential_policy,
+            selected_root_id=selected_root_id, plugin_id=plugin_id, plugin_server_name=plugin_server_name,
+            bearer_token_env_var=conf.get("bearer_token_env_var"), env_http_headers=env_http_headers,
             command=command,
             args=args,
             env=env,
@@ -1056,6 +1129,7 @@ class MCPServerManager:
             supports_parallel_tool_calls=supports_parallel_tool_calls,
             enabled_tools=enabled_tools,
             disabled_tools=disabled_tools,
+            enabled=conf.get("enabled", True),
             default_tools_approval_mode=default_tools_approval_mode,
             tool_approval_modes=tool_approval_modes,
             tool_output_token_limits=tool_output_token_limits,
@@ -1088,7 +1162,7 @@ class MCPServerManager:
             and _config_can_connect(config)
             and (
                 config.name not in self._servers
-                or self._servers[config.name].status != ServerStatus.CONNECTED
+                or self._servers[config.name].status != ServerStatus.CONNECTED and config.name not in self._lazy_servers
             )
         ]
         if required_failures:
@@ -1116,6 +1190,13 @@ class MCPServerManager:
                 )
 
     async def _start_or_register_config(self, config: MCPServerConfig) -> None:
+        cached = self._cached_catalog.get(config.name)
+        if self._startup_policy == "LazyWhenCached" and cached is not None and _same_runtime_config(config, cached[0]) and _config_can_connect(config):
+            await self.register_config(config)
+            state = self._servers[config.name]
+            state.tools, state.raw_tools = deepcopy(cached[1]), deepcopy(cached[2])
+            self._lazy_servers.add(config.name)
+            return
         if config.auto_start and _config_can_connect(config):
             await self.start_server(config)
         else:
@@ -1398,7 +1479,7 @@ class MCPServerManager:
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )
         store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
-        await to_thread_cancel_safe(store.clear, name)
+        await to_thread_cancel_safe(store.clear, state.config.oauth_credential_name())
         self._resource_subscriptions.pop(name, None)
         state.auth_status = (
             MCPAuthStatus.NOT_LOGGED_IN
@@ -1410,9 +1491,26 @@ class MCPServerManager:
     def get_all_tools(self) -> dict[str, list[MCPToolDef]]:
         result: dict[str, list[MCPToolDef]] = {}
         for name, state in self._servers.items():
-            if state.status == ServerStatus.CONNECTED and state.tools:
+            if (state.status == ServerStatus.CONNECTED or name in self._lazy_servers) and state.tools:
                 result[name] = state.tools
         return result
+
+    def has_enabled_servers(self) -> bool:
+        return any(state.config.enabled for state in self._servers.values())
+
+    def catalog_snapshot(self) -> tuple[tuple[MCPServerConfig, list[MCPToolDef], list[MCPToolDef], str], ...]:
+        return tuple((deepcopy(state.config), deepcopy(state.tools), deepcopy(state.raw_tools),
+            state.client.instructions if state.client is not None else self._cached_catalog[name][3])
+            for name, state in self._servers.items()
+            if state.status == ServerStatus.CONNECTED or name in self._lazy_servers)
+
+    async def prepare_server_call(self, server_name: str) -> None:
+        if server_name not in self._lazy_servers:
+            await self.wait_for_server_startup(server_name)
+            return
+        state = self._servers[server_name]
+        await self.start_server(state.config)
+        self._lazy_servers.discard(server_name)
 
     async def wait_for_server_startup(self, server_name: str) -> None:
         """Wait for this server's admitted connection attempt to settle."""
@@ -1451,7 +1549,11 @@ class MCPServerManager:
 
     def get_server_contract(self, server_name: str) -> tuple[Any, ...] | None:
         state = self._servers.get(server_name)
-        if state is None or state.client is None:
+        if state is None:
+            return None
+        if server_name in self._lazy_servers:
+            return (_mcp_server_identity(state.config), self._cached_catalog[server_name][3])
+        if state.client is None:
             return None
         return (_mcp_server_identity(state.config), state.client.instructions)
 
@@ -1464,10 +1566,19 @@ class MCPServerManager:
                 result.append((name, client))
         return result
 
+    def pending_requests(self) -> tuple[asyncio.Task, ...]:
+        return tuple(task for state in self._servers.values() if state.client is not None
+            for task in state.client.pending_requests())
+
     def get_server_instructions(self) -> dict[str, str]:
         """Return {server_name: instructions} for connected servers that declared any."""
         result: dict[str, str] = {}
         for name, state in self._servers.items():
+            if name in self._lazy_servers:
+                text = self._cached_catalog[name][3].strip()
+                if text:
+                    result[name] = text
+                continue
             if state.status != ServerStatus.CONNECTED or not state.client:
                 continue
             text = (state.client.instructions or "").strip()
@@ -1574,10 +1685,13 @@ class MCPServerManager:
         client = state.client
         try:
             if client is None:
-                client = self._create_client(
-                    state.config,
-                    interactive_oauth=interactive_oauth,
-                )
+                if self.environment_runtime is not None:
+                    binding = await self.environment_runtime.bind_server(state.config)
+                    client = self._create_client(state.config, interactive_oauth=interactive_oauth, execution_binding=binding)
+                elif state.config.environment_id != "local":
+                    raise ValueError(f"MCP server `{name}` requires its configured execution environment `{state.config.environment_id}`")
+                else:
+                    client = self._create_client(state.config, interactive_oauth=interactive_oauth)
                 state.client = client
             connect_timeout = (
                 310.0
@@ -1743,12 +1857,14 @@ class MCPServerManager:
         return state
 
     def _stored_auth_status(self, config: MCPServerConfig) -> MCPAuthStatus:
+        if config.credential_policy == "ExecutorOnly":
+            return MCPAuthStatus.UNSUPPORTED
         if config.transport not in {"sse", "http"}:
             return MCPAuthStatus.UNSUPPORTED
         token_store = self._token_store.for_server(config.url or "", config.oauth_client_id)
-        if token_store.has_sdk_tokens(config.name):
+        if token_store.has_sdk_tokens(config.oauth_credential_name()):
             return MCPAuthStatus.OAUTH
-        tokens = token_store.get(config.name)
+        tokens = token_store.get(config.oauth_credential_name())
         if tokens is None:
             return (
                 MCPAuthStatus.NOT_LOGGED_IN
@@ -1762,6 +1878,7 @@ class MCPServerManager:
         config: MCPServerConfig,
         *,
         interactive_oauth: bool = False,
+        execution_binding=None,
     ) -> MCPClient:
         t = config.transport.lower()
         if t == "sse":
@@ -1801,12 +1918,14 @@ class MCPServerManager:
             ),
             request_timeout=MCP_REQUEST_TIMEOUT_SECONDS,
             tool_timeout=_mcp_tool_timeout_seconds(config),
-            token_store=self._token_store if transport in (MCPTransport.SSE, MCPTransport.HTTP) else None,
+            token_store=self._token_store if config.credential_policy == "HostFallbackAllowed" and transport in (MCPTransport.SSE, MCPTransport.HTTP) else None,
             interactive_oauth=interactive_oauth,
             elicitation_handler=self._elicitation_handler,
             on_disconnect=on_disconnect,
             on_tools_changed=on_tools_changed,
-            workspace_root=self.workspace_root,
+            workspace_root=self.workspace_root if config.environment_id == "local" else None,
+            execution_binding=execution_binding, bearer_token_env_var=config.bearer_token_env_var,
+            oauth_credential_name=config.oauth_credential_name(),
         )
         return client
 
@@ -2128,7 +2247,11 @@ def _filter_mcp_tools(
 
 def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
     return (
-        left.command == right.command
+        (left.environment_id, left.env_vars, left.credential_policy, left.selected_root_id, left.plugin_id,
+            left.plugin_server_name, left.bearer_token_env_var, left.env_http_headers) == (
+            right.environment_id, right.env_vars, right.credential_policy, right.selected_root_id, right.plugin_id,
+            right.plugin_server_name, right.bearer_token_env_var, right.env_http_headers)
+        and left.command == right.command
         and left.args == right.args
         and left.env == right.env
         and left.headers == right.headers
@@ -2185,6 +2308,8 @@ def _same_connection_config(left: MCPServerConfig, right: MCPServerConfig) -> bo
 
 def _mcp_server_identity(config: MCPServerConfig, *, include_scope: bool = True) -> tuple[Any, ...]:
     identity = (
+        config.environment_id, config.env_vars, config.credential_policy, config.selected_root_id,
+        config.plugin_id, config.plugin_server_name, config.bearer_token_env_var, tuple(sorted(config.env_http_headers.items())),
         config.transport, config.command, tuple(config.args), config.cwd,
         tuple(sorted(config.env.items())), config.url,
         tuple(sorted(config.headers.items())), config.headers_helper,

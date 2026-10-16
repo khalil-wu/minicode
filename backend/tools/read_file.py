@@ -28,6 +28,7 @@ from backend.tools.file_tools_common import (
 
 
 class ReadFileTool(BaseTool):
+    requires_execution_environment = True
     """
     Read text file content.
 
@@ -187,6 +188,10 @@ class ReadFileTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_read_file
+            return await executor_read_file(self, args, context)
         file_path = _path_arg(args)
         start_line_arg = args.get("start_line")
         end_line_arg = args.get("end_line")

@@ -59,8 +59,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _with_network_approval_context(policy, context):
+    from backend.permissions.environment_command import EnvironmentCommandPolicy
+
+    if not isinstance(policy, EnvironmentCommandPolicy) or policy.network_policy is None:
+        return policy
+
+    def register(execution_id, cancel_execution, apply_amendment):
+        async def persist_amendment(*, host, approved_host, protocol, action, reason, on_policy_applied):
+            runtime = policy.network_policy.runtime
+            normalized = await to_thread_cancel_safe(runtime.invoke_sync, "network/normalizeHost", {"host": host})
+            approved = await to_thread_cancel_safe(runtime.invoke_sync, "network/normalizeHost", {"host": approved_host})
+            if normalized["host"] != approved["host"]:
+                raise ValueError("Network policy amendment does not match the reviewed host")
+            await apply_amendment(host=host, protocol=protocol, action=action)
+            on_policy_applied()
+            await context.run_context.exec_policy_owner.persist_network_amendment(runtime,
+                host=host, protocol=protocol, action=action)
+
+        return context.run_context.network_approval_service.register(context.final_tool_request, context,
+            execution_id=execution_id, cancel_execution=cancel_execution, persist_amendment=persist_amendment)
+
+    return replace(policy, network_approval_factory=register)
+
+
 class RunCommandTool(BaseTool):
     """Execute shell commands."""
+
+    requires_execution_environment = True
 
     name = "run_command"
     result_kind = "command"
@@ -94,8 +120,8 @@ class RunCommandTool(BaseTool):
         # recorded timeout/cleanup. SandboxRunner still bounds legacy calls.
         return None
 
-    def model_description(self) -> str:
-        return _model_shell_description() + (
+    def model_description(self, *, windows: bool | None = None) -> str:
+        return _model_shell_description(windows=windows) + (
             " Managed commands wait up to yield_time_ms (default 10000 ms), then return a live command id. "
             "A running result is not an exit: use monitor with that id to wait/read output/send stdin/cancel. "
             "Continue independent work while it runs, but wait for completion before work that depends on its effects. "
@@ -105,6 +131,19 @@ class RunCommandTool(BaseTool):
             " Run tests directly: shell pipes to tail/grep can discard failures and replace the test exit code. "
             "Use monitor with cursor=0 to reread captured output instead of rerunning tests to change the display."
         )
+
+    def model_description_for_policy(self, policy) -> str:
+        return self.model_description(windows=policy.windows_shell_guidance)
+
+    def model_schema_for_policy(self, policy) -> ToolSchema:
+        schema = super().model_schema_for_policy(policy)
+        if policy.environment_count is None:
+            return schema
+        properties = {**schema.parameters["properties"]}
+        properties["command"] = {**properties["command"], "description": "Shell command in the selected execution environment's shell syntax."}
+        if policy.environment_login_parameter is False:
+            properties.pop("login")
+        return replace(schema, parameters={**schema.parameters, "properties": properties})
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -285,24 +324,38 @@ class RunCommandTool(BaseTool):
         from backend.permissions.exec_policy import FrozenExecCommand
         from backend.runtime_env import powershell_script
         args = request.argument_values()
-        cwd = self._resolve_cwd(args.get("cwd"), context, allow_workspace_escape=True)
-        workspace = Path(context.workspace_root).resolve()
         captured_context = replace(context, permission=permission)
         env, error = _validated_env(args.get("env"))
         if error:
             raise ValueError(error)
         timeout = _coerce_timeout(args.get("timeout"))
-        policy = sandbox_policy_with_grants(_workspace_sandbox_policy(workspace, captured_context,
-            timeout=timeout, env_overrides=env), captured_context)
+        environment = context.turn_environment
+        if environment is not None:
+            from backend.permissions.environment_command import EnvironmentCommandPolicy
+            from backend.workspace.executor_paths import ExecutorPath
+
+            scope = permission.environment_scope
+            cwd_path = scope.resolve_path(args.get("cwd") or scope.cwd_uri)
+            roots = tuple(ExecutorPath.parse(root, platform_os=scope.platform_os) for root in scope.workspace_root_uris)
+            policy = EnvironmentCommandPolicy(replace(scope, cwd_uri=cwd_path.uri), environment,
+                environment.config.shell_environment_policy, env, timeout, permission.allow_unsandboxed_commands)
+        else:
+            cwd = self._resolve_cwd(args.get("cwd"), context, allow_workspace_escape=True)
+            workspace = Path(context.workspace_root).resolve()
+            cwd_path, roots = Path(cwd), (workspace,)
+            policy = _workspace_sandbox_policy(workspace, captured_context, timeout=timeout, env_overrides=env)
+        policy = sandbox_policy_with_grants(policy, captured_context)
         from backend.permissions.approval_policy import rejected_approval_reason
         from backend.permissions.grants import normalize_permission_profile, intersect_permission_profiles
         requested_mode = args.get("sandbox_permissions", "use_default")
         requested_profile = args.get("additional_permissions")
-        wanted = (normalize_permission_profile(requested_profile, cwd=Path(cwd), workspace_roots=(workspace,))
+        wanted = (normalize_permission_profile(requested_profile, cwd=cwd_path, workspace_roots=roots)
             if requested_profile is not None else None)
         granted = current_granted_permissions(captured_context)
         preapproved = (wanted is not None and granted is not None and intersect_permission_profiles(granted, wanted,
-            cwd=Path(cwd), workspace_roots=(workspace,)) == wanted)
+            cwd=cwd_path, workspace_roots=roots,
+            **({"temporary_directories": tuple(ExecutorPath.parse(path) for path in policy.scope.temporary_directory_uris or ())}
+                if environment is not None else {})) == wanted)
         sandbox_permissions = "use_default" if requested_mode == "with_additional_permissions" and preapproved else requested_mode
         if sandbox_permissions != "use_default" and not preapproved and rejected_approval_reason(permission, "sandbox_approval") is not None:
             raise ValueError(f"approval policy is {permission.approval_policy}; reject command — you cannot ask for escalated permissions if the approval policy is {permission.approval_policy}")
@@ -319,21 +372,34 @@ class RunCommandTool(BaseTool):
             policy = policy.with_additional_permissions(wanted)
         elif requested_profile is not None:
             raise ValueError("`additional_permissions` requires `sandbox_permissions` set to `with_additional_permissions`")
-        raw = command_shell_argv(str(args["command"]), shell=args.get("shell"), login=args.get("login"),
-            allow_login_shell=context.run_context.exec_policy_owner.allow_login_shell,
-            native_windows_sandbox=sys.platform == "win32" and not policy.disable_os_sandbox,
-            wrap_powershell=False)
+        if environment is not None and context.run_context.network_step is not None:
+            network_policy = context.run_context.network_step.policy_for(environment)
+            policy = replace(policy, network_policy=network_policy.for_scope(policy.scope) if network_policy is not None else None)
+        if environment is not None and environment.is_remote:
+            from backend.permissions.environment_command import executor_shell_argv
+
+            raw = executor_shell_argv(environment, str(args["command"]), shell=args.get("shell"), login=args.get("login"),
+                fallback_shell=context.run_context.user_shell)
+        else:
+            raw = command_shell_argv(str(args["command"]), shell=args.get("shell"), login=args.get("login"),
+                allow_login_shell=environment.config.allow_login_shell if environment is not None else context.run_context.exec_policy_owner.allow_login_shell,
+                native_windows_sandbox=sys.platform == "win32" and not policy.disable_os_sandbox,
+                wrap_powershell=False)
         argv = list(raw)
-        if Path(raw[0]).stem.lower() in {"pwsh", "powershell"}:
+        import ntpath
+        if ntpath.splitext(ntpath.basename(raw[0]))[0].lower() in {"pwsh", "powershell"}:
             argv[-1] = powershell_script(raw[-1])
-        capture = FrozenExecCommand.capture(request, argv=argv, policy_argv=raw, cwd=Path(cwd),
-            configured_shell=Path(raw[0]), permission=permission, profile=policy.permission_profile,
-            resolved_profile=policy.resolve(cwd=Path(cwd)),
-            windows_sandbox_level="elevated" if sys.platform == "win32" and not policy.disable_os_sandbox else "disabled",
+        capture = FrozenExecCommand.capture(request, argv=argv, policy_argv=raw, cwd=cwd_path,
+            configured_shell=raw[0], permission=permission, profile=policy.permission_profile,
+            resolved_profile=None if environment is not None else policy.resolve(cwd=cwd_path),
+            environment_scope=policy.scope if environment is not None else None,
+            windows_sandbox_level=(policy.scope.windows_sandbox_level if environment is not None
+                else "elevated" if sys.platform == "win32" and not policy.disable_os_sandbox else "disabled"),
             sandbox_permissions=sandbox_permissions,
             prefix_rule=args.get("prefix_rule"), environment_id=context.environment_id, policy=policy,
             additional_permissions_present=(wanted is not None or (not granted.is_empty and requested_mode != "require_escalated")))
-        return context.run_context.exec_policy_owner.command_requirement(capture, model=context.model_execution)
+        return context.run_context.exec_policy_owner.command_requirement(capture, model=context.model_execution,
+            environment_requirements=environment.config.exec_policy if environment is not None else None)
 
     async def execute(
         self,
@@ -425,6 +491,9 @@ class RunCommandTool(BaseTool):
         *,
         allow_workspace_escape: bool = False,
     ) -> str | None:
+        if context is not None and context.turn_environment is not None:
+            scope = context.permission.environment_scope
+            return scope.resolve_path(cwd or scope.cwd_uri).uri
         workspace_root: Path | None = None
         if context and getattr(context, "workspace_root", None):
             workspace_root = Path(context.workspace_root).expanduser().resolve()
@@ -476,7 +545,8 @@ class RunCommandTool(BaseTool):
                 "or run long-lived commands in an external terminal."
             )
 
-        workspace = (
+        native = context.exec_policy_decision if context is not None else None
+        workspace = None if native is not None else (
             Path(context.workspace_root).expanduser().resolve()
             if context is not None and getattr(context, "workspace_root", None)
             else Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
@@ -485,7 +555,6 @@ class RunCommandTool(BaseTool):
         # background task. The session-owned manager remains responsible for
         # cancellation, process-tree cleanup, output bounds, and completion.
         background_timeout_ms = int(timeout * 1000) if wait_ms is not None and timeout is not None else 0
-        native = context.exec_policy_decision if context is not None else None
         if native is not None:
             base_policy = replace(native.command.policy, timeout=timeout if wait_ms is not None and timeout is not None else 0)
         else:
@@ -503,7 +572,10 @@ class RunCommandTool(BaseTool):
             if escalated or (native is None and _is_bypass_mode(context))
             else base_policy
         )
-        capability = SandboxRunner(policy).capability(cwd=cwd)
+        policy = _with_network_approval_context(policy, context)
+        from backend.terminal.executor_runner import command_capability
+
+        capability = command_capability(policy, cwd=cwd)
         if not capability.available:
             return self._error_result(
                 f"The required sandbox is unavailable, so the background command was not started: {capability.reason}"
@@ -561,6 +633,10 @@ class RunCommandTool(BaseTool):
                 **({"backgrounded": False, "stream_callback": getattr(context, "stream_callback", None)}
                    if wait_ms is not None else {}),
             )
+            from backend.permissions.environment_command import EnvironmentCommandPolicy
+
+            if isinstance(policy, EnvironmentCommandPolicy):
+                await background_manager.wait_for_startup(bg_cmd.command_id, conversation_id=conversation_id)
         except (RuntimeError, ValueError) as exc:
             return self._error_result(str(exc))
 
@@ -611,8 +687,16 @@ class RunCommandTool(BaseTool):
                         result.content += "\n\n" + hint
             return result
 
+        if bg_cmd.status != "running":
+            from backend.tools.monitor_tool import MonitorTool
+
+            result = MonitorTool()._command_snapshot(background_manager, bg_cmd.command_id,
+                {"output_mode": "head_tail", "max_chars": max_chars}, conversation_id=conversation_id)
+            result.runtime_metadata.update(command_id=bg_cmd.command_id, process_status=bg_cmd.status, exit_code=bg_cmd.exit_code)
+            return result
+
         sandbox_label = (
-            "bypass execution"
+            "executor permissions" if isinstance(policy, EnvironmentCommandPolicy) else "bypass execution"
             if capability.backend == "full-access"
             else "OS sandbox"
         )
@@ -654,12 +738,12 @@ class RunCommandTool(BaseTool):
         "retry outside the sandbox" path. Otherwise it runs under the normal
         workspace-write, no-network policy.
         """
-        workspace = (
+        native = context.exec_policy_decision if context is not None else None
+        workspace = None if native is not None else (
             Path(context.workspace_root).expanduser().resolve()
             if context is not None and getattr(context, "workspace_root", None)
             else Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
         )
-        native = context.exec_policy_decision if context is not None else None
         if native is not None:
             base_policy = replace(native.command.policy, timeout=timeout)
         else:
@@ -676,7 +760,10 @@ class RunCommandTool(BaseTool):
             if escalated or (native is None and _is_bypass_mode(context))
             else base_policy
         )
-        runner = SandboxRunner(policy)
+        policy = _with_network_approval_context(policy, context)
+        from backend.terminal.executor_runner import command_runner
+
+        runner = command_runner(policy)
 
         cancel_event = getattr(context, "cancel_event", None) if context else None
         stream_cb = getattr(context, "stream_callback", None) if context else None
@@ -761,9 +848,10 @@ class RunCommandTool(BaseTool):
         # shell syntax, so invalidate derived views of this command's workspace.
         from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-        invalidate_workspace_file_caches(
-            file_tree_changed=True, clear_file_state=True, mutation_policy=policy,
-        )
+        from backend.permissions.environment_command import EnvironmentCommandPolicy
+
+        if not isinstance(policy, EnvironmentCommandPolicy):
+            invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True, mutation_policy=policy)
 
         output = stdout + stderr
 
@@ -821,6 +909,7 @@ class RunCommandTool(BaseTool):
                 status=result_status,
                 error_kind="execution_error" if result.execution_error else None,
                 runtime_metadata={"stdout_preview": stdout, "stderr_preview": stderr, "exit_code": exit_code, "hook_output": output,
+                    "execution_error": result.execution_error, "network_policy_decisions": list(result.network_audit),
                     "command_completed": not (result.cancelled or result.timed_out or result.execution_error),
                     "process_status": result_status if result.cancelled or result.timed_out else "failed" if is_failed_exit else "completed"},
                 cleanup_receipt=cleanup_receipt,
@@ -881,6 +970,7 @@ class RunCommandTool(BaseTool):
         return ToolResult(
             content=f"{status}\n\n[{truncation_notice}]",
             runtime_metadata={"stdout_preview": preview, "stderr_preview": "", "exit_code": exit_code, "hook_output": preview,
+                "execution_error": result.execution_error, "network_policy_decisions": list(result.network_audit),
                 "command_completed": not (result.cancelled or result.timed_out or result.execution_error),
                 "process_status": result_status if result.cancelled or result.timed_out else "failed" if is_failed_exit else "completed"},
             artifact_id=artifact_id or None,
@@ -895,9 +985,12 @@ class RunCommandTool(BaseTool):
         manager = self._resolve_background_manager(context)
         owner = context.command_scope_id if context is not None else ""
         process = runner.process
+        from backend.terminal.executor_runner import ExecutorCommandProcess
+
         receipt = {
             "resource_kind": "command",
-            "resource_id": str(process.pid) if process is not None else runner._container_name,
+            "resource_id": (process.process_id if isinstance(process, ExecutorCommandProcess)
+                else str(process.pid) if process is not None else runner._container_name),
             "reason": reason,
             "requested": True,
             "acknowledged": True,

@@ -295,6 +295,18 @@ function registerIpcHandlers() {
   const withMainSender = (channel, handler) => (event, ...args) => {
     assertMainSender(event, channel);
     assertIpcCapability(channel, { logger: appendDesktopLog });
+    const record = getWindowRecord(getWin(event));
+    if (record.remoteHostId) {
+      const remote = ctx.getRemoteDesktop();
+      if (channel === "minicode:sandbox:setup") return { ok: false, error: "请在远端 Windows 主机上初始化沙箱。" };
+      if (remote.invokes(channel)) return remote.invoke(record, channel, args);
+      if (["minicode:embeddedBrowser:create", "minicode:embeddedBrowser:navigate"].includes(channel)) {
+        return remote.mapUrl(record, args[0].url).then((url) => handler(event, { ...args[0], url }));
+      }
+      if (["minicode:pickDirectory", "minicode:workspace:pickDirectory"].includes(channel)) {
+        throw new Error("Choose a directory on the connected host in the remote folder selector");
+      }
+    }
     return handler(event, ...args);
   };
 
@@ -320,11 +332,26 @@ function registerIpcHandlers() {
   }));
 
   ipcMain.handle("minicode:window:openConversation", withMainSender("minicode:window:openConversation", async (_event, conversationId) => {
-    const win = await ctx.createNewWindow({ conversationId });
+    const source = getWindowRecord(getWin(_event));
+    const win = await ctx.createNewWindow({ conversationId,
+      ...(source.remoteHostId ? { remoteHostId: source.remoteHostId, runtime: source.runtime } : {}) });
     ctx.focusMainWindow(win);
     const record = getWindowRecord(win);
     return { windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId };
   }));
+
+  for (const action of ["list", "discover", "save", "connect", "disconnect", "remove", "open"]) {
+    const channel = `minicode:connections:${action}`;
+    ipcMain.handle(channel, withMainSender(channel, async (_event, ...args) => {
+      try {
+        const value = await ctx.getRemoteDesktop()[action](...args);
+        return { ok: true, value: ["connect", "disconnect", "open"].includes(action) ? undefined : value };
+      } catch (error) {
+        appendDesktopLog(`[desktop] ${channel}: ${error.message}`);
+        return { ok: false, error: error.message };
+      }
+    }));
+  }
 
   ipcMain.on("minicode:window:unload:capture", withMainSender("minicode:window:unload:capture", (event) => {
     event.returnValue = ctx.captureUnloadIntent(getWin(event));

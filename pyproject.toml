@@ -32,6 +32,7 @@ dependencies = [
   "filelock>=3.16,<4.0",
   "regex>=2024.11,<2027",
   "snowballstemmer==2.2.0",
+  "Send2Trash>=1.8,<2.0",
   "watchdog>=6.0,<7.0",
   "mini-racer==0.14.1",
   "tree-sitter>=0.25,<0.27",
@@ -44,6 +45,9 @@ dependencies = [
   "tree-sitter-java==0.23.5",
 ]
 
+[project.scripts]
+minicode-host = "backend.desktop_remote.__main__:main"
+
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -52,6 +56,7 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 
 [tool.setuptools.package-data]
 "backend.permissions" = ["resources/execpolicy/*/*", "resources/permissions/**/*"]
+"backend.network" = ["resources/*/*"]
 "backend.agent" = ["*.js", "codex_prompt_resources/*"]
 "backend.agent.guardian" = ["resources/*"]
 "backend.llm" = ["*.json", "SOURCE_MODEL_METADATA_NOTICE.md"]

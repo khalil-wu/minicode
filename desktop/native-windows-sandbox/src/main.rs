@@ -42,6 +42,26 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&windows_sandbox_owner_resources(&owner))?);
             Ok(())
         }
+        [sandbox, ready, home_flag, home, settings_flag, settings]
+            if sandbox == "sandbox" && ready == "network-ready" && home_flag == "--codex-home"
+                && settings_flag == "--settings-json" =>
+        {
+            let settings: WindowsSandboxProvisioningSettings = serde_json::from_str(settings)?;
+            bind_windows_sandbox_owner(Path::new(home), &current_setup_user()?)?;
+            let ready = codex_windows_sandbox::sandbox_setup_is_complete_with_settings(Path::new(home), &settings);
+            println!("{}", serde_json::json!({"ready":ready,"settings":settings}));
+            Ok(())
+        }
+        [sandbox, setup, elevated, user_flag, user, home_flag, home, settings_flag, settings]
+            if sandbox == "sandbox" && setup == "setup" && elevated == "--elevated"
+                && user_flag == "--user" && home_flag == "--codex-home" && settings_flag == "--settings-json" =>
+        {
+            let settings: WindowsSandboxProvisioningSettings = serde_json::from_str(settings)?;
+            codex_windows_sandbox::validate_local_directory_path(Path::new(home))?;
+            std::fs::create_dir_all(home)?;
+            bind_windows_sandbox_owner(Path::new(home), user)?;
+            run_elevated_provisioning_setup(Path::new(home), user, settings)
+        }
         [sandbox, setup, elevated, current_user, home_flag, home]
             if sandbox == "sandbox"
                 && setup == "setup"

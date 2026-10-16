@@ -3,12 +3,41 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
+
+
+def default_user_shell() -> dict[str, str]:
+    """Capture Source's host session shell independently of model metadata."""
+    if os.name == "nt":
+        for binary, fixed in (("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                ("powershell", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")):
+            path = shutil.which(binary)
+            if path is not None or Path(fixed).is_file():
+                return {"name": "powershell", "path": path or fixed}
+        return {"name": "cmd", "path": "cmd.exe"}
+    import pwd
+
+    user_path = pwd.getpwuid(os.getuid()).pw_shell
+    user_name = Path(user_path).stem
+    candidates = (user_name, "zsh", "bash") if sys.platform == "darwin" else (user_name, "bash", "zsh")
+    for name in dict.fromkeys(candidates):
+        if name not in {"bash", "zsh", "sh", "pwsh", "powershell", "cmd"}:
+            continue
+        if Path(user_path).stem == name and Path(user_path).is_file():
+            path = user_path
+        else:
+            path = shutil.which(name)
+            if path is None and name in {"bash", "zsh", "sh"} and Path("/bin", name).is_file():
+                path = str(Path("/bin", name))
+        if path is not None:
+            return {"name": "powershell" if name in {"pwsh", "powershell"} else name, "path": path}
+    return {"name": "sh", "path": "/bin/sh"}
 
 
 def powershell_script(command: str, *, cwd: str | None = None) -> str:
@@ -27,12 +56,16 @@ def powershell_script(command: str, *, cwd: str | None = None) -> str:
     )
 
 # MiniCode treats host-owned launch context as non-inheritable regardless of the
-# user's shell-environment policy. MiniCode's two desktop bearer tokens are the
+# user's shell-environment policy. MiniCode's own runtime bearer tokens are the
 # same kind of runtime-owned capability and therefore share this boundary.
 _NON_INHERITABLE_ENV_NAMES = frozenset(
     {
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "NODE_REPL_AUTH_TOKEN",
+        "CODEX_GUARDIAN_DECISIONS_API_KEY",
         "OPENAI_FEDERATION_RULE_ID",
         "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
         "MINICODE_RUNTIME_TOKEN",
         "MINICODE_EMBEDDED_BROWSER_TOKEN",
         "MINICODE_EVAL_API_KEY",

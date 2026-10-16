@@ -31,6 +31,8 @@ def test_desktop_package_includes_required_shell_modules_and_sidecar() -> None:
 
     for required in {
         "backend-sidecar.js",
+        "remote-host.js",
+        "remote-desktop.js",
         "cdp-bridge.js",
         "crash-reporter.js",
         "ipc-handlers.js",

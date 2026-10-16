@@ -261,6 +261,10 @@ def get_mcp_status(manager: Any | None) -> list[dict[str, Any]]:
             "args": [str(item) for item in (entry.get("args") or [])],
             "env": {str(key): str(value) for key, value in dict(entry.get("env") or {}).items()},
             "env_vars": list(entry.get("env_vars") or []),
+            "environment_id": entry.get("environment_id", "local"),
+            "enabled": entry.get("enabled", True),
+            "bearer_token_env_var": entry.get("bearer_token_env_var"),
+            "env_http_headers": dict(entry.get("env_http_headers") or {}),
             "headers": {str(key): str(value) for key, value in dict(entry.get("headers") or {}).items()},
             "headers_helper": str(entry.get("headers_helper") or ""),
             "oauth": dict(entry.get("oauth") or {}),
@@ -562,8 +566,32 @@ def _manual_config_from_payload(data: dict[str, Any]) -> MCPServerConfig:
         "default_tools_approval_mode",
     )
     tool_approval_modes = _tool_approval_modes(data.get("tools"))
+    environment_id = data.get("environment_id", "local")
+    if not isinstance(environment_id, str):
+        raise MCPServiceError("MCP environment_id must be a string")
+    named_env_vars = []
+    env_vars = data.get("env_vars", [])
+    if not isinstance(env_vars, list):
+        raise MCPServiceError("MCP env_vars must be an array")
+    for item in env_vars:
+        if isinstance(item, str):
+            name_value, source_value = item, "local"
+        elif isinstance(item, dict) and not set(item) - {"name", "source"}:
+            name_value, source_value = item.get("name"), item.get("source") or "local"
+        else:
+            raise MCPServiceError("MCP env_vars entries must be names or name/source objects")
+        if not isinstance(name_value, str) or not name_value.strip() or source_value not in {"local", "remote"}:
+            raise MCPServiceError("MCP env_vars requires a name and local or remote source")
+        if source_value == "remote" and environment_id == "local":
+            raise MCPServiceError("MCP remote env_vars requires a remote environment")
+        named_env_vars.append((name_value, source_value))
     return MCPServerConfig(
         name=name,
+        environment_id=environment_id,
+        enabled=data.get("enabled", True),
+        env_vars=tuple(named_env_vars),
+        bearer_token_env_var=data.get("bearer_token_env_var"),
+        env_http_headers=data.get("env_http_headers", {}),
         command=raw_command.strip() if isinstance(raw_command, str) else "",
         args=list(raw_args),
         env=dict(raw_env),
@@ -599,6 +627,10 @@ def _server_entry_from_config(config: MCPServerConfig) -> dict[str, Any]:
         "transport": config.transport,
         "auto_start": config.auto_start,
     }
+    if config.environment_id != "local":
+        server_entry["environment_id"] = config.environment_id
+    if not config.enabled:
+        server_entry["enabled"] = False
     if config.transport == "stdio":
         server_entry["command"] = config.command
         server_entry["args"] = config.args
@@ -606,12 +638,18 @@ def _server_entry_from_config(config: MCPServerConfig) -> dict[str, Any]:
             server_entry["env"] = config.env
         if config.cwd:
             server_entry["cwd"] = config.cwd
+        if config.env_vars:
+            server_entry["env_vars"] = [{"name": name, "source": source} for name, source in config.env_vars]
     else:
         server_entry["url"] = config.url
         if config.headers:
             server_entry["headers"] = config.headers
         if config.headers_helper:
             server_entry["headers_helper"] = config.headers_helper
+        if config.bearer_token_env_var is not None:
+            server_entry["bearer_token_env_var"] = config.bearer_token_env_var
+        if config.env_http_headers:
+            server_entry["env_http_headers"] = config.env_http_headers
         if config.transport in {"sse", "http"}:
             oauth: dict[str, Any] = {}
             if config.oauth_client_id:
@@ -657,6 +695,8 @@ def _server_entry_from_payload(
         entry.pop("headers", None)
         entry.pop("headers_helper", None)
         entry.pop("oauth", None)
+        entry.pop("bearer_token_env_var", None)
+        entry.pop("env_http_headers", None)
     else:
         entry.pop("command", None)
         entry.pop("args", None)
@@ -689,6 +729,10 @@ def _server_entry_from_payload(
         "disabled_tools",
         "default_tools_approval_mode",
         "tools",
+        "environment_id",
+        "enabled",
+        "bearer_token_env_var",
+        "env_http_headers",
     ):
         if field in data and field not in canonical_entry:
             entry.pop(field, None)

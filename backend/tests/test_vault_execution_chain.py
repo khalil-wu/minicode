@@ -91,17 +91,28 @@ def test_mcp_templates_and_passthrough_resolve_the_same_scoped_environment(execu
     config = manager._config_from_mapping("plugin:tools@local:helper", {
         "transport": "stdio", "command": "node", "args": ["${VAULT_MCP}", "${VAULT_SHARED}"],
         "env": {"VAULT_SHARED": "literal", "TARGET": "explicit"},
-        "env_vars": ["VAULT_MCP", {"name": "TARGET", "source": "VAULT_GLOBAL"}],
+        "env_vars": ["VAULT_MCP", "VAULT_GLOBAL", {"name": "TARGET", "source": "local"}],
     }, source="user", priority=0, base_dir=tmp_path)
     assert config.args == ["server", "literal"]
     assert config.env["VAULT_MCP"] == "server"
+    assert config.env["VAULT_GLOBAL"] == "global"
     assert config.env["TARGET"] == "explicit"
+    assert config.env_vars == (("VAULT_MCP", "local"), ("VAULT_GLOBAL", "local"), ("TARGET", "local"))
+    legacy_alias = {"transport": "stdio", "command": "node", "env_vars": [{"name": "TARGET", "source": "VAULT_GLOBAL"}]}
+    with pytest.raises(ValueError, match="source must be local or remote"):
+        manager._config_from_mapping("plugin:tools@local:helper", legacy_alias,
+            source="user", priority=0, base_dir=tmp_path)
+    with pytest.raises(ValueError, match="source must be local or remote"):
+        write_mcp_config(json.dumps({"servers": {"helper": legacy_alias}}), tmp_path / "legacy-alias.json")
     execution_vault.set("VAULT_URL", "https://fixture.invalid/mcp", scope="mcp:remote")
     source = json.dumps({"servers": {"remote": {"transport": "http", "url": "${VAULT_URL}"}}})
     receipt = write_mcp_config(source, tmp_path / "remote.json")
     assert "${VAULT_URL}" in receipt["config"]["content"]
     remote = manager._config_from_mapping("remote", {"transport": "http", "url": "${VAULT_URL}"}, source="user", priority=0, base_dir=tmp_path)
     assert remote.url == "https://fixture.invalid/mcp"
+    with pytest.raises(ValueError, match="missing environment variable 'VAULT_URL'"):
+        manager._config_from_mapping("other", {"transport": "http", "url": "${VAULT_URL}"},
+            source="user", priority=0, base_dir=tmp_path)
 
 
 def test_mcp_restart_reloads_changed_variable_references_before_launch(execution_vault, tmp_path, monkeypatch):

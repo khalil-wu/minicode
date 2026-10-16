@@ -24,6 +24,9 @@ from backend.permissions.native_execpolicy import NativeExecPolicyError, NativeE
 from backend.sandbox.policy import PermissionProfile, ResolvedSandboxPolicy, SandboxEnforcement, SandboxPolicy
 
 if TYPE_CHECKING:
+    from backend.permissions.environment_command import EnvironmentCommandPolicy
+    from backend.permissions.environment_scope import EnvironmentPermissionScope
+    from backend.workspace.executor_paths import ExecutorPath
     from backend.agent.final_tool_request import FinalExecutableToolRequest
     from backend.agent.model_execution import ModelExecutionSnapshot
     from backend.permissions.context import PermissionContext
@@ -80,8 +83,8 @@ class FrozenExecCommand:
     tool_request_digest: str
     argv: tuple[str, ...]
     policy_argv: tuple[str, ...]
-    cwd: Path
-    configured_shell: Path
+    cwd: Path | ExecutorPath
+    configured_shell: Path | str
     approval_policy_json: str
     profile_kind: str
     managed_profile: bool
@@ -93,7 +96,7 @@ class FrozenExecCommand:
     environment_id: str
     shell_mode: str
     execution_digest: str
-    policy: SandboxPolicy
+    policy: SandboxPolicy | EnvironmentCommandPolicy
     additional_permissions_present: bool
 
     @classmethod
@@ -101,17 +104,23 @@ class FrozenExecCommand:
         configured_shell: Path, permission: PermissionContext, profile: PermissionProfile,
         resolved_profile: ResolvedSandboxPolicy, windows_sandbox_level: str, sandbox_permissions: str,
         prefix_rule: Sequence[str] | None, environment_id: str, policy: SandboxPolicy,
-        additional_permissions_present: bool, shell_mode: str = "normal") -> FrozenExecCommand:
+        additional_permissions_present: bool, shell_mode: str = "normal",
+        environment_scope: EnvironmentPermissionScope | None = None) -> FrozenExecCommand:
         approval_policy_json = json.dumps(permission.approval_policy_value(), sort_keys=True, separators=(",", ":"))
-        values = {"tool_request_digest": request.arguments_digest or request.digest, "argv": tuple(argv), "policy_argv": tuple(policy_argv), "cwd": Path(cwd),
-            "configured_shell": Path(configured_shell), "approval_policy_json": approval_policy_json,
+        values = {"tool_request_digest": request.arguments_digest or request.digest, "argv": tuple(argv), "policy_argv": tuple(policy_argv),
+            "cwd": cwd if environment_scope is not None else Path(cwd),
+            "configured_shell": str(configured_shell) if environment_scope is not None else Path(configured_shell), "approval_policy_json": approval_policy_json,
             "profile_kind": profile.file_system.kind.value, "managed_profile": profile.enforcement is SandboxEnforcement.MANAGED,
-            "full_disk_write": resolved_profile.full_disk_write, "denied_reads": resolved_profile.has_denied_read_restrictions,
+            "full_disk_write": environment_scope.has_full_disk_write_access() if environment_scope is not None else resolved_profile.full_disk_write,
+            "denied_reads": environment_scope.has_denied_read_restrictions() if environment_scope is not None else resolved_profile.has_denied_read_restrictions,
             "windows_sandbox_level": windows_sandbox_level, "sandbox_permissions": sandbox_permissions,
             "prefix_rule": tuple(prefix_rule) if prefix_rule is not None else None,
             "environment_id": environment_id, "shell_mode": shell_mode,
             "additional_permissions_present": additional_permissions_present}
-        identity = json.dumps({**values, "resolved_profile": asdict(resolved_profile)}, default=str, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        identity = json.dumps({**values, "request_digest": request.digest,
+            "network_policy": policy.network_policy.identity() if environment_scope is not None and policy.network_policy is not None else None,
+            "resolved_profile": environment_scope.identity() if environment_scope is not None else asdict(resolved_profile)},
+            default=str, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return cls(**values, policy=policy, execution_digest=hashlib.sha256(identity.encode("utf-8")).hexdigest())
 
     def native_payload(self) -> dict[str, Any]:
@@ -216,8 +225,18 @@ class ExecPolicyOwner:
             "ignore_allow_prefix_rules": self._ignore_for_model(model)})["policy"]
 
     def command_requirement(self, command: FrozenExecCommand, *, model: ModelExecutionSnapshot,
-        environment_sources: Sequence[ExecPolicySource] = ()) -> ExecPolicyDecision:
-        result = self.runtime.invoke({"operation": "command_requirement", **self._policy_payload(),
+        environment_sources: Sequence[ExecPolicySource] = (),
+        environment_requirements: dict[str, Any] | None = None) -> ExecPolicyDecision:
+        payload = self._policy_payload()
+        if environment_requirements is not None:
+            # Both inputs go through the pinned Source requirements parser.
+            # Requirements permit only prompt/forbidden, so model filtering
+            # of allow prefixes commutes with this restrictive overlay.
+            thread_rules = payload["requirements_rules"]
+            payload["requirements_rules"] = {**deepcopy(environment_requirements), "prefix_rules": [
+                *(thread_rules["prefix_rules"] if thread_rules is not None else ()),
+                *deepcopy(environment_requirements["prefix_rules"])]}
+        result = self.runtime.invoke({"operation": "command_requirement", **payload,
             **command.native_payload(), "environment_sources": [source.payload() for source in environment_sources],
             "ignore_allow_prefix_rules": self._ignore_for_model(model)})
         requirement = result["requirement"]
@@ -244,6 +263,21 @@ class ExecPolicyOwner:
         if decision.proposed_amendment is None:
             raise ValueError("This captured execution request has no proposed execpolicy amendment")
         await to_thread_cancel_safe(self._append_and_update, decision.proposed_amendment)
+
+    def _append_network_and_update(self, runtime, *, host: str, protocol: str, action: str) -> None:
+        with self._update_lock:
+            runtime.append_network_amendment(path=self.default_policy_path, host=host, protocol=protocol, action=action)
+            sources = tuple(source for folder in self.folders for source in collect_policy_sources(folder))
+            candidate = {**self._inspection_payload(), "sources": [source.payload() for source in sources]}
+            inspection = self.runtime.invoke(candidate)
+            with self._state_lock:
+                if sources != self.sources or inspection != self._current_inspection:
+                    self.sources = sources
+                    self._current_inspection = inspection
+                    self.revision += 1
+
+    async def persist_network_amendment(self, runtime, *, host: str, protocol: str, action: str) -> None:
+        await to_thread_cancel_safe(self._append_network_and_update, runtime, host=host, protocol=protocol, action=action)
 
     async def apply_approved_amendment(self, decision: ExecPolicyDecision,
         warn: Callable[[str], Awaitable[None]]) -> bool:

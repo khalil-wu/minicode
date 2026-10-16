@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.skills.loader import SkillLoader, SkillFull, SkillMeta
+from backend.skills.errors import RequiredSkillUnavailableError
 
 logger = logging.getLogger(__name__)
 _KEEP_PROJECT_ROOT = object()
@@ -32,6 +34,38 @@ class SkillManager:
     ) -> None:
         self._loader = loader or SkillLoader()
         self._discovered = False
+        self.executor_catalog = None
+        self._implicit_invocations: set[tuple[str, str, str, str]] = set()
+        self._implicit_invocation_turn_id = None
+
+    def attach_executor_catalog(self, catalog) -> None:
+        self.executor_catalog = catalog
+
+    def clone_host_catalog(self) -> SkillManager:
+        clone = SkillManager(deepcopy(self._loader))
+        clone._discovered = self._discovered
+        clone._implicit_invocations = set(self._implicit_invocations)
+        clone._implicit_invocation_turn_id = self._implicit_invocation_turn_id
+        return clone
+
+    def record_implicit_invocation(self, turn_id, invocation) -> bool:
+        if self._implicit_invocation_turn_id != turn_id:
+            self._implicit_invocations.clear()
+            self._implicit_invocation_turn_id = turn_id
+        key = (invocation.source_kind, invocation.scope or "", invocation.resource,
+            invocation.name if invocation.source_kind == "host" else "")
+        if key in self._implicit_invocations:
+            return False
+        self._implicit_invocations.add(key)
+        return True
+
+    def validate_required_skills(self, requirements) -> None:
+        if self.executor_catalog is not None:
+            self.executor_catalog.validate_required_skills(requirements)
+            return
+        for requirement in requirements:
+            for name in requirement.skill_names:
+                raise RequiredSkillUnavailableError(f"Required skill {json.dumps(name, ensure_ascii=False)} from environment {json.dumps(requirement.environment_id, ensure_ascii=False)} is unavailable")
 
     def discover(self) -> list[SkillMeta]:
         """
@@ -52,6 +86,10 @@ class SkillManager:
 
     def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
+        if self.executor_catalog is not None:
+            snapshot = self.clone_host_catalog()
+            snapshot.attach_executor_catalog(self.executor_catalog)
+            return snapshot
         loader = deepcopy(self._loader)
         snapshot = SkillManager(loader)
         snapshot._discovered = self._discovered

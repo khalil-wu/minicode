@@ -20,6 +20,7 @@ import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { WorkspaceSearchPanel } from "../panels/WorkspaceSearchPanel";
 import type { FileTreeRevealRequest } from "../stores/types";
 import { isDesktop, fsListTree, fsSearchFiles, trustWorkspace } from "../desktop/runtime";
+import { workspaceHasConversation } from "../protocol/workspace-owner";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import {
   type GitStatus,
@@ -170,7 +171,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     try {
       if (isDesktop()) {
         const rootPath = workingDirectory;
-        await trustWorkspace(rootPath);
+        if (!workspaceHasConversation()) await trustWorkspace(rootPath);
         const entries = await fsListTree(rootPath);
         let nextTree = entriesToTree(entries, rootPath, workspaceLabel(rootPath));
         const persistedExpanded = Array.from(normalizeDesktopExpandedPaths(rootPath, readExpandedPaths(rootPath)))

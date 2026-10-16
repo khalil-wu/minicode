@@ -838,6 +838,23 @@ const TOOL_RUNTIME_SPAN_EVENTS = new Set([
   "tool.completed",
 ]);
 
+const isNetworkPolicyAmendment = (value: unknown): boolean => isRecord(value)
+  && Object.keys(value).length === 2 && isNonEmptyString(value.host)
+  && (value.action === "allow" || value.action === "deny");
+
+const isNetworkApprovalRequest = (request: Record<string, unknown>): boolean => {
+  const context = request.network_approval_context;
+  return isRecord(context) && isNonEmptyString(context.host)
+    && ["http", "https", "socks5_tcp", "socks5_udp"].includes(String(context.protocol))
+    && (!("proposed_network_policy_amendments" in request) || (Array.isArray(request.proposed_network_policy_amendments)
+      && request.proposed_network_policy_amendments.every(isNetworkPolicyAmendment)))
+    && Array.isArray(request.available_decisions) && request.available_decisions.length > 0
+    && request.available_decisions.every(decision => decision === "approved" || decision === "approved_for_session" || decision === "abort"
+      || (isRecord(decision) && Object.keys(decision).length === 1 && isRecord(decision.network_policy_amendment)
+        && Object.keys(decision.network_policy_amendment).length === 1
+        && isNetworkPolicyAmendment(decision.network_policy_amendment.network_policy_amendment)));
+};
+
 const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
   const requestId = value.request_id;
   const request = value.request;
@@ -879,6 +896,8 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
       && (request.subtype !== "request_permissions" || (isRecord(request.permissions) && hasBoundedJsonShape(request.permissions)))
       && (request.subtype !== "write_stdin" || (isRecord(request.stdin_action) && hasBoundedJsonShape(request.stdin_action)))
       && (!("network_unisolated" in request) || typeof request.network_unisolated === "boolean")
+      && (!(request.tool_name === "network_access" || "network_approval_context" in request || "proposed_network_policy_amendments" in request)
+        || isNetworkApprovalRequest(request))
       && (!("mcp_approval" in request) || (isRecord(request.mcp_approval)
         && isNonEmptyString(request.mcp_approval.server)
         && isNonEmptyString(request.mcp_approval.tool_name)

@@ -174,6 +174,9 @@ export interface McpServerStatus {
   headersHelper?: string;
   oauth?: { clientId?: string; callbackPort?: number };
   envVars?: Array<string | { name?: string; source?: string }>;
+  environmentId?: string;
+  bearerTokenEnvVar?: string;
+  envHttpHeaders?: Record<string, string>;
   cwd?: string;
   url?: string;
   autoStart?: boolean;
@@ -381,6 +384,7 @@ export type SettingsTab =
   | "plugins"
   | "skills"
   | "connectors"
+  | "connections"
   | "browser"
   | "scheduler"
   | "workspaceGit"
@@ -1768,6 +1772,8 @@ export interface PendingApproval {
   approvalReason?: string | null;
   proposedExecpolicyAmendment?: string[] | null;
   availableDecisions?: import("../protocol/common-types").ControlCanUseToolRequest["available_decisions"];
+  networkApprovalContext?: import("../protocol/common-types").NetworkApprovalContext;
+  proposedNetworkPolicyAmendments?: import("../protocol/common-types").NetworkPolicyAmendment[];
   args: Record<string, unknown>;
   sourceAgent?: string;
   sourceThread?: string;
@@ -2076,6 +2082,7 @@ export interface InspectorSlice {
 // ── Editor Slice ─────────────────────────────────────────────────
 
 export interface EditorTab {
+  workspaceOwner?: import("../protocol/workspace-owner").WorkspaceRequestOwner;
   language?: string;
   pinned?: boolean;
   preview?: boolean;
@@ -2130,7 +2137,7 @@ export interface EditorSlice {
     content: string,
     error?: string | null,
     contentHash?: string,
-    meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes" | "readOnly">,
+    meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes" | "readOnly" | "workspaceOwner">,
   ) => void;
   markTabSaved: (path: string, savedContent: string, contentHash?: string, sizeBytes?: number, workspaceRoot?: string) => void;
   markTabExternalChanged: (path: string, options?: { workspaceRoot?: string; changed?: boolean }) => void;

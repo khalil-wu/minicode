@@ -4,7 +4,18 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::core::GUID;
+
+static REQUIRE_EXISTING_SETUP: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn require_existing_setup() -> bool {
+    REQUIRE_EXISTING_SETUP.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_require_existing_setup() {
+    REQUIRE_EXISTING_SETUP.store(true, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct OwnerIdentity {

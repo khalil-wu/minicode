@@ -15,6 +15,9 @@ from backend.sandbox.policy import AdditionalPermissionProfile
 from backend.permissions.approval_policy import ApprovalPolicy, GranularApprovalConfig
 
 if TYPE_CHECKING:
+    from backend.agent.tool_environments import ToolEnvironmentBindings
+    from backend.agent.environment_selection import TurnEnvironment
+    from backend.permissions.environment_scope import EnvironmentPermissionScope
     from backend.agent.model_execution import ModelExecutionSnapshot
     from backend.llm.base import ToolCallEvent
     from backend.tools.base import ToolResult
@@ -101,6 +104,7 @@ class PermissionContext:
     captured_mcp_permission_profile: ResolvedSandboxPolicy | None = field(default=None, repr=False)
     captured_mcp_approval_store: MCPApprovalStore | None = field(default=None, repr=False)
     captured_exec_policy: Any | None = field(default=None, repr=False)
+    environment_scope: EnvironmentPermissionScope | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         # frozen=True prevents field replacement but does not protect nested
@@ -183,6 +187,9 @@ class ToolExecutionContext:
     authorization_digest: str = ""
     authorization_policy_identity: str = ""
     exec_policy_decision: Any | None = field(default=None, repr=False)
+    final_tool_request: Any | None = field(default=None, repr=False)
+    turn_environment: TurnEnvironment | None = field(default=None, repr=False)
+    environment_bindings: ToolEnvironmentBindings | None = field(default=None, repr=False)
 
     def source_for_call(self, call_id: str) -> ToolCallSource:
         return self.call_sources.get(call_id, DIRECT_TOOL_SOURCE)

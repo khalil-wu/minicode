@@ -302,6 +302,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
                 loadWarning: t.draftRestorePending && error ? error : meta?.loadWarning ?? null,
                 sizeBytes: meta?.sizeBytes,
                 readOnly: Boolean(meta?.readOnly),
+                workspaceOwner: meta?.workspaceOwner ?? t.workspaceOwner,
                 draftRestorePending: false,
                 draftRestored: Boolean(t.draftRestorePending),
               }

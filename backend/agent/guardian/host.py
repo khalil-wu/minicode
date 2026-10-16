@@ -166,7 +166,7 @@ def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscrip
         elif message.role == "developer" and text.startswith(MANUAL_APPROVAL_DEVELOPER_PREFIX):
             append_text("developer", text)
         elif message.role == "tool":
-            body = next((value for value in (message.mcp_output, message.code_mode_output, message.history_notes_output)
+            body = next((value for value in (message.native_tool_output, message.mcp_output, message.code_mode_output, message.history_notes_output)
                 if value is not None), text)
             name = tool_names.get(message.tool_call_id, message.name)
             append_text(f"tool {name} result" if name is not None else "tool result", _output_text(body),

@@ -1,4 +1,5 @@
 import { useI18n, type TranslationKey } from "../i18n";
+import { appendWorkspaceOwner } from "../protocol/workspace-owner";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
@@ -15,7 +16,7 @@ export function ProjectEnvironmentSettings({ workspaceRoot }: { workspaceRoot: s
   const [busy, setBusy] = useState("");
   const operation = useRef<AbortController | null>(null);
   useEffect(() => () => operation.current?.abort(), []);
-  const endpoint = (path = "") => { const url = new URL("/api/workspace/environment" + path, apiBase()); url.searchParams.set("workspace_root", workspaceRoot); return url; };
+  const endpoint = (path = "") => { const url = new URL("/api/workspace/environment" + path, apiBase()); url.searchParams.set("workspace_root", workspaceRoot); appendWorkspaceOwner(url); return url; };
   useEffect(() => {
     if (!workspaceRoot) return;
     const controller = new AbortController();

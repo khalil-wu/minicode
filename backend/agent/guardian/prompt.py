@@ -59,6 +59,18 @@ class GuardianPermissionEvidence:
         resolved = policy.resolve(cwd=cwd)
         return cls(environment_id, tuple(str(path) for path in resolved.unreadable_roots), tuple(sorted(set(resolved.unreadable_globs))))
 
+    @classmethod
+    def from_context(cls, context, *, environment_id: str | None):
+        from backend.permissions.environment_scope import permission_scope_for_context
+
+        scope = permission_scope_for_context(context, environment_id=environment_id)
+        if scope is not None:
+            _writable, denied, globs = scope.instruction_paths()
+            return cls(environment_id, denied, globs)
+        if context.sandbox_policy is None:
+            return cls(environment_id)
+        return cls.from_policy(context.sandbox_policy, cwd=context.workspace_root, environment_id=environment_id)
+
     def render(self) -> tuple[str, ...]:
         scope = f"The active permission profile for environment {json.dumps(self.environment_id, ensure_ascii=False)}" if self.environment_id is not None else "The parent turn's active permission profile"
         entries = [f"- path `{path}`" for path in self.denied_paths] + [f"- glob `{glob}`" for glob in self.denied_globs]

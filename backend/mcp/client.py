@@ -438,6 +438,9 @@ class MCPClient:
         request_timeout: float | None = None,
         tool_timeout: float | None = None,
         workspace_root: Path | None = None,
+        execution_binding=None,
+        bearer_token_env_var: str | None = None,
+        oauth_credential_name: str | None = None,
     ) -> None:
         self.server_name = server_name
         self._command = command
@@ -448,6 +451,9 @@ class MCPClient:
         self._oauth_client_id = str(oauth_client_id or "").strip()
         self._oauth_callback_port = oauth_callback_port
         self._cwd = cwd
+        self._execution_binding = execution_binding
+        self._bearer_token_env_var = bearer_token_env_var
+        self._oauth_credential_name = oauth_credential_name if oauth_credential_name is not None else server_name
         # Roots are owned by the client instance.  A client must never resolve
         # the process-global "active" workspace because reconnects and
         # concurrent sessions can otherwise expose another conversation's tree.
@@ -472,7 +478,7 @@ class MCPClient:
         )
         self._token_store = token_store
         self._tokens = (
-            token_store.for_server(self._url or "", self._oauth_client_id).get(server_name)
+            token_store.for_server(self._url or "", self._oauth_client_id).get(self._oauth_credential_name)
             if token_store is not None else None
         )
         self._interactive_oauth = interactive_oauth
@@ -653,6 +659,21 @@ class MCPClient:
         return True
 
     async def _sdk_transport_context(self) -> Any:
+        binding = self._execution_binding
+        if binding is not None and binding.environment_id != "local":
+            if self._transport == MCPTransport.STDIO:
+                from backend.mcp.executor_stdio import executor_stdio_client
+
+                return executor_stdio_client(binding.lease, [self._command, *self._args], binding.cwd_uri,
+                    env=self._env, env_policy=binding.remote_env_policy)
+            if self._transport != MCPTransport.HTTP:
+                raise ConnectionError("executor MCP servers require stdio or Streamable HTTP transport")
+            from backend.mcp.executor_http import executor_mcp_http_client_factory
+
+            return streamablehttp_client(self._url, headers=await self._resolved_http_headers(),
+                timeout=self._request_timeout, sse_read_timeout=max(self._request_timeout, self._tool_timeout),
+                auth=await self._http_oauth_auth(), httpx_client_factory=executor_mcp_http_client_factory(
+                    binding.lease, bearer_token_env_var=binding.bearer_token_env_var))
         if self._transport == MCPTransport.STDIO:
             from backend.config import PROJECT_ROOT
 
@@ -722,7 +743,7 @@ class MCPClient:
 
         provider, callback = await create_sdk_oauth_provider(
             self._url,
-            self.server_name,
+            self._oauth_credential_name,
             self._token_store,
             interactive=self._interactive_oauth,
             client_id=self._oauth_client_id,
@@ -741,6 +762,12 @@ class MCPClient:
 
     async def _resolved_http_headers(self) -> dict[str, str]:
         headers = self._http_headers()
+        executor_bearer = self._execution_binding is not None and self._execution_binding.bearer_token_env_var is not None
+        if self._bearer_token_env_var is not None and not executor_bearer:
+            token = os.environ.get(self._bearer_token_env_var)
+            if not token:
+                raise ValueError(f"Environment variable {self._bearer_token_env_var} for MCP server '{self.server_name}' is not set or empty")
+            headers["Authorization"] = f"Bearer {token}"
         if not self._headers_helper:
             return headers
         name_key, url_key = _HEADERS_HELPER_ENV
@@ -949,6 +976,9 @@ class MCPClient:
         }
         return tools
 
+    def pending_requests(self) -> tuple[asyncio.Task, ...]:
+        return tuple(task for task in self._active_request_tasks if not task.done())
+
     async def call_tool(
         self,
         tool_name: str,
@@ -1055,6 +1085,28 @@ class MCPClient:
         items, next_cursor, _ = await self._page("resources/list", "resources", cursor)
         return self._parse_resources(items), next_cursor
 
+    async def list_resources_result(self, cursor: str | None = None) -> dict[str, Any]:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
+            return {"resources": []}
+        result = await self._request("resources/list", {"cursor": cursor} if cursor is not None else None)
+        self._parse_resources(result["resources"])
+        return result
+
+    async def list_all_resource_items(self, *, templates: bool = False) -> list[dict[str, Any]]:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
+            return []
+        result = await self._paged("resources/templates/list" if templates else "resources/list",
+            "resourceTemplates" if templates else "resources")
+        if templates:
+            self._parse_resource_templates(result)
+        else:
+            self._parse_resources(result)
+        return result
+
     def _parse_resources(self, items: list[dict[str, Any]]) -> list[MCPResourceDef]:
         resources: list[MCPResourceDef] = []
         for item in items:
@@ -1092,6 +1144,15 @@ class MCPClient:
         items, next_cursor, _ = await self._page("resources/templates/list", "resourceTemplates", cursor)
         return self._parse_resource_templates(items), next_cursor
 
+    async def list_resource_templates_result(self, cursor: str | None = None) -> dict[str, Any]:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
+            return {"resourceTemplates": []}
+        result = await self._request("resources/templates/list", {"cursor": cursor} if cursor is not None else None)
+        self._parse_resource_templates(result["resourceTemplates"])
+        return result
+
     def _parse_resource_templates(self, items: list[dict[str, Any]]) -> list[MCPResourceTemplateDef]:
         templates: list[MCPResourceTemplateDef] = []
         for item in items:
@@ -1113,10 +1174,13 @@ class MCPClient:
         return templates
 
     async def read_resource(self, uri: str) -> list[dict[str, Any]]:
+        result = await self.read_resource_result(uri)
+        return [content for content in result.get("contents", []) if isinstance(content, dict)]
+
+    async def read_resource_result(self, uri: str) -> dict[str, Any]:
         if not self._connected:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
-        result = await self._request("resources/read", {"uri": uri})
-        return [content for content in result.get("contents", []) if isinstance(content, dict)]
+        return await self._request("resources/read", {"uri": uri})
 
     async def subscribe_resource(self, uri: str) -> bool:
         if not self._connected or not self._server_capabilities.resources_subscribe:
@@ -1289,6 +1353,11 @@ class MCPClient:
         return dict(owners[0]) if len(owners) == 1 else None
 
     def _client_roots(self) -> list[dict[str, str]]:
+        if self._execution_binding is not None:
+            from urllib.parse import unquote, urlsplit
+
+            return [{"uri": uri, "name": unquote(urlsplit(uri).path).rstrip("/").rsplit("/", 1)[-1]}
+                for uri in self._execution_binding.workspace_root_uris]
         # Roots belong to this client's explicit workspace owner. With no owner,
         # do not consult process-global workspace state.
         candidates: list[Path] = []

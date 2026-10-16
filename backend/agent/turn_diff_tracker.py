@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from backend.diff.unified import iter_unified_diff, split_diff_lines
+from backend.workspace.executor_paths import ExecutorPath
 
 
 ZERO_OID = "0000000000000000000000000000000000000000"
@@ -48,10 +49,16 @@ class _TrackedContent:
 
 
 @dataclass(frozen=True, slots=True)
+class _TrackedPath:
+    environment_id: str
+    path: str | ExecutorPath
+
+
+@dataclass(frozen=True, slots=True)
 class _DiffCacheKey:
-    left_path: str
+    left_path: _TrackedPath
     left_revision: int | None
-    right_path: str
+    right_path: _TrackedPath
     right_revision: int | None
 
 
@@ -64,17 +71,33 @@ class TurnDiffSnapshot:
 class TurnDiffTracker:
     """Track the net exact text diff for one agent turn."""
 
-    def __init__(self) -> None:
+    def __init__(self, display_roots: dict[str, str] | None = None) -> None:
         self.lock = asyncio.Lock()
         self._valid = True
-        self._baseline_by_path: dict[str, _TrackedContent] = {}
-        self._current_by_path: dict[str, _TrackedContent] = {}
-        self._origin_by_current_path: dict[str, str] = {}
+        self._baseline_by_path: dict[_TrackedPath, _TrackedContent] = {}
+        self._current_by_path: dict[_TrackedPath, _TrackedContent] = {}
+        self._origin_by_current_path: dict[_TrackedPath, _TrackedPath] = {}
         self._next_content_revision = 0
         self._revision = 0
         self._rendered_diffs: dict[_DiffCacheKey, str | None] = {}
         self._unified_diff: str | None = None
         self._rendered_diff_count = 0
+        self._display_roots = {key: ExecutorPath.parse(uri) for key, uri in (display_roots or {}).items()}
+
+    def set_environment_display_roots(self, display_roots: dict[str, str]) -> None:
+        roots = {key: ExecutorPath.parse(uri) for key, uri in display_roots.items()}
+        if roots != self._display_roots:
+            self._display_roots = roots
+            self._rendered_diffs.clear()
+
+    def _display(self, path: _TrackedPath) -> str:
+        value = path.path
+        if isinstance(value, ExecutorPath):
+            root = self._display_roots.get(path.environment_id)
+            display = value.relative_to(root).as_posix() if root is not None and value.is_relative_to(root) else value.native
+        else:
+            display = value
+        return f"{path.environment_id}/{display}" if len(self._display_roots) > 1 and path.environment_id else display
 
     @property
     def revision(self) -> int:
@@ -106,6 +129,9 @@ class TurnDiffTracker:
         old_content: str | None,
         new_content: str | None,
         overwritten_new_content: str | None = None,
+        environment_id: str = "",
+        old_path_uri: str | None = None,
+        new_path_uri: str | None = None,
     ) -> None:
         """Apply one exact committed mutation.
 
@@ -115,11 +141,13 @@ class TurnDiffTracker:
 
         if not self._valid:
             return
-        source = _normalized_path(old_path or new_path)
-        destination = _normalized_path(new_path or old_path)
-        if not source or not destination:
+        source_value = ExecutorPath.parse(old_path_uri or new_path_uri) if old_path_uri or new_path_uri else _normalized_path(old_path or new_path)
+        destination_value = ExecutorPath.parse(new_path_uri or old_path_uri) if new_path_uri or old_path_uri else _normalized_path(new_path or old_path)
+        if not source_value or not destination_value:
             self.invalidate()
             return
+        source = _TrackedPath(environment_id, source_value)
+        destination = _TrackedPath(environment_id, destination_value)
 
         if source != destination:
             self._apply_update(
@@ -155,7 +183,7 @@ class TurnDiffTracker:
 
     def _apply_add(
         self,
-        path: str,
+        path: _TrackedPath,
         content: str,
         overwritten_content: str | None,
     ) -> None:
@@ -168,15 +196,15 @@ class TurnDiffTracker:
             self._baseline_by_path[path] = self._tracked_content(overwritten_content)
         self._current_by_path[path] = self._tracked_content(content)
 
-    def _apply_delete(self, path: str, content: str) -> None:
+    def _apply_delete(self, path: _TrackedPath, content: str) -> None:
         if self._current_by_path.pop(path, None) is None and path not in self._baseline_by_path:
             self._baseline_by_path[path] = self._tracked_content(content)
         self._origin_by_current_path.pop(path, None)
 
     def _apply_update(
         self,
-        source_path: str,
-        move_path: str | None,
+        source_path: _TrackedPath,
+        move_path: _TrackedPath | None,
         old_content: str | None,
         overwritten_move_content: str | None,
         new_content: str | None,
@@ -206,8 +234,8 @@ class TurnDiffTracker:
 
         self._current_by_path[source_path] = self._tracked_content(new_content)
 
-    def _rename_pairs(self) -> dict[str, str]:
-        pairs: dict[str, str] = {}
+    def _rename_pairs(self) -> dict[_TrackedPath, _TrackedPath]:
+        pairs: dict[_TrackedPath, _TrackedPath] = {}
         for destination, origin in self._origin_by_current_path.items():
             if (
                 destination == origin
@@ -226,14 +254,14 @@ class TurnDiffTracker:
             return
         rename_pairs = self._rename_pairs()
         paired_destinations = set(rename_pairs.values())
-        handled: set[str] = set()
+        handled: set[_TrackedPath] = set()
         previous_diffs = self._rendered_diffs
         rendered_diffs: dict[_DiffCacheKey, str | None] = {}
         aggregate: list[str] = []
 
         paths = sorted(
             set(self._baseline_by_path) | set(self._current_by_path),
-            key=_normalized_path,
+            key=lambda path: (path.environment_id, str(path.path)),
         )
         for path in paths:
             if path in handled:
@@ -256,9 +284,9 @@ class TurnDiffTracker:
                 rendered = previous_diffs[key]
             else:
                 rendered = self._render_diff(
-                    left_path=path,
+                    left_path=self._display(path),
                     left_content=left_content.content if left_content else None,
-                    right_path=destination,
+                    right_path=self._display(destination),
                     right_content=right_content.content if right_content else None,
                 )
             rendered_diffs[key] = rendered

@@ -94,8 +94,9 @@ def _is_websocket_authorized(websocket: WebSocket) -> bool:
     return bool(supplied) and _constant_time_equal(supplied, expected)
 
 
-def _workspace_raw_token_signature(path: str, workspace_root: str, expires_at: int, secret: str) -> str:
-    payload = f"workspace_raw:v2:{workspace_root}:{path}:{expires_at}".encode("utf-8")
+def _workspace_raw_token_signature(path: str, workspace_root: str, expires_at: int, secret: str, *, session_id: str = "", conversation_id: str = "", environment_id: str = "") -> str:
+    payload = (f"workspace_raw:v3:{session_id}:{conversation_id}:{environment_id}:{workspace_root}:{path}:{expires_at}"
+        if session_id or conversation_id or environment_id else f"workspace_raw:v2:{workspace_root}:{path}:{expires_at}").encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
@@ -123,7 +124,9 @@ def _is_workspace_raw_token_authorized(request: Request) -> bool:
         return False
     if expires_at < int(time.time()):
         return False
-    expected_signature = _workspace_raw_token_signature(raw_path, workspace_root, expires_at, secret)
+    expected_signature = _workspace_raw_token_signature(raw_path, workspace_root, expires_at, secret,
+        session_id=request.query_params.get("session_id", ""), conversation_id=request.query_params.get("conversation_id", ""),
+        environment_id=request.query_params.get("environment_id", ""))
     return _constant_time_equal(supplied_signature, expected_signature)
 
 
@@ -134,8 +137,10 @@ def _workspace_browser_raw_token_signature(
     path: str,
     expires_at: int,
     secret: str,
+    environment_id: str = "",
 ) -> str:
-    payload = f"browser_raw:v1:{session_id}:{conversation_id}:{execution_cwd}:{path}:{expires_at}".encode("utf-8")
+    payload = (f"browser_raw:v2:{session_id}:{conversation_id}:{environment_id}:{execution_cwd}:{path}:{expires_at}"
+        if environment_id else f"browser_raw:v1:{session_id}:{conversation_id}:{execution_cwd}:{path}:{expires_at}").encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
@@ -161,7 +166,8 @@ def _is_workspace_browser_raw_token_authorized(request: Request) -> bool:
         return False
     if expires_at < int(time.time()):
         return False
-    expected = _workspace_browser_raw_token_signature(session_id, conversation_id, execution_cwd, path, expires_at, secret)
+    expected = _workspace_browser_raw_token_signature(session_id, conversation_id, execution_cwd, path, expires_at, secret,
+        environment_id=request.query_params.get("environment_id", ""))
     return _constant_time_equal(supplied_signature, expected)
 
 

@@ -244,7 +244,7 @@ def tool_result_journal_payload(
             payload[field_name] = deepcopy(event_data[field_name])
     # These are model-history bodies added by the private journal recorder;
     # public tool events carry only their display summary.
-    for field_name in ("model_content", "mcp_output", "code_mode_output", "tool_search_output", "history_notes_output"):
+    for field_name in ("model_content", "mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output"):
         if field_name in event_data:
             payload[field_name] = deepcopy(event_data[field_name])
     return payload
@@ -1040,7 +1040,7 @@ class ExecutionJournal:
                         **({"private_model_only": True} if payload.get("private_model_only") is True else {}),
                         "name": str(payload.get("tool_name") or payload.get("name") or "tool"),
                         "tool_call_id": call_id,
-                        **{field: deepcopy(payload[field]) for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output") if field in payload},
+                        **{field: deepcopy(payload[field]) for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output") if field in payload},
                     }
                 )
                 pending_tool_call_ids.discard(call_id)

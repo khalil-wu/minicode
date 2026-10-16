@@ -344,6 +344,13 @@ def stdin_wait_ms(value: Any, *, chars: str, context: Any) -> int:
 
 
 def current_terminal_policy(context: Any) -> SandboxPolicy:
+    if context.turn_environment is not None:
+        from backend.permissions.environment_command import EnvironmentCommandPolicy
+        from backend.permissions.grants import current_granted_permissions
+
+        scope = context.permission.environment_scope.with_additional_permissions(current_granted_permissions(context))
+        return EnvironmentCommandPolicy(scope, context.turn_environment,
+            context.turn_environment.config.shell_environment_policy, {}, None, context.permission.allow_unsandboxed_commands)
     from backend.sandbox.policy import sandbox_policy_for_permission_context
 
     run_context = context.run_context
@@ -415,9 +422,10 @@ def command_shell_argv(
     return [program, "-lc" if use_login else "-c", command]
 
 
-def _model_shell_description() -> str:
-    if sys.platform == "win32":
-        host_shell = "PowerShell 7" if shutil.which("pwsh.exe") else "Windows PowerShell 5.1"
+def _model_shell_description(*, windows: bool | None = None) -> str:
+    if (windows if windows is not None else sys.platform == "win32"):
+        host_shell = ("PowerShell" if windows is not None else
+            "PowerShell 7" if shutil.which("pwsh.exe") else "Windows PowerShell 5.1")
         return (
             f"Execute a shell command. The default Windows shell is {host_shell}; use shell to select a shell type. "
             "The sandbox applies to the selected shell. Use workspace-relative paths and cross-platform tools. "

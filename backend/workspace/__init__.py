@@ -1,4 +1,9 @@
-from .api import create_workspace_router
+def create_workspace_router():
+    # Path/permission modules can import this package before the HTTP
+    # consumers exist. Build the public router only at application assembly.
+    from .api import create_workspace_router as build_router
+    return build_router()
+
 from .context import WorkspaceContext, ProjectMetadata
 from .file_state_cache import FileStateCache, get_global_file_cache
 from .fuzzy_search import FuzzySearchEngine, get_global_fuzzy_search

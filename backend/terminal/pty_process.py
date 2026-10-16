@@ -69,16 +69,21 @@ def _attach_controlling_terminal():
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
-async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: dict[str, str], pass_fds: tuple[int, ...] = ()):
+async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: dict[str, str],
+        pass_fds: tuple[int, ...] = (), on_exit=None, creationflags: int | None = None, on_created=None):
     if sys.platform == "win32":
         from backend.sandbox.windows_native import pty_command
 
         argv = command if isinstance(command, list) else [env.get("COMSPEC", "cmd.exe"), "/c", command]
         # Source codex-utils-pty owns ConPTY and its Job Object. The Python owner
         # still owns the wrapper process, captured output and exact tree cancel.
-        return await spawn_exec(*pty_command(argv, cwd=cwd), cwd=str(cwd) if cwd else None,
-                                env=env, stdin=asyncio.subprocess.PIPE,
-                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        kwargs = {"creationflags": creationflags} if creationflags is not None else {}
+        process = await spawn_exec(*pty_command(argv, cwd=cwd), cwd=str(cwd) if cwd else None,
+                                env=env, on_exit=on_exit, stdin=asyncio.subprocess.PIPE,
+                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **kwargs)
+        if on_created is not None:
+            on_created(process)
+        return process
 
     import fcntl
     import struct
@@ -91,7 +96,7 @@ async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: di
     try:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         kwargs = {"cwd": str(cwd) if cwd else None, "env": env, "stdin": slave, "stdout": slave,
-                  "stderr": slave, "preexec_fn": _attach_controlling_terminal}
+                  "stderr": slave, "preexec_fn": _attach_controlling_terminal, "on_exit": on_exit}
         if pass_fds:
             kwargs["pass_fds"] = pass_fds
         loop = asyncio.get_running_loop()

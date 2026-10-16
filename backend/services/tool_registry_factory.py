@@ -69,6 +69,7 @@ def build_tool_registry(
     config: AppConfig | None = None,
     llm_provider: Any | None = None,
     mcp_manager: Any = MCP_MANAGER_UNSET,
+    skill_manager: Any | None = None,
 ) -> ToolRegistry:
     """
     Build the default tool registry (DESIGN.md section 8.2).
@@ -267,6 +268,10 @@ def build_tool_registry(
     registry.register(ListMcpResourceNotificationsTool(effective_mcp_manager))
     registry.register(ListMcpPromptsTool(effective_mcp_manager))
     registry.register(GetMcpPromptTool(effective_mcp_manager))
+    if skill_manager is not None:
+        from backend.tools.skill_tools import bind_skill_tools
+
+        bind_skill_tools(registry, skill_manager)
 
     from backend.tools.tool_search import ToolSearchTool
     tool_search = ToolSearchTool(registry)
@@ -285,6 +290,8 @@ def register_mcp_tools(
     registry: ToolRegistry,
     mcp_manager: Any,
     artifact_store: ArtifactStore,
+    *,
+    prepare_call=None,
 ) -> None:
     """Register connected MCP servers' tools as MCPToolProxy instances."""
     from backend.mcp.registry import MCPToolRegistry
@@ -294,9 +301,10 @@ def register_mcp_tools(
     if not callable(get_all_tools) or not callable(get_client):
         return
 
-    mcp_registry = MCPToolRegistry(registry, artifact_store=artifact_store, mcp_manager=mcp_manager)
+    mcp_registry = MCPToolRegistry(registry, artifact_store=artifact_store, mcp_manager=mcp_manager,
+        prepare_call=prepare_call)
     for server_name, tools in (get_all_tools() or {}).items():
         client = get_client(server_name)
-        if client is None or not tools:
+        if not tools:
             continue
         mcp_registry.register_server_tools(server_name, tools, client)

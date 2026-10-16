@@ -114,6 +114,16 @@ def _parallel_tool_batch_timeout() -> float | None:
     return timeout if timeout > 0 else None
 
 
+def _context_before_dispatch(tc, context, tool_registry, context_builder):
+    from backend.agent.tool_environments import execution_context_for_call
+    from backend.skills.implicit import admit_implicit_skill_invocation
+
+    context = execution_context_for_call(tc, context, tool_registry.get_tool(tc.name))
+    admit_implicit_skill_invocation(tool_name=tc.name, args=tc.arguments,
+        tool_context=context, context_builder=context_builder)
+    return context
+
+
 def tool_output_delta_events(
     tc: ToolCallEvent,
     result: ToolResult,
@@ -231,6 +241,8 @@ def _store_final_tool_result(
     append_context_result: Callable[..., None] | None = None,
 ) -> tuple[list[AgentEvent], list[dict[str, str]]]:
     """Commit the completed observation before any transport await or yield."""
+    if tool_ctx.environment_bindings is not None:
+        tool_ctx = tool_ctx.environment_bindings.admitted_context(tc, tool_ctx)
     notices: list[AgentEvent] = []
     request_digest = _final_tool_request_digest(tc) or canonical_tool_request_digest(
         tc.name,
@@ -264,7 +276,7 @@ def _store_final_tool_result(
                     ))
     if not result.is_error or "committed_diff" in result.runtime_metadata:
         _track_created_file_edits(tc, diff, tool_ctx)
-    removed_records = _reconcile_removed_created_file_edits(tool_ctx)
+    removed_records = _reconcile_removed_created_file_edits(tool_ctx, result.removed_file_paths)
     if removed_records:
         superseded_ids = list(
             dict.fromkeys(
@@ -442,26 +454,40 @@ def _track_created_file_edits(
             "new",
         }:
             continue
-        raw_path = str(item.get("path") or "").strip()
+        raw_path = str(item.get("path_uri") or item.get("path") or "").strip()
         if not raw_path:
             continue
         resolved, display_path = _display_path_for_tool_arg(raw_path, tool_ctx)
-        key = os.path.normcase(str(resolved))
+        key = ((str(id(tool_ctx.turn_environment.environment)), resolved.uri)
+            if tool_ctx.turn_environment is not None else os.path.normcase(str(resolved)))
         tracker[key] = {
             "tool_call_id": tc.id,
             "resolved_path": str(resolved),
             "display_path": display_path,
+            "environment_id": tool_ctx.environment_id,
         }
 
 
 def _reconcile_removed_created_file_edits(
     tool_ctx: ToolExecutionContext,
+    removed_paths=(),
 ) -> list[dict[str, str]]:
     tracker = tool_ctx.metadata.get(_CREATED_FILE_EDIT_TRACKER_KEY)
     if not isinstance(tracker, dict) or not tracker:
         return []
+    if tool_ctx.turn_environment is not None:
+        scope = tool_ctx.permission.environment_scope
+        paths = {scope.resolve_path(path).uri for path in removed_paths}
+        removed = []
+        for key, record in tuple(tracker.items()):
+            if record.get("environment_id") == tool_ctx.environment_id and record["resolved_path"] in paths:
+                removed.append(record)
+                tracker.pop(key)
+        return removed
     removed: list[dict[str, str]] = []
     for key, raw_record in list(tracker.items()):
+        if isinstance(key, tuple):
+            continue  # Executor records are reconciled only from their actual URI results.
         if not isinstance(raw_record, dict):
             tracker.pop(key, None)
             continue
@@ -584,6 +610,32 @@ async def execute_tool_batch(
     prepared_tool_calls: list[ToolCallEvent] | None = None,
     execution_limit: int | None = None,
     execution_limit_reason: str = "",
+) -> AsyncIterator[AgentEvent]:
+    from backend.agent.tool_environments import ToolEnvironmentBindings
+
+    snapshot = tool_ctx.run_context.turn_environments if tool_ctx.run_context is not None else None
+    bindings = ToolEnvironmentBindings(snapshot)
+    bound_context = replace(tool_ctx, environment_bindings=bindings)
+    try:
+        async with aclosing(_execute_tool_batch(tool_calls, ctx=ctx, state=state,
+                tool_registry=tool_registry, permission_checker=permission_checker,
+                approval_handler=approval_handler, skill_manager=skill_manager,
+                permission_context=permission_context, tool_ctx=bound_context,
+                prepared_tool_calls=prepared_tool_calls, execution_limit=execution_limit,
+                execution_limit_reason=execution_limit_reason)) as stream:
+            async for event in stream:
+                yield event
+    finally:
+        await bindings.close_after_tools(bound_context)
+
+
+async def _execute_tool_batch(
+    tool_calls: list[ToolCallEvent], *, ctx: ContextBuilder, state: AgentState,
+    tool_registry: ToolRegistry, permission_checker: PermissionChecker,
+    approval_handler: Callable | None, skill_manager: Any | None,
+    permission_context: PermissionContext | None, tool_ctx: ToolExecutionContext,
+    prepared_tool_calls: list[ToolCallEvent] | None = None,
+    execution_limit: int | None = None, execution_limit_reason: str = "",
 ) -> AsyncIterator[AgentEvent]:
     tool_ctx.tool_registry = tool_registry
     auto_queue: list[ToolCallEvent] = []
@@ -981,7 +1033,7 @@ async def _flush_queue(
     for is_concurrent, batch in batch_tool_calls(queue, tool_registry):
         if is_concurrent and len(batch) > 1:
             diffs_by_id = {
-                tc.id: _detached_tool_diff(
+                tc.id: await _detached_tool_diff(
                     tc,
                     workspace_root=tool_ctx.workspace_root,
                     tool_ctx=tool_ctx,
@@ -992,10 +1044,11 @@ async def _flush_queue(
 
             async def _run_parallel_tool(tc: ToolCallEvent) -> ToolResult:
                 try:
+                    call_context = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
                     result = await run_tool_with_timeout(
                         tc,
                         tool_registry,
-                        tool_ctx,
+                        call_context,
                         iteration_id=iteration_id,
                     )
                 except Exception as exc:
@@ -1267,16 +1320,17 @@ async def _flush_queue(
                     summary=f"Running {tc.name}",
                 )
                 diff = (
-                    _detached_tool_diff(
+                    await _detached_tool_diff(
                         tc, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx
                     )
                     if _tool_supports_diff(tc.name, tool_registry)
                     else None
                 )
+                call_context = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
                 result = await run_tool_with_timeout(
                     tc,
                     tool_registry,
-                    tool_ctx,
+                    call_context,
                     iteration_id=iteration_id,
                 )
                 _invalidate_workspace_views_after_mutation(
@@ -1413,6 +1467,9 @@ async def execute_serial(
     skill_manager: Any | None,
     iteration_id: str = "",
 ) -> AsyncIterator[AgentEvent]:
+    from backend.agent.tool_environments import execution_context_for_call
+
+    tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
     diff: dict[str, Any] | None = None
     turn_id = _tool_turn_id(tool_ctx)
     started_epoch = _tool_start_times(state).get(tc.id, time.time())
@@ -1510,7 +1567,7 @@ async def execute_serial(
 
     if perm in (PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW):
         diff = (
-            _detached_tool_diff(
+            await _detached_tool_diff(
                 tc, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx
             )
             if needs_diff_review
@@ -1651,7 +1708,7 @@ async def execute_serial(
                         or declared_permission == PermissionLevel.DIFF_REVIEW
                     )
                     diff = (
-                        _detached_tool_diff(
+                        await _detached_tool_diff(
                             tc,
                             workspace_root=tool_ctx.workspace_root,
                             tool_ctx=tool_ctx,
@@ -1792,11 +1849,15 @@ async def execute_serial(
             yield final_tool_call_event()
             tool_call_emitted = True
         if not permission_allowed_by_hook:
+            tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
             approval_request = _bound_final_tool_request(tc)
             if approval_request is None:
                 captured_tool = tool_registry.get_tool(tc.name)
                 approval_request = FinalExecutableToolRequest.freeze(tc,
-                    policy_identity=captured_tool.policy_identity if captured_tool is not None else tc.name)
+                    policy_identity=captured_tool.policy_identity if captured_tool is not None else tc.name,
+                    environment_identity=(tool_ctx.permission.environment_scope.identity()
+                        if captured_tool is not None and captured_tool.requires_execution_environment
+                        and tool_ctx.permission.environment_scope is not None else None))
                 _bind_final_tool_request(tc, approval_request)
             approval_event = AgentEvent.approval_request(
                 tool_call_id=tc.id,
@@ -1819,6 +1880,8 @@ async def execute_serial(
                 network_unisolated=permission_decision.matched_rule == "network_not_isolated",
             )
             approval_event.data["policy_identity"] = approval_request.policy_identity
+            if approval_request.environment_identity is not None:
+                approval_event.data["environment_id"] = tool_ctx.environment_id
             if approval_request.exec_policy is not None:
                 native = approval_request.exec_policy
                 approval_event.data["command"] = list(native.command.policy_argv)
@@ -2125,7 +2188,7 @@ async def execute_serial(
                     perm = permission_decision.permission_level
                     execution_args = deepcopy(dict(tc.arguments))
                     diff = (
-                        _detached_tool_diff(
+                        await _detached_tool_diff(
                             tc,
                             workspace_root=tool_ctx.workspace_root,
                             tool_ctx=tool_ctx,
@@ -2223,7 +2286,7 @@ async def execute_serial(
         tool_call_emitted = True
 
     if diff is None and _tool_supports_diff(tc.name, tool_registry):
-        diff = _detached_tool_diff(
+        diff = await _detached_tool_diff(
             tc, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx
         )
 
@@ -2266,6 +2329,7 @@ async def execute_serial(
     if routed is not None:
         result = routed.result
     else:
+        tool_ctx = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
         result = await run_tool_with_timeout(
             tc, tool_registry, tool_ctx, iteration_id=iteration_id
         )

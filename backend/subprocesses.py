@@ -119,7 +119,10 @@ async def _spawn_with_exit_callback(
 async def spawn_exec(
     *args: str, on_exit: Callable[[], None] | None = None, **kwargs: Any,
 ) -> asyncio.subprocess.Process:
-    kwargs.update(process_group_kwargs())
+    group_options = process_group_kwargs()
+    if "creationflags" in kwargs and "creationflags" in group_options:
+        group_options["creationflags"] |= kwargs["creationflags"]
+    kwargs.update(group_options)
     if on_exit is not None:
         return await _spawn_with_exit_callback(*args, shell=False, on_exit=on_exit, **kwargs)
     return await asyncio.create_subprocess_exec(*args, **kwargs)
@@ -128,7 +131,10 @@ async def spawn_exec(
 async def spawn_shell(
     command: str, *, on_exit: Callable[[], None] | None = None, **kwargs: Any,
 ) -> asyncio.subprocess.Process:
-    kwargs.update(process_group_kwargs())
+    group_options = process_group_kwargs()
+    if "creationflags" in kwargs and "creationflags" in group_options:
+        group_options["creationflags"] |= kwargs["creationflags"]
+    kwargs.update(group_options)
     if on_exit is not None:
         return await _spawn_with_exit_callback(command, shell=True, on_exit=on_exit, **kwargs)
     return await asyncio.create_subprocess_shell(command, **kwargs)

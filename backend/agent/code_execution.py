@@ -196,7 +196,7 @@ class CodeExecutionRuntime:
                     if event.type == "tool_result":
                         operation = cell.pending_tools.pop(call_id)
                         result = results.pop(call_id)
-                        value = {item.name: getattr(result, item.name) for item in fields(result) if item.name not in {"runtime_metadata", "mcp_result", "code_mode_output"}}
+                        value = {item.name: getattr(result, item.name) for item in fields(result) if item.name not in {"runtime_metadata", "mcp_result", "code_mode_output", "native_tool_output"}}
                         if result.images:
                             value["images"] = []
                             for image in result.images:

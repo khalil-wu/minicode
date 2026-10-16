@@ -1019,9 +1019,6 @@ class ExtensionToolAdapter(BaseTool):
     def model_description(self) -> str:
         return self.description
 
-    def model_schema(self) -> Any:
-        return None
-
     def validate_input(self, args: dict[str, Any] | None = None) -> str:
         return ""
 

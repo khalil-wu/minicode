@@ -22,11 +22,32 @@ async function setupWindowsSandbox({ scriptPath, apiBaseUrl, runtimeToken, shell
       if (!response.ok) return { ok: false, error: `无法读取 Windows 执行环境配置（HTTP ${response.status}），请检查后端连接。` };
       status = await response.json();
     } catch (error) { return { ok: false, error: `无法读取 Windows 执行环境配置：${error.message}` }; }
-    if (!status.sandbox_executable) return { ok: false, error: "后端配置的 Windows 隔离组件尚未安装，无法开始初始化。" };
+    const network = status.network_provisioning;
+    const authority = network?.required === true ? network : status;
+    if (typeof authority.sandbox_executable !== "string" || !authority.sandbox_executable) {
+      return { ok: false, error: "后端配置的 Windows 隔离组件尚未安装，无法开始初始化。" };
+    }
+    if (typeof authority.sandbox_home !== "string" || !authority.sandbox_home) {
+      return { ok: false, error: "后端尚未提供 Windows 隔离环境目录，无法开始初始化。" };
+    }
+    let settingsBase64;
+    if (network?.required === true) {
+      const settings = network.settings;
+      if (!settings || Object.keys(settings).sort().join(",") !== "allow_local_binding,proxy_ports"
+        || !Array.isArray(settings.proxy_ports)
+        || settings.proxy_ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)
+        || typeof settings.allow_local_binding !== "boolean") {
+        return { ok: false, error: "后端提供的 Windows 网络隔离设置无效，无法开始初始化。" };
+      }
+      settingsBase64 = Buffer.from(JSON.stringify({ proxy_ports: settings.proxy_ports,
+        allow_local_binding: settings.allow_local_binding }), "utf8").toString("base64");
+    }
     const quotedPath = (value) => `"${value.replace(/(\\+)$/, "$1$1")}"`;
-    const argumentsList = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", quotedPath(scriptPath),
-      "-ShellProcessId", String(shellProcessId), "-SandboxHome", quotedPath(status.sandbox_home),
-      "-RuntimePath", quotedPath(status.sandbox_executable)].map(powershellLiteral).join(", ");
+    const scriptArguments = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", quotedPath(scriptPath),
+      "-ShellProcessId", String(shellProcessId), "-SandboxHome", quotedPath(authority.sandbox_home),
+      "-RuntimePath", quotedPath(authority.sandbox_executable)];
+    if (settingsBase64 !== undefined) scriptArguments.push("-ProvisioningSettingsBase64", settingsBase64);
+    const argumentsList = scriptArguments.map(powershellLiteral).join(", ");
     const command = `$ErrorActionPreference = 'Stop'
 $arguments = @(${argumentsList})
 try {

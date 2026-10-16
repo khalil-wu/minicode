@@ -420,7 +420,7 @@ def test_workspace_api_requires_an_explicit_workspace_root(monkeypatch, tmp_path
         response = client.get("/api/workspace/tree", params={"path": "."})
 
     assert response.status_code == 422
-    assert response.json()["detail"][0]["loc"][-1] == "workspace_root"
+    assert response.json()["detail"] == "workspace_root is required"
 
 
 def test_workspace_root_persists_across_state_reload(monkeypatch, tmp_path) -> None:

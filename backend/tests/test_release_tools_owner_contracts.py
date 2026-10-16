@@ -52,12 +52,14 @@ class _DelayedWrite(BaseTool):
 
     def __init__(self, marker):
         self.marker = marker
+        self.entered = asyncio.Event()
         self.cancelled = asyncio.Event()
 
     def get_schema(self):
         return ToolSchema(self.name, "Delayed mutation", {"type": "object"})
 
     async def execute(self, args, context=None):
+        self.entered.set()
         try:
             await asyncio.sleep(.15)
             self.marker.write_text("late write", encoding="utf-8")
@@ -69,7 +71,7 @@ class _DelayedWrite(BaseTool):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("managed", [False, True])
-async def test_tool_timeout_cancels_real_write_before_cleanup_is_reported(tmp_path, managed):
+async def test_tool_timeout_cancels_real_write_before_cleanup_is_reported(tmp_path, managed, monkeypatch):
     marker = tmp_path / "late.txt"
     tool = _DelayedWrite(marker)
     registry = ToolRegistry()
@@ -78,6 +80,22 @@ async def test_tool_timeout_cancels_real_write_before_cleanup_is_reported(tmp_pa
     context = ToolExecutionContext(permission=PermissionContext(mode="bypass"),
         workspace_root=tmp_path, conversation_id="release-timeout", task_manager=manager,
         cancel_event=asyncio.Event())
+    wait = asyncio.wait
+
+    async def wait_after_source_entry(tasks, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        if timeout == tool.timeout_seconds:
+            # This case proves cancellation inside execute, not the speed of
+            # cold schema/hook setup before the source coroutine is scheduled.
+            source_entry = asyncio.create_task(tool.entered.wait())
+            try:
+                await wait(set(tasks) | {source_entry}, return_when=asyncio.FIRST_COMPLETED)
+                assert tool.entered.is_set(), "Source did not enter execution"
+            finally:
+                source_entry.cancel()
+                await asyncio.gather(source_entry, return_exceptions=True)
+        return await wait(tasks, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr("backend.agent.tool_execution.asyncio.wait", wait_after_source_entry)
     try:
         result = await run_tool_with_timeout(ToolCallEvent("write", tool.name, {}), registry, context)
         assert result.status == "timeout"

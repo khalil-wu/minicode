@@ -1968,13 +1968,14 @@ class AnthropicAdapter(LLMAdapter):
                 )
 
             elif msg.role == "tool":
-                if msg.code_mode_output is not None:
-                    from backend.mcp.result_projection import mcp_output_images
+                native_output = msg.native_tool_output if msg.native_tool_output is not None else msg.code_mode_output
+                if native_output is not None:
+                    from backend.mcp.result_projection import mcp_output_images, mcp_text_output
 
-                    if any(item["type"] == "input_audio" for item in msg.code_mode_output):
+                    if not isinstance(native_output, str) and any(item["type"] == "input_audio" for item in native_output):
                         raise ValueError("Anthropic does not support native audio tool output; use Responses")
-                    tool_text = "\n".join(item["text"] for item in msg.code_mode_output if item["type"] == "input_text")
-                    tool_images = mcp_output_images(msg.code_mode_output)
+                    tool_text = mcp_text_output(native_output)
+                    tool_images = mcp_output_images(native_output)
                 elif msg.mcp_output is not None:
                     from backend.mcp.result_projection import mcp_output_images, mcp_text_output
 

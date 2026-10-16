@@ -274,6 +274,8 @@ function trustedPathCandidates(targetPath) {
 }
 
 const IPC_CAPABILITIES = new Set([
+  "minicode:connections:list", "minicode:connections:discover", "minicode:connections:save", "minicode:connections:remove",
+  "minicode:connections:connect", "minicode:connections:disconnect", "minicode:connections:open",
   "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
   "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
   "minicode:deepLink:pending",

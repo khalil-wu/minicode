@@ -17,7 +17,7 @@
     "start:client": "npm run build:frontend:desktop && chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "start:client:devfrontend": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "node --test backend-sidecar.test.js backend-host-contract.test.js startup-recovery.test.js browser-lifecycle-audit.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js pty-cleanup-regressions.test.js security.test.js updater.test.js utils.test.js window-manager.test.js window-lifecycle.test.js multiwindow-ownership.test.js windows-sandbox-setup.test.js menu-popup.test.js open-targets.test.js",
+    "test:unit": "node --test backend-sidecar.test.js backend-host-contract.test.js startup-recovery.test.js browser-lifecycle-audit.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js pty-cleanup-regressions.test.js security.test.js updater.test.js utils.test.js window-manager.test.js window-lifecycle.test.js multiwindow-ownership.test.js remote-host.test.js remote-desktop.test.js windows-sandbox-setup.test.js menu-popup.test.js open-targets.test.js",
     "test:e2e": "node --test electron-smoke.test.js editor-viewport.test.js browser-capture.test.js multiwindow-electron.test.js window-unload-electron.test.js external-backend-electron.test.js",
     "test:packaged": "node packaged-smoke.test.js",
     "version:check": "python ../scripts/version_sync.py --check",
@@ -27,10 +27,11 @@
     "language:prepare": "npm ci --prefix language-services --omit=dev --no-audit --no-fund && npm run clangd:prepare",
     "clangd:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-clangd-runtime.ps1",
     "runtime:windows-sandbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-sandbox-runtime.ps1",
-    "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js",
-    "pack:dir": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
-    "dist:win": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis",
-    "runtime:execpolicy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-execpolicy-runtime.ps1"
+    "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js && python scripts/verify-network-runtime.py",
+    "pack:dir": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
+    "dist:win": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis",
+    "runtime:execpolicy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-execpolicy-runtime.ps1",
+    "runtime:network": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-network-runtime.ps1"
   },
   "devDependencies": {
     "@divriots/h2d-electron-sdk": "^0.0.4",
@@ -66,6 +67,8 @@
       "preload.js",
       "backend-sidecar.js",
       "backend-host-contract.js",
+      "remote-host.js",
+      "remote-desktop.js",
       "windows-sandbox-setup.js",
       "menu-popup.js",
       "cdp-bridge.js",

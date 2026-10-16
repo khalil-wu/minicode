@@ -203,6 +203,8 @@ async def _emit_write_diff(
     display_path: str,
     old_display_path: str | None = None,
     overwritten_new_content: str | None = None,
+    old_executor_uri: str | None = None,
+    new_executor_uri: str | None = None,
 ) -> None:
     emit = getattr(context, "emit_event", None) if context else None
     if emit is None:
@@ -214,43 +216,48 @@ async def _emit_write_diff(
     tool_call_id = str(context.tool_call_id or "file-write")
     old_path = old_display_path or display_path or file_path
     new_path = display_path or file_path
-    try:
-        # Keep mutation + snapshot emission under the turn tracker lock. Tool
-        # calls can run concurrently; MiniCode serializes tracker updates so an
-        # older one-file snapshot can never arrive after a newer aggregate.
-        async with tracker.lock:
-            had_diff = tracker.has_unified_diff()
-            tracker.track_change(
-                old_path=old_path,
-                new_path=new_path,
-                old_content=old_content,
-                new_content=new_content,
-                overwritten_new_content=overwritten_new_content,
-            )
-            snapshot = tracker.snapshot()
-            if not had_diff and snapshot.unified_diff is None:
-                return
-            from backend.agent.message import AgentEvent
+    if old_executor_uri is not None or new_executor_uri is not None:
+        snapshot = context.run_context.turn_environments if context.run_context is not None else None
+        roots = ({item.selection.environment_id: item.selection.cwd for item in snapshot.turn_environments()}
+                 if snapshot is not None else {context.environment_id: context.permission.environment_scope.cwd_uri})
+        tracker.set_environment_display_roots(roots)
+    # Keep mutation + snapshot emission under the turn tracker lock. Tool
+    # calls can run concurrently; MiniCode serializes tracker updates so an
+    # older one-file snapshot can never arrive after a newer aggregate.
+    async with tracker.lock:
+        had_diff = tracker.has_unified_diff()
+        tracker.track_change(
+            old_path=old_path,
+            new_path=new_path,
+            old_content=old_content,
+            new_content=new_content,
+            overwritten_new_content=overwritten_new_content,
+            environment_id=context.environment_id if old_executor_uri is not None or new_executor_uri is not None else "",
+            old_path_uri=old_executor_uri,
+            new_path_uri=new_executor_uri,
+        )
+        snapshot = tracker.snapshot()
+        if not had_diff and snapshot.unified_diff is None:
+            return
+        from backend.agent.message import AgentEvent
 
-            thread_id = str(getattr(context, "conversation_id", "") or "")
-            turn_id = str(
-                (context.metadata or {}).get("run_id")
-                or (context.metadata or {}).get("turn_id")
-                or (context.metadata or {}).get("assistant_message_id")
-                or ""
-            )
-            await emit(
-                "turn.diff.updated",
-                AgentEvent.turn_diff_updated(
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    diff=snapshot.unified_diff or "",
-                    revision=snapshot.revision,
-                    tool_call_id=tool_call_id,
-                ).data,
-            )
-    except Exception:
-        return
+        thread_id = str(getattr(context, "conversation_id", "") or "")
+        turn_id = str(
+            (context.metadata or {}).get("run_id")
+            or (context.metadata or {}).get("turn_id")
+            or (context.metadata or {}).get("assistant_message_id")
+            or ""
+        )
+        await emit(
+            "turn.diff.updated",
+            AgentEvent.turn_diff_updated(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                diff=snapshot.unified_diff or "",
+                revision=snapshot.revision,
+                tool_call_id=tool_call_id,
+            ).data,
+        )
 
 
 def content_hash(content: str) -> str:

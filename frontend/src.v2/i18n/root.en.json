@@ -170,5 +170,9 @@
   "查看和编辑内容": "view and edit the contents of",
   "的内容": "",
   "互联网访问": "Internet access",
+  "允许 {actor} 与 {destination} 建立连接？": "Allow {actor} to connect to {destination}?",
+  "{host} 不在当前网络允许列表中": "{host} isn't on the current network allowlist",
+  "始终允许": "Always allow",
+  "允许此对话": "Allow this conversation",
   "允许 {v0}": "Allow {v0} to"
 }

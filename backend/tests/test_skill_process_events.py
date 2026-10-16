@@ -81,7 +81,7 @@ def test_explicit_skill_selection_stages_turn_owned_payload_without_lifecycle_ev
     ]
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED), originator="Codex fixture")]
 
     events = asyncio.run(run())
 
@@ -104,7 +104,7 @@ def test_plain_words_do_not_activate_a_skill(tmp_path) -> None:
     state = AgentState(user_message="Use React patterns for this page")
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED), originator="Codex fixture")]
 
     assert asyncio.run(run()) == []
     assert "skill_injections" not in state.prompt_context
@@ -124,7 +124,7 @@ def test_skill_activation_reports_missing_mcp_dependency_to_user_and_model(tmp_p
             return None
 
     async def run() -> list:
-        return [event async for event in activate_turn_skills(manager, state.user_message, state, _McpManager(), permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
+        return [event async for event in activate_turn_skills(manager, state.user_message, state, _McpManager(), permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED), originator="Codex fixture")]
 
     events = asyncio.run(run())
     assert [event.type for event in events] == ["system_notice"]
@@ -173,7 +173,7 @@ def test_explicit_skill_installs_approved_mcp_dependency_before_injection(tmp_pa
             manager, state.user_message, state, _McpManager(), answer, publish,
             permission_context=PermissionContext(),
             permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED),
-        )]
+         originator="Codex fixture")]
 
     assert asyncio.run(run()) == []
     assert published[0].type == "request_user_input"
@@ -228,7 +228,7 @@ def test_skill_install_prompt_is_delivered_before_waiting_for_answer(tmp_path, m
                 manager, state.user_message, state, _McpManager(), approve, nested.publish,
                 permission_context=PermissionContext(),
                 permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED),
-            ):
+             originator="Codex fixture"):
                 yield event
 
         seen = []
@@ -305,7 +305,7 @@ def test_skill_mcp_skip_is_remembered_by_transport_identity_for_the_live_context
     async def activate():
         state = AgentState(user_message="$frontend-dev")
         return [event async for event in activate_turn_skills(manager, state.user_message, state,
-            McpManager(), skip, publish, prompted_dependencies=owner.prompted_mcp_dependencies, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED))]
+            McpManager(), skip, publish, prompted_dependencies=owner.prompted_mcp_dependencies, permission_context=PermissionContext(), permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.MANAGED, NetworkSandboxPolicy.RESTRICTED), originator="Codex fixture")]
     asyncio.run(activate())
     asyncio.run(activate())
     assert len(published) == 1

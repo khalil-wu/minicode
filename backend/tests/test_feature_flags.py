@@ -31,6 +31,7 @@ def test_feature_flag_name_normalization_and_boolean_coercion() -> None:
 def test_feature_flags_default_to_existing_runtime_behaviour(monkeypatch) -> None:
     flags = load_feature_flags({})
 
+    assert flags.enabled("skill_mcp_dependency_install") is True
     assert flags.enabled("reactive_compact") is True
     assert flags.enabled("plugin_lifecycle_api") is True
     assert flags.enabled("plugin_skills") is True
@@ -201,3 +202,13 @@ def test_feature_flag_settings_service_rejects_unknown_flags(monkeypatch, tmp_pa
                 config_change_hook=_hook,
             )
         )
+
+
+def test_skill_dependency_install_stable_flag_retains_effective_override_without_adding_switch(monkeypatch, tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"feature_flags": {"skill_mcp_dependency_install": False}}), encoding="utf-8")
+    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings)
+    payload = get_feature_flag_settings()
+    assert payload["effective"]["skill_mcp_dependency_install"] == {"enabled": False}
+    assert payload["overrides"]["skill_mcp_dependency_install"] is False
+    assert "skill_mcp_dependency_install" not in {flag["name"] for flag in payload["flags"]}

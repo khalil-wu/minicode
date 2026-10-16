@@ -8,7 +8,7 @@ import time
 from contextlib import AsyncExitStack, aclosing
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder, clone_context_builder
@@ -52,7 +52,11 @@ from backend.permissions.context import PermissionContext
 from backend.permissions.grants import PermissionGrantStore
 from backend.agent.guardian.host import GuardianHostState
 from backend.tools.registry import ToolRegistry
+from backend.skills.errors import RequiredSkillUnavailableError
 from backend.terminal.manager import BackgroundCommandManager
+
+if TYPE_CHECKING:
+    from backend.agent.environment_selection import ThreadEnvironments
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +83,10 @@ class AgentSession:
     permission_grants: PermissionGrantStore = field(default_factory=PermissionGrantStore)
     guardian_host: GuardianHostState | None = None
     mcp_tool_approvals: MCPApprovalStore = field(default_factory=MCPApprovalStore)
+    network_approval_service: Any | None = None
     owns_guardian_host: bool = True
+    thread_environments: ThreadEnvironments | None = None
+    owns_thread_environments: bool = False
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
     _command_shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -97,10 +104,13 @@ class AgentSession:
             if self._command_shutdown_task.done():
                 self._command_shutdown_task.result()
             return
-        if self._owned_commands is not None:
+        if self._owned_commands is not None or self.owns_thread_environments:
             borrowers = {task for task in self.lifecycle_cleanup_tasks if not task.done()}
             if not borrowers:
-                await self._owned_commands.shutdown()
+                if self._owned_commands is not None:
+                    await self._owned_commands.shutdown()
+                if self.owns_thread_environments and self.thread_environments is not None:
+                    await self.thread_environments.aclose()
                 return
 
             async def shutdown_after_cleanup() -> None:
@@ -112,7 +122,10 @@ class AgentSession:
                         await asyncio.wait(pending)
                     except asyncio.CancelledError:
                         continue
-                await self._owned_commands.shutdown()
+                if self._owned_commands is not None:
+                    await self._owned_commands.shutdown()
+                if self.owns_thread_environments and self.thread_environments is not None:
+                    await self.thread_environments.aclose()
 
             self._command_shutdown_task = asyncio.create_task(shutdown_after_cleanup())
             retain_cleanup_task(self._command_shutdown_task, self.lifecycle_cleanup_tasks)
@@ -290,17 +303,26 @@ class QueryEngine:
             submission.runtime.run_context = run_context
         else:
             session.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
+        if run_context.thread_environments is None:
+            run_context.thread_environments = session.thread_environments
+        if run_context.environment_manager is None and run_context.thread_environments is not None:
+            run_context.environment_manager = run_context.thread_environments.manager
         run_context.lifecycle_cleanup_receipts.clear()
         session.active_turn = True
         active_stream = self._submit_active(submission)
         try:
+            if run_context.environment_thread_runtime is not None:
+                run_context.environment_thread_runtime.retain_turn(asyncio.current_task(), run_context.lifecycle_cleanup_tasks)
             async for event in active_stream:
                 yield event
         finally:
             try:
                 await active_stream.aclose()
             finally:
-                session.active_turn = False
+                try:
+                    await run_context.close_environment_snapshots()
+                finally:
+                    session.active_turn = False
 
     def _resolve_runner(self) -> Callable[..., AsyncIterator[AgentEvent]]:
         return self._runner or run_agent_loop
@@ -508,6 +530,16 @@ class QueryEngine:
                 ):
                     yield event
                 raise
+            except RequiredSkillUnavailableError as error:
+                logger.warning("Required Skill admission failed: %s", error)
+                async for event in self._terminal_events(
+                    terminal, lifecycle, envelope,
+                    AgentEvent.done(status="failed", reason="required_skill_unavailable"),
+                    leading_events=(AgentEvent.error(str(error), recoverable=False, error_type="required_skill_unavailable"),),
+                    validate=False,
+                ):
+                    yield event
+                return
             except Exception:
                 logger.exception("Agent runtime failed outside provider recovery")
                 async for event in self._terminal_events(

@@ -1,0 +1,19 @@
+{
+  "source": "https://github.com/openai/codex",
+  "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "rust_toolchain": "1.95.0",
+  "target": "x86_64-pc-windows-msvc",
+  "source_files": {
+    "core/src/config/network_proxy_spec.rs": "c2dedc8e7bdd4b69baae56553a725f7cf3941c8d848bb6951ebcb732154b0fd5",
+    "core/src/network_policy_decision.rs": "ab5087590206b88f58cb071d22fa04db431b495a36393ff4dc6b75507ccb7582",
+    "file-system/src/lib.rs": "9b7fe888858c41554318ba039f468266aa067ceccc781131cd022ef87ca6b16c",
+    "file-system/src/exec_permission_profile_serde.rs": "b75ce10bf45776937d36cbabb75e48fb0a2b44eafc170d6ed76e55eff0e1519b"
+  },
+  "cargo_lock_sha256": "f2bc6cf4184f47368730d9234a502920350010f1ad07c3c187dbce8b836c6556",
+  "build_script_sha256": "66e8b471f483cb04148660e32d09d76be387409a322c68e183420979a91e78cd",
+  "bridge_files": {
+    "Cargo.toml": "72947e72ffd5e0b345f0f7919db8b488993a2884f6e1f6c688ffdbc9267b51c1",
+    "src/lib.rs": "5a55c2bf78f71723bddcd8b0e1d0a691f34b98ee948ba259793f6954fe383d46",
+    "src/main.rs": "8553d199ec5c91e2d8e493dcc45a3caac5eb82e276fb5338b530879a05482ae5"
+  }
+}

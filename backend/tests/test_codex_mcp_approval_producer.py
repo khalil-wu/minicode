@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from backend.agent.query_engine import AgentSession
 from backend.artifact.store import ArtifactStore
 from backend.mcp.approval import MCPApprovalStore
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
-from backend.mcp.client import MCPCallResult, MCPToolDef
+from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef
 from backend.mcp.config_file import write_mcp_config
 from backend.mcp.manager import MCPServerConfig, MCPServerManager, MCPServerState, ServerStatus
 from backend.mcp.registry import MCPToolProxy, MCPToolRegistry
@@ -73,6 +74,7 @@ def policy(workspace, kind):
         profile = PermissionProfile.managed(FileSystemSandboxPolicy.unrestricted(), network=NetworkSandboxPolicy.RESTRICTED)
     else:
         profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+            FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
             FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.PROJECT_ROOTS), FileSystemAccessMode.WRITE),
         ]), network=NetworkSandboxPolicy.ENABLED)
     return SandboxPolicy(workspace_root=workspace, permission_profile=profile)
@@ -206,17 +208,36 @@ class SourceModel(LLMAdapter):
     ("managed-workspace", "approve", {"destructiveHint": True}, True),
 ])
 async def test_frozen_mcp_proxy_reaches_real_query_execution_or_blocked_projection(tmp_path, monkeypatch, kind, mode, annotations, allowed):
+    from backend.agent.environment_selection import EnvironmentConfig, EnvironmentConfigState, TurnEnvironmentRequest
+
     tool, transport, manager = proxy(annotations, mode)
+    peer = tmp_path / "owned_mcp_server.py"
+    definition = {"name": tool._tool_def.name, "description": tool._tool_def.description,
+        "inputSchema": tool._tool_def.input_schema, "annotations": annotations, "_meta": tool._tool_def.meta}
+    peer.write_text('import json,sys\nTOOL=' + repr(definition) + '\n' + '''for line in sys.stdin:
+    request=json.loads(line)
+    if "id" not in request: continue
+    method=request["method"]
+    if method=="initialize": result={"protocolVersion":request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"owned-local-mcp","version":"1"}}
+    elif method=="tools/list": result={"tools":[TOOL]}
+    else: result={"content":[{"type":"text","text":"Actual MCP observation"}]}
+    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}),flush=True)
+''', encoding="utf-8")
     config_path = tmp_path / "source-mcp.json"
     write_mcp_config(json.dumps({"servers": {"source-server": {
-        "transport": "stdio", "command": "python", "default_tools_approval_mode": mode,
+        "transport": "stdio", "command": sys.executable, "args": [str(peer)], "startup_timeout_sec": 3,
+        "default_tools_approval_mode": mode,
     }}}), config_path)
     manager = MCPServerManager(config_path=config_path, workspace_root=tmp_path)
     [server] = manager.load_config()
     manager._servers[server.name] = MCPServerState(server, client=transport, status=ServerStatus.CONNECTED, tools=[tool._tool_def])
     tool = MCPToolProxy(server.name, tool._tool_def, transport, manager=manager)
     real_policy = policy(tmp_path, kind)
-    monkeypatch.setattr("backend.sandbox.sandbox_policy_for_permission_context", lambda *args, **kwargs: real_policy)
+    original_call = MCPClient.call_tool
+    async def observe_call(client, name, arguments, *, request_owner=None, request_meta=None):
+        transport.calls.append((name, arguments, request_owner))
+        return await original_call(client, name, arguments, request_owner=request_owner, request_meta=request_meta)
+    monkeypatch.setattr(MCPClient, "call_tool", observe_call)
     config = AppConfig(llm=LLMSettings(provider="openai", model="fixture", api_key="", auth_header=False), permissions=settings())
     model = SourceModel(config.llm, tool.name)
     registry = ToolRegistry()
@@ -225,6 +246,8 @@ async def test_frozen_mcp_proxy_reaches_real_query_execution_or_blocked_projecti
     run = RunContext(mcp_manager=manager, mcp_owner_session_id="source-owner")
     events = [event async for event in query("Use the exact remote operation", llm=model, config=config, tool_registry=registry,
         permission_context=PermissionContext(approval_policy="never", workspace_root=tmp_path), workspace_root=tmp_path,
+        environment_requests=(TurnEnvironmentRequest("local", tmp_path.as_uri(), (tmp_path.as_uri(),),
+            EnvironmentConfigState.ready(EnvironmentConfig(real_policy.permission_profile, (tmp_path.as_uri(),)))),),
         metadata={"conversation_id": f"mcp-source-{kind}-{mode}"}, run_context=run, max_iterations=3)]
     results = [event for event in events if event.type == "tool_result"]
     assert len(results) == 1
@@ -234,7 +257,8 @@ async def test_frozen_mcp_proxy_reaches_real_query_execution_or_blocked_projecti
     assert results[0].data["is_error"] is (not allowed)
     if allowed:
         assert transport.calls[0][0:2] == ("operation", {"value": "original"})
-        assert transport.calls[0][2]["mcp_permission_profile"] == real_policy.resolve(cwd=tmp_path)
+        assert transport.calls[0][2]["mcp_permission_scope"].permission_profile == real_policy.permission_profile
+        assert transport.calls[0][2]["mcp_permission_profile"] is None
         assert "Actual MCP observation" in model.requests[-1]
     else:
         assert results[0].data["status"] == "blocked"

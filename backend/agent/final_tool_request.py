@@ -93,18 +93,24 @@ class FinalExecutableToolRequest:
     policy_identity: str = ""
     arguments_digest: str = ""
     exec_policy: Any | None = None
+    environment_identity: Mapping[str, Any] | None = None
 
     @classmethod
-    def freeze(cls, tc: ToolCallEvent, *, policy_identity: str = "") -> "FinalExecutableToolRequest":
+    def freeze(cls, tc: ToolCallEvent, *, policy_identity: str = "", environment_identity: Mapping[str, Any] | None = None) -> "FinalExecutableToolRequest":
         arguments = _freeze_value(dict(tc.arguments or {}))
-        digest = canonical_tool_request_digest(policy_identity or tc.name, _thaw_value(arguments))
+        arguments_digest = canonical_tool_request_digest(policy_identity or tc.name, _thaw_value(arguments))
+        environment = _freeze_value(environment_identity) if environment_identity is not None else None
+        digest = (canonical_tool_request_digest(policy_identity or tc.name,
+            {"arguments": _thaw_value(arguments), "environment": _thaw_value(environment)})
+            if environment is not None else arguments_digest)
         return cls(
             tool_call_id=str(tc.id or "").strip(),
             tool_name=str(tc.name or "").strip(),
             arguments=arguments,
             digest=digest,
             policy_identity=policy_identity or str(tc.name or "").strip(),
-            arguments_digest=digest,
+            arguments_digest=arguments_digest,
+            environment_identity=environment,
         )
 
     def with_exec_policy(self, decision: Any) -> "FinalExecutableToolRequest":

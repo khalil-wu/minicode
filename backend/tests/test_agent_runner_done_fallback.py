@@ -301,6 +301,7 @@ class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
         self.selected_model = "gpt-test"
         self._model_override_active = False
         self.skill_manager = None
+        self.environment_manager = None
         self.vector_memory = None
         self.task_manager = None
         self.background_manager = None

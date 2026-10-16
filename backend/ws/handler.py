@@ -266,6 +266,7 @@ class WebSocketSession(
         skill_executor: Any | None = None,
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
+        environment_manager: Any | None = None,
         ws_manager: Any | None = None,
         replay_state: ReplayState | None = None,
         window_instance_id: str = "",
@@ -302,6 +303,7 @@ class WebSocketSession(
 
             mcp_manager = get_mcp_manager()
         self.mcp_manager = mcp_manager
+        self.environment_manager = environment_manager
         # Snapshot of the MCP registry generation this tool_registry reflects.
         # Used to hot-reload MCP tools into a live session (see
         # refresh_tool_registry_if_mcp_changed) without restarting the backend.

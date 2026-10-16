@@ -50,6 +50,34 @@ class WindowsNativeRuntime:
     group: str
 
 
+@dataclass(frozen=True)
+class LocalNetworkPrerequisite:
+    runtime: WindowsNativeRuntime
+    settings: dict[str, Any]
+
+    def status(self) -> dict[str, Any]:
+        payload = {"required": True, "settings": self.settings,
+            "sandbox_home": str(self.runtime.home), "sandbox_executable": str(self.runtime.executable)}
+        try:
+            result = subprocess.run([str(self.runtime.executable), "sandbox", "network-ready", "--codex-home",
+                str(self.runtime.home), "--settings-json", _json(self.settings)], capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW, timeout=10, check=True)
+        except subprocess.CalledProcessError as error:
+            return {**payload, "ready": False, "reason": error.stderr.decode("utf-8", errors="replace").strip()}
+        ready = json.loads(result.stdout)["ready"]
+        return {**payload, "ready": ready, "reason": "" if ready else
+            "Windows managed proxy settings are not initialized; use the explicit MiniCode sandbox setup action."}
+
+
+def capture_local_network_prerequisite(lease) -> LocalNetworkPrerequisite:
+    runtime, reason = discover_runtime()
+    if runtime is None:
+        raise RuntimeError(reason)
+    prerequisite = LocalNetworkPrerequisite(runtime, dict(lease.provisioning_settings))
+    lease.runtime.local_prerequisite = prerequisite
+    return prerequisite
+
+
 def _candidate_executables() -> Iterable[Path]:
     configured = str(os.environ.get(_RUNNER_ENV) or "").strip()
     if configured:
@@ -327,7 +355,7 @@ def prepare_command(
     runtime, reason = discover_runtime()
     if runtime is None:
         raise RuntimeError(reason)
-    account = runtime.online_username if resolved.allow_network else runtime.offline_username
+    account = runtime.online_username if resolved.allow_network and not resolved.enforce_managed_network else runtime.offline_username
     with ExitStack() as preparation:
         desktop = PrivateDesktop.create(account)
         preparation.callback(desktop.close)
@@ -342,7 +370,7 @@ def prepare_command(
         write_roots.append(str(private_temp.resolve()))
         profile = _permission_profile(resolved, cwd)
         child_env = {key: value for key, value in env.items() if key.upper() != POLICY_SCOPE_ENV}
-        if not resolved.allow_network:
+        if not resolved.allow_network and not resolved.enforce_managed_network:
             child_env = {
                 key: value for key, value in child_env.items()
                 if key.upper() not in {
@@ -359,6 +387,8 @@ def prepare_command(
             "--windows-sandbox-level", "elevated",
             "--windows-sandbox-private-desktop-name", desktop.name,
         ]
+        if resolved.enforce_managed_network:
+            args.extend(("--proxy-enforced", "--require-existing-sandbox", "--network-proxy-restricting-sid", resolved.network_proxy_restricting_sid))
         for root in workspace_roots:
             args.extend(("--workspace-root", str(root.resolve())))
         args.extend(("--write-roots-json", _json(write_roots)))

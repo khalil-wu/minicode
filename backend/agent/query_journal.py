@@ -165,7 +165,7 @@ class QueryJournalRecorder:
             message = next((item for item in reversed(self.context_builder._history)
                 if item.role == "tool" and item.tool_call_id == call_id), None)
             if message is not None:
-                for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output"):
+                for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output"):
                     body = getattr(message, field)
                     if body is not None:
                         data[field] = deepcopy(body)

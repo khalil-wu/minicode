@@ -1,7 +1,9 @@
+import { appendWorkspaceOwner, workspaceRequestPath, type WorkspaceRequestOwner } from "./workspace-owner";
 import { ApiError, apiBase, authHeaders, fetchWithTimeout } from "./api";
 import { safeJsonParse } from "../lib/safe-parse";
 
 export interface WorkspaceFileResponse {
+  session_id?: string; conversation_id?: string; environment_id?: string; path_uri?: string; read_only?: boolean;
   path: string;
   content: string;
   content_hash?: string;
@@ -30,6 +32,7 @@ export interface WorkspaceProjectIndex {
 }
 
 export interface WorkspaceFilePreviewResponse {
+  session_id?: string; conversation_id?: string; environment_id?: string; path_uri?: string;
   file_name: string;
   path: string;
   media_type: string;
@@ -88,19 +91,21 @@ const ws = (
   path: string,
   workspaceRoot: string,
   params: Record<string, string | number | boolean | undefined> = {},
+  owner?: WorkspaceRequestOwner,
 ): string => {
   const root = workspaceRoot.trim();
   if (!root) throw new Error("Workspace folder is missing.");
   const url = new URL(`${apiBase()}/api/workspace${path.startsWith("/") ? path : `/${path}`}`);
   url.searchParams.set("workspace_root", root);
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) url.searchParams.set(key, String(value));
+    if (value !== undefined) url.searchParams.set(key, typeof value === "string" && ["path", "file"].includes(key) ? workspaceRequestPath(value, root) : String(value));
   }
+  appendWorkspaceOwner(url, owner);
   return url.toString();
 };
 
-export const readWorkspaceFile = async (path: string, workspaceRoot: string, signal?: AbortSignal): Promise<WorkspaceFileResponse> => {
-  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path }), { headers: authHeaders(), signal });
+export const readWorkspaceFile = async (path: string, workspaceRoot: string, signal?: AbortSignal, owner?: WorkspaceRequestOwner): Promise<WorkspaceFileResponse> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path: owner?.path_uri ?? path }, owner), { headers: authHeaders(), signal });
   if (!r.ok) {
     throw new ApiError(r.status, await errorMessageFromWorkspaceResponse(r));
   }
@@ -117,9 +122,10 @@ export const fetchWorkspaceFilePreview = async (
   path: string,
   workspaceRoot: string,
   signal?: AbortSignal,
+  owner?: WorkspaceRequestOwner,
 ): Promise<WorkspaceFilePreviewResponse> => {
   const r = await fetchWithTimeout(
-    ws("/preview", workspaceRoot, { path }),
+    ws("/preview", workspaceRoot, { path }, owner),
     { headers: authHeaders(), signal },
     { timeoutMessage: "文件预览加载超时，请重试。" },
   );
@@ -138,7 +144,7 @@ export const writeWorkspaceFile = async (
   const r = await fetchWithTimeout(ws("/file", workspaceRoot), {
     method: "PUT",
     headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ path, content }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot), content }),
   });
   if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
@@ -148,6 +154,9 @@ const conflictPayload = async (response: Response): Promise<WorkspaceCompareWrit
     const payload = await response.json();
     const detail = payload?.detail;
     if (detail && typeof detail === "object") {
+      if (typeof detail.actual_hash !== "string") {
+        return { ok: false, conflict: false, message: typeof detail.message === "string" ? detail.message : "Workspace request failed." };
+      }
       return {
         ok: false,
         conflict: true,
@@ -157,7 +166,7 @@ const conflictPayload = async (response: Response): Promise<WorkspaceCompareWrit
     }
     return {
       ok: false,
-      conflict: true,
+      conflict: false,
       message: typeof detail === "string" ? detail : "File has changed on disk.",
     };
   } catch {
@@ -170,12 +179,13 @@ export const compareWriteWorkspaceFile = async (
   expectedHash: string,
   content: string,
   workspaceRoot: string,
+  owner?: WorkspaceRequestOwner,
 ): Promise<WorkspaceCompareWriteResult> => {
   try {
-    const r = await fetchWithTimeout(ws("/file/compare-write", workspaceRoot), {
+    const r = await fetchWithTimeout(ws("/file/compare-write", workspaceRoot, {}, owner), {
       method: "PUT",
       headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ path, expected_hash: expectedHash, content }),
+      body: JSON.stringify({ path: owner?.path_uri ?? workspaceRequestPath(path, workspaceRoot), expected_hash: expectedHash, content }),
     });
     if (r.ok) {
       return { ok: true, file: (await r.json()) as WorkspaceFileResponse };
@@ -193,7 +203,7 @@ export const createWorkspaceDirectory = async (path: string, workspaceRoot: stri
   const r = await fetchWithTimeout(ws("/directory", workspaceRoot), {
     method: "POST",
     headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot) }),
   });
   if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
@@ -206,7 +216,7 @@ export const renameWorkspacePath = async (
   const r = await fetchWithTimeout(ws("/rename", workspaceRoot), {
     method: "POST",
     headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ path, new_path: newPath }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot), new_path: workspaceRequestPath(newPath, workspaceRoot) }),
   });
   if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
@@ -226,9 +236,10 @@ export const deleteWorkspacePath = async (
 export const listWorkspaceTree = async (
   workspaceRoot: string,
   path: string = ".",
+  owner?: WorkspaceRequestOwner,
 ): Promise<WorkspaceTreeNode | null> => {
   try {
-    const r = await fetchWithTimeout(ws("/tree", workspaceRoot, { path }), { headers: authHeaders() });
+    const r = await fetchWithTimeout(ws("/tree", workspaceRoot, { path }, owner), { headers: authHeaders() });
     if (!r.ok) {
       const detail = await errorMessageFromWorkspaceResponse(r);
       throw new Error(detail || `Workspace tree request failed (${r.status} ${r.statusText || "error"}).`);
@@ -322,9 +333,10 @@ export const searchWorkspaceFiles = async (
   query: string,
   limit: number = 20,
   kind: "file" | "folder" | "all" = "file",
+  owner?: WorkspaceRequestOwner,
 ): Promise<WorkspaceSearchResult[]> => {
   const r = await fetchWithTimeout(
-    ws("/search", workspaceRoot, { query, limit, kind }),
+    ws("/search", workspaceRoot, { query, limit, kind }, owner),
     { headers: authHeaders() },
   );
   if (!r.ok) {

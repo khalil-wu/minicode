@@ -4,7 +4,7 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { ApiError, apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "./api";
 import type { WorkspaceFilePreviewResponse } from "./workspace";
 
-export type ConversationBrowserOwner = { conversationId: string; executionCwd: string };
+export type ConversationBrowserOwner = { conversationId: string; executionCwd: string; environmentId?: string };
 export interface ConversationBrowserEntry {
   name: string;
   path: string;
@@ -26,6 +26,7 @@ function browserUrl(owner: ConversationBrowserOwner, method: string, path: strin
   url.searchParams.set("session_id", sessionId);
   url.searchParams.set("conversation_id", owner.conversationId);
   url.searchParams.set("execution_cwd", owner.executionCwd);
+  if (owner.environmentId) url.searchParams.set("environment_id", owner.environmentId);
   url.searchParams.set("path", path);
   return url;
 }
@@ -53,7 +54,9 @@ export function conversationBrowserRawUrl(owner: ConversationBrowserOwner, path:
   const secret = new Headers(authHeaders()).get("X-MiniCode-Token");
   if (secret) {
     const expiresAt = Math.floor(Date.now() / 1000) + 300;
-    const payload = `browser_raw:v1:${url.searchParams.get("session_id")}:${owner.conversationId}:${owner.executionCwd}:${path}:${expiresAt}`;
+    const payload = owner.environmentId
+      ? `browser_raw:v2:${url.searchParams.get("session_id")}:${owner.conversationId}:${owner.environmentId}:${owner.executionCwd}:${path}:${expiresAt}`
+      : `browser_raw:v1:${url.searchParams.get("session_id")}:${owner.conversationId}:${owner.executionCwd}:${path}:${expiresAt}`;
     const encoder = new TextEncoder();
     const signature = hmac(sha256, encoder.encode(secret), encoder.encode(payload));
     const encoded = btoa(Array.from(signature, (byte) => String.fromCharCode(byte)).join("")).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");

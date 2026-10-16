@@ -161,7 +161,7 @@ async def test_foreground_output_cancel_finishes_owned_persistence_and_capture_c
             captured.append((command, self.policy, kwargs))
             return SandboxResult(stdout="preview", stderr="", exit_code=7, stdout_path=str(raw))
 
-    monkeypatch.setattr(command_tool, "SandboxRunner", Runner)
+    monkeypatch.setattr("backend.terminal.executor_runner.command_runner", Runner)
     context = owner(tmp_path)
     context.sandbox_policy = SandboxPolicy.bypass()
     store = ArtifactStore(storage_dir=tmp_path / "artifacts")

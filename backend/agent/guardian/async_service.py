@@ -19,6 +19,7 @@ from backend.agent.guardian.async_request import CollectedAsyncEvidence
 from backend.agent.guardian.async_decisions import DecisionsError, DecisionsSampler, comparison_record, decisions_api_key
 from backend.agent.guardian.context import GuardianContextMode
 from backend.agent.guardian.contract import GuardianReceipt
+from backend.agent.guardian.config import parent_has_full_access, parent_permission_profile, parent_environment_identity
 from backend.agent.guardian.prompt import GuardianPermissionEvidence
 from backend.agent.guardian.images import collect_parent_images
 from backend.agent.guardian.node_repl import registered_source_model
@@ -57,8 +58,8 @@ class ScoreAuthorization:
                 config.llm.api_key, tuple(sorted(config.feature_flags.flags.items())),
                 config.config_layer_stack.fingerprint if config.config_layer_stack is not None else None),
             (context.permission.mode, context.permission.approval_policy, context.permission.sandbox_mode,
-                context.permission.strict_auto_review, deepcopy(context.sandbox_policy.permission_profile), json.dumps(grants, sort_keys=True)),
-            (context.environment_id, str(context.workspace_root)), _classifier_definition(execution))
+                context.permission.strict_auto_review, deepcopy(parent_permission_profile(context)), json.dumps(grants, sort_keys=True)),
+            parent_environment_identity(context), _classifier_definition(execution))
 
 
 def _classifier_definition(execution):
@@ -267,7 +268,7 @@ class GuardianAsyncService:
         if self.closed or execution is None or not execution.config.feature_flags.enabled("guardian_approval", True):
             return None
         policy = resolve_guardian_model_policy(execution.config, execution.model_info)
-        full_access = context.permission.approval_policy == "never" and context.sandbox_policy.permission_profile.enforcement.value == "disabled"
+        full_access = parent_has_full_access(context)
         if not policy.scoring_enabled or full_access or _settings(context).get("approvals_reviewer", "user") != "auto_review":
             return None
         GuardianAsyncConfig.resolve(execution.config, execution.model_info)
@@ -350,7 +351,7 @@ class GuardianAsyncService:
                 self.progress.invalidate(index)
             return
         settings = _settings(context)
-        full_access = context.permission.approval_policy == "never" and context.sandbox_policy.permission_profile.enforcement.value == "disabled"
+        full_access = parent_has_full_access(context)
         if full_access or settings.get("approvals_reviewer", "user") == "user":
             self.progress.invalidate(index)
             return
@@ -406,7 +407,7 @@ class GuardianAsyncService:
         try:
             execution = context.model_execution
             checkpoint = select_async_parent_checkpoint(evidence, config, sampler, execution.model_info)
-            permissions = GuardianPermissionEvidence.from_policy(context.sandbox_policy, cwd=context.workspace_root, environment_id=context.environment_id)
+            permissions = GuardianPermissionEvidence.from_context(context, environment_id=context.environment_id)
             instructions = config.render_instructions(_settings(context), execution.model_info)
             reviews = tuple(self.reviews_source())
             if reservation is not None:

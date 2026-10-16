@@ -26,6 +26,7 @@ from backend.tools.file_tools_common import (
 )
 
 class WriteFileTool(BaseTool):
+    requires_execution_environment = True
     """
     Write a complete text file.
 
@@ -182,6 +183,10 @@ class WriteFileTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_write_file
+            return await executor_write_file(self, args, context)
         file_path = _path_arg(args)
         content = args.get("content", "")
 

@@ -75,7 +75,7 @@ class PendingRunner:
 
 @pytest.mark.asyncio
 async def test_background_io_failure_retains_runner_and_cancel_retries(monkeypatch):
-    monkeypatch.setattr(manager_module, "SandboxRunner", PendingRunner)
+    monkeypatch.setattr(manager_module, "command_runner", PendingRunner)
     manager = manager_module.BackgroundCommandManager()
     command = manager_module.BackgroundCommand(command_id="fixture", command="fake", conversation_id="conv", sandbox_policy=SandboxPolicy.bypass())
     manager._commands[command.command_id] = command
@@ -97,7 +97,7 @@ async def test_background_io_failure_retains_runner_and_cancel_retries(monkeypat
 @pytest.mark.asyncio
 async def test_foreground_pending_cleanup_moves_to_existing_background_owner(tmp_path, monkeypatch):
     manager = manager_module.BackgroundCommandManager()
-    monkeypatch.setattr(command_tool, "SandboxRunner", PendingRunner)
+    monkeypatch.setattr("backend.terminal.executor_runner.command_runner", PendingRunner)
     context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), workspace_root=tmp_path, conversation_id="conv", background_manager=manager)
     result = await command_tool.RunCommandTool(artifact_store=object())._execute_foreground("fixture", str(tmp_path), 10, context)
     assert result.cleanup_receipt["pending"] == 1

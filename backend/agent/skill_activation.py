@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
+from backend.feature_flags import FeatureFlags
 from backend.skills.manager import SkillManager
 from backend.skills.loader import SkillMeta
 from backend.permissions.context import PermissionContext
@@ -74,8 +75,11 @@ async def activate_turn_skills(
     publish_event: Any | None = None,
     *,
     permission_context: PermissionContext,
-    permission_profile: ResolvedSandboxPolicy,
+    permission_profile: ResolvedSandboxPolicy | None,
+    permission_scope: Any | None = None,
     prompted_dependencies: set[str] | None = None,
+    feature_flags: FeatureFlags | None = None,
+    originator: str = "minicode",
 ) -> AsyncIterator[AgentEvent]:
     """Select textual skill workflows without granting executable hook authority."""
     prompted = prompted_dependencies if prompted_dependencies is not None else set()
@@ -102,7 +106,8 @@ async def activate_turn_skills(
                 server for server in payload.get("mcp_dependencies", [])
                 if mcp_manager is None or mcp_manager.get_client(server) is None
             ]
-            if missing_dependencies and mcp_manager is not None:
+            first_party = originator in {"codex_cli_rs", "codex-tui", "codex_vscode"} or originator.startswith("Codex ")
+            if missing_dependencies and mcp_manager is not None and first_party and (feature_flags or FeatureFlags()).enabled("skill_mcp_dependency_install"):
                 from backend.services.mcp_service import MCPServiceError, _manual_config_from_payload, install_skill_mcp_servers
 
                 specs = {
@@ -143,10 +148,11 @@ async def activate_turn_skills(
                 if candidates:
                     # codex-mcp::mcp_permission_prompt_is_auto_approved with
                     # the default (no per-tool approval override) context.
-                    install = permission_context.approval_policy == "never" and (
-                        permission_profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}
-                        or permission_profile.full_disk_write
-                    )
+                    full_access = (permission_scope.has_full_disk_write_access() if permission_scope is not None
+                        else permission_profile is not None and (
+                            permission_profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}
+                            or permission_profile.full_disk_write))
+                    install = permission_context.approval_policy == "never" and full_access
                     if not install and permission_context.approval_policy != "never" and approval_handler is not None and publish_event is not None:
                         request_id = f"skill-mcp-{uuid4().hex}"
                         await publish_event(AgentEvent(

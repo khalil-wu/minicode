@@ -16,6 +16,7 @@ let accepting = false;
 let configuredEndpoint = "";
 const inFlight = new Set();
 const operations = new Map();
+const remoteHosts = new Map();
 
 function init(deps = {}) {
   manager = deps.manager || null;
@@ -25,9 +26,9 @@ function init(deps = {}) {
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
 }
 
-function tokenMatches(value) {
+function tokenMatches(value, expectedToken = token) {
   const supplied = Buffer.from(String(value || ""));
-  const expected = Buffer.from(token);
+  const expected = Buffer.from(expectedToken);
   return supplied.length === expected.length && expected.length > 0 && crypto.timingSafeEqual(supplied, expected);
 }
 
@@ -90,6 +91,7 @@ function operationReceipt(operation) {
 
 function createOperation(id, owner, windowInstanceId, windowBindingToken) {
   const operation = { id, owner, windowInstanceId, windowBindingToken, controller: new AbortController(), started: false,
+    remoteHostId: getWindowRecordByInstanceId(windowInstanceId)?.remoteHostId || null,
     submitted: false, settled: false, status: "queued", reason: "", promise: null };
   operations.set(id, operation);
   return operation;
@@ -201,7 +203,9 @@ async function handleRequest(request, response) {
   if (!accepting) return sendJson(response, 503, { ok: false, error: "Embedded browser bridge is stopping" });
   const auth = String(request.headers.authorization || "");
   const suppliedToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (!tokenMatches(suppliedToken)) return sendJson(response, 401, { ok: false, error: "Unauthorized" });
+  const remote = [...remoteHosts.entries()].find(([_id, host]) => tokenMatches(suppliedToken, host.ready.bridge_token));
+  if (!remote && !tokenMatches(suppliedToken)) return sendJson(response, 401, { ok: false, error: "Unauthorized" });
+  const remoteHostId = remote?.[0] || null;
   if (request.method === "GET" && request.url === "/v1/health") {
     return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser" });
   }
@@ -209,8 +213,14 @@ async function handleRequest(request, response) {
     return sendJson(response, 404, { ok: false, error: "Not found" });
   }
   try {
-    const payload = await readJsonBody(request);
+    let payload = await readJsonBody(request);
     const binding = request.url === "/v1/operation" ? null : assertWindowBinding(payload);
+    const owner = binding || ownedOperation(payload) || assertWindowBinding(payload);
+    if ((owner.remoteHostId || null) !== remoteHostId) {
+      const error = new Error("Desktop bridge token belongs to a different host");
+      error.code = "ERR_WINDOW_BINDING";
+      throw error;
+    }
     if (request.url === "/v1/window-binding") {
       if (payload.window_owner_id !== binding.windowOwnerId) throw new Error("Desktop window owner does not match its binding.");
       return sendJson(response, 200, { ok: true, window_instance_id: binding.windowInstanceId, window_owner_id: binding.windowOwnerId });
@@ -242,6 +252,13 @@ async function handleRequest(request, response) {
         finally { response.off("close", disconnected); }
       }
       return sendJson(response, 200, { ok: true, cleanup_receipt: operationReceipt(operation) });
+    }
+    if (remote && payload.action === "navigate" && payload.url) {
+      const host = remote[1];
+      const authorization = payload.navigation_authorization;
+      payload = { ...payload, url: await host.mapUrl(payload.url),
+        ...(authorization ? { navigation_authorization: { ...authorization,
+          url: await host.mapUrl(authorization.url), preview_url: await host.mapUrl(authorization.preview_url) } } : {}) };
     }
     const result = await executeOwnedCommand(payload, response);
     return sendJson(response, result?.ok === false ? 400 : 200, result || { ok: true });
@@ -318,4 +335,7 @@ function releaseWindow(windowInstanceId) {
   }
 }
 
-module.exports = { init, start, stop, releaseWindow };
+function registerRemoteHost(id, host) { remoteHosts.set(id, host); }
+function unregisterRemoteHost(id, host) { if (remoteHosts.get(id) === host) remoteHosts.delete(id); }
+
+module.exports = { init, start, stop, releaseWindow, registerRemoteHost, unregisterRemoteHost };

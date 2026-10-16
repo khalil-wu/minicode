@@ -59,13 +59,14 @@ def list_checkpoints(
     session_id: str = "",
     workspace_root: str = "",
     limit: int = 50,
+    execution_context=None,
 ) -> CheckpointListResult:
     target_conversation_id = str(conversation_id or "").strip()
     if not target_conversation_id:
         raise CheckpointServiceError("No active conversation for checkpoint.list")
     bounded_limit = max(1, min(int(limit or 50), 200))
     expected_session = str(session_id or "").strip()
-    expected_workspace = _resolved_workspace(workspace_root)
+    expected_workspace = _checkpoint_workspace(workspace_root, execution_context)
     records = checkpoint_manager.list_for_conversation(target_conversation_id, limit=200)
     records = [
         record
@@ -73,8 +74,9 @@ def list_checkpoints(
         if (not expected_session or str(record.session_id or "").strip() == expected_session)
         and (
             expected_workspace is None
-            or _resolved_workspace(record.workspace_root) == expected_workspace
+            or _record_workspace(record.workspace_root, execution_context) == expected_workspace
         )
+        and (execution_context is None or record.metadata.get("environment_id") in (None, execution_context.environment_id))
     ][:bounded_limit]
     return CheckpointListResult(
         conversation_id=target_conversation_id,
@@ -89,6 +91,7 @@ async def rewind_checkpoint(
     conversation_id: str = "",
     session_id: str = "",
     workspace_root: str = "",
+    execution_context=None,
 ) -> CheckpointRewindResult:
     clean_checkpoint_id = str(checkpoint_id or "").strip()
     if not clean_checkpoint_id:
@@ -103,10 +106,11 @@ async def rewind_checkpoint(
             raise CheckpointServiceError("Checkpoint does not belong to the active conversation.")
         if expected_session and str(record.session_id or "").strip() != expected_session:
             raise CheckpointServiceError("Checkpoint does not belong to the active session.")
-        expected_workspace = _resolved_workspace(workspace_root)
-        if expected_workspace is not None and _resolved_workspace(record.workspace_root) != expected_workspace:
+        expected_workspace = _checkpoint_workspace(workspace_root, execution_context)
+        if expected_workspace is not None and _record_workspace(record.workspace_root, execution_context) != expected_workspace:
             raise CheckpointServiceError("Checkpoint does not belong to the active workspace.")
-        record = await checkpoint_manager.rewind(clean_checkpoint_id)
+        record = (await checkpoint_manager.rewind(clean_checkpoint_id, execution_context=execution_context)
+                  if execution_context is not None else await checkpoint_manager.rewind(clean_checkpoint_id))
     except Exception as exc:
         raise CheckpointServiceError(f"Checkpoint rewind failed: {exc}") from exc
     return CheckpointRewindResult(
@@ -115,10 +119,26 @@ async def rewind_checkpoint(
     )
 
 
-def _resolved_workspace(value: str) -> Path | None:
+def _checkpoint_workspace(value, execution_context):
+    if execution_context is not None and execution_context.permission.environment_scope is not None:
+        return _resolved_workspace(execution_context.permission.environment_scope.cwd_uri)
+    return _resolved_workspace(value)
+
+
+def _record_workspace(value, execution_context):
+    if execution_context is not None and execution_context.turn_environment is not None and not execution_context.turn_environment.is_remote:
+        from backend.workspace.executor_service import resolve_executor_path
+        return resolve_executor_path(execution_context, value)
+    return _resolved_workspace(value)
+
+
+def _resolved_workspace(value: str):
     clean = str(value or "").strip()
     if not clean:
         return None
+    if clean.startswith("file:"):
+        from backend.workspace.executor_paths import ExecutorPath
+        return ExecutorPath.parse(clean)
     return Path(clean).expanduser().resolve()
 
 

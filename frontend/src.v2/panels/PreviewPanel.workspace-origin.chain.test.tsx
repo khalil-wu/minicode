@@ -7,6 +7,7 @@ import { resetPreviewRequestScopesForTests } from "../chat/previewRequestScope";
 import { PreviewPanel } from "./PreviewPanel";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { emptyConversationWorkbenchState } from "../stores/ui-slice";
+import { bindWorkspaceOwnerRuntime } from "../protocol/workspace-owner";
 
 const { preview } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
@@ -19,6 +20,8 @@ vi.mock("../protocol/ws-outbox", () => ({ createClientCommandId: () => "origin-r
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 beforeEach(() => {
+  bindWorkspaceOwnerRuntime(() => ({ session_id: "preview-origin", conversation_id: useAppStore.getState().conversationId ?? "",
+    workspace_root: useAppStore.getState().workingDirectory }));
   resetPreviewRequestScopesForTests();
   preview.mockReset();
   vi.mocked(sendClientCommandAwaitResult).mockReset();
@@ -54,7 +57,7 @@ describe("workspace file origin reaches document navigation", () => {
     expect(useAppStore.getState().editorOpenRequests.at(-1)?.path).toBe(dirtyTab.path);
     expect(useAppStore.getState().editorTabs).toEqual([dirtyTab]);
     expect(useAppStore.getState().draft).toBe("未发送的主草稿");
-    expect(preview).toHaveBeenCalledWith("C:/owner/docs/design.md", "C:/owner", expect.any(AbortSignal));
+    expect(preview).toHaveBeenCalledWith("C:/owner/docs/design.md", "C:/owner", expect.any(AbortSignal), { session_id: "preview-origin", conversation_id: "workspace-owner" });
   });
 
   it.each(["attachment", "artifact", "local"] as const)("does not invent a disk-open action for a %s document", (source) => {

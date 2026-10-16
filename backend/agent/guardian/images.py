@@ -58,7 +58,7 @@ def collect_parent_images(context, *, include_tool_outputs: bool, node_repl) -> 
                 continue
             native_images = any(item["type"] in {"message", "function_call_output", "custom_tool_call_output"} for item in message.provider_items)
             if not native_images:
-                output = next((body for body in (message.mcp_output, message.code_mode_output, message.history_notes_output) if body is not None), None)
+                output = next((body for body in (message.native_tool_output, message.mcp_output, message.code_mode_output, message.history_notes_output) if body is not None), None)
                 if message.role == "tool" and include_tool_outputs and output is not None:
                     content_images(output)
                 elif message.role in {"user", "assistant"} or message.role == "tool" and include_tool_outputs:

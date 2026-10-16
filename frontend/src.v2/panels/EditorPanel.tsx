@@ -8,6 +8,7 @@ import { useAppStore } from "../stores";
 import type { EditorOpenRequest, EditorTab } from "../stores/types";
 import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace, loadEditorViewState, persistEditorViewState, restoreWorkspaceEditorDrafts, mergeRestoredEditorTabs } from "../stores/shared-helpers";
 import { workspaceRawResourceUrlWithToken } from "../protocol/api";
+import { workspaceFileOwner, workspaceHasConversation, workspaceRequestOwner, type WorkspaceRequestOwner } from "../protocol/workspace-owner";
 import {
   compareWriteWorkspaceFile,
   readWorkspaceFile,
@@ -194,7 +195,7 @@ const toWorkspaceDisplayPath = (path: string, workingDirectory = ""): string => 
 const rawFileUrl = (path: string, workingDirectory: string, version: number): string => {
   if (!path || /^(https?:|data:|blob:|mailto:|tel:|#)/i.test(path)) return path;
   const normalized = toWorkspaceDisplayPath(path, workingDirectory);
-  const url = new URL(workspaceRawResourceUrlWithToken(normalized, workingDirectory));
+  const url = new URL(workspaceRawResourceUrlWithToken(normalized, workingDirectory, undefined, workspaceRequestOwner()));
   url.searchParams.set("version", String(version));
   return url.toString();
 };
@@ -250,6 +251,7 @@ const resolveDesktopFsPath = (path: string, workingDirectory: string): string =>
 };
 
 interface FileSnapshot {
+  workspaceOwner?: WorkspaceRequestOwner;
   content: string;
   contentHash?: string;
   sizeBytes?: number;
@@ -388,9 +390,9 @@ const reactNodeText = (node: React.ReactNode): string => {
   return "";
 };
 
-const readFileSnapshot = async (path: string, workingDirectory: string): Promise<FileSnapshot | null> => {
+const readFileSnapshot = async (path: string, workingDirectory: string, owner?: WorkspaceRequestOwner): Promise<FileSnapshot | null> => {
   if (!isEditablePath(path)) return null;
-  if (isDesktop()) {
+  if (isDesktop() && !owner && !workspaceHasConversation()) {
     const desktopFile = await fsReadFileInfo(resolveDesktopFsPath(path, workingDirectory));
     if (desktopFile != null) {
       return {
@@ -401,12 +403,14 @@ const readFileSnapshot = async (path: string, workingDirectory: string): Promise
       };
     }
   }
-  const response = await readWorkspaceFile(path, workingDirectory);
+  const response = await readWorkspaceFile(path, workingDirectory, undefined, owner);
   if (!response) return null;
   return {
     content: response.content,
     contentHash: response.content_hash,
     sizeBytes: response.size_bytes ?? response.size,
+    readOnly: response.read_only,
+    workspaceOwner: workspaceFileOwner(response),
   };
 };
 
@@ -649,6 +653,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       loadWarning: warning,
       sizeBytes: snapshot.sizeBytes,
       readOnly: snapshot.readOnly,
+      workspaceOwner: snapshot.workspaceOwner,
     });
     return warning;
   };
@@ -676,7 +681,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       return;
     }
     try {
-      const snapshot = await readFileSnapshot(path, directory);
+      const snapshot = await readFileSnapshot(path, directory, tab.workspaceOwner);
       if (snapshot != null) {
         commit(() => applyFileSnapshot(path, snapshot));
       } else {
@@ -785,7 +790,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         }
         // Both single-file and project saves share the backend's guarded mutation
         // queue and acknowledge the exact submitted buffer, preserving newer edits.
-        const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
+        const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace, tab.workspaceOwner);
         const state = useAppStore.getState();
         const workspace = workspaceRootsEqual(state.workingDirectory, saveWorkspace)
           ? state : editorStateForWorkspace(saveWorkspace);
@@ -929,7 +934,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       );
     };
     try {
-      const snapshot = await readFileSnapshot(path, directory);
+      const snapshot = await readFileSnapshot(path, directory, tabAtRequest.workspaceOwner);
       if (snapshot == null) throw new Error(tr("无法读取 {v0}", { v0: path }));
       if (!canCommit()) return;
       const currentTab = useAppStore.getState().editorTabs.find((tab) => editorPathsEqual(tab.path, path, directory))!;

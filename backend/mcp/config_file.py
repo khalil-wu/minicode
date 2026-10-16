@@ -23,6 +23,7 @@ _SERVER_FIELDS = frozenset({
     "tool_timeout_sec", "required", "supports_parallel_tool_calls",
     "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
     "requires_user_action", "setup_hint", "docs_url",
+    "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
 })
 
 
@@ -129,6 +130,19 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"MCP server '{name}' contains unsupported fields: {', '.join(unknown_fields)}."
         )
+    for native, legacy in (("http_headers", "headers"), ("http_headers_helper", "headers_helper")):
+        if native in normalized:
+            normalized[legacy] = normalized.pop(native)
+    if "environment_id" in normalized and not isinstance(normalized["environment_id"], str):
+        raise ValueError(f"MCP server '{name}' environment_id must be a string.")
+    if "enabled" in normalized and not isinstance(normalized["enabled"], bool):
+        raise ValueError(f"MCP server '{name}' enabled must be a boolean.")
+    bearer = normalized.get("bearer_token_env_var")
+    if bearer is not None and not isinstance(bearer, str):
+        raise ValueError(f"MCP server '{name}' bearer_token_env_var must be a string.")
+    env_headers = normalized.get("env_http_headers", {})
+    if not isinstance(env_headers, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in env_headers.items()):
+        raise ValueError(f"MCP server '{name}' env_http_headers must map strings to strings.")
     try:
         transport = mcp_transport_from_mapping(normalized)
     except ValueError as exc:
@@ -136,7 +150,7 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
     normalized["transport"] = transport
 
     stdio_only = ("command", "args", "env", "env_vars", "cwd")
-    remote_only = ("url", "headers", "headers_helper")
+    remote_only = ("url", "headers", "headers_helper", "bearer_token_env_var", "env_http_headers")
     if transport == "stdio":
         _reject_nonempty_fields(name, transport, normalized, (*remote_only, "oauth"))
         for field in (*remote_only, "oauth"):
@@ -190,7 +204,7 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"MCP server '{name}' env_vars contains an invalid name.")
                 continue
             var_name = item.get("name")
-            source = item.get("source", var_name)
+            source = item.get("source") or "local"
             unknown_fields = sorted(set(item) - {"name", "source"})
             if unknown_fields:
                 raise ValueError(
@@ -199,8 +213,10 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                 )
             if not isinstance(var_name, str) or not var_name.strip() or "\x00" in var_name:
                 raise ValueError(f"MCP server '{name}' env_vars mapping requires a valid name.")
-            if not isinstance(source, str) or not source.strip() or "\x00" in source:
-                raise ValueError(f"MCP server '{name}' env_vars mapping requires a valid source.")
+            if source not in {"local", "remote"}:
+                raise ValueError(f"MCP server '{name}' env_vars source must be local or remote.")
+            if source == "remote" and normalized.get("environment_id", "local") == "local":
+                raise ValueError(f"MCP server '{name}' remote env_vars requires a remote environment.")
         if env_vars:
             normalized["env_vars"] = env_vars
         else:

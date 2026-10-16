@@ -56,7 +56,7 @@ def test_changed_file_event_carries_workspace_root():
     registry.register(WriteFileTool())
     call = ToolCallEvent(id="write-1", name="write_file", arguments={"file_path": "index.html"})
 
-    payload = changed_file_event_payload(call, context, registry)
+    payload = asyncio.run(changed_file_event_payload(call, context, registry))
 
     assert payload is not None
     assert payload["path"] == "index.html"

@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+from backend.workspace.executor_paths import ExecutorPath
 
 from backend.sandbox.policy import (
     AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
@@ -48,7 +49,7 @@ def normalize_permission_profile(
         for access in ("read", "write"):
             for path in raw_fs.get(access) or ():
                 entries.append(FileSystemSandboxEntry(
-                    FileSystemPath.path(_resolve_legacy_path(path, cwd)),
+                    _concrete_path(_resolve_legacy_path(path, cwd)),
                     FileSystemAccessMode(access),
                 ))
         for raw_entry in raw_fs.get("entries", ()):
@@ -57,7 +58,7 @@ def normalize_permission_profile(
             raw_path = raw_entry["path"]
             kind = raw_path["type"]
             if kind == "path":
-                path = FileSystemPath.path(_resolve_legacy_path(raw_path["path"], cwd))
+                path = _concrete_path(_resolve_legacy_path(raw_path["path"], cwd))
             elif kind == "glob_pattern":
                 path = FileSystemPath.glob(raw_path["pattern"])
             elif kind == "special":
@@ -87,8 +88,14 @@ def normalize_permission_profile(
 
 
 def _resolve_legacy_path(path: str, cwd: Path) -> Path:
+    if isinstance(cwd, ExecutorPath):
+        return ExecutorPath.resolve(path, cwd_uri=cwd.uri, platform_os=cwd.platform_os)
     candidate = Path(path).expanduser()
     return _absolute_path(candidate if candidate.is_absolute() else cwd / candidate)
+
+
+def _concrete_path(path):
+    return FileSystemPath("path", path.uri) if isinstance(path, ExecutorPath) else FileSystemPath.path(path)
 
 
 def permission_profile_payload(profile: AdditionalPermissionProfile) -> dict[str, Any]:
@@ -229,6 +236,11 @@ def intersect_permission_profiles(
     *, cwd: Path, workspace_roots: tuple[Path, ...] = (),
     temporary_directories: tuple[Path, ...] | None = None,
 ) -> AdditionalPermissionProfile:
+    if isinstance(cwd, ExecutorPath):
+        from backend.permissions.environment_grants import intersect_environment_permissions
+
+        return intersect_environment_permissions(requested, granted, cwd=cwd,
+            workspace_roots=workspace_roots, temporary_directories=temporary_directories)
     network = NetworkPermissions(True) if (
         requested.network is not None and requested.network.enabled is True
         and granted.network is not None and granted.network.enabled is True
@@ -344,12 +356,24 @@ def sandbox_policy_with_grants(policy: SandboxPolicy, context: ToolExecutionCont
 
 
 def permission_context_with_grants(permission: PermissionContext, context: ToolExecutionContext) -> PermissionContext:
-    return replace(permission, additional_permissions=current_granted_permissions(context), strict_auto_review=context.permission_grants.strict_auto_review_enabled(context.turn_id))
+    granted = current_granted_permissions(context)
+    scope = permission.environment_scope
+    return replace(permission, additional_permissions=granted,
+        environment_scope=scope.with_additional_permissions(granted) if scope is not None else None,
+        strict_auto_review=context.permission_grants.strict_auto_review_enabled(context.turn_id))
 
 
 def permission_profile_allows_path(profile: AdditionalPermissionProfile | None, path: str | Path, *, cwd: Path, workspace_root: Path | None, write: bool = False) -> bool:
     if profile is None or profile.file_system is None:
         return False
+    if isinstance(cwd, ExecutorPath):
+        from backend.permissions.environment_scope import EnvironmentPermissionScope
+
+        scope = EnvironmentPermissionScope("grants", PermissionProfile.managed(FileSystemSandboxPolicy.restricted(
+            profile.file_system.entries, glob_scan_max_depth=profile.file_system.glob_scan_max_depth)),
+            cwd.uri, (workspace_root.uri,) if workspace_root is not None else (), cwd.platform_os)
+        access = scope.resolve_access(str(path))
+        return access.can_write if write else access.can_read
     roots = (workspace_root,) if workspace_root is not None else ()
     access = _resolved_fs(profile.file_system, cwd, roots).resolve_access(_resolve_legacy_path(os.fspath(path), cwd))
     return access.can_write if write else access.can_read

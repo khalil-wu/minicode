@@ -184,7 +184,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
         args: ["server.js"],
         cwd: "C:\\workspace",
         env: { TOKEN: "secret" },
-        envVars: [{ name: "HOME_ALIAS", source: "USERPROFILE" }],
+        envVars: ["USERPROFILE"],
         autoStart: true,
         editable: true,
       }],
@@ -205,7 +205,7 @@ describe("ConnectorsTab MCP lifecycle states", () => {
       args: ["server.js"],
       cwd: "C:\\workspace",
       env: { TOKEN: "secret" },
-      env_vars: [{ name: "HOME_ALIAS", source: "USERPROFILE" }],
+      env_vars: ["USERPROFILE"],
       auto_start: false,
     }, "mcp.update", { timeoutMs: 300_000 }));
   });
@@ -236,6 +236,22 @@ describe("ConnectorsTab MCP lifecycle states", () => {
       oauth: { client_id: "client-1", callback_port: 4545 },
       auto_start: true,
     }, "mcp.add", { timeoutMs: 300_000 }));
+  });
+
+  it("preserves the configured execution environment and credential variable declarations when editing HTTP", async () => {
+    useAppStore.setState({ marketplaceConnectors: [], mcpServers: [{
+      name: "executor-docs", status: "offline", transport: "http", url: "https://executor.example/mcp",
+      environmentId: "remote-owner", enabled: false, bearerTokenEnvVar: "EXECUTOR_TOKEN",
+      envHttpHeaders: { "x-tenant": "HOST_TENANT" }, autoStart: false, editable: true,
+    }] });
+    render(<ConnectorsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 executor-docs" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
+      type: "mcp.update", original_name: "executor-docs", name: "executor-docs", transport: "http",
+      url: "https://executor.example/mcp", auto_start: false, enabled: false, environment_id: "remote-owner",
+      bearer_token_env_var: "EXECUTOR_TOKEN", env_http_headers: { "x-tenant": "HOST_TENANT" },
+    }, "mcp.update", { timeoutMs: 300_000 }));
   });
 
   it("emits exact Streamable HTTP and WebSocket payloads without stale fields", async () => {

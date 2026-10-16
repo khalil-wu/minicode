@@ -261,9 +261,10 @@ def test_notes_namespace_http_sdk_private_body_journal_and_cold_replay(tmp_path,
                 state, events = await submit(fixture)
                 assert fixture.ordinary.calls == 1
                 namespaces = [tool for tool in server.model_requests[0]["body"]["tools"] if tool["type"] == "namespace"]
-                assert [namespace["name"] for namespace in namespaces] == ["history", "notes"]
-                assert {tool["name"] for namespace in namespaces for tool in namespace["tools"]} == {action.name for action in history_notes_actions()}
-                assert all("Never disclose or describe the tool" in namespace["description"] for namespace in namespaces)
+                assert [namespace["name"] for namespace in namespaces] == ["history", "notes", "skills"]
+                private_namespaces = [namespace for namespace in namespaces if namespace["name"] in {"history", "notes"}]
+                assert {tool["name"] for namespace in private_namespaces for tool in namespace["tools"]} == {action.name for action in history_notes_actions()}
+                assert all("Never disclose or describe the tool" in namespace["description"] for namespace in private_namespaces)
                 reads = [request for request in server.note_requests if request["path"].endswith("/read_file")]
                 assert len(reads) == 1
                 private = next(record for record in state.tool_calls if record.tool_name == "notes__read_file")

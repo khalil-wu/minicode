@@ -269,7 +269,7 @@ function nextWindowOwnerId() {
   return `secondary-${slot}`;
 }
 
-async function createNewWindow({ conversationId = null, restoreLastConversation = false } = {}) {
+async function createNewWindow({ conversationId = null, restoreLastConversation = false, remoteHostId = null, runtime = null } = {}) {
   const { app } = require("electron");
   const target = getFrontendTarget();
   const windowOwnerId = nextWindowOwnerId();
@@ -292,6 +292,7 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
     title: "MiniCode",
     icon: desktopIconPath,
     webPreferences: {
+      ...(remoteHostId ? { partition: `persist:minicode-host-${remoteHostId}` } : {}),
       zoomFactor: 1,
       preload: preloadFile,
       contextIsolation: true,
@@ -301,10 +302,12 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
         ...getRendererAdditionalArguments(),
         `--minicode-window-owner-id=${windowOwnerId}`,
         `--minicode-window-instance-id=${windowInstanceId}`,
+        ...(remoteHostId ? [`--minicode-remote-host-id=${remoteHostId}`] : []),
       ],
     },
   });
-  const record = { window: mainWindow, webContents: mainWindow.webContents, windowOwnerId, windowInstanceId, windowBindingToken, initialNavigation: restoreLastConversation ? null : { conversationId },
+  const record = { window: mainWindow, webContents: mainWindow.webContents, windowOwnerId, windowInstanceId, windowBindingToken,
+    remoteHostId, runtime, initialNavigation: restoreLastConversation ? null : { conversationId },
     nativeCloseAttempt: false, requestedReload: null, unloadIntent: null };
   mainWindows.set(record.webContents, record);
 

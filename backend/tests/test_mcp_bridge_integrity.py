@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import store_result_events
 from backend.llm.base import ToolCallEvent
-from backend.mcp.client import MCPCallResult, MCPToolDef
+from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef, MCPServerCapabilities
 from backend.mcp.registry import MCPToolProxy, MCPToolRegistry
 from backend.tools.mcp_tools import (
     ListMcpPromptsTool,
@@ -52,6 +53,13 @@ class _CatalogClient:
     async def list_prompts(self) -> list[SimpleNamespace]:
         return await self._list()
 
+    async def list_all_resource_items(self, *, templates=False):
+        if self.fail:
+            raise ConnectionError("catalog unavailable")
+        entries = await self._list()
+        return [({"uriTemplate": item.uri_template} if templates else {"uri": item.uri})
+            | {"name": item.name, "mimeType": item.mime_type} for item in entries]
+
 
 class _Manager:
     def __init__(self, clients: list[tuple[str, object]]) -> None:
@@ -89,6 +97,13 @@ class _Manager:
 def test_mcp_catalog_listing_reports_server_failures(tool_type, entry, expected) -> None:
     failed = _CatalogClient(fail=True)
     only_failure = asyncio.run(tool_type(_Manager([("broken", failed)])).execute({}))
+    if tool_type in {ListMcpResourcesTool, ListMcpResourceTemplatesTool}:
+        assert not only_failure.is_error
+        assert json.loads(only_failure.native_tool_output) == {"resources" if tool_type is ListMcpResourcesTool else "resourceTemplates": []}
+        partial = asyncio.run(tool_type(_Manager([("working", _CatalogClient(entry)), ("broken", failed)])).execute({}))
+        assert not partial.is_error and expected in partial.native_tool_output
+        assert "Unavailable servers" not in partial.content
+        return
     assert only_failure.is_error
     assert "broken: RuntimeError: catalog unavailable" in only_failure.content
 
@@ -103,9 +118,9 @@ def test_mcp_catalog_listing_reports_server_failures(tool_type, entry, expected)
 
 def test_empty_mcp_resource_is_a_successful_read() -> None:
     class _EmptyResourceClient:
-        async def read_resource(self, uri: str) -> list[dict[str, str]]:
+        async def read_resource_result(self, uri: str) -> dict:
             assert uri == "docs://empty"
-            return [{"uri": uri, "text": ""}]
+            return {"contents": [{"uri": uri, "text": ""}]}
 
     result = asyncio.run(
         ReadMcpResourceTool(_Manager([("docs", _EmptyResourceClient())])).execute(
@@ -113,7 +128,7 @@ def test_empty_mcp_resource_is_a_successful_read() -> None:
         )
     )
     assert not result.is_error
-    assert result.content == "Resource docs/docs://empty is empty."
+    assert json.loads(result.native_tool_output) == {"server": "docs", "uri": "docs://empty", "contents": [{"uri": "docs://empty", "text": ""}]}
 
 
 def test_mcp_resource_read_requires_server_and_keeps_binary_content(tmp_path) -> None:
@@ -122,12 +137,12 @@ def test_mcp_resource_read_requires_server_and_keeps_binary_content(tmp_path) ->
             self.text = text
             self.calls = 0
 
-        async def read_resource(self, uri: str) -> list[dict[str, str]]:
+        async def read_resource_result(self, uri: str) -> dict:
             self.calls += 1
-            return [
+            return {"contents": [
                 {"uri": uri, "text": self.text},
                 {"uri": uri, "blob": "AQID", "mimeType": "application/octet-stream"},
-            ]
+            ]}
 
     first = _ResourceClient("wrong server")
     second = _ResourceClient("right server")
@@ -217,19 +232,25 @@ def test_mcp_binary_artifact_raw_response_preserves_bytes_and_owner(tmp_path) ->
 
 
 def test_mcp_resource_listing_exposes_server_cursor() -> None:
-    class _PagedClient:
-        async def list_resources_page(self, cursor=None):
-            if cursor is None:
-                return [SimpleNamespace(uri="docs://first", name="First", mime_type="text/plain")], "page-2"
-            assert cursor == "page-2"
-            return [SimpleNamespace(uri="docs://second", name="Second", mime_type="text/plain")], None
+    class _PagedClient(MCPClient):
+        def __init__(self):
+            super().__init__("docs")
+            self._connected = True
+            self._server_capabilities = MCPServerCapabilities(resources=True)
+
+        async def _request(self, method, params=None):
+            assert method == "resources/list"
+            if params is None:
+                return {"resources": [{"uri": "docs://first", "name": "First"}], "nextCursor": "page-2"}
+            assert params == {"cursor": "page-2"}
+            return {"resources": [{"uri": "docs://second", "name": "Second"}]}
 
     tool = ListMcpResourcesTool(_Manager([("docs", _PagedClient())]))
-    first = asyncio.run(tool.execute({}))
+    first = asyncio.run(tool.execute({"server": "docs"}))
     second = asyncio.run(tool.execute({"server": "docs", "cursor": "page-2"}))
-    assert "Next cursor: page-2 | Server: docs" in first.content
+    assert json.loads(first.native_tool_output)["nextCursor"] == "page-2"
     assert "docs://second" in second.content
-    assert "Next cursor" not in second.content
+    assert "nextCursor" not in json.loads(second.native_tool_output)
 
 
 def test_mcp_notification_read_reports_a_failed_queue() -> None:

@@ -69,7 +69,7 @@ describe("contextPayload native attachments", () => {
     ], "session-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8787/api/workspace/raw?path=docs%2Fproblem.png",
+      new URL("http://127.0.0.1:8787/api/workspace/raw?path=docs%2Fproblem.png"),
       { headers: { "X-Test": "1" } },
     );
     expect(mocks.uploadAttachment).toHaveBeenCalledOnce();

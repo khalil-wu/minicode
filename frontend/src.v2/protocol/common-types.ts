@@ -105,10 +105,12 @@ export type CommonClientCommandType =
 
 export type McpTransport = "stdio" | "sse" | "http" | "ws";
 
-export type McpEnvVarReference = string | { name: string; source: string };
+export type McpEnvVarReference = string | { name: string; source: "local" | "remote" };
 
 interface McpServerMutationCommon {
   name: string;
+  environment_id?: string;
+  enabled?: boolean;
   auto_start: boolean;
   startup_timeout_sec?: number;
   tool_timeout_sec?: number;
@@ -138,6 +140,8 @@ export type McpServerMutationPayload = McpServerMutationCommon & (
       url: string;
       headers?: Record<string, string>;
       headers_helper?: string;
+      bearer_token_env_var?: string;
+      env_http_headers?: Record<string, string>;
       oauth?: { client_id?: string; callback_port?: number };
       command?: never;
       args?: never;
@@ -248,6 +252,9 @@ export interface McpStatusEvent {
     headers_helper?: string;
     oauth?: { client_id?: string; callback_port?: number };
     env_vars?: Array<string | { name?: string; source?: string }>;
+    environment_id?: string;
+    bearer_token_env_var?: string;
+    env_http_headers?: Record<string, string>;
     cwd?: string;
     url?: string;
     auto_start?: boolean;
@@ -506,6 +513,19 @@ export interface ProviderOAuthProgressEvent {
   message: string;
 }
 
+export interface NetworkPolicyAmendment {
+  host: string;
+  action: "allow" | "deny";
+}
+
+export interface NetworkApprovalContext {
+  host: string;
+  protocol: "http" | "https" | "socks5_tcp" | "socks5_udp";
+}
+
+export type NetworkApprovalDecision = "approved" | "approved_for_session" | "abort"
+  | { network_policy_amendment: { network_policy_amendment: NetworkPolicyAmendment } };
+
 export interface ControlCanUseToolRequest {
   subtype: "can_use_tool";
   tool_name: string;
@@ -517,7 +537,9 @@ export interface ControlCanUseToolRequest {
   cwd?: string;
   reason?: string | null;
   proposed_execpolicy_amendment?: string[] | null;
-  available_decisions?: Array<"approved" | "abort" | "approved_for_session" | { approved_execpolicy_amendment: { proposed_execpolicy_amendment: string[] } }>;
+  available_decisions?: Array<NetworkApprovalDecision | { approved_execpolicy_amendment: { proposed_execpolicy_amendment: string[] } }>;
+  network_approval_context?: NetworkApprovalContext;
+  proposed_network_policy_amendments?: NetworkPolicyAmendment[];
   diff?: string | Record<string, unknown>;
   source_agent?: string;
   source_thread?: string;

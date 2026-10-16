@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from backend.services.tool_registry_factory import build_tool_registry as _build_tool_registry
 from backend.artifact.store import ArtifactStore
@@ -215,7 +216,7 @@ def test_mcp_resource_template_and_subscription_tools() -> None:
             "uri": "docs://mini/latest",
         })
 
-        assert "Template: docs://{package}/{version}" in listed.content
+        assert json.loads(listed.native_tool_output)["resourceTemplates"][0]["uriTemplate"] == "docs://{package}/{version}"
         assert "Subscribed to MCP resource updates" in subscribed.content
         assert "Subscribed: docs://mini/latest" in notifications.content
         assert "Unsubscribed from MCP resource updates" in unsubscribed.content

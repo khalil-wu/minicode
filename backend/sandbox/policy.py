@@ -227,6 +227,9 @@ class WritableRoot:
 class ResolvedSandboxPolicy:
     enforcement: SandboxEnforcement
     network: NetworkSandboxPolicy
+    enforce_managed_network: bool = False
+    managed_network: Mapping[str, Any] | None = None
+    network_proxy_restricting_sid: str | None = None
     root_access: FileSystemAccessMode | None = None
     full_disk_read: bool = False
     full_disk_write: bool = False
@@ -298,6 +301,14 @@ class SandboxPolicy:
     )
     env_overrides: dict[str, str] = field(default_factory=dict)
     timeout: float | None = None
+    user_home_dir: Path | None = None
+    temporary_directories: tuple[Path, ...] | None = None
+    windows_sandbox_selection: str | None = None
+    use_legacy_landlock: bool = False
+    captured_env: Mapping[str, str] | None = None
+    enforce_managed_network: bool = False
+    managed_network: Mapping[str, Any] | None = None
+    network_proxy_restricting_sid: str | None = None
 
     def __post_init__(self) -> None:
         workspace_root = (
@@ -360,6 +371,8 @@ class SandboxPolicy:
             "shell_environment_policy",
             ShellEnvironmentPolicy.from_mapping(self.shell_environment_policy),
         )
+        if self.captured_env is not None:
+            object.__setattr__(self, "captured_env", dict(self.captured_env))
 
         profile = self.permission_profile
         if profile is None:
@@ -428,12 +441,16 @@ class SandboxPolicy:
 
     def resolve(self, *, cwd: str | Path | None = None) -> ResolvedSandboxPolicy:
         assert self.permission_profile is not None
-        return resolve_permission_profile(
+        resolved = resolve_permission_profile(
             self.permission_profile,
             workspace_roots=self.workspace_roots,
             cwd=_absolute_path(cwd or self.policy_cwd or Path.cwd()),
             protect_workspace_metadata=self.protect_workspace_metadata,
+            user_home_dir=self.user_home_dir,
+            temporary_directories=self.temporary_directories,
         )
+        return replace(resolved, enforce_managed_network=self.enforce_managed_network,
+            managed_network=self.managed_network, network_proxy_restricting_sid=self.network_proxy_restricting_sid)
 
     def with_additional_permissions(
         self,
@@ -912,6 +929,8 @@ def resolve_permission_profile(
     workspace_roots: tuple[Path, ...],
     cwd: Path,
     protect_workspace_metadata: bool = True,
+    user_home_dir: Path | None = None,
+    temporary_directories: tuple[Path, ...] | None = None,
 ) -> ResolvedSandboxPolicy:
     file_system = profile.file_system
     if profile.enforcement is SandboxEnforcement.DISABLED:
@@ -951,7 +970,7 @@ def resolve_permission_profile(
     minimal_access: list[FileSystemAccessMode] = []
     for entry in file_system.entries:
         if entry.path.kind == "glob_pattern":
-            unreadable_globs.append(_resolve_glob(str(entry.path.value), cwd))
+            unreadable_globs.append(_resolve_glob(str(entry.path.value), cwd, user_home_dir=user_home_dir))
             continue
         if entry.path.kind == "path":
             raw_path = Path(entry.path.value)
@@ -971,7 +990,8 @@ def resolve_permission_profile(
                 path = root / entry.path.subpath if entry.path.subpath else root
                 concrete.extend((candidate, entry.access) for candidate in _path_candidates(path))
         elif special is FileSystemSpecialPath.TMPDIR:
-            concrete.append((_absolute_path(tempfile.gettempdir()), entry.access))
+            directories = temporary_directories if temporary_directories is not None else (Path(tempfile.gettempdir()),)
+            concrete.extend((_absolute_path(directory), entry.access) for directory in directories)
         elif special is FileSystemSpecialPath.SLASH_TMP and os.name != "nt":
             concrete.append((Path("/tmp"), entry.access))
 
@@ -1120,7 +1140,7 @@ def _has_structured_network_constraints(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
     return any(
-        value.get(key) not in (None, False, (), [], {})
+        key in value and value[key] is not None
         for key in (
             "allowedDomains",
             "deniedDomains",
@@ -1137,6 +1157,14 @@ def _has_structured_network_constraints(value: Any) -> bool:
             "allow_local_binding",
             "http_port",
             "socks_port",
+            "allowUpstreamProxy",
+            "allow_upstream_proxy",
+            "dangerously_allow_all_unix_sockets",
+            "dangerously_allow_non_loopback_proxy",
+            "enableSocks5",
+            "enableSocks5Udp",
+            "enable_socks5",
+            "enable_socks5_udp",
         )
     )
 
@@ -1399,8 +1427,11 @@ def _ordered_paths(paths: object) -> list[Path]:
     )
 
 
-def _resolve_glob(pattern: str, cwd: Path) -> str:
-    candidate = Path(pattern).expanduser()
+def _resolve_glob(pattern: str, cwd: Path, *, user_home_dir: Path | None = None) -> str:
+    if user_home_dir is not None and (pattern == "~" or pattern.startswith(("~/", "~\\"))):
+        candidate = user_home_dir / pattern[2:] if len(pattern) > 1 else user_home_dir
+    else:
+        candidate = Path(pattern).expanduser()
     if candidate.is_absolute():
         return str(candidate)
     return str(cwd / candidate)

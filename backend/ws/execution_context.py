@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from backend.agent.environment_selection import ThreadEnvironments
     from backend.ws.handler import WebSocketSession
 
 
@@ -93,10 +94,46 @@ class ExecutionUnload:
 
 
 @dataclass(eq=False)
+class ConversationThreadRuntime:
+    """Thread-owned capabilities shared by WS and detached entry points."""
+
+    store_identity: str
+    conversation_id: str
+    thread_environments: ThreadEnvironments | None = None
+    network_approval_service: Any | None = None
+    environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
+
+    def retain_turn(self, task: asyncio.Task[Any], cleanup_tasks: set[asyncio.Task[Any]]) -> None:
+        self._turn_borrowers[task] = cleanup_tasks
+
+    def pending_tasks(self) -> frozenset[asyncio.Task[Any]]:
+        pending = set()
+        for task, cleanup in tuple(self._turn_borrowers.items()):
+            active = {borrower for borrower in cleanup if not borrower.done()}
+            if not task.done():
+                active.add(task)
+            if active:
+                pending.update(active)
+            else:
+                self._turn_borrowers.pop(task)
+        return frozenset(pending)
+
+    async def close_environments(self) -> None:
+        while pending := self.pending_tasks():
+            await asyncio.wait(pending)
+        async with self.environment_lock:
+            if self.thread_environments is not None:
+                await self.thread_environments.aclose()
+                self.thread_environments = None
+
+
+@dataclass(eq=False)
 class ConversationExecutionContext:
     conversation_id: str
     owner: ExecutionHost
     unloading: ThreadUnloadingState
+    thread_runtime: ConversationThreadRuntime
     _unload: ExecutionUnload | None = field(default=None, init=False, repr=False)
     _admission_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
     _lifecycle_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
@@ -135,6 +172,7 @@ class ConversationExecutionContext:
         # and their borrowed callbacks. These are references to those objects,
         # not a second registry of task ids or cancellation state.
         tasks = self._admission_tasks | self._lifecycle_tasks | self.host.run_manager.lifecycle_cleanup_tasks_for(self.conversation_id)
+        tasks.update(self.thread_runtime.pending_tasks())
         tasks.update(self.host.run_manager.notification_tasks_for(self.conversation_id))
         from backend.agent.runtime import default_runtime_if_initialized
 
@@ -153,6 +191,7 @@ class ConversationExecutionRegistry:
     def __init__(self) -> None:
         self._hosts: dict[str, ExecutionHost] = {}
         self._conversations: dict[str, ConversationExecutionContext] = {}
+        self._thread_runtimes: dict[tuple[str, str], ConversationThreadRuntime] = {}
         self._admissions: dict[asyncio.Task[Any], ExecutionAdmission] = {}
 
     def retain_admission(self, session: WebSocketSession, task: asyncio.Task[Any]) -> ExecutionAdmission:
@@ -230,13 +269,37 @@ class ConversationExecutionRegistry:
             current.owner.origin.require_same_window(window_instance_id=session.window_instance_id, window_owner_id=session.window_owner_id)
             current.unloading.sync(has_subscribers=has_subscribers, is_active=is_active, now=now)
             return current
+        runtime = self.thread_runtime(session.conversation_repo.store_instance_id(), conversation_id)
         context = ConversationExecutionContext(conversation_id, self.retain_host(session), ThreadUnloadingState.create(
-            has_subscribers=has_subscribers, is_active=is_active, now=now, delay=unload_delay))
+            has_subscribers=has_subscribers, is_active=is_active, now=now, delay=unload_delay), runtime)
         self._conversations[conversation_id] = context
         return context
 
     def context_for(self, conversation_id: str) -> ConversationExecutionContext | None:
         return self._conversations.get(conversation_id)
+
+    def thread_runtime(self, store_identity: str, conversation_id: str) -> ConversationThreadRuntime:
+        key = store_identity, conversation_id
+        runtime = self._thread_runtimes.get(key)
+        if runtime is None:
+            runtime = ConversationThreadRuntime(store_identity, conversation_id)
+            self._thread_runtimes[key] = runtime
+        return runtime
+
+    def thread_runtime_for(self, store_identity: str, conversation_id: str) -> ConversationThreadRuntime | None:
+        return self._thread_runtimes.get((store_identity, conversation_id))
+
+    def thread_runtimes(self) -> tuple[ConversationThreadRuntime, ...]:
+        return tuple(self._thread_runtimes.values())
+
+    def release_thread_runtime(self, runtime: ConversationThreadRuntime) -> bool:
+        key = runtime.store_identity, runtime.conversation_id
+        if self._thread_runtimes.get(key) is not runtime:
+            return False
+        if runtime.thread_environments is not None or runtime.pending_tasks():
+            raise RuntimeError("Thread environment runtime still owns live resources")
+        self._thread_runtimes.pop(key)
+        return True
 
     def is_current(self, context: ConversationExecutionContext) -> bool:
         return self._conversations.get(context.conversation_id) is context

@@ -12,6 +12,7 @@ from backend.agent.loop_session import AgentLoopSessionContext
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.query_engine import QueryEngine, QuerySubmission
 from backend.agent.state import AgentState
+from backend.config import load_config_layer_stack
 from backend.llm.base import StreamEvent, StreamEventType, ToolCallEvent
 from backend.llm.openai_adapter import OpenAIAdapter
 from backend.services.llm_adapter_factory import create_session_llm
@@ -187,12 +188,20 @@ async def test_selection_during_step_auth_refresh_wins(tmp_path, monkeypatch):
     async def behavior(*args):
         return None
     fixture = setup(tmp_path, monkeypatch, behavior)
+    # Bootstrap captures a real turn stack when an SDK caller has none. This
+    # race begins after that accepted capture, so retain its exact snapshot.
+    fixture.owner.model_execution = replace(fixture.owner.model_execution,
+        config=replace(fixture.owner.model_execution.config, config_layer_stack=load_config_layer_stack(cwd=tmp_path)))
     original = fixture.owner.model_execution
     newer = replace(original, thinking_level="high", config=replace(original.config,
         llm=replace(original.config.llm, reasoning_effort="high")))
     seen = []
+    owners = []
     async def refresh(snapshot, force, task):
+        assert task is fixture.owner.model_owner_task and not task.done()
+        assert force is False
         seen.append(snapshot)
+        owners.append((snapshot.provider, snapshot.model, task))
         if snapshot is original:
             fixture.owner.model_execution = newer
             await asyncio.sleep(0)
@@ -202,6 +211,9 @@ async def test_selection_during_step_auth_refresh_wins(tmp_path, monkeypatch):
     state, _ = await run_query(fixture, tmp_path)
     assert state.terminal_status == "completed"
     assert seen == [original, newer]
+    assert all(actual is expected for actual, expected in zip(seen, (original, newer)))
+    assert [(provider, model) for provider, model, _ in owners] == [("custom", "model-a"), ("custom", "model-a")]
+    assert owners[0][2] is owners[1][2]
     assert fixture.owner.model_execution is newer
     assert fixture.owner.active_model_execution is newer
 

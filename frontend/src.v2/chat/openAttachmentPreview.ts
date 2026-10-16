@@ -7,6 +7,7 @@ import {
   workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
 import { fetchWorkspaceFilePreview } from "../protocol/workspace";
+import { workspaceFileOwner, workspaceRequestOwner } from "../protocol/workspace-owner";
 import { conversationBrowserRawUrl, fetchConversationBrowserPreview } from "../protocol/conversation-browser";
 import {
   commandResultSucceeded,
@@ -321,7 +322,9 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
   }
 
   const controller = lease.controller!;
-  void fetchWorkspaceFilePreview(path, workspaceRoot, controller.signal)
+  const workspaceOwner = workspaceRequestOwner();
+  const owner = workspaceOwner ? { ...workspaceOwner, conversation_id: conversationId } : undefined;
+  void fetchWorkspaceFilePreview(path, workspaceRoot, controller.signal, owner)
     .then((preview) => {
       if (!isPreviewRequestCurrent(lease)) return;
       const mediaType = normalizedMediaType(preview.media_type || target.mediaType)
@@ -338,7 +341,7 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
         contentChars: preview.content_chars,
         truncated: preview.truncated,
         url: preview.has_native && supportsNativePreview(mediaType)
-          ? workspaceRawResourceUrlWithToken(path, workspaceRoot)
+          ? workspaceRawResourceUrlWithToken(preview.path_uri ?? path, workspaceRoot, undefined, workspaceFileOwner(preview) ?? owner)
           : undefined,
         source: "workspace",
         sourcePath: preview.path,

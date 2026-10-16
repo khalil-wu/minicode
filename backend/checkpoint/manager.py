@@ -35,9 +35,15 @@ class CheckpointManager:
         conversation_id: str = "",
         session_id: str = "",
         tool_call_id: str = "",
+        execution_context=None,
     ) -> CheckpointRecord | None:
         if tool_name not in WRITE_TOOL_NAMES:
             return None
+
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(execution_context):
+            return await self._snapshot_executor(tool_name=tool_name, args=args, conversation_id=conversation_id,
+                session_id=session_id, tool_call_id=tool_call_id, execution_context=execution_context)
 
         root = Path(workspace_root or Path.cwd()).resolve()
         paths = self._paths_for_tool(tool_name, args)
@@ -83,10 +89,14 @@ class CheckpointManager:
         )
         return self._store.save(record)
 
-    async def rewind(self, checkpoint_id: str) -> CheckpointRecord:
+    async def rewind(self, checkpoint_id: str, *, execution_context=None) -> CheckpointRecord:
         record = self._store.get(checkpoint_id)
         if record is None:
             raise ValueError(f"Checkpoint '{checkpoint_id}' was not found.")
+
+        from backend.workspace.executor_service import uses_executor_io
+        if "environment_id" in record.metadata or uses_executor_io(execution_context):
+            return await self._rewind_executor(record, execution_context)
 
         root = Path(record.workspace_root).resolve()
         # cc's applySnapshot restores every tracked file to the chosen point.
@@ -130,6 +140,88 @@ class CheckpointManager:
             self._restore_files, root, list(restore_files.values())
         )
         return replace(record, paths=[snapshot.path for snapshot in restore_files.values()], files=list(restore_files.values()))
+
+    async def _snapshot_executor(self, *, tool_name, args, conversation_id, session_id, tool_call_id, execution_context):
+        from backend.workspace.executor_service import ExecutorWorkspaceService
+
+        paths = self._paths_for_tool(tool_name, args)
+        if not paths:
+            return None
+        record_id = f"chk_{checkpoint_owner_key(conversation_id)}_{uuid.uuid4().hex[:12]}"
+        async with ExecutorWorkspaceService(execution_context) as service:
+            targets = list(dict.fromkeys(service.resolve(value) for value in paths))
+            files = []
+            async with service.mutate(targets):
+                for path in targets:
+                    value = await service.metadata(path)
+                    if value is not None and not value["isFile"]:
+                        raise IsADirectoryError(path.uri)
+                    blob = None
+                    existed = value is not None and value["isFile"]
+                    if existed:
+                        raw = await service.read_bytes(path, limit=value["size"])
+                        blob = hashlib.sha256(f"{record_id}:{path.uri}".encode("utf-8")).hexdigest()
+                        await to_thread_cancel_safe(self._store.write_blob, blob, raw)
+                    files.append(CheckpointFileSnapshot(path=service.display(path), existed=existed,
+                        encoding="binary", blob=blob, environment_id=service.scope.environment_id, path_uri=path.uri))
+            record = CheckpointRecord(id=record_id, conversation_id=conversation_id, session_id=session_id,
+                tool_call_id=tool_call_id, tool_name=tool_name, workspace_root=service.cwd.uri,
+                paths=[item.path for item in files], files=files, metadata={
+                    "environment_id": service.scope.environment_id, "cwd_uri": service.cwd.uri,
+                    "args": {key: value for key, value in args.items() if key not in {"content", "patch"}}})
+            return await to_thread_cancel_safe(self._store.save, record)
+
+    async def _rewind_executor(self, record, execution_context):
+        from backend.workspace.executor_service import ExecutorWorkspaceService, record_executor_file_hash
+
+        async with ExecutorWorkspaceService(execution_context) as service:
+            record = self._qualify_executor_record(record, service)
+            if record.metadata["environment_id"] != service.scope.environment_id or service.resolve(record.workspace_root) != service.cwd:
+                raise ValueError("Checkpoint does not belong to the accepted execution environment and workspace.")
+            restore = {service.resolve(item.path_uri): item for item in record.files}
+            records = self._store.list_for_conversation(record.conversation_id, limit=None, strict=True) if record.conversation_id else []
+            ordered = sorted({item.id: item for item in [*records, record]}.values(), key=lambda item: (item.created_at, item.id))
+            chosen = next(index for index, item in enumerate(ordered) if item.id == record.id)
+            for newer in ordered[chosen + 1:]:
+                if "environment_id" not in newer.metadata:
+                    if service.context.turn_environment.is_remote or service.resolve(newer.workspace_root) != service.cwd:
+                        continue
+                    newer = self._qualify_executor_record(newer, service)
+                if newer.metadata.get("environment_id") != service.scope.environment_id or service.resolve(newer.workspace_root) != service.cwd:
+                    continue
+                for item in newer.files:
+                    restore.setdefault(service.resolve(item.path_uri), item)
+            decoded = []
+            for path, item in restore.items():
+                if not service.scope.resolve_access(path.uri).can_write:
+                    raise PermissionError(f"Checkpoint restore write denied by current execution scope: {path.uri}")
+                raw = await asyncio.to_thread(self._snapshot_bytes, item) if item.existed else None
+                decoded.append((path, item, raw))
+            async with service.mutate(list(restore)):
+                for path, item, raw in decoded:
+                    if item.existed:
+                        await service.write_bytes(path, raw)
+                    elif await service.metadata(path) is not None:
+                        await service.remove(path)
+                    record_executor_file_hash(execution_context, path.uri, None)
+            return replace(record, paths=[item.path for item in restore.values()], files=list(restore.values()))
+
+    @staticmethod
+    def _qualify_executor_record(record, service):
+        if "environment_id" in record.metadata:
+            return record
+        if service.context.turn_environment.is_remote or service.resolve(record.workspace_root) != service.cwd:
+            raise ValueError("Legacy checkpoint has no identity for this execution environment.")
+        return replace(record, workspace_root=service.cwd.uri,
+            metadata={**record.metadata, "environment_id": service.scope.environment_id, "cwd_uri": service.cwd.uri},
+            files=[replace(item, environment_id=service.scope.environment_id, path_uri=service.resolve(item.path).uri) for item in record.files])
+
+    def _snapshot_bytes(self, snapshot):
+        if snapshot.blob:
+            return self._store.read_blob(snapshot.blob)
+        if snapshot.content is None:
+            raise CheckpointCorruptError(f"Checkpoint does not contain restorable content for: {snapshot.path}")
+        return base64.b64decode(snapshot.content, validate=True) if snapshot.encoding == "base64" else snapshot.content.encode(snapshot.encoding)
 
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:
         return self._store.get(checkpoint_id)

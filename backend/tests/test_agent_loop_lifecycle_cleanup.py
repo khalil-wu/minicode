@@ -464,6 +464,7 @@ def test_real_registry_timeout_late_mutation_keeps_shared_owner_and_other_sessio
         return ""
 
     monkeypatch.setattr("backend.agent.context.build_git_status_context_async", no_repository_probe)
+    monkeypatch.setattr("backend.agent.environment_prompt.build_environment_git_status", no_repository_probe)
 
     from backend import sdk
 

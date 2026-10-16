@@ -291,6 +291,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           headers_helper?: string;
           oauth?: { client_id?: string; callback_port?: number };
           env_vars?: Array<string | { name?: string; source?: string }>;
+          environment_id?: string;
+          bearer_token_env_var?: string;
+          env_http_headers?: Record<string, string>;
           cwd?: string;
           url?: string;
           auto_start?: boolean;
@@ -342,6 +345,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
             callbackPort: srv.oauth.callback_port,
           } : undefined,
           envVars: srv.env_vars,
+          environmentId: srv.environment_id,
+          bearerTokenEnvVar: srv.bearer_token_env_var,
+          envHttpHeaders: srv.env_http_headers,
           cwd: srv.cwd,
           url: srv.url,
           autoStart: srv.auto_start,

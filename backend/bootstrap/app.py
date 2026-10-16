@@ -64,6 +64,7 @@ class AppBootstrap:
         self._status_cache_ttl_seconds = status_cache_ttl_seconds
 
         self.config: AppConfig | None = None
+        self.environment_manager: Any | None = None
         self.mcp_manager: Any | None = None
         self._mcp_managers: dict[str, Any] = {}
         self._mcp_start_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -90,6 +91,12 @@ class AppBootstrap:
             to_thread_cancel_safe(refresh_native_os_sandbox)
         )
         self.config = load_config()
+        from backend.config import STATE_ROOT
+        from backend.environments.manager import EnvironmentManager
+        from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+
+        self.environment_manager = EnvironmentManager(STATE_ROOT,
+            local_backend=LocalExecutionEnvironmentBackend())
 
         try:
             from backend.ws.client_command_log import cleanup_stale_client_command_logs
@@ -341,6 +348,12 @@ class AppBootstrap:
             from backend.workspace.project_index_runtime import project_index_runtime
 
             await project_index_runtime.shutdown()
+            if self.environment_manager is not None:
+                for thread in self.ws_manager.execution_contexts.thread_runtimes():
+                    await thread.close_environments()
+                    self.ws_manager.execution_contexts.release_thread_runtime(thread)
+                await self.environment_manager.close()
+                self.environment_manager = None
             try:
                 from backend.lsp.editor import editor_language_servers
                 await editor_language_servers.shutdown()
@@ -753,7 +766,8 @@ class AppBootstrap:
             # Disabled/External/full-disk-write profile. Granular's disabled
             # elicitation category always declines, including empty forms.
             profile = owner.get("mcp_permission_profile")
-            preapproved = profile is not None and (
+            scope = owner.get("mcp_permission_scope")
+            preapproved = scope.has_full_disk_write_access() if scope is not None else profile is not None and (
                 profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}
                 or profile.full_disk_write
             )

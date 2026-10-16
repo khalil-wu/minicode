@@ -1,4 +1,5 @@
 import { pushToast } from "../overlays/ToastContainer";
+import { workspaceHasConversation, workspaceRequestOwner, workspaceRequestPath, workspaceViewRoot } from "../protocol/workspace-owner";
 
 export interface FsEntry {
   name: string;
@@ -243,7 +244,19 @@ export interface BrowserHistoryVisit { id: string; url: string; title: string; v
 export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
 export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
 
+export type RemoteDesktopConnection = { id: string; displayName: string; kind: "ssh" | "wsl"; sshHost?: string; sshPort?: number | null; identity?: string | null; distribution?: string; status?: "connecting" | "connected" | "disconnected" };
+
 interface MiniCodeDesktop {
+  connections?: {
+    list(): Promise<RemoteDesktopConnection[]>;
+    discover(): Promise<{ sshAliases: string[]; wslDistributions: string[] }>;
+    save(connection: Omit<RemoteDesktopConnection, "status">): Promise<RemoteDesktopConnection>;
+    remove(id: string): Promise<void>;
+    connect(id: string): Promise<void>;
+    disconnect(id: string): Promise<void>;
+    open(id: string): Promise<void>;
+    onChanged(callback: (connections: RemoteDesktopConnection[]) => void): () => void;
+  };
   preferences: {
     chooseTaskDirectory(): Promise<DesktopPreferences | null>;
     get(): Promise<DesktopPreferences>;
@@ -373,6 +386,7 @@ declare global {
       apiBaseUrl?: string;
       wsBaseUrl?: string;
       runtimeToken?: string;
+      remoteHost?: { id: string; displayName: string; kind: "ssh" | "wsl"; platform: string; home: string; generation: string };
       desktop?: MiniCodeDesktop;
     };
   }
@@ -406,6 +420,10 @@ export const isDesktop = (): boolean =>
 // --- Directory picker ---
 
 export const pickDirectory = async (): Promise<string | null> => {
+  if (runtime()?.remoteHost) {
+    const { showPrompt } = await import("../overlays/DialogService");
+    return await showPrompt({ title: "选择远端文件夹", message: runtime()!.remoteHost!.displayName, defaultValue: runtime()!.remoteHost!.home });
+  }
   try {
     return (await desktop()?.pickDirectory()) ?? null;
   } catch {
@@ -413,8 +431,13 @@ export const pickDirectory = async (): Promise<string | null> => {
   }
 };
 
-export const pickWorkspaceDirectory = async (): Promise<string | null> =>
-  (await desktop()?.pickWorkspaceDirectory()) ?? null;
+export const pickWorkspaceDirectory = async (): Promise<string | null> => {
+  if (runtime()?.remoteHost) {
+    const path = await pickDirectory();
+    return path ? await desktop()!.trustWorkspace(path) : null;
+  }
+  return (await desktop()?.pickWorkspaceDirectory()) ?? null;
+};
 
 export const trustWorkspace = async (path: string): Promise<string | null> =>
   (await desktop()?.trustWorkspace(path)) ?? null;
@@ -422,6 +445,12 @@ export const trustWorkspace = async (path: string): Promise<string | null> =>
 // --- Filesystem ---
 
 export const fsReadFileInfo = async (path: string): Promise<FsFileResponse | null> => {
+  const owner = workspaceRequestOwner();
+  const root = workspaceViewRoot();
+  if (owner || workspaceHasConversation()) {
+    const { readWorkspaceFile } = await import("../protocol/workspace");
+    return await readWorkspaceFile(workspaceRequestPath(path, root), root, undefined, owner);
+  }
   const fs = desktop()?.fs;
   if (!fs) return null;
   return await fs.readFile(path);
@@ -485,6 +514,15 @@ export const fsListTreeResult = async (path: string): Promise<FsListTreeResult> 
   // A filesystem permission/missing-root failure must reach FileTree's error
   // state. Returning an empty tree turns "access denied" into a false empty
   // workspace and prevents the user from retrying the real operation.
+  const owner = workspaceRequestOwner(), root = workspaceViewRoot();
+  if (owner || workspaceHasConversation()) {
+    const { listWorkspaceTree } = await import("../protocol/workspace");
+    const tree = await listWorkspaceTree(root, workspaceRequestPath(path, root), owner);
+    return { workspaceRoot: root, requestedPath: path, entries: (tree?.children ?? []).map(entry => ({
+      name: entry.name, path: root.replace(/[/\\]+$/, "") + "/" + entry.path,
+      isDirectory: entry.is_dir, sizeBytes: entry.size_bytes ?? undefined, modifiedAt: entry.modified_at,
+    })) };
+  }
   return normalizeFsListTreeResult(path, await desktop()?.fs.listTree(path));
 };
 
@@ -497,6 +535,11 @@ export const fsSearchFiles = async (
   limit = 20,
   kind: "file" | "folder" | "all" = "file",
 ): Promise<FsSearchResult[]> => {
+  const owner = workspaceRequestOwner();
+  if (owner || workspaceHasConversation()) {
+    const { searchWorkspaceFiles } = await import("../protocol/workspace");
+    return await searchWorkspaceFiles(rootPath, query, limit, kind, owner);
+  }
   const fs = desktop()?.fs;
   const result = kind !== "all" && fs?.searchFilesByKind
     ? await fs.searchFilesByKind(rootPath, query, limit, kind)

@@ -268,6 +268,8 @@ class CapabilityRegistry:
 
         spec = self.get_tool_spec(name)
         policy_available = active_policy.is_available(spec)
+        if tool.requires_execution_environment and not active_policy.advertise_environment_tools:
+            policy_available = False
         direct = policy_available and active_policy.is_directly_visible(spec)
         denied = False
         level = None
@@ -484,6 +486,8 @@ class CapabilityRegistry:
         for name, tool in self._tools.items():
             spec = self.get_tool_spec(name)
             direct = active_policy.is_directly_visible(spec)
+            if tool.requires_execution_environment and not active_policy.advertise_environment_tools:
+                direct = False
             if not direct:
                 continue
             exposure = spec.exposure if spec else "core"

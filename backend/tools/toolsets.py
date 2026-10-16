@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any, Iterable
+import json
 
 from backend.tools.contracts import ToolSpec
 
@@ -120,6 +122,16 @@ class ToolsetPolicy:
     nested_surface: bool = False
     supports_search_tool: bool = False
     availability_filters: tuple[ToolAvailabilityFilter, ...] = ()
+    # Ephemeral receiving-step facts. They are rebuilt from the actual
+    # attachment snapshot and never restored from persisted model metadata.
+    environment_count: int | None = None
+    advertise_environment_tools: bool = True
+    windows_shell_guidance: bool | None = None
+    environment_login_parameter: bool | None = None
+    model_messages: Mapping[str, Any] | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "model_messages", deepcopy(self.model_messages))
 
     @classmethod
     def default(cls) -> "ToolsetPolicy":
@@ -348,6 +360,8 @@ class ToolsetPolicy:
                 "code_mode_enabled=1" if self.code_mode_enabled else "code_mode_enabled=0",
                 "nested_surface=1" if self.nested_surface else "nested_surface=0",
                 "search=1" if self.supports_search_tool else "search=0",
+                f"environments={self.environment_count}:{self.advertise_environment_tools}:{self.windows_shell_guidance}:{self.environment_login_parameter}",
+                "model_messages=" + json.dumps(self.model_messages, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
                 *(
                     f"availability[{index}]={clause.cache_key()}"
                     for index, clause in enumerate(self.availability_filters)

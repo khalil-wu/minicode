@@ -10,10 +10,12 @@ import guardianEn from "./guardian.en.json";
 import guardianZh from "./guardian.zh-CN.json";
 import rootEn from "./root.en.json";
 import rootZh from "./root.zh-CN.json";
+import connectionsEn from "./connections.en.json";
+import connectionsZh from "./connections.zh-CN.json";
 import { resolveLocale, type Locale } from "./locale";
 
-const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn };
-const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh };
+const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn };
+const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh };
 export type TranslationKey = keyof typeof en;
 export type TranslationValues = Record<string, string | number>;
 export type Translate = (key: TranslationKey, values?: TranslationValues) => string;

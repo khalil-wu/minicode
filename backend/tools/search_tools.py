@@ -58,6 +58,7 @@ from backend.tools.search_support import (
     _grep_with_ripgrep,)
 
 class GlobFilesTool(BaseTool):
+    requires_execution_environment = True
     """
     Fast file pattern matching tool that works with any codebase size.
     Supports glob patterns like "**/*.js" or "src/**/*.ts"
@@ -151,6 +152,10 @@ class GlobFilesTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_glob_files
+            return await executor_glob_files(self, args, context)
         pattern = args.get("pattern", "")
         directory = args.get("path") or args.get("directory", ".")
         head_limit = _coerce_head_limit(args.get("head_limit"), GLOB_MAX_MATCHES)
@@ -226,6 +231,7 @@ class GlobFilesTool(BaseTool):
 
 
 class GrepFilesTool(BaseTool):
+    requires_execution_environment = True
     """
     在目录中搜索匹配正则表达式的文件内容。
 
@@ -427,6 +433,10 @@ class GrepFilesTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_grep_files
+            return await executor_grep_files(self, args, context)
         pattern = args.get("pattern", "")
         fixed_strings = _as_bool(args.get("fixed_strings", False))
         directory = args.get("path") or args.get("directory", ".")

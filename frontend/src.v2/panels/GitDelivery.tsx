@@ -2,6 +2,7 @@ import { useI18n } from "../i18n";
 import { useEffect, useState } from "react";
 import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, Upload } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
+import { appendWorkspaceOwner } from "../protocol/workspace-owner";
 import { showConfirm } from "../overlays/DialogService";
 import { useAppStore } from "../stores";
 import { openExternal } from "../desktop/runtime";
@@ -34,6 +35,7 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
   const [statusLoading, setStatusLoading] = useState(true);
   const endpoint = new URL("/api/workspace/git/delivery", apiBase());
   endpoint.searchParams.set("workspace_root", workspaceRoot);
+  appendWorkspaceOwner(endpoint);
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();

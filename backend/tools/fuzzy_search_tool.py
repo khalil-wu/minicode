@@ -18,6 +18,7 @@ _WORKSPACE_ROOT_UNSET = object()
 
 
 class FuzzySearchTool(BaseTool):
+    requires_execution_environment = True
     """
     模糊文件搜索工具。
 
@@ -102,6 +103,10 @@ class FuzzySearchTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_fuzzy_search
+            return await executor_fuzzy_search(self, args, context)
         query = args.get("query", "")
         max_results = args.get("max_results", 20)
         include_tests = args.get("include_tests", False)

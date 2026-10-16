@@ -1,0 +1,14 @@
+{
+  "identity": "minicode-network",
+  "protocol": 1,
+  "sourceCommit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "target": "x86_64-pc-windows-msvc",
+  "files": {
+    "LICENSE.openai-codex": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "minicode-network.exe": "f14c6d27630f3791bee6e50578e1eee8506bf0e75ad8f971c407287d7402b9fc",
+    "NOTICE.openai-codex": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+    "source-manifest.json": "c1180c18e04cf0513c33eb805022accefa37d83a9152b32d8054b0ac65ebbf63",
+    "THIRD_PARTY_NOTICES.txt": "024a26d1bcd8659fb03171fe84cdcf8b804c24ec7efc6ab55629834046ec864a"
+  },
+  "managed_network_ready_protocol": 1
+}

@@ -39,10 +39,51 @@ jobs:
           path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
           if-no-files-found: error
 
+  native-network:
+    name: Build pinned Source network runtime (Linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 822e58cc3d666166c7446c5b1ea2e52f5d09594c
+          path: .tmp/codex-src
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - name: Install native network build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev cmake clang
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .tmp/native-network-build/source/codex-rs/target
+          key: ${{ runner.os }}-network-822e58cc-1.95.0-${{ hashFiles('desktop/native-network/**', 'desktop/scripts/prepare-network-runtime.py') }}
+          restore-keys: ${{ runner.os }}-network-822e58cc-1.95.0-
+      - name: Build and verify the pinned Source network runtime
+        run: >-
+          python desktop/scripts/prepare-network-runtime.py
+          --cargo "$(rustup which --toolchain 1.95.0 cargo)"
+          --source-checkout .tmp/codex-src
+          --build-directory .tmp/native-network-build
+          --output-directory backend/network/resources/x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-network-linux-x64
+          path: backend/network/resources/x86_64-unknown-linux-gnu
+          if-no-files-found: error
+
   backend:
     name: Backend protocol and tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    needs: native-execpolicy
+    needs: [native-execpolicy, native-network]
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -60,6 +101,12 @@ jobs:
           path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
       - name: Restore native executable permission
         run: chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-network-linux-x64
+          path: backend/network/resources/x86_64-unknown-linux-gnu
+      - name: Restore native network executable permission
+        run: chmod +x backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -191,7 +238,7 @@ jobs:
   desktop:
     name: Desktop unit and smoke tests
     runs-on: ubuntu-latest
-    needs: native-execpolicy
+    needs: [native-execpolicy, native-network]
     timeout-minutes: 25
     defaults:
       run:
@@ -204,6 +251,12 @@ jobs:
           path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
       - name: Restore native executable permission
         run: chmod +x ../backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-network-linux-x64
+          path: backend/network/resources/x86_64-unknown-linux-gnu
+      - name: Restore native network executable permission
+        run: chmod +x ../backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

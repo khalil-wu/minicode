@@ -872,6 +872,7 @@ describe("EditorPanel", () => {
         "hash-before",
         "first edit",
         "C:\\projects\\demo",
+        undefined,
       );
     });
 
@@ -907,7 +908,7 @@ describe("EditorPanel", () => {
     const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
     expect(editor.value).toBe("中文恢复");
     expect(readWorkspaceFile).toHaveBeenCalledTimes(1);
-    expect(readWorkspaceFile).toHaveBeenCalledWith("saved.txt", workspace);
+    expect(readWorkspaceFile).toHaveBeenCalledWith("saved.txt", workspace, undefined, undefined);
     expect(screen.queryByText("正在加载文件...")).toBeNull();
   });
 
@@ -1048,7 +1049,7 @@ describe("EditorPanel", () => {
       });
     });
     await act(async () => { window.dispatchEvent(new Event("editor:save")); });
-    expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("same.txt", "B old", "B edit", "C:/other");
+    expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("same.txt", "B old", "B edit", "C:/other", undefined);
     await act(async () => resolveFirst({ ok: true, file: { path: "same.txt", content: "A edit", content_hash: "A saved" } }));
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "B edit", original: "B edit", contentHash: "B saved" });
 
@@ -1317,7 +1318,7 @@ describe("EditorPanel", () => {
     const input = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: updated } });
     act(() => window.dispatchEvent(new Event("editor:save")));
-    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenCalledWith(tab.path, "before", updated, "C:\\projects\\demo"));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenCalledWith(tab.path, "before", updated, "C:\\projects\\demo", undefined));
     await waitFor(() => expect(useAppStore.getState().editorTabs[0].original).toBe(updated));
     act(() => input.focus());
     fireEvent.select(input, { target: { selectionStart: updated.indexOf("Changed"), selectionEnd: updated.length } });
@@ -1451,7 +1452,7 @@ describe("EditorPanel", () => {
     expect(renamedModelPath).not.toBe(modelPath);
     expect(decodeURIComponent(new URL(renamedModelPath).pathname)).toBe("/C:/projects/demo/renamed.txt");
     await act(async () => { window.dispatchEvent(new Event("editor:save")); });
-    expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("renamed.txt", "saved hash", "second edit", "C:\\projects\\demo");
+    expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("renamed.txt", "saved hash", "second edit", "C:\\projects\\demo", undefined);
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "second edit", original: "second edit", contentHash: "second hash" });
   });
 
@@ -1494,7 +1495,7 @@ describe("EditorPanel", () => {
     act(() => window.dispatchEvent(new Event("editor:save-all")));
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith("已保存 1 个文件；磁盘冲突：docs/shared.ts；保存失败：src/shared.ts", "error", 6000));
     expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(3);
-    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("docs/shared.ts", "hash-1", "draft-1", "C:\\projects\\demo");
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("docs/shared.ts", "hash-1", "draft-1", "C:\\projects\\demo", undefined);
     const tabs = useAppStore.getState().editorTabs;
     expect(tabs[0]).toMatchObject({ content: "draft-0", original: "draft-0", contentHash: "saved-hash" });
     expect(tabs[1]).toMatchObject({ content: "draft-1", original: "disk-1", contentHash: "hash-1", externalChanged: true });
@@ -1513,13 +1514,13 @@ describe("EditorPanel", () => {
     render(<EditorPanel />);
     await screen.findByTestId("monaco-editor");
     act(() => window.dispatchEvent(new Event("editor:save-all")));
-    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("src/a.ts", "a-hash", "a-draft", "C:\\projects\\demo");
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("src/a.ts", "a-hash", "a-draft", "C:\\projects\\demo", undefined);
     act(() => {
       useAppStore.getState().updateTabContent("src/a.ts", "a-newer");
       useAppStore.getState().renameEditorPath("src", "lib", "C:/projects/demo");
     });
     await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "a-draft", content_hash: "a-saved" } }));
-    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("lib/b.ts", "b-hash", "b-draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("lib/b.ts", "b-hash", "b-draft", "C:\\projects\\demo", undefined));
     await waitFor(() => expect(useAppStore.getState().editorTabs[1].original).toBe("b-draft"));
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "a", path: "lib/a.ts", content: "a-newer", original: "a-draft", contentHash: "a-saved" });
     expect(useAppStore.getState().activeTabPath).toBe("lib/a.ts");
@@ -1538,7 +1539,7 @@ describe("EditorPanel", () => {
     act(() => window.dispatchEvent(new Event("editor:save-all")));
     act(() => useAppStore.getState().setWorkingDirectory("C:/other"));
     await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "a-draft", content_hash: "a-saved" } }));
-    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/b.ts", "b-hash", "b-draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/b.ts", "b-hash", "b-draft", "C:\\projects\\demo", undefined));
     await waitFor(() => expect(editorStateForWorkspace("C:/projects/demo").editorTabs[1].original).toBe("b-draft"));
     expect(useAppStore.getState().workingDirectory).toBe("C:/other");
     expect(useAppStore.getState().editorTabs).toEqual([]);
@@ -1560,7 +1561,7 @@ describe("EditorPanel", () => {
     act(() => window.dispatchEvent(new Event("editor:save-all")));
     expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(1);
     await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "first draft", content_hash: "first-hash" } }));
-    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/a.ts", "first-hash", "newer draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/a.ts", "first-hash", "newer draft", "C:\\projects\\demo", undefined));
     await waitFor(() => expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "pending-single", content: "newer draft", original: "newer draft", contentHash: "latest-hash" }));
     expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(2);
   });

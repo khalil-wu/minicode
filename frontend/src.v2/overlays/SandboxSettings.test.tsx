@@ -3,8 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SandboxSettings } from "./SandboxSettings";
 
-const mocks = vi.hoisted(() => ({ desktop: vi.fn(), fetch: vi.fn(), setup: vi.fn(), inspect: vi.fn() }));
-vi.mock("../desktop/runtime", () => ({ desktop: mocks.desktop }));
+const mocks = vi.hoisted(() => ({ desktop: vi.fn(), runtime: vi.fn(), fetch: vi.fn(), setup: vi.fn(), inspect: vi.fn() }));
+vi.mock("../desktop/runtime", () => ({ desktop: mocks.desktop, runtime: mocks.runtime }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: mocks.inspect }));
 vi.mock("../protocol/api", () => ({
   apiBase: () => "http://sandbox.test",
@@ -149,4 +149,34 @@ it("does not start another status request after unmounting during system authori
   view.unmount();
   await act(async () => setup.resolve({ ok: true }));
   expect(mocks.fetch).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the existing setup action disabled for a remote Windows host and explains its actual scope", async () => {
+  mocks.runtime.mockReturnValue({ remoteHost: { platform: "windows" } });
+  render(<SandboxSettings />);
+  const button = await screen.findByRole("button", { name: "初始化" });
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText("请在远端 Windows 主机上初始化沙箱。")).toBeTruthy();
+  fireEvent.click(button);
+  expect(mocks.setup).not.toHaveBeenCalled();
+});
+
+it("does not show Windows setup for a remote Linux execution host", () => {
+  mocks.runtime.mockReturnValue({ remoteHost: { platform: "linux" } });
+  const view = render(<SandboxSettings />);
+  expect(view.container.textContent).toBe("");
+  expect(mocks.fetch).not.toHaveBeenCalled();
+});
+
+it("requires the current network settings to be confirmed after successful native setup", async () => {
+  const pending = { ...ready, setup_required: false, network_provisioning: {
+    required: true, ready: false, reason: "当前代理配置尚未初始化。", sandbox_home: "D:/actual-network-owner" } };
+  mocks.fetch.mockResolvedValueOnce(response(pending)).mockResolvedValueOnce(response(pending));
+  render(<SandboxSettings />);
+  fireEvent.click(await screen.findByRole("button", { name: "初始化" }));
+  await screen.findByText("Windows 初始化已完成，但默认权限的工具尚不可用。请查看检测详情。");
+  expect(screen.queryByText("已就绪")).toBeNull();
+  expect(screen.getByText(pending.network_provisioning.reason)).toBeTruthy();
+  expect(screen.getByText(pending.network_provisioning.sandbox_home)).toBeTruthy();
+  expect(mocks.inspect).not.toHaveBeenCalled();
 });

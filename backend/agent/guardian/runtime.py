@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+from io import BytesIO
 from dataclasses import dataclass, replace
 from copy import deepcopy
 from pathlib import Path
@@ -11,6 +12,7 @@ from uuid import uuid4
 
 from backend.agent.context import ContextBuilder, clone_context_builder
 from backend.agent.guardian.contract import GuardianReviewError
+from backend.agent.guardian.config import reviewer_permission_profile
 from backend.agent.guardian.context import GuardianCheckpointRecoveryNeeded, GuardianParentCheckpoint
 from backend.agent.guardian.prompt import GuardianPrompt, FOLLOWUP_REMINDER
 from backend.agent.loop_session import AgentLoopSessionContext
@@ -81,6 +83,10 @@ class GuardianContextBuilder(ContextBuilder):
 
     async def prepare_system_prompt(self, state) -> str:
         return self.policy
+
+    async def _ensure_environment_project_instructions(self) -> None:
+        # The reviewer receives the issuer's instruction evidence in its action.
+        return
 
     def _get_project_guidelines(self, *args, **kwargs) -> str:
         # The issuing host supplies applied instruction evidence, and Source
@@ -164,9 +170,23 @@ class GuardianCommandTool(RunCommandTool):
     def check_permission(self, args=None, context=None):
         return PermissionLevel.AUTO
 
+    def capture_exec_policy(self, request, context, permission):
+        if request.argument_values().get("sandbox_permissions", "use_default") != "use_default":
+            raise ValueError("Guardian commands cannot request sandbox escalation")
+        scope = permission.environment_scope
+        if scope is not None:
+            scope = replace(scope, permission_profile=reviewer_permission_profile(scope.permission_profile))
+            cwd = scope.resolve_path(request.argument_values().get("cwd") or scope.cwd_uri)
+            if not scope.resolve_access(cwd.uri).can_read:
+                raise ValueError("Guardian's read-only policy denies the requested working directory")
+        readonly = replace(permission, mode="confirm", approval_policy="never", sandbox_mode="read-only",
+            allow_unsandboxed_commands=False, additional_permissions=None, environment_scope=scope)
+        return super().capture_exec_policy(request, replace(context, permission=readonly,
+            sandbox_policy=self.review_sandbox_policy, allow_network=False), readonly)
+
     def _resolve_cwd(self, cwd, context, *, allow_workspace_escape=False):
         resolved = super()._resolve_cwd(cwd, context, allow_workspace_escape=True)
-        if resolved is not None and not self.review_sandbox_policy.resolve(cwd=resolved).resolve_access(resolved).can_read:
+        if context.turn_environment is None and resolved is not None and not self.review_sandbox_policy.resolve(cwd=resolved).resolve_access(resolved).can_read:
             raise ValueError("Guardian's read-only policy denies the requested working directory")
         return resolved
 
@@ -182,6 +202,7 @@ class GuardianViewImageTool(BaseTool):
     name = "view_image"
     permission = PermissionLevel.AUTO
     read_only = True
+    requires_execution_environment = True
     workspace_path_fields = ("path",)
     description = "View a local image file from the filesystem when visual inspection is needed."
 
@@ -196,16 +217,30 @@ class GuardianViewImageTool(BaseTool):
         from backend.async_cleanup import to_thread_cancel_safe
         from PIL import Image
 
-        path = Path(args["path"]).expanduser()
-        path = path if path.is_absolute() else context.workspace_root / path
-        if not self.review_sandbox_policy.resolve(cwd=context.workspace_root).resolve_access(path).can_read:
-            return ToolResult("Guardian's read-only policy denies this image path", is_error=True)
-        def read_image():
-            with Image.open(path) as loaded:
+        from backend.workspace.executor_service import ExecutorWorkspaceService, uses_executor_io
+
+        if uses_executor_io(context):
+            scope = context.permission.environment_scope
+            readonly_scope = replace(scope, permission_profile=reviewer_permission_profile(scope.permission_profile))
+            readonly = replace(context, permission=replace(context.permission, environment_scope=readonly_scope))
+            async with ExecutorWorkspaceService(readonly) as service:
+                path = service.resolve(args["path"])
+                if not readonly_scope.resolve_access(path.uri).can_read:
+                    return ToolResult("Guardian's read-only policy denies this image path", is_error=True)
+                image_bytes = await service.read_bytes(path)
+                display, image_type = path.native, media_type_for_path(path.name)
+        else:
+            path = Path(args["path"]).expanduser()
+            path = path if path.is_absolute() else context.workspace_root / path
+            if not self.review_sandbox_policy.resolve(cwd=context.workspace_root).resolve_access(path).can_read:
+                return ToolResult("Guardian's read-only policy denies this image path", is_error=True)
+            image_bytes = await to_thread_cancel_safe(path.read_bytes)
+            display, image_type = str(path), media_type_for_path(path)
+        def verify_image():
+            with Image.open(BytesIO(image_bytes)) as loaded:
                 loaded.verify()
-            return path.read_bytes()
-        image_bytes = await to_thread_cancel_safe(read_image)
-        return ToolResult(content=f"Loaded image: {path}", images=[{"data": base64.b64encode(image_bytes).decode("ascii"), "media_type": media_type_for_path(path)}])
+        await to_thread_cancel_safe(verify_image)
+        return ToolResult(content=f"Loaded image: {display}", images=[{"data": base64.b64encode(image_bytes).decode("ascii"), "media_type": image_type}])
 
 
 class GuardianRuntime:
@@ -217,6 +252,7 @@ class GuardianRuntime:
 
         self.config = config
         self.sandbox_policy = sandbox_policy
+        self.workspace_root = sandbox_policy.workspace_root if sandbox_policy is not None else None
         self.id = f"guardian_{uuid4().hex}"
         self.conversation_id = conversation_id
         self.llm = llm_factory(config, model_override=config.llm.model,
@@ -224,7 +260,7 @@ class GuardianRuntime:
         self.model_execution = ModelExecutionSnapshot.capture(config, self.llm)
         self.context_builder = (clone_context_builder(seed_context) if seed_context is not None else GuardianContextBuilder(policy=policy,
             token_budget=config.token_budget, agent_settings=config.agent, llm=self.llm,
-            workspace_root=sandbox_policy.workspace_root, conversation_id=self.id))
+            workspace_root=self.workspace_root, conversation_id=self.id))
         self.context_builder.bind_llm(self.llm)
         self.context_builder.parent_checkpoint = parent_checkpoint
         if seed_context is None and parent_checkpoint is not None:
@@ -238,7 +274,7 @@ class GuardianRuntime:
         registry.register(ToolExecTool())
         registry.register(ToolWaitTool())
         self.context_builder.reviewer_tool_schemas = registry.get_schemas()
-        checker = GuardianPermissionChecker(config.permissions, sandbox_policy.workspace_root)
+        checker = GuardianPermissionChecker(config.permissions, self.workspace_root)
         self.session = AgentSession(llm=self.llm, tool_registry=registry, artifact_store=artifacts,
             permission_checker=checker, agent_settings=config.agent, token_budget=config.token_budget,
             context_builder=self.context_builder)
@@ -258,12 +294,34 @@ class GuardianRuntime:
         owner = RunContext(cancel_event=cancel_event, model_execution=self.model_execution,
             active_model_execution=self.model_execution, hook_manager=HookManager(),
             retain_model=parent_context.run_context.retain_model if parent_context.run_context is not None else None)
+        parent_owner = parent_context.run_context
+        if parent_owner is not None:
+            owner.environment_manager = parent_owner.environment_manager
+            owner.environment_manager_lease = parent_owner.environment_manager_lease
+            owner.user_shell = dict(parent_owner.user_shell)
+            owner.environment_host_mcp_manager = parent_owner.environment_host_mcp_manager
+            owner.environment_host_skill_manager = parent_owner.environment_host_skill_manager
+            if self.session.thread_environments is None and parent_owner.turn_environments is not None:
+                owner.inherited_turn_environments = parent_owner.turn_environments.clone()
+                from backend.agent.environment_selection import EnvironmentConfigState, FailedTurnEnvironment, TurnEnvironment
+
+                owner.environment_requests = tuple(
+                    replace(environment.selection, config=EnvironmentConfigState.ready(replace(environment.config,
+                        permission_profile=reviewer_permission_profile(environment.config.permission_profile)))).into_request()
+                    if isinstance(environment, TurnEnvironment)
+                    else selection.into_request()
+                    for environment, selection in zip(parent_owner.turn_environments.environments,
+                        parent_owner.turn_environments.all_selections())
+                    if not isinstance(environment, FailedTurnEnvironment))
+        owner.session_source = "guardian"
+        owner.is_subagent = True
+        owner.isolated = True
         permission = PermissionContext(mode="confirm", approval_policy="never", sandbox_mode="read-only",
-            conversation_id=self.id, workspace_root=self.sandbox_policy.workspace_root,
+            conversation_id=self.id, workspace_root=self.workspace_root,
             allow_unsandboxed_commands=False, sandbox_auto_allow_commands=True)
-        runtime = AgentLoopSessionContext(workspace_root=self.sandbox_policy.workspace_root, session_id=self.id,
+        runtime = AgentLoopSessionContext(workspace_root=self.workspace_root, session_id=self.id,
             run_context=owner, permission_context=permission, cancel_event=cancel_event)
-        state = AgentState(user_message=prompt.text, conversation_id=self.id, workspace_root=self.sandbox_policy.workspace_root)
+        state = AgentState(user_message=prompt.text, conversation_id=self.id, workspace_root=self.workspace_root)
         metadata = {"query_source": "guardian_review", "conversation_id": self.id, "run_id": f"guardian_review_{uuid4().hex}",
             "parent_turn_id": parent_context.turn_id, "parent_response_id": parent_context.metadata.get("parent_response_id"),
             "internal_session_source": "guardian",

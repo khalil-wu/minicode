@@ -21,6 +21,7 @@ import { getWebSocket } from "../../hooks/useWebSocket";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
+import { workspaceRequestOwner } from "../../protocol/workspace-owner";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
 import { copyText } from "../../lib/clipboard";
@@ -914,7 +915,7 @@ const workspacePathFromHref = (
   return candidate;
 };
 
-const localImageWithinWorkspace = (url: string, workspaceRoot?: string): { path: string; src: string } | null => {
+const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string): { path: string; src: string } | null => {
   if (isWorkspaceRawResourceUrl(url)) {
     try {
       const parsed = new URL(url, window.location.href);
@@ -931,8 +932,10 @@ const localImageWithinWorkspace = (url: string, workspaceRoot?: string): { path:
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
   const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
+  const owner = workspaceRequestOwner();
   return relativePath
-    ? { path: relativePath, src: workspaceRawResourceUrlWithToken(relativePath, workingDirectory) }
+    ? { path: relativePath, src: workspaceRawResourceUrlWithToken(relativePath, workingDirectory, undefined,
+        owner ? { ...owner, conversation_id: conversationId || owner.conversation_id } : undefined) }
     : null;
 };
 
@@ -1224,7 +1227,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   const artifactId = artifactIdFromReference(rawSrc);
   const isConnected = useAppStore((s) => s.isConnected);
   const sessionId = getWebSocket()?.sessionId;
-  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot);
+  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId);
   const blockedLocalImage = !artifactId && Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
   const src = artifactId ? artifactResourceUrl({ artifactId, conversationId, sessionId, source: "artifact", isConnected })
     : workspaceLocalImage?.src ?? rawSrc;

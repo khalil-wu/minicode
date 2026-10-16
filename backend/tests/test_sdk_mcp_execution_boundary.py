@@ -117,6 +117,7 @@ def test_sdk_mcp_timeout_persists_cleanup_receipt(
             self.release: asyncio.Event | None = None
             self.finished: asyncio.Event | None = None
             self.context: ToolExecutionContext | None = None
+            self.source_task: asyncio.Task | None = None
 
         def get_schema(self) -> ToolSchema:
             return ToolSchema(
@@ -133,6 +134,7 @@ def test_sdk_mcp_timeout_persists_cleanup_receipt(
             self.release = asyncio.Event()
             self.finished = asyncio.Event()
             self.context = context
+            self.source_task = asyncio.current_task()
             try:
                 while not self.release.is_set():
                     try:
@@ -145,30 +147,44 @@ def test_sdk_mcp_timeout_persists_cleanup_receipt(
 
     resistant = ResistantTool()
 
-    async def scenario() -> tuple[str, int, int]:
+    async def scenario() -> str:
         output = await _mcp_callable_for_tool(
             resistant,
             server_name="sdk-timeout",
             workspace_root=tmp_path,
         )()
         assert resistant.context is not None
-        owned_at_return = len(resistant.context.pending_cleanup_tasks)
+        original = resistant.source_task
         assert resistant.release is not None
         assert resistant.finished is not None
-        resistant.release.set()
-        await asyncio.wait_for(resistant.finished.wait(), timeout=1.0)
-        for _ in range(100):
-            if not resistant.context.pending_cleanup_tasks:
-                break
-            await asyncio.sleep(0)
-        return output, owned_at_return, len(resistant.context.pending_cleanup_tasks)
+        try:
+            assert original is not None and not original.done()
+            owner = resistant.context.cleanup_tasks_by_call[resistant.context.tool_call_id]
+            assert resistant.context.pending_cleanup_tasks == {owner}
+            assert not owner.done()
+            registry_call = owner.get_coro()
+            while registry_call.cr_code.co_qualname != "CapabilityRegistry.execute":
+                registry_call = registry_call.cr_await
+            assert registry_call.cr_frame.f_locals["execution_task"] is original
+            assert resistant.context.environment_bindings.bound == {}
+            assert resistant.context.run_context is None
+        finally:
+            resistant.release.set()
+            await asyncio.wait_for(resistant.finished.wait(), timeout=1.0)
+            await asyncio.gather(*tuple(resistant.context.pending_cleanup_tasks))
+        await asyncio.wait_for(asyncio.shield(original), timeout=1.0)
+        assert original.result().content == "released"
+        await asyncio.sleep(0)  # Let the actual source's settlement callbacks commit.
+        assert not resistant.context.pending_cleanup_tasks
+        assert resistant.context.tool_call_id not in resistant.context.cleanup_tasks_by_call
+        settled = resistant.context.cleanup_receipts[resistant.context.tool_call_id]
+        assert settled["pending"] == 0 and settled["completed"] is True
+        return output
 
-    output, owned_at_return, owned_after = asyncio.run(scenario())
+    output = asyncio.run(scenario())
 
     assert "timed out" in output
     assert "cleanup: pending/manual recovery required" in output
-    assert owned_at_return == 1
-    assert owned_after == 0
     events = _journal("sdk-timeout", "sdk_resistant", journal_root).read_events()
     receipt = events[-1].payload["cleanup_receipt"]
     assert receipt["pending"] == 1

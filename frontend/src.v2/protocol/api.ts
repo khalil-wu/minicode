@@ -1,6 +1,7 @@
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { safeJsonParse, safeURL } from "../lib/safe-parse";
+import { workspaceRequestPath } from "./workspace-request-path";
 
 const RUNTIME = (globalThis as unknown as {
   __MINICODE_RUNTIME__?: { apiBaseUrl?: string; wsBaseUrl?: string; runtimeToken?: string; windowBindingToken?: string };
@@ -143,11 +144,14 @@ const hmacSha256Bytes = (key: Uint8Array, message: Uint8Array): Uint8Array => {
   return hmac(sha256, key, message);
 };
 
-const workspaceRawToken = (path: string, workspaceRoot: string): string => {
+type WorkspaceRawOwner = { session_id: string; conversation_id: string; environment_id?: string };
+
+const workspaceRawToken = (path: string, workspaceRoot: string, owner?: WorkspaceRawOwner): string => {
   const token = runtimeToken();
   if (!token) return "";
   const expiresAt = Math.floor(Date.now() / 1000) + 300;
-  const payload = `workspace_raw:v2:${workspaceRoot}:${path}:${expiresAt}`;
+  const payload = owner ? `workspace_raw:v3:${owner.session_id}:${owner.conversation_id}:${owner.environment_id ?? ""}:${workspaceRoot}:${path}:${expiresAt}`
+    : `workspace_raw:v2:${workspaceRoot}:${path}:${expiresAt}`;
   const signature = bytesToBase64Url(hmacSha256Bytes(toUtf8Bytes(token), toUtf8Bytes(payload)));
   return `${expiresAt}.${signature}`;
 };
@@ -202,14 +206,21 @@ export const workspaceRawResourceUrlWithToken = (
   path: string,
   workspaceRoot: string,
   base = apiBase(),
+  owner?: WorkspaceRawOwner | null,
 ): string => {
   const url = safeURL(`${base}/api/workspace/raw`, currentHttpOrigin());
   if (!url) {
     return `${base}/api/workspace/raw?path=${encodeURIComponent(path)}&workspace_root=${encodeURIComponent(workspaceRoot)}`;
   }
+  path = owner ? workspaceRequestPath(path, workspaceRoot) : path;
   url.searchParams.set("path", path);
   url.searchParams.set("workspace_root", workspaceRoot);
-  const rawToken = workspaceRawToken(path, workspaceRoot);
+  if (owner) {
+    url.searchParams.set("session_id", owner.session_id);
+    url.searchParams.set("conversation_id", owner.conversation_id);
+    if (owner.environment_id) url.searchParams.set("environment_id", owner.environment_id);
+  }
+  const rawToken = workspaceRawToken(path, workspaceRoot, owner ?? undefined);
   if (rawToken) url.searchParams.set("raw_token", rawToken);
   return url.toString();
 };

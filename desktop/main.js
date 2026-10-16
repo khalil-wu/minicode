@@ -24,6 +24,8 @@ const { setupWindowsSandbox } = require("./windows-sandbox-setup");
 const { popupApplicationMenu } = require("./menu-popup");
 const desktopPreferences = require("./preferences");
 const browserHistory = require("./browser-history");
+const { RemoteDesktop } = require("./remote-desktop");
+let remoteDesktop = null;
 
 // html.to.design capture is an explicitly enabled development aid. Keep the
 // dependency out of the packaged startup path and save captures locally.
@@ -123,8 +125,8 @@ const RENDERER_CSP_DEV = RENDERER_CSP.replace(
   "script-src 'self' 'unsafe-inline' http://localhost:* http://127.0.0.1:*",
 );
 
-function installRendererCspHeaders() {
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+function installRendererCspHeaders(targetSession = session.defaultSession) {
+  targetSession.webRequest.onHeadersReceived((details, callback) => {
     const isDevDocument =
       Boolean(FRONTEND_DEV_URL) && details.url.startsWith(FRONTEND_DEV_URL);
     const isRendererDocument =
@@ -442,7 +444,7 @@ function getBackendRuntimeConfig() {
 
 function getWindowRuntimeConfig(window) {
   const record = windowManager.getWindowRecord(window);
-  return { ...getBackendRuntimeConfig(), windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId, windowBindingToken: record.windowBindingToken };
+  return { ...(record.remoteHostId ? record.runtime : getBackendRuntimeConfig()), windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId, windowBindingToken: record.windowBindingToken };
 }
 
 const windowCleanupTasks = new Map();
@@ -454,7 +456,7 @@ function releaseWindowResources(record, retry = false) {
     desktopLifecycleToken: EMBEDDED_BROWSER_TOKEN };
   embeddedBrowserBridge.releaseWindow(record.windowInstanceId);
   embeddedBrowserManager.releaseWindow(record.windowInstanceId);
-  const cleanupTask = Promise.all([
+  const cleanupTask = record.remoteHostId ? remoteDesktop.releaseWindow(record) : Promise.all([
     ptyManager.releaseWindow(record.windowInstanceId),
     releaseEditorWindow(runtime),
   ]);
@@ -481,7 +483,10 @@ async function launchManagedBackend() {
 }
 
 function publishBackendRuntimeChange(previousRuntime, nextRuntime) {
-  for (const win of windowManager.getMainWindows()) windowManager.getWindowRecord(win).runtime = { ...nextRuntime };
+  for (const win of windowManager.getMainWindows()) {
+    const record = windowManager.getWindowRecord(win);
+    if (!record.remoteHostId) record.runtime = { ...nextRuntime };
+  }
   if (
     previousRuntime.apiBaseUrl === nextRuntime.apiBaseUrl
     && previousRuntime.wsBaseUrl === nextRuntime.wsBaseUrl
@@ -489,6 +494,7 @@ function publishBackendRuntimeChange(previousRuntime, nextRuntime) {
     return;
   }
   for (const win of windowManager.getMainWindows()) {
+    if (windowManager.getWindowRecord(win).remoteHostId) continue;
     win.webContents.send("minicode:runtime:changed", getWindowRuntimeConfig(win));
   }
 }
@@ -993,7 +999,8 @@ windowManager.init({
   frontendDevUrl: FRONTEND_DEV_URL,
   getAppRoot,
   onMainWindowCreated: (mainWindow, record) => {
-    record.runtime = getBackendRuntimeConfig();
+    if (!record.remoteHostId) record.runtime = getBackendRuntimeConfig();
+    else installRendererCspHeaders(mainWindow.webContents.session);
     updater.registerWindow(record.windowInstanceId);
     mainWindow.webContents.on("did-navigate", () => {
       updater.invalidateActivity(record.windowInstanceId, "activity.renderer_navigation");
@@ -1028,6 +1035,12 @@ embeddedBrowserBridge.init({
 });
 
 ipcHandlers.init({
+  getRemoteDesktop: () => {
+    if (!remoteDesktop) remoteDesktop = new RemoteDesktop({ userData: app.getPath("userData"),
+      bridgeEndpoint: process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT, windowManager,
+      browserBridge: embeddedBrowserBridge, log: appendDesktopLog });
+    return remoteDesktop;
+  },
   desktopPreferences,
   onLocaleChanged: buildApplicationMenu,
   browserHistory,
@@ -1148,6 +1161,7 @@ async function drainDesktopResources() {
       desktopCleanupFailed && record.cleanupError ? releaseWindowResources(record, true) : task);
     await Promise.all(pending);
     await ptyManager.killAllSessions();
+    if (remoteDesktop) await remoteDesktop.close();
     await backendSidecar.stopBackendSidecar();
     if (backendSidecar.getBackendProcess()) throw new Error("The backend is still running; rollback data cannot be prepared.");
     const bridgeStop = embeddedBrowserBridge.stop();

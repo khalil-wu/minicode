@@ -14,8 +14,13 @@ from typing import TYPE_CHECKING, Any
 
 from backend.async_cleanup import cancel_and_drain_receipt, retain_cleanup_task
 from backend.llm.errors import sanitize_llm_error_message
+from backend.runtime_env import default_user_shell
 
 if TYPE_CHECKING:
+    from backend.agent.environment_selection import EnvironmentManagerLease, ThreadEnvironments, TurnEnvironmentRequest, TurnEnvironmentSnapshot
+    from backend.environments.manager import EnvironmentManager
+    from backend.mcp.environment_runtime import PreparedEnvironmentCapabilities
+    from backend.ws.execution_context import ConversationThreadRuntime
     from backend.agent.context import ContextBuilder
     from backend.agent.extension_actions import ExtensionExecutionActions
     from backend.agent.message import UserCommand
@@ -48,6 +53,27 @@ class RunContext:
     """Mutable, turn-owned runtime capabilities shared by one agent run."""
 
     lifecycle_runtime: ProviderLifecycleRuntime | None = None
+    environment_manager: EnvironmentManager | None = None
+    environment_manager_lease: EnvironmentManagerLease | None = None
+    environment_requests: tuple[TurnEnvironmentRequest, ...] | None = None
+    inherited_turn_environments: TurnEnvironmentSnapshot | None = None
+    selected_capability_roots: tuple[dict[str, Any], ...] = ()
+    environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    environment_capabilities: PreparedEnvironmentCapabilities | None = None
+    environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
+    environment_host_mcp_manager: Any | None = None
+    environment_host_skill_manager: Any | None = None
+    network_step: Any | None = None
+    network_approval_service: Any | None = None
+    session_source: str = "sdk"
+    isolated: bool = False
+    is_subagent: bool = False
+    thread_environments: ThreadEnvironments | None = None
+    retain_thread_environments: bool = False
+    user_shell: dict[str, str] = field(default_factory=default_user_shell)
+    environment_thread_runtime: ConversationThreadRuntime | None = None
+    initial_turn_environments: TurnEnvironmentSnapshot | None = None
+    turn_environments: TurnEnvironmentSnapshot | None = None
     context_builder: ContextBuilder | None = None
     extension_actions: ExtensionExecutionActions | None = None
     enqueue_extension_followup: Callable[[UserCommand], Any] | None = None
@@ -123,6 +149,45 @@ class RunContext:
     user_stop_receipt: dict[str, Any] | None = None
     user_stop_acceptance: asyncio.Future[None] | None = None
     exec_policy_owner: Any | None = None
+
+    async def capture_turn_environments(self) -> TurnEnvironmentSnapshot:
+        captured = await self.thread_environments.snapshot()
+        previous = self.turn_environments
+        self.turn_environments = captured
+        if self.initial_turn_environments is None:
+            self.initial_turn_environments = captured
+        if previous is not None and previous is not self.initial_turn_environments:
+            await previous.aclose()
+        return captured
+
+    async def close_environment_snapshots(self) -> None:
+        current, initial = self.turn_environments, self.initial_turn_environments
+        self.turn_environments = self.initial_turn_environments = None
+        if current is not None:
+            await current.aclose()
+        if initial is not None and initial is not current:
+            await initial.aclose()
+        if self.inherited_turn_environments is not None:
+            await self.inherited_turn_environments.aclose()
+            self.inherited_turn_environments = None
+        if self.environment_capabilities is not None:
+            self.environment_retirement_tasks.add(self.environment_capabilities.retire(self))
+            self.environment_capabilities = None
+        if self.environment_retirement_tasks:
+            tasks = tuple(self.environment_retirement_tasks)
+            pending_tools = any(not task.done() for task in self.lifecycle_cleanup_tasks)
+            pending_cells = self.code_execution is not None and any(
+                cell.task is not None and not cell.task.done() for cell in self.code_execution.cells.values())
+            if pending_tools or pending_cells:
+                for task in tasks:
+                    self.retain_lifecycle_task(task, label="environment_capabilities_retirement")
+                self.environment_retirement_tasks.difference_update(tasks)
+                return
+            results = await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+            errors = [result for result in results if isinstance(result, Exception)]
+            if errors:
+                raise ExceptionGroup("retired environment capabilities did not close", errors)
+            self.environment_retirement_tasks.difference_update(tasks)
 
     def prepare_turn_owner(self) -> None:
         self.turn_owner_task = asyncio.current_task()

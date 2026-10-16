@@ -1,4 +1,5 @@
 import { useI18n } from "../i18n";
+import { workspaceHasConversation } from "../protocol/workspace-owner";
 import { ContextMenu } from "../components/ContextMenu";
 import {
   Copy,
@@ -119,7 +120,7 @@ export const FileContextMenu = ({
     if (!ok) return;
     if (!continueMenuAction()) return;
     try {
-      if (isDesktop()) {
+      if (isDesktop() && !workspaceHasConversation()) {
         const targetPath = joinWorkspacePath(workingDirectory, menu.path);
         let result = await desktop()?.fs.deletePath(targetPath, menu.isDir, false);
         if (result && "needsConfirmation" in result && result.needsConfirmation) {

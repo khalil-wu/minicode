@@ -55,12 +55,15 @@ def _python_command(script: str) -> str:
 def test_execution_entrypoint_sandbox_coverage_is_explicit() -> None:
     command_tool = Path("backend/tools/command_tool.py").read_text(encoding="utf-8")
     background_manager = Path("backend/terminal/manager.py").read_text(encoding="utf-8")
+    executor_runner = Path("backend/terminal/executor_runner.py").read_text(encoding="utf-8")
     sandbox_runner = Path("backend/sandbox/runner.py").read_text(encoding="utf-8")
     terminal_session = Path("backend/terminal/session.py").read_text(encoding="utf-8")
     mcp_client = Path("backend/mcp/client.py").read_text(encoding="utf-8")
     hook_runners = Path("backend/hooks/runners.py").read_text(encoding="utf-8")
 
-    assert "SandboxRunner(policy)" in command_tool
+    assert "command_runner(policy)" in command_tool
+    assert "return ExecutorCommandRunner(policy)" in executor_runner
+    assert "return SandboxRunner(policy)" in executor_runner
     assert '"sandbox_policy": policy' in command_tool
     assert "runner.run(" in background_manager
     assert "host_command=host_command" in background_manager

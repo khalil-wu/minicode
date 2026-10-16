@@ -117,6 +117,7 @@ class MCPToolProxy(BaseTool):
         client_or_manager: MCPClient | Any,
         artifact_store: ArtifactStore | None = None,
         manager: Any | None = None,
+        prepare_call=None,
     ) -> None:
         self._server_name = server_name
         # Model schema and permission hints must describe the same admitted
@@ -128,6 +129,7 @@ class MCPToolProxy(BaseTool):
         # Prefer the manager reference for dynamic client lookup (reconnection-safe).
         # Fall back to a direct client pointer for backward compatibility.
         self._manager = manager
+        self._prepare_call = prepare_call
         self._static_client: MCPClient | None = client_or_manager if manager is None else None
         self._catalog_revision = (
             int(getattr(manager, "registry_version", 0) or 0)
@@ -187,6 +189,8 @@ class MCPToolProxy(BaseTool):
         ) or "auto"
         self._approval_mode = approval_mode
         self._approval_config = copy.deepcopy(server_config)
+        runtime = getattr(manager, "environment_runtime", None)
+        self._permission_scope = runtime.permission_scope(server_config.environment_id) if runtime is not None else None
         self._plugin_id = server_config.source.removeprefix("plugin:") if server_config is not None and server_config.source.startswith("plugin:") else None
 
         # Source Auto preserves Option<bool>: D=true first, then R=true,
@@ -208,6 +212,15 @@ class MCPToolProxy(BaseTool):
     @property
     def server_name(self) -> str:
         return self._server_name
+
+    @property
+    def environment_id(self) -> str:
+        return self._approval_config.environment_id if self._approval_config is not None else "local"
+
+    @property
+    def permission_scope(self):
+        """The issuing server's captured attachment, retained by this proxy."""
+        return self._permission_scope
 
     @property
     def policy_identity(self) -> str:
@@ -235,7 +248,10 @@ class MCPToolProxy(BaseTool):
         if self._approval_mode == "approve":
             return PermissionLevel.AUTO
         profile = context.captured_mcp_permission_profile if context is not None else None
-        if context is not None and context.approval_policy == "never" and profile is not None:
+        if context is not None and context.approval_policy == "never" and self._permission_scope is not None:
+            if self._permission_scope.has_full_disk_write_access():
+                return PermissionLevel.AUTO
+        elif context is not None and context.approval_policy == "never" and self.environment_id == "local" and profile is not None:
             from backend.sandbox.policy import SandboxEnforcement
 
             if profile.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL} or profile.full_disk_write:
@@ -411,6 +427,8 @@ class MCPToolProxy(BaseTool):
         Tool annotations describe permission risk, not result immutability.
         Every invocation reaches the server so mutable remote state stays fresh.
         """
+        if self._prepare_call is not None:
+            await self._prepare_call(self._server_name)
         if not self._catalog_is_current(context):
             return self._error_result(
                 f"MCP catalog changed for '{self._server_name}'. Refresh tools before calling '{self._tool_def.name}'."
@@ -440,8 +458,7 @@ class MCPToolProxy(BaseTool):
                         "conversation_run_generation"
                     ),
                     "mcp_manager": (
-                        getattr(run_context, "mcp_manager", None)
-                        or self._manager
+                        self._manager or getattr(run_context, "mcp_manager", None)
                     ),
                     "hook_manager": (
                         run_context.hook_manager
@@ -464,8 +481,10 @@ class MCPToolProxy(BaseTool):
                     # Never alone does not preapprove an MCP permission prompt.
                     "mcp_permission_profile": (
                         context.sandbox_policy.resolve(cwd=context.workspace_root)
-                        if context.sandbox_policy is not None else None
+                        if self.environment_id == "local" and self._permission_scope is None
+                        and context.sandbox_policy is not None else None
                     ),
+                    "mcp_permission_scope": self._permission_scope,
                 }
                 request_owner.update({key: metadata[key] for key in ("message_id", "turn_id") if key in metadata})
             call_started = time.monotonic()
@@ -569,17 +588,19 @@ class MCPToolRegistry:
         tool_registry: ToolRegistry,
         artifact_store: ArtifactStore | None = None,
         mcp_manager: Any | None = None,
+        prepare_call=None,
     ) -> None:
         self._tool_registry = tool_registry
         self._artifact_store = artifact_store
         self._mcp_manager = mcp_manager
+        self._prepare_call = prepare_call
         self._server_tools: dict[str, list[str]] = {}
         self._wire_name_owner: dict[str, str] = {}
         self._version = mcp_manager.registry_version if mcp_manager is not None else 0
         tool_registry.mcp_tool_registry = self
 
     def fork(self, tool_registry: ToolRegistry) -> "MCPToolRegistry":
-        clone = MCPToolRegistry(tool_registry, self._artifact_store, self._mcp_manager)
+        clone = MCPToolRegistry(tool_registry, self._artifact_store, self._mcp_manager, self._prepare_call)
         clone._server_tools = {name: list(tools) for name, tools in self._server_tools.items()}
         clone._wire_name_owner = dict(self._wire_name_owner)
         clone._version = self._version
@@ -626,6 +647,7 @@ class MCPToolRegistry:
                 client_or_manager=client,
                 artifact_store=self._artifact_store,
                 manager=self._mcp_manager,
+                prepare_call=self._prepare_call,
             )
             schema = proxy.get_schema().parameters
             if schema.get("type", "object") != "object":

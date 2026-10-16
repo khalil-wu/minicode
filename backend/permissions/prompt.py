@@ -20,12 +20,30 @@ def permission_instructions(context) -> str:
     requirements = stack.requirements if stack is not None else None
     messages = model.model_info.model_messages if model.model_info is not None else None
     messages = messages or {}
-    resolved = context.sandbox_policy.resolve(cwd=context.workspace_root)
-    roots = sorted(str(root.root) for root in resolved.writable_roots) if not resolved.full_disk_write else []
-    mode = "danger_full_access" if resolved.full_disk_write else "workspace_write" if roots else "read_only"
+    from backend.permissions.environment_scope import permission_scope_for_context
+    from backend.sandbox.policy import NetworkSandboxPolicy
+
+    scope = permission_scope_for_context(context)
+    configured = context.run_context is not None and context.run_context.turn_environments is not None
+    if scope is not None:
+        writable, denied_paths, denied_globs = scope.instruction_paths()
+        full_write = scope.has_full_disk_write_access()
+        roots = sorted(writable) if not full_write else []
+        allow_network = scope.permission_profile.network is NetworkSandboxPolicy.ENABLED
+    elif configured:
+        roots, denied_paths, denied_globs = [], (), ()
+        full_write = allow_network = False
+    else:
+        resolved = context.sandbox_policy.resolve(cwd=context.workspace_root)
+        full_write, allow_network = resolved.full_disk_write, resolved.allow_network
+        roots = sorted(str(root.root) for root in resolved.writable_roots) if not full_write else []
+        denied_paths, denied_globs = tuple(map(str, resolved.unreadable_roots)), resolved.unreadable_globs
+    mode = "danger_full_access" if full_write else "workspace_write" if roots else "read_only"
     sandbox_override = (messages.get("permissions") or {}).get(mode)
     sandbox = sandbox_override if sandbox_override is not None else _bundled(f"sandbox_mode/{mode}.md").rstrip()
-    sandbox = sandbox.replace("{{ network_access }}", "enabled" if resolved.allow_network else "restricted")
+    sandbox = sandbox.replace("{{ network_access }}", "enabled" if allow_network else "restricted")
+    if configured and scope is None:
+        sandbox = "No usable execution environment is available. Wait for an environment to become available before using this tool."
     policy = context.permission.approval_policy_value()
     kind = context.permission.approval_policy
     reviewer = settings.get("approvals_reviewer", "user")
@@ -91,8 +109,8 @@ def permission_instructions(context) -> str:
                 omitted = True
         return kept
     roots = bounded(roots)
-    denied_paths = bounded([str(path) for path in resolved.unreadable_roots])
-    denied_globs = bounded(sorted(set(resolved.unreadable_globs)))
+    denied_paths = bounded(denied_paths)
+    denied_globs = bounded(sorted(set(denied_globs)))
     sections = [sandbox, approval]
     if roots:
         quoted = [f"`{root}`" for root in roots]

@@ -2,10 +2,25 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
-class WorkspaceTreeEntry(BaseModel):
+class WorkspaceExecutionIdentity(BaseModel):
+    environment_id: str | None = None
+    path_uri: str | None = None
+    conversation_id: str | None = None
+    session_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_identity(self, handler):
+        payload = handler(self)
+        for name in ("environment_id", "path_uri", "conversation_id", "session_id", "read_only"):
+            if payload.get(name) is None:
+                payload.pop(name, None)
+        return payload
+
+
+class WorkspaceTreeEntry(WorkspaceExecutionIdentity):
     name: str
     path: str
     is_dir: bool
@@ -14,13 +29,13 @@ class WorkspaceTreeEntry(BaseModel):
     has_children: bool = False
 
 
-class WorkspaceTreeResponse(BaseModel):
+class WorkspaceTreeResponse(WorkspaceExecutionIdentity):
     workspace_root: str
     requested_path: str
     entries: list[WorkspaceTreeEntry] = Field(default_factory=list)
 
 
-class WorkspaceSearchResultResponse(BaseModel):
+class WorkspaceSearchResultResponse(WorkspaceExecutionIdentity):
     path: str
     name: str
     score: float
@@ -28,12 +43,13 @@ class WorkspaceSearchResultResponse(BaseModel):
     kind: str = "file"
 
 
-class WorkspaceSearchResponse(BaseModel):
+class WorkspaceSearchResponse(WorkspaceExecutionIdentity):
     query: str
     results: list[WorkspaceSearchResultResponse] = Field(default_factory=list)
 
 
-class WorkspaceFileResponse(BaseModel):
+class WorkspaceFileResponse(WorkspaceExecutionIdentity):
+    read_only: bool | None = None
     workspace_root: str
     path: str
     name: str
@@ -57,7 +73,7 @@ class WorkspaceProjectIndexIssue(BaseModel):
     message: str
 
 
-class WorkspaceProjectIndexResponse(BaseModel):
+class WorkspaceProjectIndexResponse(WorkspaceExecutionIdentity):
     workspace_root: str
     files: list[WorkspaceProjectIndexFile]
     dependency_paths: list[str] | None = None
@@ -89,7 +105,7 @@ class WorkspacePathRenameRequest(BaseModel):
     new_path: str = Field(min_length=1)
 
 
-class WorkspacePathResponse(BaseModel):
+class WorkspacePathResponse(WorkspaceExecutionIdentity):
     workspace_root: str
     path: str
     name: str
@@ -98,14 +114,14 @@ class WorkspacePathResponse(BaseModel):
     modified_at: str | None = None
 
 
-class WorkspaceDeleteResponse(BaseModel):
+class WorkspaceDeleteResponse(WorkspaceExecutionIdentity):
     workspace_root: str
     path: str
     deleted: bool = True
     is_dir: bool
 
 
-class WorkspaceGitWorktreeEntryResponse(BaseModel):
+class WorkspaceGitWorktreeEntryResponse(WorkspaceExecutionIdentity):
     path: str
     branch: str
     commit: str
@@ -116,7 +132,7 @@ class WorkspaceGitWorktreeEntryResponse(BaseModel):
     can_remove: bool = False
 
 
-class WorkspaceGitWorktreeResponse(BaseModel):
+class WorkspaceGitWorktreeResponse(WorkspaceExecutionIdentity):
     is_git_repo: bool | None = None
     is_worktree: bool = False
     current_path: str = ""

@@ -465,14 +465,25 @@ class SandboxRunner:
         string validation are not filesystem sandboxes.
         """
         resolved = self._policy.resolve(cwd=cwd)
-        if resolved.enforcement is SandboxEnforcement.DISABLED:
+        selection = self._policy.windows_sandbox_selection
+        if selection == "mxc":
+            return SandboxCapability(False, "windows-mxc", False, False,
+                reason="Windows MXC sandbox is unavailable in this execution environment")
+        if resolved.enforce_managed_network:
+            if sys.platform != "win32":
+                return SandboxCapability(False, "unavailable", False, False,
+                    reason="Local managed network routing is implemented only for the elevated Windows sandbox")
+            if selection != "elevated":
+                return SandboxCapability(False, "windows-elevated-wfp", False, False,
+                    reason="Managed network routing requires the elevated Windows sandbox")
+        if not resolved.enforce_managed_network and resolved.enforcement is SandboxEnforcement.DISABLED:
             return SandboxCapability(
                 available=True,
                 backend="full-access",
                 filesystem_isolated=False,
                 network_isolated=False,
             )
-        if resolved.enforcement is SandboxEnforcement.EXTERNAL:
+        if not resolved.enforce_managed_network and resolved.enforcement is SandboxEnforcement.EXTERNAL:
             # Codex treats ExternalSandbox as an already-established boundary:
             # MiniCode must not layer or second-guess a platform sandbox here.
             return SandboxCapability(
@@ -483,6 +494,34 @@ class SandboxRunner:
                 deny_read_isolated=False,
                 protected_paths_isolated=False,
             )
+        if sys.platform == "linux" and self._policy.use_legacy_landlock:
+            return SandboxCapability(False, "linux-landlock", False, False,
+                reason="Legacy Landlock sandbox is unavailable in this execution environment")
+        if sys.platform == "win32" and selection is not None:
+            if selection == "disabled":
+                return SandboxCapability(False, "none", False, False,
+                    reason="No Windows platform sandbox was selected for this managed request")
+            if selection not in {"restricted-token", "elevated"}:
+                return SandboxCapability(False, "unknown", False, False,
+                    reason=f"Unsupported Windows sandbox selection: {selection}")
+            if selection == "restricted-token" and not resolved.full_disk_read:
+                return SandboxCapability(False, "windows-restricted-token", False, False,
+                    reason="windows unelevated restricted-token sandbox cannot enforce filesystem read restrictions directly")
+            from backend.sandbox.windows_native import discover_runtime
+
+            runtime, reason = discover_runtime()
+            if runtime is None:
+                return SandboxCapability(False, f"windows-{selection}", False, False, reason=reason)
+            if selection == "restricted-token":
+                return SandboxCapability(True, "windows-restricted-token", True,
+                    not resolved.allow_network, deny_read_isolated=False,
+                    protected_paths_isolated=_protected_paths_fully_isolated(resolved))
+            if _sandbox_policy_preflight_error(resolved) or _has_filesystem_root_write(resolved) or not resolved.root_read_baseline:
+                return SandboxCapability(False, "windows-elevated-wfp", False, False,
+                    reason=_sandbox_policy_preflight_error(resolved) or "elevated Windows sandbox cannot enforce this filesystem profile")
+            return SandboxCapability(True, "windows-elevated-wfp", True,
+                resolved.enforce_managed_network or not resolved.allow_network, deny_read_isolated=True,
+                protected_paths_isolated=_protected_paths_fully_isolated(resolved))
         if (
             sys.platform == "darwin"
             and shutil.which("sandbox-exec")
@@ -611,6 +650,9 @@ class SandboxRunner:
         stdin: Any = asyncio.subprocess.PIPE,
         stdout: Any = asyncio.subprocess.PIPE,
         stderr: Any = asyncio.subprocess.PIPE,
+        creationflags: int | None = None,
+        on_created: Callable[[asyncio.subprocess.Process], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
     ) -> asyncio.subprocess.Process:
         """Start a long-lived stdio process behind the same sandbox boundary.
 
@@ -658,11 +700,17 @@ class SandboxRunner:
             }
             if self._bubblewrap_mount_targets is not None:
                 spawn_kwargs["pass_fds"] = self._bubblewrap_mount_targets.preserved_fds
+            if creationflags is not None:
+                spawn_kwargs["creationflags"] = creationflags
+            if on_exit is not None:
+                spawn_kwargs["on_exit"] = on_exit
             if isinstance(wrapped, list):
                 process = await spawn_exec(*wrapped, **spawn_kwargs)
             else:
                 process = await spawn_shell(wrapped, **spawn_kwargs)
             self.process = process
+            if on_created is not None:
+                on_created(process)
             await self._await_sandbox_ready(process, capture_startup_output=True)
             return process
         except BaseException as exc:
@@ -1195,11 +1243,9 @@ class SandboxRunner:
         # Per-launch command overrides are applied after the configured policy,
         # matching Codex command/exec. The helper also makes runtime-owned
         # identity variables non-restorable.
-        env = shell_subprocess_env(
-            self._policy.shell_environment_policy,
-            self._policy.env_overrides,
-            vault_scope="run_command",
-        )
+        env = (dict(self._policy.captured_env) if self._policy.captured_env is not None
+            else shell_subprocess_env(self._policy.shell_environment_policy,
+                self._policy.env_overrides, vault_scope="run_command"))
         # Nudge child processes toward UTF-8 so their output decodes cleanly.
         # PYTHONUTF8/PYTHONIOENCODING cover Python children; PYTHONUNBUFFERED
         # keeps streamed output prompt. Native Windows tools that ignore these
@@ -1224,13 +1270,34 @@ class SandboxRunner:
         tty: bool = False,
     ) -> str | list[str]:
         resolved = self._policy.resolve(cwd=cwd)
-        if resolved.enforcement in {
+        if not resolved.enforce_managed_network and resolved.enforcement in {
             SandboxEnforcement.DISABLED,
             SandboxEnforcement.EXTERNAL,
         }:
             return list(argv) if argv is not None else host_command or command
 
         shell_command = shlex.join(argv) if argv is not None else command
+
+        if capability.backend == "windows-restricted-token":
+            from backend.sandbox.windows_native import discover_runtime, _permission_profile
+            import json
+
+            runtime, reason = discover_runtime()
+            if runtime is None:
+                raise SandboxUnavailableError(reason)
+            effective_cwd = Path(cwd or self._policy.policy_cwd or Path.cwd()).resolve()
+            wrapped = [str(runtime.executable), "--run-as-windows-sandbox", "--codex-home", str(runtime.home),
+                "--command-cwd", str(effective_cwd), "--permission-profile",
+                json.dumps(_permission_profile(resolved, effective_cwd), ensure_ascii=False),
+                "--env-json", json.dumps(self._build_env(), ensure_ascii=False),
+                "--windows-sandbox-level", "restricted-token"]
+            for root in self._policy.workspace_roots:
+                wrapped.extend(("--workspace-root", str(root)))
+            if tty:
+                wrapped.append("--tty")
+            wrapped.append("--")
+            wrapped.extend(argv if argv is not None else ["cmd.exe", "/c", host_command or command])
+            return wrapped
 
         if capability.backend == "bubblewrap":
             ready_path = self._prepare_bubblewrap_mount_targets(resolved)

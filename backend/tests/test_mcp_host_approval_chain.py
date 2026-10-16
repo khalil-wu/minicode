@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -9,7 +10,7 @@ from backend.agent.run_context import RunContext
 from backend.artifact.store import ArtifactStore
 from backend.config import load_config
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
-from backend.mcp.client import MCPCallResult, MCPToolDef
+from backend.mcp.client import MCPClient, MCPToolDef
 from backend.mcp.config_file import write_mcp_config
 from backend.mcp.manager import MCPServerManager, MCPServerState, ServerStatus
 from backend.mcp.registry import MCPToolProxy, MCPToolRegistry
@@ -51,8 +52,7 @@ class OwnedMCPTransport:
         self.calls = []
 
     async def call_tool(self, name, arguments, *, request_owner):
-        self.calls.append((name, arguments, request_owner))
-        return MCPCallResult(content=[{"type": "text", "text": "Host approved output"}])
+        raise AssertionError("The SDK query must invoke its captured real stdio MCP client")
 
 
 @pytest.mark.asyncio
@@ -81,7 +81,25 @@ async def test_host_mcp_approval_config_reaches_sdk_result_without_waiving_bound
     }), encoding="utf-8")
     if case == "managed_deny":
         (managed / "managed-settings.json").write_text(json.dumps({"permissions": {"always_deny": [identity]}}), encoding="utf-8")
-    server = {"transport": "stdio", "command": "python", "args": [], "default_tools_approval_mode": "approve"}
+    definition = MCPToolDef("run.op", "Host operation", {"type": "object", "properties": {}, "additionalProperties": False},
+        annotations={"readOnlyHint": case == "read_only_hint", "openWorldHint": case != "read_only_hint", "destructiveHint": case == "destructive"},
+        meta={"anthropic/alwaysLoad": True})
+    sibling = MCPToolDef("run_op", "Another raw tool", {"type": "object", "properties": {}})
+    definitions = [{"name": item.name, "description": item.description, "inputSchema": item.input_schema,
+        "annotations": item.annotations, "_meta": item.meta} for item in (definition, sibling)]
+    peer = tmp_path / "owned_host_approval_mcp.py"
+    peer.write_text('import json,sys\nTOOLS=' + repr(definitions) + '\n' + '''for line in sys.stdin:
+    request=json.loads(line)
+    if "id" not in request: continue
+    method=request["method"]
+    if method=="initialize": result={"protocolVersion":request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"owned-host-approval","version":"1"}}
+    elif method=="tools/list": result={"tools":TOOLS}
+    elif method=="tools/call": result={"content":[{"type":"text","text":"Host approved output"}]}
+    else: raise AssertionError(method)
+    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}),flush=True)
+''', encoding="utf-8")
+    server = {"transport": "stdio", "command": sys.executable, "args": ["-I", "-S", "-u", str(peer)],
+        "default_tools_approval_mode": "approve"}
     if case == "raw_tool":
         server.update(default_tools_approval_mode="prompt", tools={"run.op": {"approval_mode": "approve"}})
     elif case == "read_only_hint":
@@ -92,10 +110,15 @@ async def test_host_mcp_approval_config_reaches_sdk_result_without_waiving_bound
     [server_config] = manager.load_config()
     assert server_config.name == "host.server"
     client = OwnedMCPTransport()
-    definition = MCPToolDef("run.op", "Host operation", {"type": "object", "properties": {}, "additionalProperties": False},
-        annotations={"readOnlyHint": case == "read_only_hint", "openWorldHint": case != "read_only_hint", "destructiveHint": case == "destructive"},
-        meta={"anthropic/alwaysLoad": True})
-    sibling = MCPToolDef("run_op", "Another raw tool", {"type": "object", "properties": {}})
+    live_clients = []
+    original_call = MCPClient.call_tool
+
+    async def observe_call(actual_client, name, arguments, *, request_owner=None, request_meta=None):
+        live_clients.append(actual_client)
+        client.calls.append((name, arguments, request_owner))
+        return await original_call(actual_client, name, arguments, request_owner=request_owner, request_meta=request_meta)
+
+    monkeypatch.setattr(MCPClient, "call_tool", observe_call)
     manager._servers[server_config.name] = MCPServerState(server_config, client=client, status=ServerStatus.CONNECTED, tools=[definition, sibling])
     registry = ToolRegistry()
     catalog = MCPToolRegistry(registry, mcp_manager=manager)
@@ -120,6 +143,7 @@ async def test_host_mcp_approval_config_reaches_sdk_result_without_waiving_bound
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"), metadata={"conversation_id": f"host-approval-{case}"},
     )]
     assert len(client.calls) == int(allowed)
+    assert all(isinstance(actual, MCPClient) for actual in live_clients)
     results = [event for event in events if event.type == "tool_result"]
     assert len(results) == 1
     assert results[0].data.get("is_error", False) is not allowed

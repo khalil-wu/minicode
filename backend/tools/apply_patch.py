@@ -66,6 +66,7 @@ LINE_TEXT: /[^\r\n]+/
 
 
 class ApplyPatchTool(BaseTool):
+    requires_execution_environment = True
     """Apply a MiniCode-style patch envelope across one or more files."""
 
     name = "apply_patch"
@@ -203,6 +204,10 @@ class ApplyPatchTool(BaseTool):
         return base
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_patch_io import execute_executor_patch
+            return await execute_executor_patch(self, args, context)
         patch_text = args.get("patch", "")
         if not isinstance(patch_text, str) or not patch_text.strip():
             return self._error_result("Missing patch argument")

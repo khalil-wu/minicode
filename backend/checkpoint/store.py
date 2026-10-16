@@ -50,6 +50,8 @@ class CheckpointFileSnapshot:
     # raw byte copy. ``content`` remains populated only on legacy records that
     # inlined base64 payloads before the sidecar migration.
     blob: str | None = None
+    environment_id: str | None = None
+    path_uri: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,8 @@ class CheckpointRecord:
                 content=item.get("content") if item.get("content") is not None else None,
                 encoding=str(item.get("encoding") or "utf-8"),
                 blob=str(item.get("blob")) if item.get("blob") else None,
+                environment_id=item.get("environment_id"),
+                path_uri=item.get("path_uri"),
             )
             for item in payload.get("files", [])
             if isinstance(item, dict)

@@ -57,18 +57,57 @@ def review_model_for_execution(parent) -> ReviewModel:
     return select_review_model(parent, tuple(models), default_review_model_id=preferred)
 
 
-def reviewer_sandbox_policy(parent: SandboxPolicy) -> SandboxPolicy:
-    profile = parent.permission_profile
+def reviewer_permission_profile(profile: PermissionProfile) -> PermissionProfile:
     if profile.enforcement is SandboxEnforcement.EXTERNAL:
         raise ValueError("Guardian requires an executor-managed read-only sandbox")
     if profile.file_system.kind is FileSystemSandboxKind.UNRESTRICTED:
         entries = (FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),)
     else:
         entries = tuple(replace(entry, access=FileSystemAccessMode.READ if entry.access.can_read else FileSystemAccessMode.DENY) for entry in profile.file_system.entries)
-    ceiling = PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries,
+    return PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries,
         glob_scan_max_depth=profile.file_system.glob_scan_max_depth), network=NetworkSandboxPolicy.RESTRICTED)
-    return replace(parent, permission_profile=ceiling, allow_unsandboxed_commands=False,
+
+
+def reviewer_sandbox_policy(parent: SandboxPolicy) -> SandboxPolicy:
+    return replace(parent, permission_profile=reviewer_permission_profile(parent.permission_profile), allow_unsandboxed_commands=False,
         auto_allow_commands_if_sandboxed=True, fail_if_unavailable=True, preflight_required=True, excluded_commands=())
+
+
+def parent_permission_profile(context, *, environment_id=None):
+    from backend.permissions.environment_scope import permission_scope_for_context
+
+    scope = permission_scope_for_context(context, environment_id=environment_id)
+    if scope is not None:
+        return scope.permission_profile
+    if context.run_context is not None and context.run_context.turn_environments is not None:
+        return None
+    return context.sandbox_policy.permission_profile if context.sandbox_policy is not None else None
+
+
+def parent_environment_identity(context):
+    run = context.run_context
+    snapshot = run.turn_environments if run is not None else None
+    if snapshot is None:
+        return context.environment_id, str(context.workspace_root)
+    from backend.agent.environment_selection import TurnEnvironment, StartingTurnEnvironment
+
+    return tuple((environment.selection.environment_id, environment.selection.cwd,
+        environment.selection.workspace_roots, str(environment.selection.config),
+        id(environment.environment) if isinstance(environment, (TurnEnvironment, StartingTurnEnvironment)) else None)
+        for environment in snapshot.environments)
+
+
+def parent_has_full_access(context):
+    if context.permission.approval_policy != "never":
+        return False
+    run = context.run_context
+    snapshot = run.turn_environments if run is not None else None
+    if snapshot is not None:
+        return bool(snapshot.environments) and all(
+            environment.config.permission_profile.enforcement is SandboxEnforcement.DISABLED
+            for environment in snapshot.turn_environments()) and len(snapshot.turn_environments()) == len(snapshot.environments)
+    profile = parent_permission_profile(context)
+    return profile is not None and profile.enforcement is SandboxEnforcement.DISABLED
 
 
 def build_reviewer_config(parent: AppConfig, review_model: ReviewModel) -> AppConfig:

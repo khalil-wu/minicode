@@ -15,7 +15,7 @@ import logging
 import os
 import psutil
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,11 @@ class PersistedTaskState:
     container_engine: str = ""
     container_ref: str = ""
     container_cidfile: str = ""
+    environment_id: str = "local"
+    executor_remote: bool = False
+    executor_process_id: str = ""
+    executor_session_id: str = ""
+    network_audit: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,11 @@ def save_task(
     container_engine: str = "",
     container_ref: str = "",
     container_cidfile: str = "",
+    environment_id: str = "local",
+    executor_remote: bool = False,
+    executor_process_id: str = "",
+    executor_session_id: str = "",
+    network_audit: list[dict] | None = None,
 ) -> Path:
     """Save task state to disk."""
     clean_task_id = validate_storage_id(task_id, field_name="task_id")
@@ -132,6 +142,9 @@ def save_task(
         container_engine=container_engine,
         container_ref=container_ref,
         container_cidfile=container_cidfile,
+        environment_id=environment_id, executor_remote=executor_remote,
+        executor_process_id=executor_process_id, executor_session_id=executor_session_id,
+        network_audit=list(network_audit or ()),
     )
     tasks_dir = get_tasks_dir(session_id, base_dir)
     task_path = tasks_dir / f"{clean_task_id}.json"
@@ -287,6 +300,13 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
             )
         )
         if orphaned_record:
+            if task.executor_remote:
+                payload = asdict(task)
+                payload.update(status="interrupted", cleanup_pending=True,
+                    cleanup_reason="executor_session_unavailable", cleanup_requested_at=time.time(), cleanup_completed_at=None)
+                save_task(session_id=session_id, base_dir=base_dir, **payload)
+                orphaned.append(load_task(session_id, task.task_id, base_dir))
+                continue
             cleanup_requested_at = time.time()
             cleanup_completed = True
             cleanup_reason = "background_owner_exited"
@@ -325,6 +345,11 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
                 conversation_id=task.conversation_id,
                 owner_task_id=task.owner_task_id,
                 parent_run_id=task.parent_run_id,
+                environment_id=task.environment_id,
+                executor_remote=task.executor_remote,
+                executor_process_id=task.executor_process_id,
+                executor_session_id=task.executor_session_id,
+                network_audit=task.network_audit,
                 process_start_time=task.process_start_time,
                 owner_pid=task.owner_pid,
                 owner_start_time=task.owner_start_time,
@@ -384,6 +409,12 @@ def reconcile_owned_tasks(
         if task.owner_task_id not in clean_owner_ids and task.parent_run_id not in clean_parent_ids:
             continue
         matched.append(task.task_id)
+        if task.executor_remote:
+            # A host PID cannot prove the remote session or process is gone.
+            # Retain its exact original logical IDs without reconnecting a
+            # replacement environment or claiming an unobserved termination.
+            pending.append(task.task_id)
+            continue
 
         legacy_owner = task.owner_pid is None or task.owner_start_time is None
         owner_alive = process_identity_matches(task.owner_pid, task.owner_start_time)
@@ -432,6 +463,11 @@ def reconcile_owned_tasks(
                 conversation_id=task.conversation_id,
                 owner_task_id=task.owner_task_id,
                 parent_run_id=task.parent_run_id,
+                environment_id=task.environment_id,
+                executor_remote=task.executor_remote,
+                executor_process_id=task.executor_process_id,
+                executor_session_id=task.executor_session_id,
+                network_audit=task.network_audit,
                 process_start_time=task.process_start_time,
                 owner_pid=task.owner_pid,
                 owner_start_time=task.owner_start_time,

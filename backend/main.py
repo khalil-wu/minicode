@@ -523,6 +523,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             skill_executor=_state.bootstrap.skill_executor,
             memory_manager=_state.bootstrap.memory_manager,
             mcp_manager=_state.bootstrap.mcp_manager,
+            environment_manager=_state.bootstrap.environment_manager,
         )
     except WebSocketDisconnect:
         return

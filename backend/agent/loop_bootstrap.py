@@ -231,6 +231,8 @@ async def bootstrap_agent_loop(
         # during this turn then advance the same state exported in the next
         # conversation snapshot, matching CC's cumulative readFileState.
         resolved_metadata["_read_file_hashes"] = read_file_hashes()
+    resolved_metadata["_executor_read_file_hashes"] = context.executor_read_file_hashes()
+    resolved_metadata["_executor_observed_files"] = context.executor_observed_files()
     initial_max_iterations_limit = int(
         request.initial_max_iterations_limit
         if request.initial_max_iterations_limit is not None
@@ -315,6 +317,9 @@ async def bootstrap_agent_loop(
         from backend.config import load_config
         run_context.model_execution = ModelExecutionSnapshot.capture(load_config(cwd=workspace_root), request.llm)
         model_snapshot = run_context.model_execution
+    elif model_snapshot.config.config_layer_stack is None:
+        model_snapshot = replace(model_snapshot, config=replace(model_snapshot.config, config_layer_stack=turn_config_stack))
+        run_context.model_execution = model_snapshot
     from backend.skills.manager import SkillManager
 
     if isinstance(skill_manager, SkillManager):
@@ -387,8 +392,28 @@ async def bootstrap_agent_loop(
             effective_permission_context,
             filesystem_constraints=managed_constraints,
         )
+    conversation_id = str(getattr(state, "conversation_id", "") or "").strip()
+    if run_context.environment_manager is not None:
+        from backend.agent.environment_runtime import refresh_run_environment_capabilities
+
+        if run_context.environment_host_mcp_manager is None:
+            run_context.environment_host_mcp_manager = run_context.mcp_manager
+        if run_context.environment_host_skill_manager is None:
+            run_context.environment_host_skill_manager = skill_manager
+        prepared_capabilities = await refresh_run_environment_capabilities(run_context,
+            agent_session=agent_session, permission_context=effective_permission_context,
+            config_stack=turn_config_stack, feature_flags=model_snapshot.config.feature_flags,
+            registry=request.tool_registry, artifact_store=request.artifact_store,
+            workspace_root=workspace_root, conversation_id=conversation_id,
+            turn_id=str(turn_kernel.metadata["turn_id"]))
+        skill_manager = prepared_capabilities.skill_manager
+        context.bind_skill_manager(skill_manager, workspace_root, config_stack=turn_config_stack)
+        for warning in prepared_capabilities.warnings:
+            if emit_event is not None:
+                await emit_event("system_notice", {"conversation_id": conversation_id,
+                    "message": warning, "level": "warning"})
     skill_read_roots: list[str] = []
-    if skill_manager is not None:
+    if skill_manager is not None and run_context.environment_manager is None:
         readable_roots = getattr(skill_manager, "readable_roots", None)
         if callable(readable_roots):
             skill_read_roots = [str(path) for path in readable_roots()]
@@ -432,6 +457,13 @@ async def bootstrap_agent_loop(
     sandbox_workspace = Path(workspace_root).expanduser().resolve() if workspace_root else Path.cwd()
 
     def _sandbox_policy_for(current: PermissionContext):
+        if run_context.environment_manager is not None:
+            primary = run_context.turn_environments.primary()
+            if primary is None or primary.is_remote:
+                return None
+            from backend.workspace.executor_local_policy import local_sandbox_policy
+
+            return local_sandbox_policy(primary.permission_scope.sandbox_context())
         policy = sandbox_policy_for_permission_context(
             sandbox_workspace,
             current,
@@ -450,10 +482,11 @@ async def bootstrap_agent_loop(
     conversation_id = str(getattr(state, "conversation_id", "") or "").strip()
     effective_permission_context = replace(
         effective_permission_context,
-        allow_unsandboxed_commands=turn_sandbox_policy.allow_unsandboxed_commands,
-        sandbox_fail_if_unavailable=turn_sandbox_policy.fail_if_unavailable,
-        sandbox_auto_allow_commands=turn_sandbox_policy.auto_allow_commands_if_sandboxed,
-        sandbox_excluded_commands=turn_sandbox_policy.excluded_commands,
+        **({"allow_unsandboxed_commands": turn_sandbox_policy.allow_unsandboxed_commands,
+            "sandbox_fail_if_unavailable": turn_sandbox_policy.fail_if_unavailable,
+            "sandbox_auto_allow_commands": turn_sandbox_policy.auto_allow_commands_if_sandboxed,
+            "sandbox_excluded_commands": turn_sandbox_policy.excluded_commands}
+            if turn_sandbox_policy is not None else {}),
         conversation_id=conversation_id,
         workspace_root=Path(workspace_root).expanduser().resolve() if workspace_root else None,
     )
@@ -499,10 +532,11 @@ async def bootstrap_agent_loop(
         live_policy = _sandbox_policy_for(normalized)
         return replace(
             normalized,
-            allow_unsandboxed_commands=live_policy.allow_unsandboxed_commands,
-            sandbox_fail_if_unavailable=live_policy.fail_if_unavailable,
-            sandbox_auto_allow_commands=live_policy.auto_allow_commands_if_sandboxed,
-            sandbox_excluded_commands=live_policy.excluded_commands,
+            **({"allow_unsandboxed_commands": live_policy.allow_unsandboxed_commands,
+                "sandbox_fail_if_unavailable": live_policy.fail_if_unavailable,
+                "sandbox_auto_allow_commands": live_policy.auto_allow_commands_if_sandboxed,
+                "sandbox_excluded_commands": live_policy.excluded_commands}
+                if live_policy is not None else {}),
             conversation_id=conversation_id,
             workspace_root=Path(workspace_root).expanduser().resolve() if workspace_root else None,
         )
@@ -522,7 +556,7 @@ async def bootstrap_agent_loop(
         approval_handler=request.approval_handler,
         stream_callback=stream_callback,
         workspace_root=workspace_root,
-        allow_network=turn_sandbox_policy.allow_network,
+        allow_network=turn_sandbox_policy.allow_network if turn_sandbox_policy is not None else False,
         sandbox_policy=turn_sandbox_policy,
         task_manager=task_manager,
         background_manager=background_manager,
@@ -544,7 +578,9 @@ async def bootstrap_agent_loop(
             else PermissionGrantStore()
         ),
         turn_id=str(turn_kernel.metadata["turn_id"]),
-        environment_id=str(resolved_metadata.get("environment_id") or "local"),
+        environment_id=(run_context.turn_environments.primary().selection.environment_id
+            if run_context.turn_environments is not None and run_context.turn_environments.primary() is not None
+            else "" if run_context.turn_environments is not None else "local"),
     )
     tool_context.permission_grants.begin_turn(tool_context.turn_id)
     from backend.permissions.exec_policy import ExecPolicyOwner, config_folders
@@ -559,6 +595,12 @@ async def bootstrap_agent_loop(
             await emit_event("system_notice", {"conversation_id": conversation_id,
                 "message": owner.load_warning.message, "level": "warning"})
     run_context.exec_policy_owner = owner
+    if run_context.turn_environments is not None:
+        from backend.network.runtime import prepare_environment_network_step
+
+        run_context.network_step = await prepare_environment_network_step(
+            environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
+            config_stack=turn_config_stack, exec_policy_sources=owner.sources)
     context.bind_tool_context(tool_context)
     from backend.agent.model_activation import admit_model_activation
 
@@ -572,7 +614,7 @@ async def bootstrap_agent_loop(
         policy = _sandbox_policy_for(normalized)
         tool_context.permission = normalized
         tool_context.sandbox_policy = policy
-        tool_context.allow_network = bool(policy.allow_network)
+        tool_context.allow_network = bool(policy.allow_network) if policy is not None else False
         return normalized, policy
 
     if workspace_root is not None and "cwd" not in tool_context.metadata:
@@ -665,6 +707,17 @@ async def bootstrap_agent_loop(
     )
     run_context.hook_manager = hook_manager
     context.bind_hook_manager(hook_manager)
+    from backend.network.approval import NetworkApprovalService
+
+    network_owner = run_context.environment_thread_runtime or agent_session or run_context
+    network_service = network_owner.network_approval_service
+    if network_service is None or network_service.conversation_id != tool_context.command_scope_id:
+        network_service = NetworkApprovalService(conversation_id=tool_context.command_scope_id)
+        network_owner.network_approval_service = network_service
+    run_context.network_approval_service = network_service
+    if agent_session is not None:
+        network_service.bind_review_source(lambda: agent_session.context_builder._tool_execution_context
+            if agent_session.active_turn else None)
     preflight = await prepare_turn_input(
         user_message,
         state=state,

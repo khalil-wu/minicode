@@ -336,6 +336,12 @@ async def run_owned_rest_chat(
     if run_context.execution_journal is None:
         run_context.execution_journal = agent_runtime.execution_journal(journal_owner)
     run_context.mcp_manager = mcp_manager
+    run_context.environment_manager = getattr(bootstrap, "environment_manager", None)
+    run_context.session_source = "automation" if run_id else "rest"
+    if run_context.environment_manager is not None and owner is not None:
+        store_identity = await asyncio.to_thread(repository.store_instance_id)
+        run_context.environment_thread_runtime = bootstrap.ws_manager.execution_contexts.thread_runtime(
+            store_identity, conversation_id)
     run_context.agent_runtime = agent_runtime
     run_context.cost_session_id = session_id
     run_context.requires_explicit_workspace = bool(workspace_root)

@@ -17,6 +17,8 @@ from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.run_context import RunContext
+from backend.agent.environment_selection import EnvironmentManagerLease, TurnEnvironmentRequest
+from backend.environments.manager import EnvironmentManager
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.terminal.manager import BackgroundCommandManager
 from backend.agent.execution_journal import ExecutionJournal, execution_journal_owner
@@ -149,6 +151,11 @@ class SDKSession:
         self._lifecycle_cleanup_waiters: set[asyncio.Task] = set()
         self._code_stores: dict[str, CodeExecutionStore] = {}
         self._commands = BackgroundCommandManager(session_id=session_id)
+        self._environment_manager = self._query_kwargs.pop("environment_manager", None)
+        self._environment_manager_lease: EnvironmentManagerLease | None = None
+        self._thread_environments = None
+        self._inherited_turn_environments = None
+        self._user_shell = None
 
     async def aclose(self) -> None:
         self._closed = True
@@ -167,6 +174,13 @@ class SDKSession:
         }:
             await asyncio.wait(pending)
         await self._commands.shutdown()
+        if self._thread_environments is not None:
+            await self._thread_environments.aclose()
+        if self._inherited_turn_environments is not None:
+            await self._inherited_turn_environments.aclose()
+            self._inherited_turn_environments = None
+        if self._environment_manager_lease is not None:
+            await self._environment_manager_lease.aclose()
         self._code_stores.clear()
         self._active_query = False
         self._active_query_task = None
@@ -202,6 +216,24 @@ class SDKSession:
                 run_context = RunContext(lifecycle_cleanup_tasks=self.lifecycle_cleanup_tasks)
             else:
                 self.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
+            if self._user_shell is None:
+                self._user_shell = dict(run_context.user_shell)
+            else:
+                run_context.user_shell = dict(self._user_shell)
+            manager = run_kwargs.pop("environment_manager", self._environment_manager or run_context.environment_manager)
+            if manager is None:
+                from backend.config import STATE_ROOT
+                from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+
+                manager = EnvironmentManager(STATE_ROOT, local_backend=LocalExecutionEnvironmentBackend())
+                self._environment_manager_lease = EnvironmentManagerLease.own(manager)
+            self._environment_manager = manager
+            run_context.environment_manager = manager
+            run_context.environment_manager_lease = self._environment_manager_lease
+            run_context.thread_environments = self._thread_environments
+            run_context.inherited_turn_environments = self._inherited_turn_environments
+            self._inherited_turn_environments = None
+            run_context.retain_thread_environments = True
             if run_context.cancel_event is None:
                 run_context.cancel_event = asyncio.Event()
             self._active_run_context = run_context
@@ -222,6 +254,8 @@ class SDKSession:
                 async for event in stream:
                     yield event
         finally:
+            if self._active_run_context is not None:
+                self._thread_environments = self._active_run_context.thread_environments
             self._active_query = False
             self._active_query_task = None
             self._active_query_stream = None
@@ -280,6 +314,12 @@ class SDKSession:
             metadata=child_metadata,
             **child_kwargs,
         )
+        child._environment_manager = self._environment_manager
+        child._user_shell = dict(self._user_shell) if self._user_shell is not None else None
+        if self._environment_manager_lease is not None:
+            child._environment_manager_lease = self._environment_manager_lease.clone()
+        if self._thread_environments is not None:
+            child._inherited_turn_environments = self._thread_environments.snapshot_now()
         if system_note:
             child.context_builder.append_system_note(system_note)
         return child
@@ -344,6 +384,8 @@ async def query(
     background_manager: BackgroundCommandManager | None = None,
     code_store: CodeExecutionStore | None = None,
     run_context: RunContext | None = None,
+    environment_manager: EnvironmentManager | None = None,
+    environment_requests: tuple[TurnEnvironmentRequest, ...] | None = None,
     lifecycle_cleanup_waiters: set[asyncio.Task] | None = None,
     workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
@@ -389,8 +431,21 @@ async def query(
         yield done
         return
     run_context = run_context if run_context is not None else RunContext()
+    manager_lease = None
     waiters = lifecycle_cleanup_waiters if lifecycle_cleanup_waiters is not None else set()
     try:
+        if environment_manager is not None:
+            run_context.environment_manager = environment_manager
+        if run_context.environment_manager is None:
+            from backend.config import STATE_ROOT
+            from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+
+            manager_lease = EnvironmentManagerLease.own(EnvironmentManager(STATE_ROOT,
+                local_backend=LocalExecutionEnvironmentBackend()))
+            run_context.environment_manager = manager_lease.manager
+            run_context.environment_manager_lease = manager_lease
+        if environment_requests is not None:
+            run_context.environment_requests = environment_requests
         async with aclosing(_query_unclaimed(
             message,
             llm=llm,
@@ -423,6 +478,8 @@ async def query(
         conversation_query_guards().end_after_cleanup(
             claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=waiters,
         )
+        if manager_lease is not None:
+            await manager_lease.aclose()
 
 
 async def _query_unclaimed(

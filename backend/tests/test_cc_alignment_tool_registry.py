@@ -59,14 +59,7 @@ def test_web_search_is_available_without_a_hosted_provider(tmp_path) -> None:
 
 @pytest.mark.parametrize("supports_search", [False, True])
 def test_mcp_bridge_tools_share_the_admitted_search_capability(tmp_path, supports_search) -> None:
-    """MCP helpers stay reachable with and without native discovery support.
-
-    list_mcp_resources/read_mcp_resource declared should_defer while the
-    template, subscription, notification, and prompt bridges did not, so the
-    rarely-needed six were direct on every turn while the two entry points were
-    hidden behind tool_search. Keep the whole family deferred when the admitted
-    model supports discovery, and direct when it cannot call tool_search.
-    """
+    """Source resource tools remain core; optional bridges follow discovery."""
 
     registry = build_tool_registry(
         ArtifactStore(storage_dir=tmp_path / "artifacts"),
@@ -74,18 +67,19 @@ def test_mcp_bridge_tools_share_the_admitted_search_capability(tmp_path, support
     )
     mcp_names = {name for name in registry.list_tools() if "mcp" in name}
     assert mcp_names, "expected MCP bridge tools to be registered"
+    resource_names = {"list_mcp_resources", "read_mcp_resource", "list_mcp_resource_templates"}
 
     policy = ToolsetPolicy(supports_search_tool=supports_search)
     direct_names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)}
     if supports_search:
-        assert not (mcp_names & direct_names)
+        assert mcp_names & direct_names == resource_names
     else:
         assert mcp_names <= direct_names
 
     views = {view.name: view for view in registry.build_schema_views(toolset_policy=policy)}
     for name in mcp_names:
-        assert views[name].exposure == "deferred", name
-        assert views[name].direct is (not supports_search), name
+        assert views[name].exposure == ("core" if name in resource_names else "deferred"), name
+        assert views[name].direct is (name in resource_names or not supports_search), name
         assert views[name].schema_available is True, name
 
     # The async-agent availability filter admits the whole "mcp" toolset, so

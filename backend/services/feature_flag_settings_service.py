@@ -43,6 +43,8 @@ def get_feature_flag_settings() -> dict[str, Any]:
         # create new desktop switches when a runtime capability is added.
         if name in {
             "content_item_kinds",
+            "skill_mcp_dependency_install",
+            "stable_environment_tools",
             "guardian_approval", "guardian_reuse_parent_compaction", "guardianv2",
             "guardianv2_decisions_comparison", "guardian_root_handoff_context",
             "guardian_enhanced_node_repl_transcripts", "guardian_node_repl_transcript_images",

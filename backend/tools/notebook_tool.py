@@ -33,6 +33,7 @@ def _parse_cell_id(cell_id: str) -> int | None:
 
 
 class NotebookEditTool(BaseTool):
+    requires_execution_environment = True
     """Edit a cell in a Jupyter notebook (.ipynb)."""
 
     name = "notebook_edit"
@@ -89,6 +90,10 @@ class NotebookEditTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_notebook_edit
+            return await executor_notebook_edit(self, args, context)
         result = await run_blocking_io(self._execute, args, context)
         change = result.runtime_metadata.pop("notebook_change", None)
         if change is not None:
@@ -142,9 +147,44 @@ class NotebookEditTool(BaseTool):
 
         try:
             old_content = path.read_bytes().decode("utf-8")
-            nb = json.loads(old_content)
         except Exception as exc:
             return self._error_result(f"Failed to read notebook JSON: {exc}")
+        prepared = self._edit_content(args, old_content)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        new_text, action, cell_count = prepared
+        try:
+            # Notebook edits share the same guarded mutation queue as text
+            # edits. Revalidate after waiting so a concurrent editor save is
+            # rejected instead of silently overwritten.
+            with file_mutation_locks([path]):
+                ok, message = _validate_expected_hash(path, expected_hash)
+                if not ok:
+                    return self._error_result(message)
+                _atomic_write_text(path, new_text)
+                record_file_hash(context, path, content_hash(new_text))
+
+                # Keep cache publication inside the queue; the event/result can
+                # be emitted after release because it does not affect the file.
+                get_global_file_cache().invalidate(path)
+        except Exception as exc:
+            return self._error_result(f"Failed to write notebook: {exc}")
+
+        result = self._success_result(
+            content=f"{action} in {raw_path} ({cell_count} cells). content_hash: {content_hash(new_text)}",
+            display_summary=action,
+        )
+        result.runtime_metadata["notebook_change"] = {
+            "file_path": raw_path, "old_content": old_content, "new_content": new_text,
+            "display_path": _workspace_display_path(path, raw_path, context),
+        }
+        return result
+
+    def _edit_content(self, args, old_content):
+        try:
+            nb = json.loads(old_content)
+        except json.JSONDecodeError as error:
+            return self._error_result(f"Failed to read notebook JSON: {error}")
         cells = nb.get("cells")
         if not isinstance(cells, list):
             return self._error_result("Notebook has no cells array")
@@ -214,35 +254,10 @@ class NotebookEditTool(BaseTool):
                 action = f"Replaced cell {target.get('id')}"
 
         nb["cells"] = cells
-        try:
-            new_text = preserve_text_line_endings(
-                json.dumps(nb, ensure_ascii=False, indent=1), old_content.encode("utf-8"),
-            )
-            # Notebook edits share the same guarded mutation queue as text
-            # edits. Revalidate after waiting so a concurrent editor save is
-            # rejected instead of silently overwritten.
-            with file_mutation_locks([path]):
-                ok, message = _validate_expected_hash(path, expected_hash)
-                if not ok:
-                    return self._error_result(message)
-                _atomic_write_text(path, new_text)
-                record_file_hash(context, path, content_hash(new_text))
-
-                # Keep cache publication inside the queue; the event/result can
-                # be emitted after release because it does not affect the file.
-                get_global_file_cache().invalidate(path)
-        except Exception as exc:
-            return self._error_result(f"Failed to write notebook: {exc}")
-
-        result = self._success_result(
-            content=f"{action} in {raw_path} ({len(cells)} cells). content_hash: {content_hash(new_text)}",
-            display_summary=action,
+        new_text = preserve_text_line_endings(
+            json.dumps(nb, ensure_ascii=False, indent=1), old_content.encode("utf-8"),
         )
-        result.runtime_metadata["notebook_change"] = {
-            "file_path": raw_path, "old_content": old_content, "new_content": new_text,
-            "display_path": _workspace_display_path(path, raw_path, context),
-        }
-        return result
+        return new_text, action, len(cells)
 
     @staticmethod
     def _build_cell(cell_type: str, source: str) -> dict[str, Any]:

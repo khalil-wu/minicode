@@ -307,7 +307,19 @@ class SessionApprovalRuntimeMixin:
         if isinstance(pending_request, dict) and "mcp_approval" in pending_request:
             if payload.get("auto_approved") or payload.get("session_approved"):
                 return False
-        if isinstance(pending_request, dict) and "command" in pending_request:
+        if isinstance(pending_request, dict) and "network_approval_context" in pending_request:
+            decision = payload.get("decision")
+            if decision not in pending_request["available_decisions"]:
+                return False
+            if any(key in payload for key in ("remember_for_session", "remember_for_future", "auto_approved", "session_approved")):
+                return False
+            denied = decision == "abort" or (
+                isinstance(decision, dict)
+                and decision["network_policy_amendment"]["network_policy_amendment"]["action"] == "deny"
+            )
+            if payload.get("action") != ("reject" if denied else "approve"):
+                return False
+        elif isinstance(pending_request, dict) and "command" in pending_request:
             decision = payload.get("decision")
             available = pending_request["available_decisions"]
             if payload.get("remember_for_session") or payload.get("remember_for_future") or payload.get("auto_approved") or payload.get("session_approved"):
@@ -707,6 +719,7 @@ class SessionApprovalRuntimeMixin:
                     "guidance": guidance,
                     "reason": reason,
                     "superseded": True,
+                    **({"decision": "abort"} if "network_approval_context" in payload.get("request", {}) else {}),
                 },
             ):
                 request_ids.append(request_id)
@@ -1049,7 +1062,8 @@ class SessionApprovalRuntimeMixin:
             request["strict_auto_review"] = True
         if "mcp_approval" in event.data:
             request["mcp_approval"] = self._clone_json_dict(event.data["mcp_approval"])
-        for key in ("command", "cwd", "proposed_execpolicy_amendment", "available_decisions"):
+        for key in ("command", "cwd", "proposed_execpolicy_amendment", "available_decisions",
+                    "network_approval_context", "proposed_network_policy_amendments"):
             if key in event.data:
                 request[key] = event.data[key]
         if "command" in event.data:

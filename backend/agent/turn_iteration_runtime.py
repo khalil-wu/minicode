@@ -136,6 +136,30 @@ class TurnIterationRuntime:
                 # A host selection published during the await owns the next
                 # step. Refresh that choice under the same admission deadline.
         snapshot = run_context.model_execution
+        if run_context.environment_manager is not None:
+            from backend.agent.environment_runtime import refresh_run_environment_capabilities
+            from backend.workspace.executor_local_policy import local_sandbox_policy
+
+            self.turn_kernel.refresh_live_permission_context()
+            prepared = await refresh_run_environment_capabilities(run_context,
+                agent_session=self.agent_session, permission_context=self.tool_context.permission,
+                config_stack=snapshot.config.config_layer_stack,
+                feature_flags=snapshot.config.feature_flags, registry=self.base_tool_registry,
+                artifact_store=self.tool_context.artifact_store, workspace_root=self.workspace_root,
+                conversation_id=self.tool_context.conversation_id, turn_id=self.tool_context.turn_id)
+            self.context.bind_skill_manager(prepared.skill_manager, self.workspace_root)
+            self.skill_manager = prepared.skill_manager
+            primary = run_context.turn_environments.primary()
+            policy = local_sandbox_policy(primary.permission_scope.sandbox_context()) if primary is not None and not primary.is_remote else None
+            self.tool_context.sandbox_policy = policy
+            self.tool_context.allow_network = policy.allow_network if policy is not None else False
+            self.tool_context.environment_id = primary.selection.environment_id if primary is not None else ""
+            self.context.configure_project_instructions(snapshot.config.config_layer_stack.project_instruction_config())
+            from backend.network.runtime import prepare_environment_network_step
+
+            run_context.network_step = await prepare_environment_network_step(
+                environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
+                config_stack=snapshot.config.config_layer_stack, exec_policy_sources=run_context.exec_policy_owner.sources)
         model_events: list[AgentEvent] = []
         if snapshot is not None and self.context._llm is not snapshot.llm:
             target_budget = snapshot.config.token_budget
@@ -210,6 +234,16 @@ class TurnIterationRuntime:
                     for name in loaded_deferred_tools
                 ),
             )
+        from backend.tools.environment_policy import policy_for_environment_snapshot
+
+        features = run_context.model_execution.config.feature_flags if run_context.model_execution is not None else None
+        active_policy = policy_for_environment_snapshot(active_policy, run_context.turn_environments,
+            stable_environment_tools=features.enabled("stable_environment_tools", default=False) if features is not None else False)
+        active_policy = replace(active_policy, model_messages=(snapshot.model_info.model_messages
+            if snapshot is not None and snapshot.model_info is not None else None))
+        mcp_manager = run_context.mcp_manager
+        if not active_policy.code_mode_only and (mcp_manager is None or not mcp_manager.has_enabled_servers()):
+            active_policy = active_policy.with_disabled_tools({"list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"})
         # The execution boundary reads the policy from metadata as well as
         # the schema builder.  Publish the *final* policy after deferred tools
         # have been activated; writing the pre-activation value here would let
@@ -300,6 +334,7 @@ class TurnIterationRuntime:
             admission_snapshot = self.context.export_snapshot()
             try:
                 if self.skill_manager is not None:
+                    primary = run_context.turn_environments.primary() if run_context.turn_environments is not None else None
                     async for skill_event in activate_turn_skills(
                         self.skill_manager,
                         boundary_input.content,
@@ -308,8 +343,11 @@ class TurnIterationRuntime:
                         self.tool_context.approval_handler,
                         self.tool_context.run_context.publish_nested_event if self.tool_context.run_context else None,
                         permission_context=self.tool_context.permission,
-                        permission_profile=self.tool_context.sandbox_policy.resolve(cwd=self.tool_context.workspace_root),
+                        permission_profile=(self.tool_context.sandbox_policy.resolve(cwd=self.tool_context.workspace_root)
+                            if self.tool_context.sandbox_policy is not None else None),
+                        permission_scope=primary.permission_scope if primary is not None else None,
                         prompted_dependencies=self.context.prompted_mcp_dependencies,
+                        feature_flags=self.tool_context.model_execution.config.feature_flags,
                     ):
                         events.append(skill_event)
                 original_attachments = self.state.attachments

@@ -48,6 +48,9 @@ class _McpManager:
     def get_server_instructions(self):
         return {}
 
+    def has_enabled_servers(self):
+        return self.connected
+
     def get_client(self, _name):
         return object() if self.connected else None
 
@@ -101,7 +104,7 @@ def test_skill_dependency_install_uses_actual_approval_and_sandbox_profile(
             permission_context=PermissionContext(mode=mode, approval_policy=approval),
             permission_profile=ResolvedSandboxPolicy(enforcement, NetworkSandboxPolicy.RESTRICTED, full_disk_write=full_write),
             prompted_dependencies=prompted,
-        )]
+         originator="Codex fixture")]
 
     events = asyncio.run(run())
     assert bool(published) is expect_prompt
@@ -134,7 +137,7 @@ def test_managed_denied_dependency_is_neither_prompted_nor_installed(tmp_path, m
             skills, state.user_message, state, manager, unexpected, unexpected,
             permission_context=PermissionContext(approval_policy=approval),
             permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.DISABLED, NetworkSandboxPolicy.ENABLED),
-        )]
+         originator="Codex fixture")]
 
     events = asyncio.run(run())
     assert manager.admitted == ["docs"]
@@ -164,7 +167,7 @@ def test_skill_dependency_skip_keeps_missing_dependency_visible(tmp_path, monkey
             skills, state.user_message, state, manager, answer, publish,
             permission_context=PermissionContext(),
             permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.DISABLED, NetworkSandboxPolicy.ENABLED),
-        )]
+         originator="Codex fixture")]
 
     events = asyncio.run(run())
     assert len(published) == 1
@@ -223,7 +226,7 @@ def test_skill_dependency_real_config_install_and_post_answer_policy_check(
             answer if policy_changes_while_waiting else None, publish if policy_changes_while_waiting else None,
             permission_context=PermissionContext(approval_policy="on-request" if policy_changes_while_waiting else "never"),
             permission_profile=ResolvedSandboxPolicy(SandboxEnforcement.DISABLED, NetworkSandboxPolicy.ENABLED),
-        )]
+         originator="Codex fixture")]
 
     events = asyncio.run(run())
     assert manager.admitted == ["docs", "docs"]
@@ -245,7 +248,7 @@ def test_skill_dependency_real_config_install_and_post_answer_policy_check(
         assert len(events) == 1 and "not connected: docs" in events[0].data["content"]
 
 
-def test_agent_loop_compiles_turn_permissions_before_automatic_skill_install(tmp_path, monkeypatch):
+def test_agent_loop_keeps_third_party_originator_and_does_not_automatically_install(tmp_path, monkeypatch):
     skills = _skill_manager(tmp_path, monkeypatch)
     manager = _McpManager()
     installed, messages_seen = [], []
@@ -260,9 +263,9 @@ def test_agent_loop_compiles_turn_permissions_before_automatic_skill_install(tmp
 
     class CapturingLLM(LLMAdapter):
         async def stream_chat(self, messages, tools=None):
-            assert installed
+            assert not installed
             messages_seen.extend(messages)
-            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Docs are available.")
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Skill instructions are loaded.")
             yield StreamEvent(type=StreamEventType.DONE)
 
         async def simple_chat(self, messages):
@@ -286,7 +289,7 @@ def test_agent_loop_compiles_turn_permissions_before_automatic_skill_install(tmp
         )]
 
     events = asyncio.run(run())
-    assert len(installed) == 1 and installed[0]["name"] == "docs"
+    assert installed == [] and manager.admitted == []
     assert not any(event.type == "request_user_input" for event in events)
     assert any("Use the docs server." in str(message.content) for message in messages_seen)
-    assert all("MCP dependency unavailable" not in str(message.content) for message in messages_seen)
+    assert any("MCP dependency unavailable" in str(message.content) for message in messages_seen)

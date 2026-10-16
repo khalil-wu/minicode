@@ -39,6 +39,20 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
 
     replace("lib.rs", 'mod runtime_ownership;', 'mod runtime_ownership;\n#[cfg(target_os = "windows")]\nmod owner_identity;\n#[cfg(target_os = "windows")]\npub use owner_identity::{OwnerIdentity, windows_sandbox_owner_identity, bind_windows_sandbox_runner, windows_sandbox_read_acl_mutex};\n#[cfg(target_os = "windows")]\npub use owner_identity::bind_for_user as bind_windows_sandbox_owner;\n#[cfg(target_os = "windows")]\npub use runtime_ownership::current_setup_user;\n#[cfg(target_os = "windows")]\npub use wfp::windows_sandbox_owner_resources;')
     replace("runtime_ownership.rs", 'pub(crate) fn current_setup_user()', 'pub fn current_setup_user()')
+    proxy_arm = '            PROXY_ENFORCED_FLAG => proxy_enforced = true,'
+    tty_arm = '            "--tty" => tty = true,\n'
+    existing_arm = '            "--require-existing-sandbox" => crate::owner_identity::set_require_existing_setup(),\n'
+    wrapper_path = source_dir / "wrapper.rs"
+    wrapper = texts[wrapper_path]
+    if tty_arm + existing_arm + tty_arm + proxy_arm in wrapper:
+        texts[wrapper_path] = wrapper.replace(tty_arm + existing_arm + tty_arm + proxy_arm, tty_arm + existing_arm + proxy_arm)
+    elif tty_arm + existing_arm + proxy_arm not in wrapper:
+        old = tty_arm + proxy_arm if tty_arm + proxy_arm in wrapper else proxy_arm
+        replace("wrapper.rs", old, tty_arm + existing_arm + proxy_arm)
+    replace("identity.rs", '                remove_sandbox_users_file(codex_home, reason)?;',
+        '                anyhow::ensure!(!crate::owner_identity::require_existing_setup(), "{reason}; use the explicit MiniCode sandbox setup action");\n                remove_sandbox_users_file(codex_home, reason)?;')
+    replace("identity.rs", '    if identity.is_none() {\n        if let Some(reason) = &setup_reason {',
+        '    if identity.is_none() {\n        anyhow::ensure!(!crate::owner_identity::require_existing_setup(), "Windows sandbox setup does not match this managed network policy: {}; use the explicit MiniCode sandbox setup action", setup_reason.as_deref().unwrap_or("sandbox identity is unavailable"));\n        if let Some(reason) = &setup_reason {')
     replace("setup.rs", 'pub const SETUP_VERSION: u32 = 5;', 'pub const SETUP_VERSION: u32 = 6;')
     replace("setup.rs", 'pub const OFFLINE_USERNAME: &str = "MiniCodeSbxOffline";', 'pub fn offline_username() -> &\'static str { &crate::owner_identity::owner().offline_username }')
     replace("setup.rs", 'pub const ONLINE_USERNAME: &str = "MiniCodeSbxOnline";', 'pub fn online_username() -> &\'static str { &crate::owner_identity::owner().online_username }')
@@ -379,7 +393,6 @@ fn revoking_absent_sid_preserves_child_null_dacl()''')
     replace("wrapper.rs", '    command: Vec<String>,\n}', '    command: Vec<String>,\n    tty: bool,\n}')
     replace("wrapper.rs", '            tty: false,', '            tty: request.tty,')
     replace("wrapper.rs", '    let mut command = None;', '    let mut command = None;\n    let mut tty = false;')
-    replace("wrapper.rs", '            PROXY_ENFORCED_FLAG => proxy_enforced = true,', '            "--tty" => tty = true,\n            PROXY_ENFORCED_FLAG => proxy_enforced = true,')
     replace("wrapper.rs", '        command: command.ok_or_else(|| anyhow!("missing sandboxed command separator --"))?,', '        command: command.ok_or_else(|| anyhow!("missing sandboxed command separator --"))?,\n        tty,')
     replace("setup_provisioning.rs", '    *setup_mode = Some(payload.mode);', '    crate::owner_identity::bind_for_user(&payload.codex_home, &payload.real_user)?;\n    anyhow::ensure!(payload.offline_username == crate::setup::offline_username() && payload.online_username == crate::setup::online_username(), "setup payload accounts do not match its owner");\n    *setup_mode = Some(payload.mode);')
     replace("setup_provisioning.rs", '        anyhow::ensure!(\n            crate::runtime_ownership::load_installation()?\n                .is_none_or(|record| record.runtime.is_none()),\n            "registered Core owns these sandbox accounts; helper provisioning is not permitted"\n        );', '''        let owner = crate::owner_identity::owner();

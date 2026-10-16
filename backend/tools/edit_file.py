@@ -302,6 +302,7 @@ def prepare_edit_content(
 
 
 class EditFileTool(BaseTool):
+    requires_execution_environment = True
     """
     Replace one exact string in a text file.
 
@@ -477,6 +478,10 @@ class EditFileTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_edit_file
+            return await executor_edit_file(self, args, context)
         file_path = _path_arg(args)
         old_string = args.get("old_string", "")
         new_string = args.get("new_string", "")

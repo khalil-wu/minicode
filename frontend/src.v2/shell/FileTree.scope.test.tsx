@@ -210,6 +210,7 @@ describe("FileTree root-bound user actions", () => {
 
   it("keeps native delete's actual path bound to A and cancels stale large-directory confirmation", async () => {
     const pending = deferred<boolean>();
+    useAppStore.setState({ conversationId: null });
     vi.mocked(isDesktop).mockReturnValue(true);
     const deletePath = vi.fn(async () => ({ needsConfirmation: true, entryCount: 200 }));
     vi.mocked(desktop).mockReturnValue({ fs: { deletePath } } as unknown as ReturnType<typeof desktop>);

@@ -10,7 +10,7 @@ class SandboxResult:
 
     stdout: str
     stderr: str
-    exit_code: int
+    exit_code: int | None
     timed_out: bool = False
     cancelled: bool = False
     sandbox_unavailable: bool = False
@@ -24,6 +24,7 @@ class SandboxResult:
     cleanup_pending: bool = False
     cleanup_reason: str = ""
     execution_error: str = ""
+    network_audit: tuple[dict, ...] = ()
 
     @property
     def success(self) -> bool:

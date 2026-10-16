@@ -9,3 +9,5 @@
 现在这个测试确认真实 `CodeVM.step("start")` 已进入、Python continuation 在 busy JS 期间仍可运行，随后发出实际 `tool_wait(terminate=True)`，从该请求到原工具终态事件计时。保留小于 3 秒和真实 cancelled 的要求，排除取消区间外的准备及 teardown；没有延长 VM 超时或取消限额。
 
 本地必要验证使用当前工作区：SidebarLeft 41/41；bundled Python 3.11.9 的 busy V8 场景 1/1。证据为 `sidebar-recovery-owner-20261016.log`、`busy-v8-cancel-timing-20261016.xml/.log`。后端测试工作区含未提交 remote 实现，不能据此声称冻结提交完整通过；提交后的 GitHub 全量结果另记。未提交 remote 范围不属于此修复提交。
+
+GitHub 最终结果：提交 `ae278f910148f9c731a0dfaa51453431d66179c7` 的 run [38775603301](https://github.com/khalil-wu/minicode/actions/runs/38775603301) 七项全部成功。保存的完整 job/step 状态为 `output/ci-repair-20261015/github-ae278f91-state.json`。该通过结果包含既有新会话/junction 修复及侧栏 grid 按钮修复，不涵盖尚未提交的 remote 文件。

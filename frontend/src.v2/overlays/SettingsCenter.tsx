@@ -41,6 +41,7 @@ import { WorkspaceGitTab } from "./WorkspaceGitTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ProviderTab } from "./ProviderTab";
 import { ConnectorsTab } from "./ConnectorsTab";
+import { ConnectionsTab } from "./ConnectionsTab";
 import { SchedulerTab } from "./SchedulerTab";
 import { AdvancedTab } from "./AdvancedTab";
 import { FeatureFlagsTab } from "./FeatureFlagsTab";
@@ -197,6 +198,7 @@ export const SettingsCenter = () => {
     { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <BookOpenText /> },
     { id: "connectors" as const, group: tr("集成"), label: "MCP", description: tr("安装和管理外部工具服务、连接与认证状态。"), keywords: tr("stdio HTTP 服务 工具 市场"), icon: <Cable /> },
     { id: "browser" as const, group: tr("集成"), label: tr("浏览器"), description: tr("管理内置浏览器页面、下载与站点权限。"), keywords: tr("控制台 网络 下载 数据 网站"), icon: <Globe2 /> },
+    { id: "connections" as const, group: tr("集成"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <Cable /> },
     { id: "scheduler" as const, group: tr("集成"), label: tr("已安排"), description: tr("管理自动运行的任务与最近记录。"), keywords: tr("计划 Cron 时区 Worktree 自动"), icon: <CalendarClock /> },
     { id: "workspaceGit" as const, group: tr("编码"), label: tr("Git 与工作树"), description: tr("查看当前工作区的变更、分支与工作树。"), keywords: tr("diff 状态 文件 提交"), icon: <GitBranch /> },
     { id: "features" as const, group: tr("编码"), label: tr("实验功能"), description: tr("启用或停用当前运行时支持的实验能力。"), keywords: tr("开关 运行时 SDK 预览"), icon: <FlaskConical /> },
@@ -351,6 +353,7 @@ export const SettingsCenter = () => {
               {tab === "skills" && <SkillsTab onReturnToApp={toggleSettings} />}
               {tab === "voice" && <VoiceSettings active={settingsOpen && tab === activeTab} />}
               {tab === "connectors" && <ConnectorsTab />}
+              {tab === "connections" && <ConnectionsTab active={settingsOpen && tab === activeTab} />}
               {tab === "browser" && <BrowserIntegrationTab active={settingsOpen && tab === activeTab} />}
               {tab === "scheduler" && <SchedulerTab active={settingsOpen && tab === activeTab} title={tr("定时任务")} description={tr("自动运行的任务和最近结果。")} />}
               {tab === "workspaceGit" && <WorkspaceGitTab active={settingsOpen && tab === activeTab} />}

@@ -102,6 +102,50 @@ test("new windows own distinct instances, captured callbacks and reusable persis
   assert.equal(manager.getWindowForSender(primary.webContents), primary);
 });
 
+test("a remote window retains its actual runtime and a separate persistent storage partition", async (t) => {
+  const { manager } = windowFixture(t);
+  const local = await manager.createMainWindow();
+  const runtime = { apiBaseUrl: "http://127.0.0.1:59101", wsBaseUrl: "ws://127.0.0.1:59101", runtimeToken: "remote-runtime",
+    remoteHost: { id: "actual-host", generation: "actual-generation" } };
+  const remote = await manager.createNewWindow({ remoteHostId: "actual-host", runtime, conversationId: "remote-conversation" });
+  const record = manager.getWindowRecord(remote);
+  assert.equal(record.runtime, runtime);
+  assert.equal(record.initialNavigation.conversationId, "remote-conversation");
+  assert.equal(remote.options.webPreferences.partition, "persist:minicode-host-actual-host");
+  assert.equal(local.options.webPreferences.partition, undefined);
+  assert.ok(remote.options.webPreferences.additionalArguments.includes("--minicode-remote-host-id=actual-host"));
+});
+
+test("remote preload cannot borrow the local runtime if its selected host binding is missing", () => {
+  const exposed = [];
+  const processOwner = { ...process, contextIsolated: true, argv: ["electron", "--minicode-remote-host-id=host-a"],
+    env: { MINICODE_RUNTIME_TOKEN: "local-must-not-be-borrowed" } };
+  let runtime = { apiBaseUrl: "http://127.0.0.1:8000", wsBaseUrl: "ws://127.0.0.1:8000", runtimeToken: "local-token" };
+  const electron = { ipcRenderer: { sendSync: () => runtime, on() {} }, contextBridge: { exposeInMainWorld: (_name, value) => exposed.push(value) } };
+  assert.throws(() => load("preload.js", { electron }, { process: processOwner }), /selected remote host's runtime binding/);
+  assert.equal(exposed.length, 0);
+  runtime = { apiBaseUrl: "http://127.0.0.1:59101", wsBaseUrl: "ws://127.0.0.1:59101", runtimeToken: "remote-token", remoteHost: { id: "host-a" } };
+  load("preload.js", { electron }, { process: processOwner });
+  assert.equal(exposed[0].runtimeToken, "remote-token");
+  assert.equal(exposed[0].apiBaseUrl, runtime.apiBaseUrl);
+});
+
+test("connection IPC reports the real error to the renderer without its internal transport wrapper", async () => {
+  const handlers = new Map(), exposed = [];
+  const ipcMain = { handle: (name, handler) => handlers.set(name, handler), on() {} };
+  const window = { isDestroyed: () => false, webContents: { mainFrame: {}, getURL: () => "file:///MiniCode/index.html" } };
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const ipc = load("ipc-handlers.js", { electron: { ipcMain, app: {}, dialog: {}, shell: {} } });
+  ipc.init({ getWindowForSender: () => window, getWindowRecord: () => ({ windowInstanceId: "owned-window" }), appendDesktopLog() {},
+    getRemoteDesktop: () => ({ async open() { throw new Error("ssh: connection refused"); }, async connect() { return { ready: { bridge_token: "private-secret" } }; } }) });
+  ipc.registerIpcHandlers();
+  const runtime = { apiBaseUrl: "http://127.0.0.1:8000", wsBaseUrl: "ws://127.0.0.1:8000" };
+  load("preload.js", { electron: { ipcRenderer: { sendSync: () => runtime, on() {}, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) },
+    contextBridge: { exposeInMainWorld: (_name, value) => exposed.push(value) } } }, { process: { ...process, contextIsolated: true, argv: [], env: {} } });
+  await assert.rejects(exposed[0].desktop.connections.open("owned-host"), error => error.message === "ssh: connection refused");
+  assert.equal(await exposed[0].desktop.connections.connect("owned-host"), undefined);
+});
+
 test("IPC derives the actual secondary owner for controls, dialogs, resources and updater ACKs", async (t) => {
   const { manager } = windowFixture(t);
   const primary = await manager.createMainWindow();

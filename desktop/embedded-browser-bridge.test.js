@@ -59,6 +59,33 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("remote bridge secrets are scoped to their actual host and never authorize another host's window", async () => {
+  const calls = [];
+  const remoteRecord = { remoteHostId: "host-a", windowInstanceId: "remote-window", windowOwnerId: "remote-primary",
+    windowBindingToken: "remote-binding", window: { isDestroyed: () => false } };
+  bridge.init({ token: "local-private", getWindowRecordByInstanceId: id => id === "remote-window" ? remoteRecord : null,
+    manager: { async executeControlCommand(payload) { calls.push(payload); return { ok: true }; } } });
+  const first = { ready: { bridge_token: "host-a-private" } }, second = { ready: { bridge_token: "host-b-private" } };
+  bridge.registerRemoteHost("host-a", first);
+  bridge.registerRemoteHost("host-b", second);
+  const endpoint = await bridge.start();
+  const request = token => fetch(`${endpoint}/v1/command`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ action: "list_targets", window_instance_id: "remote-window", window_binding_token: "remote-binding", conversation_id: "remote-conversation" }) });
+  try {
+    assert.equal((await request("local-private")).status, 403);
+    assert.equal((await request("host-b-private")).status, 403);
+    assert.equal((await request("host-a-private")).status, 200);
+    assert.equal(calls.length, 1);
+  } finally {
+    bridge.unregisterRemoteHost("host-a", first);
+    bridge.unregisterRemoteHost("host-b", second);
+    await bridge.stop();
+    bridge.init({ token: "bridge-test-token", getWindowRecordByInstanceId: instance => instance === "fixture-window" ? {
+      windowInstanceId: instance, windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => false },
+    } : null });
+  }
+});
+
 function command(endpoint, payload, path = "command") {
   return fetch(`${endpoint}/v1/${path}`, {
     method: "POST", headers: { authorization: "Bearer bridge-test-token", "content-type": "application/json" },

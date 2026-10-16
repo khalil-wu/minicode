@@ -132,8 +132,8 @@ describe("native C/C++ Monaco provider bridge", () => {
     const header = Monaco.editor.createModel("int unsaved_header_function();", "c", Monaco.Uri.parse(editorModelUri("local.h", "/cpp-editor-test")));
     const fetch = vi.fn(async (_url, init) => {
       expect(JSON.parse(init.body)).toMatchObject({ method: "completion", line: 0, character: 1,
-        documents: [{ path: model.uri.fsPath, content: "#", language: "cpp" },
-          { path: header.uri.fsPath, content: "int unsaved_header_function();", language: "c" }] });
+        documents: [{ path: "main.cpp", content: "#", language: "cpp" },
+          { path: "local.h", content: "int unsaved_header_function();", language: "c" }] });
       return new Response(JSON.stringify({ result: { isIncomplete: false, items: [{
         label: " include <header>", kind: 15, insertTextFormat: 2, filterText: "include",
         textEdit: { range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "include <$0>" },
@@ -163,14 +163,14 @@ describe("native C/C++ Monaco provider bridge", () => {
     }));
     await requestEditorLanguage(Monaco, reader, "hover");
     const first = bodies.find((body) => body.method === "hover")!;
-    const discardedId = first.documents.find((document: any) => document.path === discarded.uri.fsPath).document_id;
+    const discardedId = first.documents.find((document: any) => document.path === "a.py").document_id;
     discarded.dispose();
     await vi.waitFor(() => expect(bodies.some((body) => body.action === "close" && body.document_ids.includes(discardedId))).toBe(true));
     await requestEditorLanguage(Monaco, reader, "hover");
     const last = bodies.filter((body) => body.method === "hover").at(-1)!;
     expect(last.client_id).toBe(first.client_id);
     expect(last.snapshot_revision).toBeGreaterThan(first.snapshot_revision);
-    expect(last.documents.map((document: any) => document.path)).toEqual(expect.arrayContaining([reader.uri.fsPath, hidden.uri.fsPath]));
+    expect(last.documents.map((document: any) => document.path)).toEqual(expect.arrayContaining(["b.py", "hidden.py"]));
     expect(last.documents.some((document: any) => document.document_id === discardedId)).toBe(false);
     expect(hidden.getValue()).toBe('kept = "unsaved"');
   });

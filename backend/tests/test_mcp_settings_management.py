@@ -100,7 +100,7 @@ def test_mcp_status_includes_editable_config_without_resolving_pass_through(monk
                 "args": ["server.js"],
                 "cwd": "tools/docs",
                 "env": {"TOKEN": "fixed"},
-                "env_vars": [{"name": "HOME_ALIAS", "source": "USERPROFILE"}],
+                "env_vars": [{"name": "USERPROFILE", "source": "local"}],
                 "auto_start": False,
             }
         }
@@ -113,7 +113,7 @@ def test_mcp_status_includes_editable_config_without_resolving_pass_through(monk
     assert status["args"] == ["server.js"]
     assert status["cwd"] == "tools/docs"
     assert status["env"] == {"TOKEN": "fixed"}
-    assert status["env_vars"] == [{"name": "HOME_ALIAS", "source": "USERPROFILE"}]
+    assert status["env_vars"] == [{"name": "USERPROFILE", "source": "local"}]
     assert status["auto_start"] is False
 
 
@@ -133,7 +133,7 @@ def test_update_mcp_server_round_trips_structured_settings(monkeypatch) -> None:
             "args": ["server.js"],
             "cwd": "tools/docs",
             "env": {"TOKEN": "fixed"},
-            "env_vars": [{"name": "HOME_ALIAS", "source": "USERPROFILE"}],
+            "env_vars": [{"name": "USERPROFILE", "source": "local"}],
             "auto_start": False,
         },
         config_change_hook=_noop_hook,
@@ -147,7 +147,7 @@ def test_update_mcp_server_round_trips_structured_settings(monkeypatch) -> None:
         "auto_start": False,
         "env": {"TOKEN": "fixed"},
         "cwd": "tools/docs",
-        "env_vars": [{"name": "HOME_ALIAS", "source": "USERPROFILE"}],
+        "env_vars": [{"name": "USERPROFILE", "source": "local"}],
     }
     assert manager.reloaded == 1
 

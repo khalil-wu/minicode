@@ -313,7 +313,7 @@ export const ConnectorsTab = () => {
     setNewServerOAuthCallbackPort(server.oauth?.callbackPort ? String(server.oauth.callbackPort) : "");
     setNewServerEnvVars((server.envVars ?? []).map((item) => {
       const name = typeof item === "string" ? item : String(item.name ?? "");
-      const source = typeof item === "string" ? item : String(item.source ?? name);
+      const source = typeof item === "string" ? "local" : String(item.source ?? "local");
       return { id: rowId(), name, source };
     }));
     setNewServerAutoStart(server.autoStart !== false);
@@ -335,18 +335,23 @@ export const ConnectorsTab = () => {
           .map((row) => [row.name.trim(), row.value]),
       );
       const envVars = newServerEnvVars
-        .filter((row) => row.name.trim() && row.source.trim())
-        .map((row) => row.name.trim() === row.source.trim()
-          ? row.name.trim()
-          : { name: row.name.trim(), source: row.source.trim() });
+        .filter((row) => row.name.trim())
+        .map((row) => {
+          const source = row.source.trim() || "local";
+          if (source !== "local" && source !== "remote") throw new Error("MCP env_vars source must be local or remote.");
+          return source === "local" ? row.name.trim() : { name: row.name.trim(), source: "remote" as const };
+        });
       const headers = Object.fromEntries(
         newServerHeaders
           .filter((row) => row.name.trim())
           .map((row) => [row.name.trim(), row.value]),
       );
+      const editingServer = mcpServers.find((server) => server.name === editingServerName);
       const shared = {
         name,
         auto_start: newServerAutoStart,
+        ...(editingServer?.environmentId !== undefined ? { environment_id: editingServer.environmentId } : {}),
+        ...(editingServer?.enabled !== undefined ? { enabled: editingServer.enabled } : {}),
       };
       let mutation: McpServerMutationPayload;
       if (newServerTransport === "stdio") {
@@ -371,6 +376,8 @@ export const ConnectorsTab = () => {
           ...(Object.keys(headers).length ? { headers } : {}),
           ...(newServerHeadersHelper.trim() ? { headers_helper: newServerHeadersHelper.trim() } : {}),
           ...(Object.keys(oauth).length ? { oauth } : {}),
+          ...(editingServer?.bearerTokenEnvVar !== undefined ? { bearer_token_env_var: editingServer.bearerTokenEnvVar } : {}),
+          ...(editingServer?.envHttpHeaders !== undefined ? { env_http_headers: editingServer.envHttpHeaders } : {}),
         };
       } else {
         mutation = {
@@ -865,7 +872,7 @@ export const ConnectorsTab = () => {
                 {newServerEnvVars.map((row) => (
                   <div className="settings-mcp-pair-row" key={row.id}>
                     <input aria-label={tr("目标变量名称")} value={row.name} onChange={(event) => setNewServerEnvVars((rows) => rows.map((item) => item.id === row.id ? { ...item, name: event.target.value } : item))} placeholder={tr("目标名称")} style={inputStyle} />
-                    <input aria-label={tr("{v0}的来源", { v0: row.name || tr("变量") })} value={row.source} onChange={(event) => setNewServerEnvVars((rows) => rows.map((item) => item.id === row.id ? { ...item, source: event.target.value } : item))} placeholder={tr("系统变量名称")} style={inputStyle} />
+                    <input aria-label={tr("{v0}的来源", { v0: row.name || tr("变量") })} value={row.source} onChange={(event) => setNewServerEnvVars((rows) => rows.map((item) => item.id === row.id ? { ...item, source: event.target.value } : item))} placeholder="local / remote" style={inputStyle} />
                     <button type="button" onClick={() => setNewServerEnvVars((rows) => rows.filter((item) => item.id !== row.id))} aria-label={tr("删除透传变量")}><X /></button>
                   </div>
                 ))}

@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -47,6 +47,7 @@ from backend.services.workspace_api_service import (
     workspace_git_worktree_snapshots_payload,
 )
 from .service import WorkspaceService
+from .executor_editor import ExecutorEditorService
 from .text_search import WorkspaceTextSearchRequest, search_workspace_text
 from .editor_language import EditorLanguageRequest, EditorLanguageLifecycleOperation, editor_language_request, editor_language_lifecycle
 from .editor_ai import EditorCompletionRequest, editor_completion_response
@@ -76,14 +77,93 @@ def create_workspace_router() -> APIRouter:
         owner_root = service.workspace_root_path()
         return resolve_workspace_git_root(path, owner_root), owner_root
 
+    async def _request_service(request: Request):
+        from backend.api import _state
+        from backend.environments.errors import ExecutorError, ExecutorRpcError
+        from backend.services.workspace_api_service import capture_workspace_execution
+        from backend.workspace.executor_editor import ExecutorEditorService
+        from backend.workspace.executor_paths import ExecutorPath
+
+        params = request.query_params
+        session_id, conversation_id = params.get("session_id", ""), params.get("conversation_id", "")
+        root = params.get("workspace_root") or params.get("execution_cwd", "")
+        browser = request.url.path.rsplit("/", 1)[-1].startswith("browser-")
+        if not session_id and not conversation_id:
+            configured = _state.bootstrap.environment_manager if _state.bootstrap is not None else None
+            if root.startswith("file:") or params.get("environment_id") or configured is not None and configured.default_environment_id != "local":
+                raise HTTPException(409, "A connected session and conversation owner are required for executor workspace access.")
+            yield _service(root)
+            return
+        if not session_id or not conversation_id:
+            raise HTTPException(422, "session_id and conversation_id are required together.")
+        session = _state.ws_manager.get_session(session_id)
+        if session is None:
+            raise HTTPException(404, "Session is not connected.")
+        if conversation_id != session.active_conversation_id:
+            raise HTTPException(409, "Workspace conversation owner is stale.")
+        conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
+        if conversation is None or conversation.archived:
+            raise HTTPException(404, "The target conversation is not available.")
+        bound = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
+        try:
+            async with capture_workspace_execution(session, conversation_id, environment_id=params.get("environment_id")) as context:
+                if context is None:
+                    if root.startswith("file:"):
+                        raise HTTPException(409, "No usable execution environment is attached to this workspace URI.")
+                    yield (_browser_service(session_id, conversation_id, root) if browser else _service(root))
+                    return
+                scope = context.permission.environment_scope
+                bound_matches = (ExecutorPath.parse(root) == ExecutorPath.parse(scope.cwd_uri) if root.startswith("file:")
+                    else bool(bound) and not bound.startswith("file:") and Path(root).expanduser().resolve() == Path(bound).expanduser().resolve())
+                if not bound_matches:
+                    raise HTTPException(409, "Workspace execution owner is stale.")
+                editor_root = None
+                if not context.turn_environment.is_remote:
+                    from backend.workspace.trust import is_workspace_trusted
+                    local_root = ExecutorPath.parse(scope.cwd_uri).to_local_path()
+                    if not is_workspace_trusted(local_root):
+                        raise HTTPException(403, "Workspace folder is not trusted.")
+                    if browser and not conversation.workspace_root and not conversation.worktree_path and conversation.projectless_browser_root:
+                        editor_root = ExecutorPath.parse(_browser_service(session_id, conversation_id, root).workspace_root_path().as_uri())
+                service = ExecutorEditorService(context, application_config=session.config, editor_root=editor_root)
+                try:
+                    yield service
+                finally:
+                    await service.aclose()
+        except ExecutorRpcError as error:
+            raise HTTPException(404 if error.code == -32004 else 502, {"message": str(error), "executor_code": error.code}) from error
+        except ExecutorError as error:
+            raise HTTPException(503, str(error)) from error
+        except PermissionError as error:
+            raise HTTPException(403, str(error)) from error
+        except (FileNotFoundError, IsADirectoryError) as error:
+            raise HTTPException(404, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    async def _call(service, method, *args, **kwargs):
+        from backend.workspace.executor_editor import ExecutorEditorService
+        if isinstance(service, ExecutorEditorService):
+            return await getattr(service, method)(*args, **kwargs)
+        return await to_thread_cancel_safe(getattr(service, method), *args, **kwargs)
+
+    def _local_service(service):
+        from backend.workspace.executor_editor import ExecutorEditorService
+        if isinstance(service, ExecutorEditorService):
+            if service.context.turn_environment.is_remote:
+                raise HTTPException(503, "This operation requires a service configured on the selected executor.")
+            return WorkspaceService(get_workspace_root=lambda: service.cwd.to_local_path())
+        return service
+
     @router.get("/tree", response_model=WorkspaceTreeResponse)
     async def workspace_tree_api(
         path: str = Query(".", min_length=1),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceTreeResponse:
         # Directory walks stay off the event loop (cc refreshes file
         # suggestions in the background; to_thread is the minimal equivalent).
-        return await asyncio.to_thread(_service(workspace_root).list_tree, path)
+        return await _call(service, "list_tree", path)
 
     def _browser_service(session_id: str, conversation_id: str, execution_cwd: str) -> WorkspaceService:
         from backend.api import _state
@@ -113,9 +193,9 @@ def create_workspace_router() -> APIRouter:
         conversation_id: str = Query(..., min_length=1),
         execution_cwd: str = Query(..., min_length=1),
         path: str = Query(".", min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceTreeResponse:
-        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
-        return await asyncio.to_thread(service.list_tree, path)
+        return await _call(service, "list_tree", path)
 
     @router.get("/browser-file", response_model=WorkspaceFileResponse)
     async def projectless_browser_file_api(
@@ -123,9 +203,9 @@ def create_workspace_router() -> APIRouter:
         conversation_id: str = Query(..., min_length=1),
         execution_cwd: str = Query(..., min_length=1),
         path: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
-        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
-        return await asyncio.to_thread(service.read_file, path)
+        return await _call(service, "read_file", path)
 
     @router.get("/browser-preview")
     async def projectless_browser_preview_api(
@@ -133,9 +213,9 @@ def create_workspace_router() -> APIRouter:
         conversation_id: str = Query(..., min_length=1),
         execution_cwd: str = Query(..., min_length=1),
         path: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> dict[str, object]:
-        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
-        return await asyncio.to_thread(service.preview_file, path)
+        return await _call(service, "preview_file", path)
 
     @router.get("/browser-raw")
     async def projectless_browser_raw_api(
@@ -144,10 +224,10 @@ def create_workspace_router() -> APIRouter:
         execution_cwd: str = Query(..., min_length=1),
         path: str = Query(..., min_length=1),
         raw_token: str | None = Query(None),
+        service=Depends(_request_service),
     ) -> FileResponse:
         _ = raw_token
-        service = await asyncio.to_thread(_browser_service, session_id, conversation_id, execution_cwd)
-        return await asyncio.to_thread(service.raw_file_response, path)
+        return await _call(service, "raw_file_response", path)
 
     @router.get("/search", response_model=WorkspaceSearchResponse)
     async def workspace_search_api(
@@ -156,8 +236,10 @@ def create_workspace_router() -> APIRouter:
         include_tests: bool = Query(True),
         kind: str = Query("file", pattern="^(file|folder|all)$"),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceSearchResponse:
-        service = _service(workspace_root)
+        if isinstance(service, ExecutorEditorService):
+            return WorkspaceSearchResponse(**(await service.search(query, limit=limit, include_tests=include_tests, kind=kind)))
         try:
             payload = await asyncio.to_thread(
                 workspace_search_payload,
@@ -175,16 +257,26 @@ def create_workspace_router() -> APIRouter:
     async def workspace_text_search_api(
         request: WorkspaceTextSearchRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> dict:
-        return await asyncio.to_thread(search_workspace_text, _service(workspace_root), request)
+        if isinstance(service, ExecutorEditorService):
+            return await service.search_content(request)
+        return await asyncio.to_thread(search_workspace_text, service, request)
 
     @router.post("/language")
     async def workspace_language_api(
         request: EditorLanguageRequest,
         workspace_root: str = Query(..., min_length=1),
         window_binding_token: str = Header(default="", alias="x-minicode-window-binding-token"),
+        service=Depends(_request_service),
     ) -> dict:
-        return await editor_language_request(_service(workspace_root), request, binding_token=window_binding_token)
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .editor_language import authenticate_editor_window
+            await authenticate_editor_window(request, binding_token=window_binding_token)
+            raise HTTPException(503, {"code": "editor.executor_language_server_unconfigured",
+                "message": "No target language-server command and executor LSP transport are configured for this environment.",
+                "environment_id": service.scope.environment_id})
+        return await editor_language_request(_local_service(service), request, binding_token=window_binding_token)
 
     @router.post("/language/lifecycle")
     async def workspace_language_lifecycle_api(
@@ -198,24 +290,28 @@ def create_workspace_router() -> APIRouter:
     async def workspace_inline_completion_api(
         request: EditorCompletionRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ):
-        return editor_completion_response(_service(workspace_root), request)
+        if isinstance(service, ExecutorEditorService):
+            from .editor_ai import executor_editor_completion_response
+            return await executor_editor_completion_response(service, request)
+        return editor_completion_response(service, request)
 
     @router.get("/git/delivery")
-    async def workspace_git_delivery_status(workspace_root: str = Query(..., min_length=1)):
-        return await git_delivery_status(_service(workspace_root).workspace_root_path())
+    async def workspace_git_delivery_status(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        return await git_delivery_status(_local_service(service).workspace_root_path())
 
     @router.get("/environment")
-    async def workspace_environment_status(workspace_root: str = Query(..., min_length=1)):
-        return environment_setup_status(_service(workspace_root).workspace_root_path())
+    async def workspace_environment_status(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        return environment_setup_status(_local_service(service).workspace_root_path())
 
     @router.post("/environment/setup")
-    async def workspace_environment_setup(request: EnvironmentSetupRequest, workspace_root: str = Query(..., min_length=1)):
-        return environment_setup_response(_service(workspace_root).workspace_root_path(), request)
+    async def workspace_environment_setup(request: EnvironmentSetupRequest, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        return environment_setup_response(_local_service(service).workspace_root_path(), request)
 
     @router.post("/git/delivery")
-    async def workspace_git_delivery_action(request: GitDeliveryRequest, workspace_root: str = Query(..., min_length=1)):
-        return await git_delivery_action(_service(workspace_root).workspace_root_path(), request)
+    async def workspace_git_delivery_action(request: GitDeliveryRequest, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        return await git_delivery_action(_local_service(service).workspace_root_path(), request)
 
     @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
     async def workspace_project_index_api(
@@ -225,8 +321,8 @@ def create_workspace_router() -> APIRouter:
         include_dependency_paths: bool = Query(False),
         previous_revision: int | None = Query(None, ge=0),
         previous_instance_id: str | None = Query(None),
+        service=Depends(_request_service),
     ) -> WorkspaceProjectIndexResponse:
-        service = _service(workspace_root)
         from .project_index_runtime import project_index_runtime
 
         async def wait_for_disconnect() -> None:
@@ -235,7 +331,8 @@ def create_workspace_router() -> APIRouter:
                 if message["type"] == "http.disconnect":
                     return
 
-        scan = asyncio.create_task(project_index_runtime.read(service, include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths, previous_revision=previous_revision, previous_instance_id=previous_instance_id))
+        scan = asyncio.create_task(service.project_index(include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths)
+            if isinstance(service, ExecutorEditorService) else project_index_runtime.read(service, include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths, previous_revision=previous_revision, previous_instance_id=previous_instance_id))
         disconnect = asyncio.create_task(wait_for_disconnect())
         try:
             completed, _ = await asyncio.wait((scan, disconnect), return_when=asyncio.FIRST_COMPLETED)
@@ -260,36 +357,39 @@ def create_workspace_router() -> APIRouter:
     async def workspace_read_file_api(
         path: str = Query(..., min_length=1),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
         # Blocking disk I/O + sha256 must not stall the event loop while a
         # conversation streams tokens over the same process's WebSocket.
-        return await asyncio.to_thread(_service(workspace_root).read_file, path)
+        return await _call(service, "read_file", path)
 
     @router.get("/raw")
     async def workspace_raw_file_api(
         path: str = Query(..., min_length=1),
         workspace_root: str = Query(..., min_length=1),
         raw_token: str | None = Query(None),
+        service=Depends(_request_service),
     ) -> FileResponse:
         _ = raw_token
-        return await asyncio.to_thread(_service(workspace_root).raw_file_response, path)
+        return await _call(service, "raw_file_response", path)
 
     @router.get("/preview")
     async def workspace_preview_file_api(
         path: str = Query(..., min_length=1),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> dict[str, object]:
         """Return a bounded, parser-backed preview for a workspace deliverable."""
-        service = _service(workspace_root)
-        return await run_in_threadpool(service.preview_file, path)
+        return await _call(service, "preview_file", path)
 
     @router.put("/file", response_model=WorkspaceFileResponse)
     async def workspace_write_file_api(
         request: WorkspaceFileUpdateRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
-        return await to_thread_cancel_safe(
-            _service(workspace_root).write_file,
+        return await _call(
+            service, "write_file",
             path=request.path,
             content=request.content,
         )
@@ -298,9 +398,10 @@ def create_workspace_router() -> APIRouter:
     async def workspace_compare_write_file_api(
         request: WorkspaceFileCompareWriteRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
-        return await to_thread_cancel_safe(
-            _service(workspace_root).compare_and_write_file,
+        return await _call(
+            service, "compare_and_write_file",
             path=request.path,
             expected_hash=request.expected_hash,
             content=request.content,
@@ -310,16 +411,18 @@ def create_workspace_router() -> APIRouter:
     async def workspace_create_directory_api(
         request: WorkspaceDirectoryCreateRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspacePathResponse:
-        return await to_thread_cancel_safe(_service(workspace_root).create_directory, request.path)
+        return await _call(service, "create_directory", request.path)
 
     @router.post("/rename", response_model=WorkspacePathResponse)
     async def workspace_rename_path_api(
         request: WorkspacePathRenameRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspacePathResponse:
-        return await to_thread_cancel_safe(
-            _service(workspace_root).rename_path,
+        return await _call(
+            service, "rename_path",
             path=request.path,
             new_path=request.new_path,
         )
@@ -329,9 +432,10 @@ def create_workspace_router() -> APIRouter:
         path: str = Query(..., min_length=1),
         recursive: bool = Query(False),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceDeleteResponse:
-        return await to_thread_cancel_safe(
-            _service(workspace_root).delete_path,
+        return await _call(
+            service, "delete_path",
             path=path,
             recursive=recursive,
         )
@@ -363,10 +467,13 @@ def create_workspace_router() -> APIRouter:
     async def git_status_api(
         path: str = Query(""),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> dict:
         """返回 git 状态：分支、已修改/暂存/未跟踪文件列表"""
         # git subprocesses are blocking calls with multi-second timeouts; keep
         # them off the event loop so streaming is never stalled by status polls.
+        if isinstance(service, ExecutorEditorService):
+            return await service.git("status", path=path)
         root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
         return await asyncio.to_thread(workspace_git_status_payload, root, workspace_root=owner_root)
 
@@ -375,8 +482,11 @@ def create_workspace_router() -> APIRouter:
         file: str = Query(""),
         path: str = Query(""),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> dict:
         """返回指定文件的 git diff"""
+        if isinstance(service, ExecutorEditorService):
+            return await service.git("diff", path=path, file=file)
         root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
         if file and not is_path_within((root / file).resolve(), root):
             raise HTTPException(status_code=400, detail="Git file is outside workspace root.")
@@ -386,19 +496,24 @@ def create_workspace_router() -> APIRouter:
     async def git_worktree_api(
         path: str = Query(""),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeResponse:
         """Return linked worktree metadata for the active workspace."""
-        root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        if isinstance(service, ExecutorEditorService):
+            return WorkspaceGitWorktreeResponse(**(await service.git("worktree", path=path)))
+        local = _local_service(service)
+        root, owner_root = await asyncio.to_thread(_resolve_git_root, path, str(local.workspace_root_path()))
         return WorkspaceGitWorktreeResponse(**(await asyncio.to_thread(workspace_git_worktree_payload, root, workspace_root=owner_root)))
 
     @router.post("/git/worktree/switch", response_model=ProjectImportResponse)
     async def git_worktree_switch_api(
         request: WorkspaceGitWorktreeSwitchRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> ProjectImportResponse:
         """Switch the active workspace to an existing git worktree."""
         return ProjectImportResponse(
-            **(await switch_workspace_git_worktree_payload(_service(workspace_root).workspace_root_path(), request.path))
+            **(await switch_workspace_git_worktree_payload(_local_service(service).workspace_root_path(), request.path))
         )
 
     @router.delete("/git/worktree", response_model=WorkspaceGitWorktreeRemoveResponse)
@@ -406,12 +521,13 @@ def create_workspace_router() -> APIRouter:
         path: str = Query(..., min_length=1),
         force: bool = Query(False),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeRemoveResponse:
         """Remove a MiniCode isolated worktree."""
         return WorkspaceGitWorktreeRemoveResponse(
             **(await to_thread_cancel_safe(
                 remove_workspace_git_worktree_payload,
-                root=_service(workspace_root).workspace_root_path(),
+                root=_local_service(service).workspace_root_path(),
                 path=path,
                 force=force,
             ))
@@ -421,6 +537,7 @@ def create_workspace_router() -> APIRouter:
     async def git_worktree_snapshots_api(
         conversation_id: str | None = Query(None),
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeSnapshotsResponse:
         """List pre-deletion worktree snapshots, newest first."""
         root = await asyncio.to_thread(_service(workspace_root).workspace_root_path)
@@ -435,12 +552,13 @@ def create_workspace_router() -> APIRouter:
     async def git_worktree_restore_api(
         request: WorkspaceGitWorktreeRestoreRequest,
         workspace_root: str = Query(..., min_length=1),
+        service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeRestoreResponse:
         """Restore a worktree snapshot to a detached worktree."""
         return WorkspaceGitWorktreeRestoreResponse(
             **(await to_thread_cancel_safe(
                 restore_workspace_git_worktree_snapshot_payload,
-                root=_service(workspace_root).workspace_root_path(),
+                root=_local_service(service).workspace_root_path(),
                 snapshot_id=request.snapshot_id,
                 dest=request.dest,
             ))

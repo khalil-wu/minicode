@@ -27,8 +27,6 @@ def editor_completion_response(
     service: WorkspaceService, request: EditorCompletionRequest
 ):
     from backend.config import load_config
-    from backend.llm.base import LLMMessage, LLMTurnContext, SideQueryOptions
-    from backend.llm.model_registry import create_session_llm
 
     root = service.workspace_root_path()
     path = service.resolve_workspace_path(request.path)
@@ -38,6 +36,17 @@ def editor_completion_response(
         resolved_path=path,
     )
     config = load_config(cwd=root)
+    return _completion_response(request, config, str(path.relative_to(root)))
+
+
+async def executor_editor_completion_response(service, request):
+    path = await service.allowed(request.path)
+    return _completion_response(request, service.application_config, service.display(path), identity=service.identity(path))
+
+
+def _completion_response(request, config, file, *, identity=None):
+    from backend.llm.base import LLMMessage, LLMTurnContext, SideQueryOptions
+    from backend.llm.model_registry import create_session_llm
     try:
         adapter = create_session_llm(
             config, request.model or None, provider_override=request.provider or None
@@ -51,7 +60,7 @@ def editor_completion_response(
     )
     content = json.dumps(
         {
-            "file": str(path.relative_to(root)),
+            "file": file,
             "prefix": request.prefix,
             "selection": request.selected,
             "suffix": request.suffix,
@@ -87,6 +96,7 @@ def editor_completion_response(
                     "text": text,
                     "usage": asdict(context.usage),
                     "model": request.model or config.llm.model,
+                    **(identity or {}),
                 },
                 ensure_ascii=False,
             )

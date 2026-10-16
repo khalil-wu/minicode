@@ -79,6 +79,24 @@ def test_initialized_native_environment_does_not_offer_repeated_setup_for_a_poli
     assert snapshot["reason"] == "current managed policy cannot be enforced"
 
 
+def test_manager_network_prerequisite_is_separate_from_filesystem_readiness(tmp_path, monkeypatch):
+    initialized, _modes = _status_runtime(tmp_path, monkeypatch)
+    initialized["value"] = True
+    prerequisite = {"required": True, "ready": False,
+        "settings": {"proxy_ports": [3218, 43128], "allow_local_binding": False},
+        "sandbox_home": str(tmp_path / "actual-owned-home"),
+        "sandbox_executable": str(tmp_path / "actual-owned-runtime.exe"),
+        "reason": "Windows managed proxy settings require explicit initialization"}
+    manager = SimpleNamespace(network_provisioning_status=lambda: copy.deepcopy(prerequisite))
+    monkeypatch.setattr(routes_health._state, "bootstrap", SimpleNamespace(environment_manager=manager))
+    snapshot = routes_health._build_sandbox_status_payload()
+    assert snapshot["available"] and snapshot["native_available"]
+    assert snapshot["setup_required"]
+    assert snapshot["network_provisioning"] == prerequisite
+    prerequisite["ready"] = True
+    assert routes_health._build_sandbox_status_payload()["setup_required"] is False
+
+
 @pytest.mark.parametrize("configured_home", [" ./configured-home ", "~/.configured-sandbox"])
 def test_setup_configuration_uses_backend_home_normalization_and_explicit_runtime(tmp_path, monkeypatch, configured_home):
     candidates = windows_native._candidate_executables

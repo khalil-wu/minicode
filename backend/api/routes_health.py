@@ -118,8 +118,13 @@ def _build_sandbox_status_payload() -> dict[str, Any]:
         sandbox_executable = next((str(path.resolve()) for path in _candidate_executables() if path.is_file()), None)
         setup_supported = sandbox_executable is not None
     setup_required = sys.platform == "win32" and not available and not native_available
+    network_provisioning = (_state.bootstrap.environment_manager.network_provisioning_status()
+        if _state.bootstrap is not None and _state.bootstrap.environment_manager is not None else None)
+    network_setup_required = network_provisioning is not None and not network_provisioning["ready"]
+    setup_required |= network_setup_required
     description = (
-        "受限命令执行环境已就绪。" if available
+        "Windows 代理网络需要显式初始化。" if network_setup_required
+        else "受限命令执行环境已就绪。" if available
         else "Windows 执行环境已初始化，当前策略仍受限制。" if native_available
         else "需要初始化 Windows 命令执行环境。" if setup_supported
         else "Windows 隔离组件尚未安装。" if sys.platform == "win32"
@@ -138,6 +143,7 @@ def _build_sandbox_status_payload() -> dict[str, Any]:
         "state_root": str(STATE_ROOT),
         "sandbox_home": str(Path(str(os.environ.get("MINICODE_WINDOWS_SANDBOX_HOME") or "").strip() or DATA_ROOT / "windows-sandbox").expanduser().resolve()),
         "sandbox_executable": sandbox_executable,
+        "network_provisioning": network_provisioning,
     }
 
 

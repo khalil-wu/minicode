@@ -3254,11 +3254,21 @@ class TaskTool(BaseTool):
                 # per-event tasks can otherwise reorder durable projections.
                 child_run_context = RunContext(
                     lifecycle_runtime=parent_run_context.lifecycle_runtime,
+                    environment_manager=parent_run_context.environment_manager,
+                    environment_manager_lease=parent_run_context.environment_manager_lease,
+                    environment_host_mcp_manager=parent_run_context.environment_host_mcp_manager,
+                    environment_host_skill_manager=parent_run_context.environment_host_skill_manager,
+                    inherited_turn_environments=(parent_run_context.turn_environments.clone()
+                        if child_agent_session.thread_environments is None and parent_run_context.turn_environments is not None else None),
+                    user_shell=dict(parent_run_context.user_shell),
+                    session_source="subagent",
+                    is_subagent=True,
+                    isolated=agent_worktree is not None,
                     retain_model=parent_run_context.retain_model,
                     refresh_model_auth=parent_run_context.refresh_model_auth,
                     execution_journal=journal,
                     window_binding_token=context.window_binding_token,
-                    mcp_manager=parent_run_context.mcp_manager,
+                    mcp_manager=parent_run_context.environment_host_mcp_manager if parent_run_context.environment_manager is not None else parent_run_context.mcp_manager,
                     mcp_owner_session_id=parent_run_context.mcp_owner_session_id,
                     skill_manager=sub_context_builder.skill_manager,
                     model_execution=child_model_snapshot,

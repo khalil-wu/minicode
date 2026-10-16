@@ -8,12 +8,12 @@ import random
 import time
 from collections import deque
 from dataclasses import replace
-from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
 from backend.agent.guardian.action import GuardianAction
-from backend.agent.guardian.config import build_reviewer_config, reviewer_sandbox_policy, review_model_for_execution
+from backend.agent.guardian.config import (build_reviewer_config, reviewer_sandbox_policy, review_model_for_execution,
+    parent_has_full_access, parent_permission_profile, parent_environment_identity, reviewer_permission_profile)
 from backend.agent.guardian.contract import (
     GUARDIAN_MAX_ATTEMPTS, GUARDIAN_REVIEW_TIMEOUT, INPUT_BUDGET_MESSAGE,
     REVIEW_FAILURE_INSTRUCTIONS, GuardianReceipt, GuardianReviewError, parse_guardian_assessment,
@@ -29,7 +29,6 @@ from backend.agent.guardian.context import (
 from backend.agent.guardian.truncation import source_token_estimate
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.run_context import RunContext
-from backend.sandbox.policy import SandboxEnforcement
 from backend.llm.base import estimate_llm_context_tokens
 
 REJECTION_INSTRUCTIONS = (
@@ -82,7 +81,7 @@ class GuardianReviewService:
             or retry_reason is not None or action.kind == "exec_command" and action.payload.get("sandbox_permissions") == "require_escalated")
         review_id = uuid4().hex
         started_at_ms = int(time.time() * 1000)
-        event = {"id": review_id, "target_item_id": action.call_id, "turn_id": action.turn_id,
+        event = {"id": review_id, "target_item_id": None if action.kind == "network_access" else action.call_id, "turn_id": action.turn_id,
             "started_at_ms": started_at_ms, "status": "in_progress", "action": action.assessment_action(),
             "review_reason": "fresh_required" if require_fresh_review else "policy"}
         digest = context.authorization_digest
@@ -92,7 +91,7 @@ class GuardianReviewService:
             raise GuardianReviewError("prompt_build", "automatic approval review cannot access the request's environment")
         if context.cancel_event is not None and context.cancel_event.is_set():
             raise asyncio.CancelledError
-        if policy == "never" and context.sandbox_policy.permission_profile.enforcement is SandboxEnforcement.DISABLED:
+        if parent_has_full_access(context):
             return GuardianReceipt(review_id, action.request_digest, action.policy_identity, action.turn_id, action.environment_id, "approved")
         asynchronous = context.run_context.guardian_async_service if context.run_context is not None else None
         if asynchronous is not None:
@@ -185,16 +184,19 @@ class GuardianReviewService:
             parent_checkpoint = context_policy.parent_compaction(evidence.parent_compaction)
             config = build_reviewer_config(parent.config, review_model)
             policy = build_guardian_policy(settings, review_model.model_info)
-            readonly = reviewer_sandbox_policy(context.sandbox_policy)
-            permissions = GuardianPermissionEvidence.from_policy(context.sandbox_policy, cwd=Path(context.workspace_root), environment_id=action.environment_id)
+            readonly = reviewer_sandbox_policy(context.sandbox_policy) if context.sandbox_policy is not None else None
+            permissions = GuardianPermissionEvidence.from_context(context, environment_id=action.environment_id)
+            profile = parent_permission_profile(context, environment_id=action.environment_id)
+            readonly_profile = reviewer_permission_profile(profile) if profile is not None else None
             info = review_model.model_info
             window_override = config.context_window_config.model_context_window if config.context_window_config is not None else None
             supported = window_override if window_override is not None else int(info.context_window) if info is not None and info.context_window else min(128000, parent.config.token_budget.total)
             percent = int(info.extra.get("effective_context_window_percent", 95)) if info is not None else 95
             maximum = supported * max(0, min(100, percent)) // 100
             signature = hashlib.sha256(json.dumps({"policy": policy, "model": review_model.model, "effort": review_model.reasoning_effort,
-                "provider": parent.provider, "base_url": config.llm.base_url, "sandbox": str(readonly.permission_profile),
+                "provider": parent.provider, "base_url": config.llm.base_url, "sandbox": str(readonly_profile),
                 "cwd": str(context.workspace_root), "reset": evidence.history_reset_version,
+                "environments": parent_environment_identity(context),
                 "context_mode": evidence.context_mode, "comp_hash": review_model.compaction_hash,
                 "features": config.feature_flags.flags, "context_window": supported,
                 "model_auto_compact_token_limit": config.context_window_config.model_auto_compact_token_limit if config.context_window_config is not None else None,

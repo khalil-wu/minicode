@@ -30,6 +30,7 @@ test("actual main drain retains a failed closed-window operation and retries it 
   let attempts = 0;
   const context = {
     module: { exports: {} }, Promise,
+    remoteDesktop: null,
     EMBEDDED_BROWSER_TOKEN: "owned-fixture-token",
     appendDesktopLog(message) { events.push(message); },
     windowManager: { clearWindowStateSaveTimer() {}, persistWindowState() {} },

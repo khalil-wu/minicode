@@ -201,6 +201,20 @@ def populate_prompt_context(
     else:
         prompt_context.pop("plan_file_path", None)
         prompt_context.pop("plan_file_exists", None)
+    if run_context is not None and run_context.turn_environments is not None:
+        from backend.workspace.executor_paths import ExecutorPath
+
+        primary = run_context.turn_environments.primary()
+        environment["cwd"] = ExecutorPath.parse(primary.selection.cwd).native if primary is not None else ""
+        environment["workspace_roots"] = [ExecutorPath.parse(root).native for root in primary.config.workspace_roots] if primary is not None else []
+        shell = primary.shell if primary is not None else None
+        environment["shell"] = shell["name"] if shell is not None else ""
+        environment["platform"] = primary.peer_info.get("platformOs") if primary is not None else None
+        if primary is None or primary.is_remote:
+            environment["user_directories"] = {}
+            for key in ("primary_file", "active_tab_path"):
+                environment.pop(key, None)
+            prompt_context.pop("projectless_context", None)
     prompt_context["environment"] = environment
     agent_mode = str(
         metadata.get("agent_mode") or "build"

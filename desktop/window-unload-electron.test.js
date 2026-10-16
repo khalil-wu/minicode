@@ -86,6 +86,7 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
       app, windowManager: windows, process, quitCleanupComplete: false, quitCleanupStarted: false, appQuitRequested: false,
       rollbackPreparationInProgress: false, desktopCleanupFailed: false,
       windowCleanupTasks: new Map(), ptyManager: { async killAllSessions() {} },
+      remoteDesktop: { async close() { assert.equal(backendStopped, false); } },
       backendSidecar: { requestBackendStop() {}, async stopBackendSidecar() {
         if (!reading) assert.deepEqual(commits.at(-1), { text: "native-close-content", size: 2 * 1024 * 1024 });
         backendStopped = true; server.close();

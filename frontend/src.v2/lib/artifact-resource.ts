@@ -62,13 +62,16 @@ export const artifactResourceUrl = ({
   if (inlineUrl) return inlineUrl;
   if (source === "workspace") {
     const resource = new URL(originalUrl!);
-    return workspaceRawResourceUrlWithToken(resource.searchParams.get("path")!, resource.searchParams.get("workspace_root")!);
+    const owner = resource.searchParams.get("conversation_id");
+    return workspaceRawResourceUrlWithToken(resource.searchParams.get("path")!, resource.searchParams.get("workspace_root")!, undefined,
+      owner ? { session_id: sessionId || resource.searchParams.get("session_id")!, conversation_id: owner,
+        environment_id: resource.searchParams.get("environment_id") || undefined } : undefined);
   }
   if (source === "browser") {
     if (!isConnected) return "";
     const resource = new URL(originalUrl!);
     return conversationBrowserRawUrl({ conversationId: resource.searchParams.get("conversation_id")!,
-      executionCwd: resource.searchParams.get("execution_cwd")! }, resource.searchParams.get("path")!);
+      executionCwd: resource.searchParams.get("execution_cwd")!, environmentId: resource.searchParams.get("environment_id") || undefined }, resource.searchParams.get("path")!);
   }
 
   const id = String(artifactId || "").trim();

@@ -724,6 +724,9 @@ def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
     call_id = str(message.tool_call_id or "")
     if message.tool_search_output is not None:
         return {"type": "tool_search_output", "call_id": call_id, "tools": deepcopy(message.tool_search_output)}
+    if message.native_tool_output is not None:
+        return {"type": "function_call_output", "call_id": call_id,
+            "output": deepcopy(message.native_tool_output)}
     if message.history_notes_output is not None:
         return {"type": "function_call_output", "call_id": call_id,
             "output": deepcopy(message.history_notes_output)}
@@ -853,9 +856,10 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
 
         accepting_leading_instructions = False
         chat_messages.append(message.to_openai_message())
-        if role == "tool" and message.code_mode_output is not None:
+        native_output = message.native_tool_output if message.native_tool_output is not None else message.code_mode_output
+        if role == "tool" and native_output is not None and not isinstance(native_output, str):
             media_parts = []
-            for item in message.code_mode_output:
+            for item in native_output:
                 if item["type"] == "input_image":
                     media_parts.append({"type": "image_url", "image_url": {
                         "url": item["image_url"], "detail": item["detail"]}})

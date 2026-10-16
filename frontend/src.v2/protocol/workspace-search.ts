@@ -1,3 +1,4 @@
+import { appendWorkspaceOwner, workspaceRequestPath } from "./workspace-owner";
 import { apiBase, authHeaders, fetchWithTimeout, errorMessageFromResponseText } from "./api";
 import type { WorkspaceBufferEdit } from "../panels/applyWorkspaceBufferEdits";
 import { applyOffsetEdits } from "../panels/applyWorkspaceBufferEdits";
@@ -30,9 +31,10 @@ export function splitSearchGlobs(value: string): string[] {
 export async function searchWorkspaceText(workspaceRoot: string, options: WorkspaceSearchOptions, buffers: WorkspaceSearchBuffer[], signal?: AbortSignal): Promise<WorkspaceSearchResult> {
   const url = new URL(`${apiBase()}/api/workspace/search-content`);
   url.searchParams.set("workspace_root", workspaceRoot);
+  appendWorkspaceOwner(url);
   const response = await fetchWithTimeout(url, { method: "POST", headers: authHeaders({ "content-type": "application/json" }), signal,
     body: JSON.stringify({ query: options.query, regex: options.regex, case_sensitive: options.caseSensitive, whole_word: options.wholeWord,
-      include: splitSearchGlobs(options.include), exclude: splitSearchGlobs(options.exclude), buffers }) });
+      include: splitSearchGlobs(options.include), exclude: splitSearchGlobs(options.exclude), buffers: buffers.map(buffer => ({ ...buffer, path: workspaceRequestPath(buffer.path, workspaceRoot) })) }) });
   if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
   return response.json();
 }

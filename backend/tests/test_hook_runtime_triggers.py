@@ -1,12 +1,15 @@
-import asyncio
 from types import SimpleNamespace
+
+import pytest
 
 from backend.bootstrap import app as bootstrap_app
 from backend.bootstrap.app import AppBootstrap
 from backend.config import AppConfig, LLMSettings
+from backend.ws.manager import WebSocketManager
 
 
-def test_bootstrap_loads_hooks_without_invented_setup_event(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_bootstrap_loads_hooks_without_invented_setup_event(monkeypatch, tmp_path) -> None:
     import backend.config as config_mod
     import backend.hooks.manager as hooks_manager
     import backend.mcp.manager as mcp_manager_mod
@@ -48,8 +51,17 @@ def test_bootstrap_loads_hooks_without_invented_setup_event(monkeypatch, tmp_pat
             return []
 
     class _Scheduler:
+        def set_heartbeat_gate(self, gate):
+            self.gate = gate
+
+        def set_on_change(self, callback):
+            self.on_change = callback
+
         async def start(self):
-            return None
+            self.started = True
+
+        async def stop(self):
+            self.started = False
 
     monkeypatch.setattr(config_mod, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(bootstrap_app, "load_config", lambda: AppConfig(llm=LLMSettings(api_key="")))
@@ -58,18 +70,21 @@ def test_bootstrap_loads_hooks_without_invented_setup_event(monkeypatch, tmp_pat
     monkeypatch.setattr(skill_manager_mod, "SkillManager", _SkillManager)
     monkeypatch.setattr(skill_executor_mod, "SkillExecutor", lambda manager: object())
     monkeypatch.setattr(mcp_manager_mod, "MCPServerManager", _McpManager)
-    monkeypatch.setattr(scheduler_mod, "get_global_scheduler", lambda: _Scheduler())
+    scheduler = _Scheduler()
+    monkeypatch.setattr(scheduler_mod, "get_global_scheduler", lambda *, on_fire: scheduler)
     monkeypatch.setattr(hooks_manager.HookManager, "from_settings", classmethod(lambda cls, settings, workspace_root=None: _HookManager()))
 
     bootstrap = AppBootstrap(
         build_tool_registry=lambda *args, **kwargs: SimpleNamespace(),
         create_session_llm=lambda *args, **kwargs: object(),
-        ws_manager=SimpleNamespace(),
+        ws_manager=WebSocketManager(),
         on_mcp_status_change=lambda *args, **kwargs: None,
     )
 
-    asyncio.run(bootstrap.startup())
+    await bootstrap.startup()
+    assert scheduler.started
 
     # No invented Setup event fires at startup; session_start runs per session
     # from loop_preflight with source="startup" (cc alignment).
-    asyncio.run(bootstrap.shutdown())
+    await bootstrap.shutdown()
+    assert not scheduler.started

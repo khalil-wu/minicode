@@ -339,7 +339,10 @@ class WebSocketManager:
                     self.execution_contexts.unload_failed(request)
                     logger.warning("Thread %s unload timed out; its original execution remains loaded", context.conversation_id)
                     return False
+            await context.thread_runtime.close_environments()
             removed = self.execution_contexts.finish_unload(request)
+            if removed:
+                self.execution_contexts.release_thread_runtime(context.thread_runtime)
         except BaseException:
             self.execution_contexts.unload_failed(request)
             raise
@@ -745,6 +748,7 @@ class WebSocketManager:
         skill_executor: Any | None = None,
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
+        environment_manager: Any | None = None,
     ) -> tuple[WebSocketSession, int]:
         from backend.ws.handler import (
             CONVERSATION_DATA_DIR,
@@ -841,6 +845,7 @@ class WebSocketManager:
                     skill_executor=skill_executor,
                     memory_manager=memory_manager,
                     mcp_manager=mcp_manager,
+                    environment_manager=environment_manager,
                     ws_manager=self,
                     replay_state=replay_state,
                     window_instance_id=window_instance_id,
@@ -1040,7 +1045,9 @@ class WebSocketManager:
                     raise RuntimeError(f"Execution host {session_id} still has undrained core tasks")
                 for request in requests:
                     if request is not None:
+                        await request.context.thread_runtime.close_environments()
                         self.execution_contexts.finish_unload(request)
+                        self.execution_contexts.release_thread_runtime(request.context.thread_runtime)
                 tail = session.event_outbox.persistence_tail
                 if tail is not None:
                     await asyncio.shield(tail)

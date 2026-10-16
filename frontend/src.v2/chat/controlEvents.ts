@@ -169,6 +169,8 @@ const applyApprovalRequest = (
     approvalReason?: string | null;
     proposedExecpolicyAmendment?: string[] | null;
     availableDecisions?: PendingApproval["availableDecisions"];
+    networkApprovalContext?: PendingApproval["networkApprovalContext"];
+    proposedNetworkPolicyAmendments?: PendingApproval["proposedNetworkPolicyAmendments"];
     args: Record<string, unknown>;
     sourceAgent?: string;
     sourceThread?: string;
@@ -197,6 +199,8 @@ const applyApprovalRequest = (
       approvalReason: request.approvalReason,
       proposedExecpolicyAmendment: request.proposedExecpolicyAmendment,
       availableDecisions: request.availableDecisions,
+      networkApprovalContext: request.networkApprovalContext,
+      proposedNetworkPolicyAmendments: request.proposedNetworkPolicyAmendments,
       args: request.args,
       sourceAgent: request.sourceAgent,
       sourceThread: request.sourceThread,
@@ -318,7 +322,8 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           ...(request.subtype === "can_use_tool" ? { mcpApproval: request.mcp_approval,
             command: request.command, displayCommand: request.display_command, cwd: request.cwd, approvalReason: request.reason,
             requestDigest: request.request_digest, proposedExecpolicyAmendment: request.proposed_execpolicy_amendment,
-            availableDecisions: request.available_decisions } : {}),
+            availableDecisions: request.available_decisions, networkApprovalContext: request.network_approval_context,
+            proposedNetworkPolicyAmendments: request.proposed_network_policy_amendments } : {}),
         });
         if (!isReplayedEvent(e) && isDesktop()) {
           notifyControlRequest(ev, conversationId, "permission", "MiniCode 请求权限",

@@ -63,6 +63,12 @@ async def _run_git(
     have actually settled. Registry cancellation can retain that same coroutine
     in the shared lifecycle owner; no anonymous cleanup callback replaces it.
     """
+    from backend.workspace.executor_service import ExecutorWorkspaceService, uses_executor_io
+    if uses_executor_io(context):
+        from backend.workspace.executor_git import run_executor_git
+        async with ExecutorWorkspaceService(context) as service:
+            return await run_executor_git(service, argv, cwd=service.resolve(str(cwd or root)),
+                write_metadata=write_git_metadata, timeout=timeout, index_file=index_file)
     root = root.resolve()
     cwd = cwd or root
     policy = sandbox_policy

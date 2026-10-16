@@ -386,5 +386,6 @@
   "手动": "Manual",
   "项目顺序": "Projects",
   "项目中的聊天": "Chats in project",
-  "最近聊天": "Recent chats"
+  "最近聊天": "Recent chats",
+  "请在远端 Windows 主机上初始化沙箱。": "Initialize the sandbox on the remote Windows host."
 }

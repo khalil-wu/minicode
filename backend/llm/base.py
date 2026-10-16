@@ -739,6 +739,7 @@ class LLMMessage:
     # ``None`` keeps old callers/snapshots compatible; adapters use a stable
     # deterministic fallback for such legacy messages.
     timestamp_ms: int | None = None
+    native_tool_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
 
     def user_text_parts(self) -> list[str]:
         """Keep admitted runtime context and the user's text in separate wire blocks.
@@ -791,6 +792,10 @@ class LLMMessage:
             from backend.mcp.result_projection import mcp_text_output
 
             msg["content"] = mcp_text_output(self.history_notes_output)
+        if self.role == "tool" and self.native_tool_output is not None:
+            from backend.mcp.result_projection import mcp_text_output
+
+            msg["content"] = mcp_text_output(self.native_tool_output)
         if self.role == "assistant" and self.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -875,6 +880,10 @@ def _estimate_responses_window_tokens(items: list[dict[str, Any]]) -> int:
 
 
 def estimate_llm_message_tokens(message: LLMMessage, content: Any | None = None) -> int:
+    if message.native_tool_output is not None:
+        from backend.mcp.result_projection import mcp_output_visible_bytes
+
+        return (mcp_output_visible_bytes(message.native_tool_output) + 3) // 4
     if message.history_notes_output is not None:
         from backend.mcp.result_projection import mcp_output_visible_bytes
 

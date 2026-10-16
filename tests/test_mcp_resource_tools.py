@@ -1,5 +1,7 @@
 import asyncio
-from types import SimpleNamespace
+import json
+
+from mcp import types
 
 from backend.artifact.store import ArtifactStore
 from backend.mcp.manager import MCPServerConfig, MCPServerManager, MCPServerState, ServerStatus
@@ -19,7 +21,7 @@ class _FakeMcpClient:
     def __init__(
         self,
         *,
-        resources: list[SimpleNamespace] | None = None,
+        resources: list[types.Resource] | None = None,
         content_by_uri: dict[str, str] | None = None,
         connected: bool = True,
     ) -> None:
@@ -29,15 +31,20 @@ class _FakeMcpClient:
         self.list_calls = 0
         self.read_calls: list[str] = []
 
-    async def list_resources_page(self, _cursor=None) -> tuple[list[SimpleNamespace], None]:
+    async def list_resources_result(self, _cursor=None) -> dict:
         self.list_calls += 1
-        return self._resources, None
+        return types.ListResourcesResult(resources=self._resources).model_dump(mode="json", by_alias=True, exclude_none=True)
 
-    async def read_resource(self, uri: str) -> list[dict[str, str]]:
+    async def list_all_resource_items(self, *, templates: bool = False) -> list[dict]:
+        assert templates is False
+        return (await self.list_resources_result())["resources"]
+
+    async def read_resource_result(self, uri: str) -> dict:
         self.read_calls.append(uri)
         if uri not in self._content_by_uri:
             raise RuntimeError("resource not found")
-        return [{"uri": uri, "mimeType": "text/plain", "text": self._content_by_uri[uri]}]
+        return types.ReadResourceResult(contents=[types.TextResourceContents(uri=uri,
+            mimeType="text/plain", text=self._content_by_uri[uri])]).model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 def _manager_with_clients(
@@ -53,8 +60,8 @@ def _manager_with_clients(
     return manager
 
 
-def test_mcp_bridge_tools_deferred_in_default_toolset() -> None:
-    """All bridges stay lazy and are activated by name through tool_search.
+def test_source_resource_tools_are_core_and_auxiliary_mcp_bridges_remain_deferred() -> None:
+    """Source's three resource tools are core; optional bridges remain lazy.
 
     The async-agent availability filter admits a whole ``mcp`` toolset, so
     placing these bridges there would widen background agents (see the
@@ -72,35 +79,36 @@ def test_mcp_bridge_tools_deferred_in_default_toolset() -> None:
     )
 
     assert {tool.get_spec().toolset for tool in tools} == {"default"}
-    assert {tool.get_spec().exposure for tool in tools} == {"deferred"}
+    assert {tool.get_spec().exposure for tool in tools[:3]} == {"core"}
+    assert {tool.get_spec().exposure for tool in tools[3:]} == {"deferred"}
 
 
 def test_list_mcp_resources_lists_only_manager_connected_servers(tmp_path) -> None:
     docs = _FakeMcpClient(
         resources=[
-            SimpleNamespace(
+            types.Resource(
                 uri="mcp://docs/schema",
                 name="Schema",
-                mime_type="application/json",
+                mimeType="application/json",
             )
         ]
     )
     stale = _FakeMcpClient(
         resources=[
-            SimpleNamespace(
+            types.Resource(
                 uri="mcp://stale/secret",
                 name="Stale",
-                mime_type="text/plain",
+                mimeType="text/plain",
             )
         ],
         connected=True,
     )
     disconnected = _FakeMcpClient(
         resources=[
-            SimpleNamespace(
+            types.Resource(
                 uri="mcp://offline/ignored",
                 name="Offline",
-                mime_type="text/plain",
+                mimeType="text/plain",
             )
         ],
         connected=False,
@@ -117,12 +125,8 @@ def test_list_mcp_resources_lists_only_manager_connected_servers(tmp_path) -> No
     result = asyncio.run(ListMcpResourcesTool(manager).execute({}))
 
     assert not result.is_error
-    assert "URI: mcp://docs/schema" in result.content
-    assert "Name: Schema" in result.content
-    assert "MimeType: application/json" in result.content
-    assert "Server: docs" in result.content
-    assert "stale" not in result.content
-    assert "offline" not in result.content
+    assert json.loads(result.native_tool_output) == {"resources": [{"server": "docs",
+        "uri": "mcp://docs/schema", "name": "Schema", "mimeType": "application/json"}]}
     assert docs.list_calls == 1
     assert stale.list_calls == 0
     assert disconnected.list_calls == 0
@@ -144,7 +148,7 @@ def test_read_mcp_resource_requires_an_exact_server(tmp_path) -> None:
     )
 
     assert result.is_error
-    assert "Missing required argument: server" in result.content
+    assert "server and uri are required" in result.content
     assert missing.read_calls == []
     assert docs.read_calls == []
 
@@ -168,7 +172,8 @@ def test_read_mcp_resource_prefers_requested_server_when_uri_collides(tmp_path) 
     )
 
     assert not result.is_error
-    assert result.content == "docs schema"
+    assert json.loads(result.native_tool_output) == {"server": "docs", "uri": "mcp://shared/schema",
+        "contents": [{"uri": "mcp://shared/schema", "mimeType": "text/plain", "text": "docs schema"}]}
     assert first.read_calls == []
     assert docs.read_calls == ["mcp://shared/schema"]
 
@@ -192,7 +197,7 @@ def test_read_mcp_resource_reports_unknown_requested_server(tmp_path) -> None:
     assert docs.read_calls == []
 
 
-def test_read_mcp_resource_stores_large_content_as_artifact(tmp_path) -> None:
+def test_read_mcp_resource_preserves_large_text_in_source_json_without_an_artifact(tmp_path) -> None:
     content = "\n".join(f"line {index}: {'x' * 40}" for index in range(80))
     docs = _FakeMcpClient(content_by_uri={"mcp://docs/large": content})
     manager = _manager_with_clients(
@@ -206,8 +211,9 @@ def test_read_mcp_resource_stores_large_content_as_artifact(tmp_path) -> None:
     )
 
     assert not result.is_error
-    assert result.artifact_id
-    assert store.get(result.artifact_id) == content
-    assert result.artifact_preview == "\n".join(content.split("\n")[:10])
-    assert "saved as Artifact" in result.content
+    assert json.loads(result.native_tool_output) == {"server": "docs", "uri": "mcp://docs/large",
+        "contents": [{"uri": "mcp://docs/large", "mimeType": "text/plain", "text": content}]}
+    assert result.artifact_id is None
+    assert result.artifact_preview is None
+    assert result.content == result.native_tool_output
     store.shutdown()

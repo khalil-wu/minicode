@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+from fastapi import HTTPException
+from backend.environments.errors import ExecutorError
 
 from backend.agent.message import AgentEvent
 from backend.ws.command_results import emit_command_error
@@ -18,19 +21,39 @@ logger = logging.getLogger(__name__)
 _SUBAGENT_TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled", "interrupted"}
 
 
+def _checkpoint_command_scope(session, data):
+    # URI cwd belongs to the selected executor. The conversation command owner
+    # still carries its separately bound desktop workspace.
+    return resolve_command_scope(session, {key: value for key, value in data.items()
+        if key not in {"execution_cwd", "workspace_root", "workspace"} or not str(value).startswith("file:")})
+
+
+@asynccontextmanager
+async def _checkpoint_execution(session, scope, data):
+    from backend.services.workspace_api_service import capture_workspace_execution
+    from backend.workspace.executor_paths import ExecutorPath
+    async with capture_workspace_execution(session, scope.conversation_id, environment_id=data.get("environment_id")) as context:
+        if context is None and (data.get("environment_id") or any(str(data.get(key) or "").startswith("file:")
+                for key in ("cwd_uri", "execution_cwd", "workspace_root", "workspace"))):
+            raise ValueError("No usable execution environment is attached to this checkpoint request.")
+        if context is not None:
+            for key in ("cwd_uri", "execution_cwd", "workspace_root", "workspace"):
+                value = str(data.get(key) or "")
+                if value.startswith("file:") and ExecutorPath.parse(value) != ExecutorPath.parse(context.permission.environment_scope.cwd_uri):
+                    raise ValueError("Checkpoint execution owner is stale.")
+        yield context
+
+
 async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.checkpoint_service import CheckpointServiceError, list_checkpoints
 
     try:
-        scope = resolve_command_scope(session, data)
-        result = list_checkpoints(
-            session.checkpoint_manager,
-            conversation_id=scope.conversation_id,
-            workspace_root=scope.workspace_root,
-            limit=int(data.get("limit", 50) or 50),
-        )
-    except (CheckpointServiceError, ValueError) as exc:
-        await emit_command_error(session, "checkpoint.list", exc)
+        scope = _checkpoint_command_scope(session, data)
+        async with _checkpoint_execution(session, scope, data) as context:
+            result = list_checkpoints(session.checkpoint_manager, conversation_id=scope.conversation_id,
+                workspace_root=scope.workspace_root, limit=int(data.get("limit", 50) or 50), execution_context=context)
+    except (CheckpointServiceError, ValueError, ExecutorError, HTTPException) as exc:
+        await emit_command_error(session, "checkpoint.list", str(exc.detail) if isinstance(exc, HTTPException) else exc)
         return True
     await session.send_payload(
         scope.apply({"type": "checkpoint.list", "checkpoints": result.checkpoints}),
@@ -48,7 +71,7 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     guards = conversation_query_guards()
     claim = None
     try:
-        scope = resolve_command_scope(session, data)
+        scope = _checkpoint_command_scope(session, data)
         from backend.ws.conversation_activity import live_subagent_count
 
         if live_subagent_count(scope.conversation_id):
@@ -59,14 +82,11 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
                 "Cannot rewind a checkpoint while the conversation has an active agent turn. "
                 "Stop the turn and retry the rewind."
             )
-        result = await rewind_checkpoint(
-            session.checkpoint_manager,
-            str(data.get("checkpoint_id") or data.get("id") or ""),
-            conversation_id=scope.conversation_id,
-            workspace_root=scope.workspace_root,
-        )
-    except (CheckpointServiceError, ValueError) as exc:
-        await emit_command_error(session, "checkpoint.rewind", exc)
+        async with _checkpoint_execution(session, scope, data) as context:
+            result = await rewind_checkpoint(session.checkpoint_manager, str(data.get("checkpoint_id") or data.get("id") or ""),
+                conversation_id=scope.conversation_id, workspace_root=scope.workspace_root, execution_context=context)
+    except (CheckpointServiceError, ValueError, ExecutorError, HTTPException) as exc:
+        await emit_command_error(session, "checkpoint.rewind", str(exc.detail) if isinstance(exc, HTTPException) else exc)
         return True
     finally:
         if claim is not None:

@@ -213,7 +213,10 @@ const nativeFolderCandidates = async (path: string, workspaceRoot: string): Prom
 const fetchWorkspaceBlob = async (path: string, workspaceRoot: string): Promise<Blob> => {
   const params = new URLSearchParams({ path });
   if (workspaceRoot.trim()) params.set("workspace_root", workspaceRoot.trim());
-  const url = `${apiBase()}/api/workspace/raw?${params.toString()}`;
+  const { appendWorkspaceOwner, workspaceRequestPath } = await import("../protocol/workspace-owner");
+  params.set("path", workspaceRequestPath(path, workspaceRoot));
+  const url = new URL(`${apiBase()}/api/workspace/raw?${params.toString()}`);
+  appendWorkspaceOwner(url);
   const response = await fetchWithTimeout(url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Workspace raw request failed (${response.status}).`);

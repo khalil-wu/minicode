@@ -4,11 +4,54 @@ import asyncio
 from pathlib import Path
 import subprocess
 from typing import Any
+from contextlib import asynccontextmanager
+from dataclasses import replace
 
 from fastapi import HTTPException
 
 from backend.diff.git_integration import is_not_git_repository
 from backend.runtime_env import sanitized_git_env
+
+
+@asynccontextmanager
+async def capture_workspace_execution(session, conversation_id: str, *, environment_id: str | None = None):
+    """Borrow the receiving conversation's actual thread environment owner."""
+    from backend.agent.environment_runtime import capture_conversation_environments
+    from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment, select_turn_environment
+    from backend.agent.run_context import RunContext
+    from backend.permissions.context import ToolExecutionContext
+    from backend.workspace.executor_paths import ExecutorPath
+
+    if getattr(session, "environment_manager", None) is None:
+        if environment_id is not None:
+            from backend.environments.errors import ExecutorProtocolError
+            raise ExecutorProtocolError("No usable execution environment is attached to this workspace request.")
+        yield None
+        return
+
+    conversation = await asyncio.to_thread(session.conversation_repo.get_conversation, conversation_id)
+    if conversation is None or conversation.archived:
+        raise HTTPException(404, "The target conversation is not available.")
+    permission = session.permission_context_for_conversation(conversation, source="workspace.request")
+    directory = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
+    if not directory:
+        raise HTTPException(409, "The conversation has no fixed execution owner.")
+    cwd_uri = (ExecutorPath.parse(directory).uri if directory.startswith("file:") else Path(directory).expanduser().resolve().as_uri())
+    snapshot = await capture_conversation_environments(environment_manager=session.environment_manager,
+        execution_registry=session.ws_manager.execution_contexts, conversation_repository=session.conversation_repo,
+        conversation_id=conversation_id, permission_context=permission, config_stack=session.config.config_layer_stack,
+        cwd_uri=cwd_uri, workspace_root_uris=(cwd_uri,))
+    try:
+        attachment = select_turn_environment(snapshot, environment_id)
+        context = ToolExecutionContext(permission=permission, session_id=session.session_id, conversation_id=conversation_id,
+            run_context=RunContext(turn_environments=snapshot), permission_checker=session.permission_checker)
+        captured = bind_tool_execution_environment(context, attachment)
+        try:
+            yield captured
+        finally:
+            await close_tool_execution_environment(captured)
+    finally:
+        await snapshot.aclose()
 
 
 def search_workspace_directories(root: Path, query: str, limit: int) -> list[dict[str, Any]]:

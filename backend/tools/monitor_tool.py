@@ -424,6 +424,9 @@ class MonitorTool(BaseTool):
             header += "Process cleanup is still pending; use action='cancel' on this command id to retry cleanup.\n"
         body = wrap_untrusted_content(output, "monitor") if output else "<no output captured yet>"
         is_execution_error = command.status == "failed" and not command.command_completed
+        execution_error = command._lifecycle().error.get("message", "") if is_execution_error else ""
+        if execution_error:
+            header += execution_error + "\n"
         status = (
             "pending"
             if bool(getattr(command, "cleanup_pending", False))
@@ -446,6 +449,7 @@ class MonitorTool(BaseTool):
             runtime_metadata={"command_id": command.command_id, "next_cursor": next_cursor, "more_output": more,
                               "end_cursor": end_cursor,
                               "stdout_preview": output, "stderr_preview": "",
+                              "execution_error": execution_error, "network_policy_decisions": list(command.network_audit),
                               "process_status": command.status, "exit_code": command.exit_code},
             cleanup_receipt=cleanup_receipt,
         )

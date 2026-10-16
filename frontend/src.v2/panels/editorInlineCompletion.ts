@@ -1,3 +1,4 @@
+import { appendWorkspaceOwner, workspaceRequestPath } from "../protocol/workspace-owner";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, errorMessageFromResponseText } from "../protocol/api";
@@ -8,11 +9,12 @@ export async function generateEditorCode(workspaceRoot: string, data: { path: st
   const preferences = state.workbenchPreferences;
   const url = new URL("/api/workspace/inline-completion", apiBase());
   url.searchParams.set("workspace_root", workspaceRoot);
+  appendWorkspaceOwner(url);
   useAppStore.setState((current) => ({ inlineCompletionUsage: { ...current.inlineCompletionUsage,
     requests: current.inlineCompletionUsage.requests + 1, pending: true, lastError: "" } }));
   try {
     const response = await fetch(url, { method: "POST", signal, headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ ...data, prefix: data.prefix.slice(-16000), suffix: data.suffix.slice(0, 8000), max_tokens: data.mode === "edit" ? 4096 : preferences.aiMaxTokens,
+      body: JSON.stringify({ ...data, path: workspaceRequestPath(data.path, workspaceRoot), prefix: data.prefix.slice(-16000), suffix: data.suffix.slice(0, 8000), max_tokens: data.mode === "edit" ? 4096 : preferences.aiMaxTokens,
         model: preferences.aiModel || state.currentModel, provider: preferences.aiProvider || state.currentProviderId || state.currentProvider }) });
     if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
     const result = await response.json() as { text: string; error?: string; usage: { input_tokens: number; output_tokens: number }; model: string };

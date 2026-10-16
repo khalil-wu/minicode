@@ -217,6 +217,10 @@ def _authorize_final_tool_request(
 
     tool = tool_registry.get_tool(tc.name)
     policy_identity = tool.policy_identity if tool is not None else tc.name
+    from backend.agent.tool_environments import execution_context_for_call, execution_environment_identity
+    from backend.environments.errors import ExecutorError
+
+    environment_identity = None
     from backend.permissions.grants import permission_context_with_grants
 
     permission_context = permission_context_with_grants(permission_context or tool_ctx.permission, tool_ctx)
@@ -226,7 +230,9 @@ def _authorize_final_tool_request(
         permission_context = replace(permission_context,
             captured_mcp_approval_store=tool_ctx.run_context.mcp_tool_approvals if tool_ctx.run_context is not None else None,
             captured_mcp_permission_profile=(
-            tool_ctx.sandbox_policy.resolve(cwd=tool_ctx.workspace_root) if tool_ctx.sandbox_policy is not None else None))
+                tool_ctx.sandbox_policy.resolve(cwd=tool_ctx.workspace_root)
+                if tool.environment_id == "local" and tool.permission_scope is None
+                and tool_ctx.sandbox_policy is not None else None))
     bound_request = _bound_final_tool_request(tc)
     if bound_request is not None and bound_request.policy_identity != policy_identity:
         return FinalToolAuthorization(request=bound_request,
@@ -267,6 +273,15 @@ def _authorize_final_tool_request(
             error=policy_reason,
             error_kind="tool_unavailable",
         )
+    if tool is not None and tool.requires_execution_environment:
+        try:
+            tool_ctx = execution_context_for_call(tc, tool_ctx, tool)
+        except (ValueError, ExecutorError) as error:
+            return FinalToolAuthorization(error=str(error), error_kind="environment_selection")
+        permission_context = permission_context_with_grants(replace(permission_context,
+            environment_scope=tool_ctx.permission.environment_scope), tool_ctx)
+        tool_ctx = replace(tool_ctx, permission=permission_context)
+        environment_identity = execution_environment_identity(tool_ctx)
     if check_scope:
         scope_reason = subagent_scope_guard_reason(tc, tool_registry, tool_ctx)
         if scope_reason:
@@ -281,7 +296,7 @@ def _authorize_final_tool_request(
             )
 
     try:
-        request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
+        request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity, environment_identity=environment_identity)
     except Exception as exc:
         return FinalToolAuthorization(
             error=f"Tool '{tc.name}' arguments could not be frozen ({type(exc).__name__}).",
@@ -297,8 +312,9 @@ def _authorize_final_tool_request(
             old_escalation = canonical.pop("with_escalated_permissions")
             canonical.setdefault("sandbox_permissions", "require_escalated" if old_escalation else "use_default")
             tc.arguments = canonical
-            request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
-        if bound_request is not None and bound_request.exec_policy is not None and bound_request.matches_arguments(tc.arguments):
+            request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity, environment_identity=environment_identity)
+        if (bound_request is not None and bound_request.exec_policy is not None
+                and bound_request.environment_identity == environment_identity and bound_request.matches_arguments(tc.arguments)):
             request = bound_request
         else:
             from backend.permissions.native_execpolicy import NativeExecPolicyError, NativeExecPolicyProcessError
@@ -355,7 +371,7 @@ def _authorize_final_tool_request(
     return FinalToolAuthorization(request=request, permission_decision=decision)
 
 
-def _detached_tool_diff(
+async def _detached_tool_diff(
     tc: ToolCallEvent,
     *,
     workspace_root: Path | str | None,
@@ -367,12 +383,16 @@ def _detached_tool_diff(
         args = deepcopy(dict(tc.arguments or {}))
     except Exception:
         return None
-    diff = generate_diff(
-        tc.name,
-        args,
-        workspace_root=workspace_root,
-        tool_ctx=tool_ctx,
-    )
+    if tool_ctx.environment_bindings is not None:
+        from backend.agent.tool_environments import execution_context_for_call
+
+        tool_ctx = execution_context_for_call(tc, tool_ctx, tool_ctx.tool_registry.get_tool(tc.name))
+    if tool_ctx.turn_environment is not None:
+        from backend.workspace.executor_tool_io import generate_executor_tool_diff
+
+        diff = await generate_executor_tool_diff(tc.name, args, tool_ctx)
+    else:
+        diff = generate_diff(tc.name, args, workspace_root=workspace_root, tool_ctx=tool_ctx)
     if tc.name == "apply_patch" and diff is not None:
         tc._apply_patch_review_hashes = args["_expected_hashes"]
     return diff
@@ -397,6 +417,13 @@ def _execution_arguments_for_tool(
         path_argument = "notebook_path" if tc.name == "notebook_edit" else "file_path"
         raw_path = str(tc.arguments.get(path_argument) or "").strip()
         if raw_path:
+            if tool_ctx.turn_environment is not None:
+                from backend.workspace.executor_service import executor_read_hash
+
+                expected = executor_read_hash(tool_ctx, raw_path)
+                if expected is not None:
+                    execution_args["expected_hash"] = expected
+                return execution_args
             try:
                 resolved = _resolve_workspace_path_for_scope(raw_path, tool_ctx)
             except Exception as exc:
@@ -648,6 +675,8 @@ def _tool_call_is_read_only(tc: ToolCallEvent, tool_registry: ToolRegistry) -> b
 def _resolve_workspace_path_for_scope(
     raw_path: str, tool_ctx: ToolExecutionContext
 ) -> Path:
+    if tool_ctx.permission.environment_scope is not None:
+        return tool_ctx.permission.environment_scope.resolve_path(raw_path)
     from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 
     # Guard extraction and mutation tools must agree on bypass semantics:
@@ -706,6 +735,14 @@ def subagent_scope_guard_reason(
     write_scope = _metadata_string_list(metadata, "write_scope")
     if not read_only and not write_scope:
         return ""
+    if tool_ctx.environment_bindings is not None:
+        from backend.agent.tool_environments import execution_context_for_call
+        from backend.environments.errors import ExecutorError
+
+        try:
+            tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+        except (ValueError, ExecutorError) as error:
+            return str(error)
 
     if read_only and not _tool_call_is_read_only(tc, tool_registry):
         return (
@@ -1039,6 +1076,7 @@ async def snapshot_before_write(
             conversation_id=tool_ctx.conversation_id,
             session_id=tool_ctx.session_id,
             tool_call_id=tc.id,
+            execution_context=tool_ctx,
         )
     except Exception as exc:
         logger.warning("checkpoint snapshot failed: %s", exc)
@@ -1150,7 +1188,7 @@ async def _run_authorized_tool(
                 "its recovery checkpoint."
             ),
         )
-    changed_file = changed_file_event_payload(tc, tool_ctx, tool_registry)
+    changed_file = await changed_file_event_payload(tc, tool_ctx, tool_registry)
     # Principle: a side effect without a recovery boundary must be visible
     # evidence, never a silent skip.  Tools like run_command and the worktree
     # family mutate the workspace through paths no file checkpoint can
@@ -1569,6 +1607,11 @@ async def _apply_extension_post_tool_hook(
 def _display_path_for_tool_arg(
     raw_path: str, tool_ctx: ToolExecutionContext
 ) -> tuple[Path, str]:
+    if tool_ctx.turn_environment is not None:
+        scope = tool_ctx.permission.environment_scope
+        resolved = scope.resolve_path(raw_path)
+        cwd = scope.resolve_path(scope.cwd_uri)
+        return resolved, resolved.relative_to(cwd).as_posix() if resolved.is_relative_to(cwd) else resolved.native
     workspace_root = (
         Path(tool_ctx.workspace_root).resolve() if tool_ctx.workspace_root else None
     )
@@ -1587,7 +1630,7 @@ def _display_path_for_tool_arg(
     return resolved, display_path
 
 
-def changed_file_event_payload(
+async def changed_file_event_payload(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
     tool_registry: ToolRegistry,
@@ -1598,7 +1641,13 @@ def changed_file_event_payload(
     if not raw_path:
         return None
     resolved, display_path = _display_path_for_tool_arg(raw_path, tool_ctx)
-    existed_before = resolved.exists()
+    if tool_ctx.turn_environment is not None:
+        from backend.workspace.executor_service import ExecutorWorkspaceService
+
+        async with ExecutorWorkspaceService(tool_ctx) as service:
+            existed_before = await service.metadata(resolved) is not None
+    else:
+        existed_before = resolved.exists()
     event_type = (
         "created" if tc.name == "write_file" and not existed_before else "modified"
     )
@@ -1606,7 +1655,10 @@ def changed_file_event_payload(
         "path": display_path,
         "event": event_type,
     }
-    if tool_ctx.workspace_root is not None:
+    if tool_ctx.turn_environment is not None:
+        payload.update(environment_id=tool_ctx.environment_id, path_uri=resolved.uri,
+            workspace_root=tool_ctx.permission.environment_scope.cwd_uri)
+    elif tool_ctx.workspace_root is not None:
         payload["workspace_root"] = str(tool_ctx.workspace_root)
     return payload
 
@@ -1956,6 +2008,11 @@ def tool_context_with_live_output(
     *,
     iteration_id: str = "",
 ) -> ToolExecutionContext:
+    from backend.agent.tool_environments import execution_context_for_call
+
+    tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+    if tool_ctx.turn_environment is not None:
+        tool_ctx.metadata.setdefault("_executor_read_file_hashes", {})
     shared_streamed_ids = tool_ctx.metadata.setdefault(
         _STREAMED_TOOL_OUTPUT_IDS_KEY,
         set(),
@@ -1976,6 +2033,7 @@ def tool_context_with_live_output(
             if _bound_final_tool_request(tc) is not None else tc.name
         ),
         exec_policy_decision=(_bound_final_tool_request(tc).exec_policy if _bound_final_tool_request(tc) is not None else None),
+        final_tool_request=_bound_final_tool_request(tc),
     )
     if not _tool_streams_output(tc.name, tool_registry):
         return call_context
@@ -2302,6 +2360,8 @@ def store_result(
         committed_record.result_payload["code_mode_raw_output"] = deepcopy(truncated.runtime_metadata["code_mode_raw_output"])
     if truncated.history_notes_output is not None:
         committed_record.result_payload["history_notes_output"] = deepcopy(truncated.history_notes_output)
+    if truncated.native_tool_output is not None:
+        committed_record.result_payload["native_tool_output"] = deepcopy(truncated.native_tool_output)
     return result_event
 
 

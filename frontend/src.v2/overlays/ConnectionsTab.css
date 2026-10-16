@@ -1,0 +1,18 @@
+.remote-connections-heading, .remote-connection-dialog header, .remote-connection-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.remote-connections-heading h3, .remote-connection-dialog h3 { margin: 0; font: inherit; color: var(--text-primary); }
+.settings-row.remote-connection-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; }
+.remote-connection-row > svg { flex: 0 0 auto; color: var(--text-secondary); }
+.remote-connection-actions { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; }
+.remote-connection-status { color: var(--text-muted); white-space: nowrap; }
+.remote-connections-empty { display: grid; justify-items: center; padding: 28px 16px; gap: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); color: var(--text-secondary); }
+.remote-connections-empty-icon { display: flex; align-items: center; gap: 2px; color: var(--text-primary); }
+.remote-connections-empty p { margin: 0; }
+#root .remote-connections-empty .settings-action-button[data-primary="true"] { border-color: var(--accent-primary); background: var(--accent-primary); color: var(--text-on-accent); }
+.remote-connection-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: var(--backdrop-strong); font-family: var(--font-ui); }
+.remote-connection-dialog { display: grid; gap: 20px; width: min(460px, calc(100vw - 48px)); padding: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
+.remote-connection-dialog label { display: grid; gap: 8px; }
+.remote-connection-dialog input { min-width: 0; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); background: var(--surface-soft); color: inherit; font: inherit; }
+.remote-connection-host-fields { display: grid; gap: 20px; }
+.remote-connection-dialog footer { justify-content: flex-end; }
+.remote-connection-dialog .settings-action-button { min-height: 36px; padding-inline: 14px; border-radius: var(--mc-control-radius); font-size: var(--mc-font-body); line-height: 1.2; }
+.remote-connection-error { overflow-wrap: anywhere; }

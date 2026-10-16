@@ -32,6 +32,8 @@ from backend.terminal.task_persistence import (
 )
 from backend.terminal.shell_commands import normalize_windows_shell_command
 from backend.terminal.stdin_authority import TerminalInputApproval, TerminalLaunchAuthority, StdinAuthorityError
+from backend.permissions.environment_command import EnvironmentCommandPolicy
+from backend.terminal.executor_runner import ExecutorCommandProcess, ExecutorCommandRunner, command_capability, command_runner
 from backend.tools.base import MAX_TOOL_RESULT_BYTES, truncate_text_tail
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,12 @@ class BackgroundCommand:
     backgrounded: bool = True
     output_changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     stream_callback: Callable[[str], Any] | None = field(default=None, repr=False)
+    environment_id: str = "local"
+    executor_remote: bool = False
+    executor_process_id: str = ""
+    executor_session_id: str = ""
+    network_audit: list[dict] = field(default_factory=list, repr=False)
+    startup_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def append_live_output(self, piece: str) -> None:
         """Persist one streamed chunk and keep only a bounded in-memory tail."""
@@ -187,6 +195,8 @@ class BackgroundCommand:
             "cleanup_requested_at": self.cleanup_requested_at,
             "cleanup_completed_at": self.cleanup_completed_at,
             "cleanup_error": dict(self.cleanup_error),
+            "environment_id": self.environment_id,
+            "network_policy_decisions": list(self.network_audit),
         }
         payload.update(self._lifecycle().to_payload())
         return payload
@@ -277,8 +287,7 @@ class BackgroundCommandManager:
             raise RuntimeError(
                 "Background commands require an explicit sandbox policy; the command was not started."
             )
-        runner = SandboxRunner(sandbox_policy)
-        capability = runner.capability(cwd=cwd)
+        capability = command_capability(sandbox_policy, cwd=cwd)
         if not capability.available:
             raise RuntimeError(
                 f"Sandbox unavailable: {capability.reason}. The background command was not started."
@@ -328,6 +337,9 @@ class BackgroundCommandManager:
             original_tool_call_id=original_tool_call_id,
             original_tool_args=deepcopy(original_tool_args or {"command": display_command}),
             sandbox_policy=sandbox_policy,
+            environment_id=sandbox_policy.scope.environment_id if isinstance(sandbox_policy, EnvironmentCommandPolicy) else "local",
+            executor_remote=isinstance(sandbox_policy, EnvironmentCommandPolicy) and sandbox_policy.attachment.is_remote,
+            executor_process_id=command_id if isinstance(sandbox_policy, EnvironmentCommandPolicy) else "",
             task_output=task_output,
             lifecycle=ExecutionLifecycle(
                 run_id=command_id,
@@ -358,6 +370,8 @@ class BackgroundCommandManager:
                 conversation_id=owner,
                 owner_task_id=bg_cmd.owner_task_id,
                 parent_run_id=bg_cmd.parent_run_id,
+                environment_id=bg_cmd.environment_id, executor_remote=bg_cmd.executor_remote,
+                executor_process_id=bg_cmd.executor_process_id,
             )
         except Exception as exc:
             bg_cmd.close_task_output()
@@ -371,8 +385,12 @@ class BackgroundCommandManager:
 
         self._commands[command_id] = bg_cmd
         try:
+            if isinstance(sandbox_policy, EnvironmentCommandPolicy):
+                bg_cmd.runner = command_runner(sandbox_policy)
             task = asyncio.create_task(self._execute(bg_cmd))
         except Exception:
+            if bg_cmd.runner is not None:
+                await bg_cmd.runner.cleanup()
             self._commands.pop(command_id, None)
             from backend.terminal.task_persistence import delete_task
 
@@ -474,16 +492,33 @@ class BackgroundCommandManager:
             policy = bg_cmd.sandbox_policy
             if policy is None:
                 raise RuntimeError("Background command has no sandbox policy")
-            runner = SandboxRunner(policy)
+            runner = bg_cmd.runner if bg_cmd.runner is not None else command_runner(policy)
             bg_cmd.runner = runner
-            host_command = normalize_windows_shell_command(
-                bg_cmd.effective_command or bg_cmd.command
-            )
+            host_command = (None if isinstance(policy, EnvironmentCommandPolicy) else
+                normalize_windows_shell_command(bg_cmd.effective_command or bg_cmd.command))
+
+            async def _executor_started(process_id: str) -> None:
+                from backend.terminal.task_persistence import save_task
+
+                bg_cmd.executor_process_id = process_id
+                bg_cmd.executor_session_id = runner.handle.client.session_id if bg_cmd.executor_remote else ""
+                bg_cmd.transition(phase="running", status="running")
+                bg_cmd.startup_ready.set()
+                save_task(session_id=self._session_id, task_id=bg_cmd.command_id,
+                    command=bg_cmd.command, description=bg_cmd.description, cwd=bg_cmd.cwd, pid=None,
+                    started_at=bg_cmd.started_at, timeout_ms=bg_cmd.timeout_ms, status="running",
+                    conversation_id=bg_cmd.conversation_id, owner_task_id=bg_cmd.owner_task_id,
+                    parent_run_id=bg_cmd.parent_run_id, environment_id=bg_cmd.environment_id,
+                    executor_remote=bg_cmd.executor_remote, executor_process_id=process_id,
+                    executor_session_id=bg_cmd.executor_session_id)
+                if self._on_started and bg_cmd.backgrounded:
+                    await self._on_started(bg_cmd)
 
             async def _process_started(pid: int) -> None:
                 from backend.terminal.task_persistence import get_process_start_time
 
                 bg_cmd.pid = pid
+                bg_cmd.startup_ready.set()
                 bg_cmd.process_start_time = get_process_start_time(pid)
                 bg_cmd.transition(phase="running", status="running")
                 # Update persisted task only after the OS process exists.
@@ -502,6 +537,8 @@ class BackgroundCommandManager:
                         conversation_id=bg_cmd.conversation_id,
                         owner_task_id=bg_cmd.owner_task_id,
                         parent_run_id=bg_cmd.parent_run_id,
+                        environment_id=bg_cmd.environment_id, executor_remote=bg_cmd.executor_remote,
+                        executor_process_id=bg_cmd.executor_process_id, executor_session_id=bg_cmd.executor_session_id,
                         process_start_time=bg_cmd.process_start_time,
                         **runner.container_ownership,
                     )
@@ -535,12 +572,15 @@ class BackgroundCommandManager:
                     process_ready_callback=_process_ready,
                     keep_stdin_open=True,
                     stream_callback=_stream_output,
+                    **({"executor_started_callback": _executor_started, "process_id": bg_cmd.executor_process_id}
+                       if isinstance(runner, ExecutorCommandRunner) else {}),
                 )
             finally:
                 stall_stop()
 
             if result.cleanup_pending:
                 unproven_cleanup = result.cleanup_reason or "process_cleanup_pending"
+            bg_cmd.network_audit = list(result.network_audit)
             if bg_cmd.output_write_error:
                 raise RuntimeError(
                     f"Background output could not be persisted: {bg_cmd.output_write_error}"
@@ -548,7 +588,7 @@ class BackgroundCommandManager:
 
             if result.cancelled:
                 bg_cmd.status = "cancelled"
-                bg_cmd.exit_code = -1
+                bg_cmd.exit_code = result.exit_code
                 bg_cmd.completed_at = time.time()
                 bg_cmd.transition(phase="cancelled", status="cancelled")
                 return
@@ -570,7 +610,7 @@ class BackgroundCommandManager:
                     bg_cmd.append_live_output(f"\n{timeout_message}")
                 else:
                     bg_cmd.append_live_output(timeout_message)
-                bg_cmd.exit_code = -1
+                bg_cmd.exit_code = result.exit_code
                 bg_cmd.completed_at = time.time()
                 bg_cmd.transition(
                     phase="completed",
@@ -588,8 +628,6 @@ class BackgroundCommandManager:
                         bg_cmd.append_live_output(result.stdout)
                     if result.stderr:
                         bg_cmd.append_live_output(result.stderr)
-                else:
-                    bg_cmd.append_live_output("\n" + result.execution_error)
                 bg_cmd.transition(phase="completed", status="failed",
                                   error={"kind": "runtime_error", "message": result.execution_error})
                 return
@@ -631,6 +669,8 @@ class BackgroundCommandManager:
                 # termination path, so nothing proved the process tree exited.
                 unproven_cleanup = "cancelled_without_process_exit_proof"
         except Exception as exc:
+            if isinstance(runner, ExecutorCommandRunner):
+                bg_cmd.network_audit = list(runner.network_audit)
             if getattr(exc, "cleanup_pending", False):
                 unproven_cleanup = str(exc.cleanup_reason)
             bg_cmd.status = "failed"
@@ -639,7 +679,8 @@ class BackgroundCommandManager:
                 bg_cmd.append_live_output(f"\n{error_message}")
             else:
                 bg_cmd.append_live_output(error_message)
-            bg_cmd.exit_code = -1
+            bg_cmd.exit_code = (bg_cmd.runner.handle.exit_code if bg_cmd.runner.handle is not None else None
+                ) if isinstance(bg_cmd.runner, ExecutorCommandRunner) else -1
             bg_cmd.completed_at = time.time()
             bg_cmd.transition(
                 phase="completed",
@@ -649,6 +690,7 @@ class BackgroundCommandManager:
             logger.error("Background command %s failed: %s", bg_cmd.command_id, exc)
 
         finally:
+            bg_cmd.startup_ready.set()
             # Only a proven process exit closes the cleanup receipt. When the
             # tree's exit could not be observed the record stays pending so the
             # owner (or the next process's reconciliation) can still reap it.
@@ -684,15 +726,15 @@ class BackgroundCommandManager:
 
             # Admission captured the actual write authority, including extra
             # writable roots and any full-disk-write grant.
-            invalidate_workspace_file_caches(
-                file_tree_changed=True,
-                clear_file_state=True,
-                mutation_policy=bg_cmd.sandbox_policy,
-            )
+            if not isinstance(bg_cmd.sandbox_policy, EnvironmentCommandPolicy):
+                invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True,
+                    mutation_policy=bg_cmd.sandbox_policy)
             await self._settle_cleanup(bg_cmd)
             await self._notify_completed_once(bg_cmd)
 
     async def _settle_cleanup(self, bg_cmd: BackgroundCommand) -> None:
+        if isinstance(bg_cmd.runner, ExecutorCommandRunner):
+            bg_cmd.network_audit = list(bg_cmd.runner.network_audit)
         # A surviving process tree keeps its durable owner record: the UI
         # may show a terminal status, but the reaper still needs the PID
         # identity. Commit that evidence before the notification so a crash
@@ -714,6 +756,9 @@ class BackgroundCommandManager:
                     conversation_id=bg_cmd.conversation_id,
                     owner_task_id=bg_cmd.owner_task_id,
                     parent_run_id=bg_cmd.parent_run_id,
+                    environment_id=bg_cmd.environment_id, executor_remote=bg_cmd.executor_remote,
+                    executor_process_id=bg_cmd.executor_process_id, executor_session_id=bg_cmd.executor_session_id,
+                    network_audit=bg_cmd.network_audit,
                     process_start_time=bg_cmd.process_start_time,
                     cleanup_pending=True,
                     cleanup_reason=bg_cmd.cleanup_reason,
@@ -785,6 +830,10 @@ class BackgroundCommandManager:
             pid=process.pid if process is not None else None,
             process_start_time=get_process_start_time(process.pid) if process is not None else None,
             cleanup_pending=True, cleanup_reason=reason, cleanup_requested_at=now,
+            environment_id=runner.policy.scope.environment_id if isinstance(runner, ExecutorCommandRunner) else "local",
+            executor_remote=isinstance(runner, ExecutorCommandRunner) and runner.policy.attachment.is_remote,
+            executor_process_id=runner.handle.process_id if isinstance(runner, ExecutorCommandRunner) and runner.handle is not None else "",
+            executor_session_id=runner.handle.client.session_id if isinstance(runner, ExecutorCommandRunner) and runner.policy.attachment.is_remote and runner.handle is not None else "",
         )
         self._commands[command_id] = bg_cmd
         if process is not None:
@@ -797,6 +846,17 @@ class BackgroundCommandManager:
         command = self._commands.get(command_id)
         if not owner or command is None or command.conversation_id != owner:
             return None
+        return command
+
+    async def wait_for_startup(self, command_id: str, *, conversation_id: str) -> BackgroundCommand:
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            raise KeyError(command_id)
+        try:
+            await command.startup_ready.wait()
+        except asyncio.CancelledError:
+            await self.cancel(command_id, conversation_id=conversation_id)
+            raise
         return command
 
     async def wait(
@@ -932,6 +992,20 @@ class BackgroundCommandManager:
                 f"Background command {command_id} is {command.status}; stdin is closed."
             )
         process = self._processes.get(command_id)
+        if close_stdin and isinstance(process, ExecutorCommandProcess):
+            raise StdinAuthorityError("The executor process protocol does not support closing stdin independently; no input was sent.")
+        if context is not None and isinstance(process, ExecutorCommandProcess):
+            from backend.agent.environment_selection import select_turn_environment
+
+            snapshot = context.run_context.turn_environments if context.run_context is not None else None
+            if snapshot is not None:
+                selected = select_turn_environment(snapshot, command.environment_id)
+            elif context.turn_environment is not None and context.turn_environment.selection.environment_id == command.environment_id:
+                selected = context.turn_environment
+            else:
+                raise StdinAuthorityError("cannot access the terminal's original environment; attach it before retrying")
+            context = replace(context, turn_environment=selected, environment_id=command.environment_id,
+                permission=replace(context.permission, environment_scope=selected.permission_scope))
         if interacts and (process is None or process.returncode is not None or (not interrupt and process.stdin is None)):
             raise RuntimeError(
                 f"Background command {command_id} has no writable stdin channel."
@@ -955,7 +1029,8 @@ class BackgroundCommandManager:
                     strict = context.permission.strict_auto_review or context.permission_grants.strict_auto_review_enabled(context.turn_id)
                     if intent != "use_default" or strict:
                         action = TerminalInputApproval(command.original_tool_call_id, context.tool_call_id,
-                            authority.environment_id, command_id, process.pid, chars, command.cwd,
+                            authority.environment_id, command_id,
+                            process.process_id if isinstance(process, ExecutorCommandProcess) else process.pid, chars, command.cwd,
                             command.tty, intent, authority.additional_permissions, authority.approval_reason(intent))
                         action.verify_reviewable()
                         if authorize_input is None:
@@ -966,7 +1041,9 @@ class BackgroundCommandManager:
                 raise asyncio.CancelledError
             try:
                 if interrupt:
-                    if os.name == "nt":
+                    if isinstance(process, ExecutorCommandProcess):
+                        await process.interrupt()
+                    elif os.name == "nt":
                         reaped = await command.runner._kill_tree(process)
                         if not reaped:
                             command.cleanup_pending = True
@@ -1035,6 +1112,9 @@ class BackgroundCommandManager:
                             conversation_id=cmd.conversation_id,
                             owner_task_id=cmd.owner_task_id,
                             parent_run_id=cmd.parent_run_id,
+                            environment_id=cmd.environment_id, executor_remote=cmd.executor_remote,
+                            executor_process_id=cmd.executor_process_id, executor_session_id=cmd.executor_session_id,
+                            network_audit=cmd.network_audit,
                             process_start_time=cmd.process_start_time,
                             cleanup_pending=True,
                             cleanup_reason=cmd.cleanup_reason,
@@ -1053,7 +1133,9 @@ class BackgroundCommandManager:
             elif cmd:
                 # A worker cancelled before its first step never creates a
                 # runner or process and therefore has no coroutine finalizer.
-                if cmd.status == "running" and cmd.runner is None:
+                if cmd.status == "running" and (cmd.runner is None or isinstance(cmd.runner, ExecutorCommandRunner) and cmd.runner.handle is None):
+                    if cmd.runner is not None:
+                        await cmd.runner.cleanup()
                     cmd.status = "cancelled"
                     cmd.completed_at = time.time()
                     cmd.transition(phase="cancelled", status="cancelled")

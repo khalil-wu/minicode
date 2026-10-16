@@ -18,6 +18,7 @@ from backend.tools.path_resolution import (
 from backend.workspace.path_filters import is_windows_reserved_path
 
 class ListFilesTool(BaseTool):
+    requires_execution_environment = True
     """
     List directory contents.
 
@@ -106,6 +107,10 @@ class ListFilesTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_tool_io import executor_list_files
+            return await executor_list_files(self, args, context)
         directory = args.get("path") or args.get("directory", ".")
         recursive = args.get("recursive", False)
         raw_limit = args.get("limit")

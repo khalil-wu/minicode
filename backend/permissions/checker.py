@@ -1353,6 +1353,7 @@ class PermissionChecker:
             and str(args.get("command") or "").strip()
             and context is not None
             and context.mode != "bypass"
+            and context.environment_scope is None
         ):
             from backend.sandbox.policy import SandboxEnforcement, sandbox_policy_for_permission_context
             from backend.sandbox.runner import SandboxRunner
@@ -1623,6 +1624,10 @@ class PermissionChecker:
     ) -> tuple[bool, str]:
         if operation not in {"read", "write", "execute"}:
             return False, f"Unsupported file operation: {operation}"
+        if context is not None and context.environment_scope is not None:
+            access = context.environment_scope.resolve_access(file_path)
+            allowed = access.can_write if operation == "write" else access.can_read
+            return allowed, "" if allowed else f"The selected environment does not grant {operation} access to {file_path}"
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1729,6 +1734,11 @@ class PermissionChecker:
         *,
         context: PermissionContext | None = None,
     ) -> bool:
+        if context is not None and context.environment_scope is not None:
+            scope = context.environment_scope
+            path = scope.resolve_path(file_path)
+            return (path == scope.resolve_path(scope.cwd_uri) or any(path == scope.resolve_path(root)
+                for root in scope.workspace_root_uris)) and scope.resolve_access(file_path).can_read
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1767,6 +1777,9 @@ class PermissionChecker:
         Search operations check thousands of files against the same roots and
         rules. Resolve those roots once without caching any path decision.
         """
+        if context is not None and context.environment_scope is not None:
+            scope = context.environment_scope
+            return lambda file_path: scope.resolve_access(file_path).can_read
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1906,6 +1919,13 @@ class PermissionChecker:
             # Actual shell paths are enforced by the captured Source sandbox,
             # rather than guessing a command's writes from its cwd argument.
             return ""
+        if context is not None and context.environment_scope is not None and tool is not None and tool.requires_execution_environment:
+            operation = "write" if tool.get_side_effect_kind(args) in {"workspace", "destructive"} else "read"
+            for path in tool.get_workspace_paths(args):
+                allowed, reason = self.validate_file_operation(str(path), operation, context=context)
+                if not allowed:
+                    return reason
+            return ""
         # Filesystem tools own the declaration of path-bearing arguments. The
         # checker applies one policy without maintaining a parallel tool-name
         # taxonomy.
@@ -1998,6 +2018,8 @@ class PermissionChecker:
         }
         if context is not None and context.requirements_source:
             scope["requirements_source"] = context.requirements_source
+        if context is not None and context.environment_scope is not None:
+            scope["environment"] = context.environment_scope.identity()
         raw_args = args or {}
         path = raw_args.get("file_path") or raw_args.get("directory") or raw_args.get("path")
         url = raw_args.get("url") or raw_args.get("uri") or raw_args.get("href")

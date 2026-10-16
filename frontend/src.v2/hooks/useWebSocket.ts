@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 import { wsProtocols, wsUrl } from "../protocol/api";
+import { bindWorkspaceOwnerRuntime } from "../protocol/workspace-owner";
 import {
   SERVER_EVENT_TYPES,
   isReplayedEvent,
@@ -256,6 +257,9 @@ let lastReceivedServerSeq = 0;
 // replace metadata from a newer switch.
 
 export const getWebSocket = (): WebSocketHandle | null => singleton;
+
+bindWorkspaceOwnerRuntime(() => ({ session_id: singleton?.sessionId ?? "", conversation_id: useAppStore.getState().conversationId ?? "",
+  workspace_root: useAppStore.getState().workingDirectory }));
 
 export const resetRecentInboundEventIdsForTests = () => {
   recentInboundEventIds.length = 0;

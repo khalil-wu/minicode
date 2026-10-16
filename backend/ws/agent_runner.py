@@ -4051,6 +4051,11 @@ class SessionAgentRunnerMixin:
             self.conversation_repo.store_instance_id
         )
         run_metadata["conversation_store_id"] = conversation_store_id
+        run_context.environment_manager = self.environment_manager
+        run_context.session_source = "desktop"
+        if self.ws_manager is not None:
+            run_context.environment_thread_runtime = self.ws_manager.execution_contexts.thread_runtime(
+                conversation_store_id, conversation.id)
         journal_owner = execution_journal_owner(
             "conversation",
             conversation_store_id,

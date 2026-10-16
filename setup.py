@@ -12,15 +12,18 @@ from wheel.bdist_wheel import bdist_wheel
 class NativeBuild(build_py):
     def run(self):
         platform = sysconfig.get_platform().replace("-", "_")
-        if platform != "win_amd64":
-            raise RuntimeError(f"No verified execpolicy runtime is staged for {platform}")
-        runtime = Path(__file__).parent / "backend/permissions/resources/execpolicy/x86_64-pc-windows-msvc"
-        manifest = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
-        if manifest["target"] != "x86_64-pc-windows-msvc":
-            raise RuntimeError("The staged native engine belongs to a different platform")
-        for name, expected in manifest["files"].items():
-            if hashlib.sha256((runtime / name).read_bytes()).hexdigest() != expected:
-                raise RuntimeError(f"Staged native resource changed: {name}")
+        target = {
+            "win_amd64": "x86_64-pc-windows-msvc",
+            "linux_x86_64": "x86_64-unknown-linux-gnu",
+        }[platform]
+        for resources in ("permissions/resources/execpolicy", "network/resources"):
+            runtime = Path(__file__).parent / "backend" / resources / target
+            manifest = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
+            if manifest["target"] != target:
+                raise RuntimeError(f"The staged native engine belongs to a different platform: {runtime}")
+            for name, expected in manifest["files"].items():
+                if hashlib.sha256((runtime / name).read_bytes()).hexdigest() != expected:
+                    raise RuntimeError(f"Staged native resource changed: {runtime / name}")
         super().run()
 
 
@@ -31,7 +34,7 @@ class NativeDistribution(Distribution):
 
 class NativeWheel(bdist_wheel):
     def get_tag(self):
-        return "py3", "none", "win_amd64"
+        return "py3", "none", sysconfig.get_platform().replace("-", "_")
 
 
 setup(distclass=NativeDistribution, cmdclass={"build_py": NativeBuild, "bdist_wheel": NativeWheel})

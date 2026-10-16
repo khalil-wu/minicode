@@ -125,6 +125,7 @@ $manifest = @{
     input_sha256 = $sourceFingerprint
     files = $hashes
     reported_version = $reported
+    managed_network_ready_protocol = 1
 } | ConvertTo-Json
 [IO.File]::WriteAllText($manifestPath, $manifest + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 Write-Output "Prepared $reported at $destinationRoot"

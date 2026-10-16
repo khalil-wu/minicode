@@ -33,6 +33,7 @@ from backend.tools.git_support import (
 )
 
 class GitStatusTool(BaseTool):
+    requires_execution_environment = True
     """
     查看 Git 工作区状态。
 
@@ -83,6 +84,10 @@ class GitStatusTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_git import executor_git_tool
+            return await executor_git_tool(self, args, context)
         path_str = args.get("path", ".")
         root = _workspace_root(context, self._workspace_root)
         if root is None:
@@ -143,6 +148,7 @@ class GitStatusTool(BaseTool):
 
 
 class GitDiffTool(BaseTool):
+    requires_execution_environment = True
     """
     查看 Git 文件差异。（只读）
 
@@ -201,6 +207,10 @@ class GitDiffTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_git import executor_git_tool
+            return await executor_git_tool(self, args, context)
         file_path = args.get("file_path")
         staged = args.get("staged", False)
         context_lines = args.get("context_lines", 3)
@@ -291,6 +301,7 @@ class GitDiffTool(BaseTool):
 
 
 class GitLogTool(BaseTool):
+    requires_execution_environment = True
     """
     查看 Git 提交历史。（只读）
 
@@ -349,6 +360,10 @@ class GitLogTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_git import executor_git_tool
+            return await executor_git_tool(self, args, context)
         limit = args.get("limit", 10)
         file_path = args.get("file_path")
         oneline = args.get("oneline", False)
@@ -389,6 +404,7 @@ class GitLogTool(BaseTool):
 
 
 class GitCommitTool(BaseTool):
+    requires_execution_environment = True
     """
     创建 Git 提交。
 
@@ -441,6 +457,10 @@ class GitCommitTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_git import executor_git_tool
+            return await executor_git_tool(self, args, context)
         message = args.get("message", "")
         add_all = args.get("add_all", False)
         root = _workspace_root(context, self._workspace_root)

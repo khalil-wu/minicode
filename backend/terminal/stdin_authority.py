@@ -25,9 +25,22 @@ class TerminalPolicySnapshot:
     workspace_roots: tuple[Path, ...]
     protect_workspace_metadata: bool
     proxy_environment: tuple[tuple[str, str], ...]
+    executor_scope: str | None = None
 
     @classmethod
     def capture(cls, policy: SandboxPolicy) -> "TerminalPolicySnapshot":
+        from backend.permissions.environment_command import EnvironmentCommandPolicy
+
+        if isinstance(policy, EnvironmentCommandPolicy):
+            scope = policy.scope
+            environment = {**policy.shell_environment_policy.set_values, **policy.env_overrides}
+            proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+            identity = scope.identity()
+            if identity["sandbox"]["permissions"]["type"] != "disabled":
+                identity["sandbox"]["permissions"]["network"] = "restricted"
+            return cls(policy.permission_profile, scope.cwd_uri, scope.workspace_root_uris, False,
+                tuple((key, environment[key]) for key in proxy_keys if key in environment),
+                json.dumps(identity, ensure_ascii=False, sort_keys=True))
         # Source keeps network proxy settings private. They participate in
         # policy drift, never in the displayed approval action/reason.
         proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
@@ -38,7 +51,8 @@ class TerminalPolicySnapshot:
 
     def filesystem_context(self) -> tuple:
         return (replace(self.permissions, network=NetworkSandboxPolicy.RESTRICTED),
-                self.cwd, self.workspace_roots, self.protect_workspace_metadata)
+                self.cwd, self.workspace_roots, self.protect_workspace_metadata,
+                self.executor_scope)
 
 
 def _with_retained_permissions(policy: SandboxPolicy, *profiles: AdditionalPermissionProfile | None) -> SandboxPolicy:
@@ -82,7 +96,11 @@ class TerminalLaunchAuthority:
         current = TerminalPolicySnapshot.capture(_with_retained_permissions(
             current_policy, self.additional_permissions, self.internal_permissions))
         bypassed = self.launch_permissions == "require_escalated"
-        if current_policy.permission_profile.file_system.has_denied_read_restrictions() and (
+        from backend.permissions.environment_command import EnvironmentCommandPolicy
+
+        denied_reads = (current_policy.scope.has_denied_read_restrictions() if isinstance(current_policy, EnvironmentCommandPolicy)
+            else current_policy.permission_profile.file_system.has_denied_read_restrictions())
+        if denied_reads and (
             bypassed or self.policy.filesystem_context() != current.filesystem_context()
         ):
             raise StdinAuthorityError("this terminal cannot enforce the current denied-read restrictions; start a new terminal")
@@ -123,7 +141,7 @@ class TerminalInputApproval:
     approval_id: str
     environment_id: str
     command_id: str
-    process_id: int
+    process_id: int | str
     input: str
     cwd: str
     tty: bool

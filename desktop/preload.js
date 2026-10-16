@@ -18,6 +18,10 @@ function readRuntimeConfig() {
 }
 
 const mainRuntimeConfig = readRuntimeConfig();
+const remoteHostId = readRuntimeArgument("--minicode-remote-host-id=");
+if (remoteHostId && mainRuntimeConfig?.remoteHost?.id !== remoteHostId) {
+  throw new Error("The selected remote host's runtime binding is unavailable");
+}
 const apiBaseUrl =
   mainRuntimeConfig?.apiBaseUrl ||
   readRuntimeArgument("--minicode-api-base-url=") ||
@@ -38,15 +42,36 @@ const updateActivityRendererInstanceId = globalThis.crypto?.randomUUID?.()
 let updateActivityRevision = 0;
 let lastDeliveredDeepLinkId = null;
 
+async function connectionCommand(action, ...args) {
+  const result = await ipcRenderer.invoke(`minicode:connections:${action}`, ...args);
+  if (!result.ok) throw new Error(result.error);
+  return result.value;
+}
+
 const runtimeConfig = {
   apiBaseUrl,
   wsBaseUrl,
   runtimeToken,
+  remoteHost: mainRuntimeConfig?.remoteHost,
   windowOwnerId: mainRuntimeConfig?.windowOwnerId || readRuntimeArgument("--minicode-window-owner-id="),
   windowInstanceId: mainRuntimeConfig?.windowInstanceId || readRuntimeArgument("--minicode-window-instance-id="),
   windowBindingToken: mainRuntimeConfig?.windowBindingToken || "",
   initialNavigation: mainRuntimeConfig?.initialNavigation,
   desktop: {
+    connections: {
+      list: () => connectionCommand("list"),
+      discover: () => connectionCommand("discover"),
+      save: (connection) => connectionCommand("save", connection),
+      remove: (id) => connectionCommand("remove", id),
+      connect: (id) => connectionCommand("connect", id),
+      disconnect: (id) => connectionCommand("disconnect", id),
+      open: (id) => connectionCommand("open", id),
+      onChanged: (callback) => {
+        const handler = (_event, connections) => callback(connections);
+        ipcRenderer.on("minicode:connections:changed", handler);
+        return () => ipcRenderer.removeListener("minicode:connections:changed", handler);
+      },
+    },
     preferences: {
       chooseTaskDirectory: () => ipcRenderer.invoke("minicode:preferences:chooseTaskDirectory"),
       get: () => ipcRenderer.invoke("minicode:preferences:get"),

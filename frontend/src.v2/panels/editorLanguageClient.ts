@@ -1,3 +1,4 @@
+import { appendWorkspaceOwner, workspaceRequestPath } from "../protocol/workspace-owner";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import { CancellationError, isCancellationError } from "monaco-editor/base/common/errors.js";
 import { useAppStore } from "../stores";
@@ -146,7 +147,7 @@ export async function requestEditorLanguage<T>(monaco: typeof Monaco, model: Mon
     && candidate.uri.scheme === "file" && workspacePathWithin(candidate.uri.fsPath, root))];
   const records = documents.map((doc) => ownedModel(owner, doc));
   const snapshot = documents.map((doc, index) => ({ document_id: records[index].documentId, model_version: doc.getVersionId(),
-    path: doc.uri.fsPath, content: doc.getValue(), language: doc.getLanguageId() }));
+    path: workspaceRequestPath(doc.uri.fsPath, root), content: doc.getValue(), language: doc.getLanguageId() }));
   const revision = ++owner.revision;
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason ?? new CancellationError());
@@ -161,6 +162,7 @@ export async function requestEditorLanguage<T>(monaco: typeof Monaco, model: Mon
     if (controller.signal.aborted || owner.released || records.some((record) => record.closed)) throw new CancellationError();
     const url = new URL("/api/workspace/language", apiBase());
     url.searchParams.set("workspace_root", root);
+  appendWorkspaceOwner(url);
     const response = await fetchWithTimeout(url, { method: "POST", signal: controller.signal,
       headers: authHeaders({ "content-type": "application/json", "x-minicode-window-binding-token": owner.windowBindingToken }),
       body: JSON.stringify({ method, window_owner_id: owner.windowOwnerId, window_instance_id: owner.windowInstanceId,

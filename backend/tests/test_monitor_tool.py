@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.terminal.manager import BackgroundCommand
 from backend.tools.monitor_tool import MonitorTool
 
 
 class _FakeBackgroundManager:
     def __init__(self) -> None:
-        self.command = SimpleNamespace(
+        self.command = BackgroundCommand(
             command_id="bg_123",
             command="npm run dev",
             cwd="C:/repo",

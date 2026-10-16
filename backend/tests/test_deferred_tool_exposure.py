@@ -152,11 +152,11 @@ def test_search_capable_registry_defers_optional_tools_behind_bridge(tmp_path) -
     assert "read_artifact" in direct_names
     assert "web_fetch" in direct_names
     assert "web_search" in direct_names
+    resource_names = {"list_mcp_resources", "read_mcp_resource", "list_mcp_resource_templates"}
+    assert resource_names <= direct_names
     assert {
         "todo_write",
         "preview_server",
-        "list_mcp_resources",
-        "read_mcp_resource",
         "sleep",
         "skill_search",
     }.isdisjoint(direct_names)
@@ -171,10 +171,9 @@ def test_search_capable_registry_defers_optional_tools_behind_bridge(tmp_path) -
     assert "update_plan" in direct_names
     assert {
         "preview_server",
-        "list_mcp_resources",
-        "read_mcp_resource",
         "sleep",
     } <= deferred_names
+    assert resource_names.isdisjoint(deferred_names)
     assert {"todo_write", "update_plan"}.isdisjoint(deferred_names)
     assert {"web_search", "web_fetch"}.isdisjoint(deferred_names)
     assert "skill_search" not in deferred_names

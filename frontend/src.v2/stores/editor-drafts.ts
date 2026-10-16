@@ -168,7 +168,8 @@ function startWriting() {
         const previous = saved.get(tab.path);
         if (tab.readOnly || tab.largeFile || tab.content === tab.original) return Boolean(previous);
         return tab.content !== previous?.content || tab.original !== previous?.original
-          || tab.contentHash !== previous?.contentHash || tab.pendingBufferTransactions !== previous?.pendingBufferTransactions;
+          || tab.contentHash !== previous?.contentHash || tab.workspaceOwner !== previous?.workspaceOwner
+          || tab.pendingBufferTransactions !== previous?.pendingBufferTransactions;
       });
       const removed = [...saved.keys()].filter(path => !paths.has(path));
       const indexChanged = JSON.stringify(index) !== JSON.stringify(indexes.get(key));

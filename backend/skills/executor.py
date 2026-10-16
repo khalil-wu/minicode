@@ -92,6 +92,74 @@ def _render_source_host_catalog(metas: list[SkillMeta], *, limit: int, token_bud
     return "\n" + "\n".join(lines) + "\n"
 
 
+def _render_source_environment_catalog(metas, catalog, *, limit, token_budget):
+    cost = (lambda value: (len(value.encode("utf-8")) + 3) // 4) if token_budget else len
+    rows = [(meta.name, meta.description, "file", str(meta.source_path).replace("\\", "/")) for meta in metas]
+    rows.extend((entry.name, entry.description, "executor package", entry.package)
+        for entry in catalog.entries if entry.enabled and entry.allow_implicit_invocation)
+    rows.sort(key=lambda row: (row[0], row[2], row[3]))
+    host_roots = list(dict.fromkeys(str(meta.alias_root).replace("\\", "/").rstrip("/") for meta in metas if meta.alias_root is not None))
+    roots = {f"r{index}": root for index, root in enumerate(host_roots)} | catalog.aliases
+    root_lines = [f"- `{alias}` = `{root}`" for alias, root in roots.items()]
+    short_rows = []
+    for name, description, kind, locator in rows:
+        matches = [(len(root), alias, root) for alias, root in roots.items() if locator.startswith(root.rstrip("/") + "/")]
+        if matches:
+            _, alias, root = max(matches)
+            locator = alias + locator[len(root):]
+        short_rows.append((name, description, kind, locator))
+    plain_intro = _SOURCE_MESSAGES["SKILLS_INTRO_WITH_SOURCE_LOCATORS"]
+    alias_intro = "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator. Short locators can be expanded using the skill roots table."
+    alias_instruction = "- Root aliases: Pass short package locators directly to `skills.read`; it resolves their matching alias from `### Skill roots`."
+
+    def row(value, description):
+        name, _, kind, locator = value
+        return f"- {name}: {description} ({kind}: {locator})" if description else f"- {name}: ({kind}: {locator})"
+
+    plain_cost = sum(cost(row(value, value[1]) + "\n") for value in rows)
+    alias_overhead = max(0, cost("### Skill roots\n" + "\n".join(root_lines) + "\n" + alias_intro) - cost(plain_intro))
+    aliased = bool(roots) and alias_overhead + sum(cost(row(value, value[1]) + "\n") for value in short_rows) < plain_cost
+    rows = short_rows if aliased else rows
+    available = max(0, limit - (alias_overhead if aliased else 0))
+    plain = [row(value, value[1]) for value in rows]
+    minimum = [row(value, "") for value in rows]
+    if sum(cost(value + "\n") for value in plain) <= available:
+        rendered = plain
+    elif sum(cost(value + "\n") for value in minimum) <= available:
+        allocation = [0] * len(rows)
+        used = sum(cost(value + "\n") for value in minimum)
+        while used < available:
+            changed = False
+            for index, value in enumerate(rows):
+                count = allocation[index]
+                if count == len(value[1]):
+                    continue
+                delta = cost(row(value, value[1][:count + 1]) + "\n") - cost(row(value, value[1][:count]) + "\n")
+                if used + delta <= available:
+                    allocation[index] += 1
+                    used += delta
+                    changed = True
+            if not changed:
+                break
+        rendered = [row(value, value[1][:allocation[index]]) for index, value in enumerate(rows)]
+    else:
+        rendered, used = [], 0
+        for value in minimum:
+            size = cost(value + "\n")
+            if used + size > available:
+                break
+            rendered.append(value)
+            used += size
+    sections = ["## Skills", alias_intro if aliased else plain_intro]
+    if aliased:
+        sections.extend(["### Skill roots", *root_lines])
+    sections.extend(["### Available skills", *rendered, "### How to use skills"])
+    if aliased:
+        sections.append(alias_instruction)
+    sections.append(_SOURCE_MESSAGES["SKILLS_HOW_TO_USE_WITH_SOURCE_LOCATORS"])
+    return "\n" + "\n".join(sections) + "\n"
+
+
 class SkillExecutor:
     """Keep lightweight Skill discovery separate from turn-scoped injection."""
 
@@ -106,7 +174,8 @@ class SkillExecutor:
     ) -> str:
         """Render Source host metadata separately from its full usage policy."""
         metas = [meta for meta in self._manager.list_metas() if meta.allow_implicit_invocation]
-        if not metas or not self._manager.include_instructions:
+        executor_catalog = self._manager.executor_catalog
+        if (not metas and executor_catalog is None) or not self._manager.include_instructions:
             return ""
         configured = self._manager.max_context_tokens
         if max_chars is not None:
@@ -119,6 +188,8 @@ class SkillExecutor:
             limit, token_budget = max(1, context_window_tokens * 2 // 100), True
         else:
             limit, token_budget = 8_000, False
+        if executor_catalog is not None:
+            return _render_source_environment_catalog(metas, executor_catalog, limit=limit, token_budget=token_budget)
         return _render_source_host_catalog(metas, limit=limit, token_budget=token_budget)
 
 
