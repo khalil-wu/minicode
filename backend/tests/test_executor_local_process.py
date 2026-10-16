@@ -12,7 +12,7 @@ import pytest
 from backend.environments.errors import ExecutorClosed, ExecutorProtocolError
 from backend.workspace.executor_local import LocalExecutionEnvironmentBackend, LocalProcessBackend
 from backend.workspace.executor_local_policy import local_sandbox_policy
-from backend.sandbox.runner import SandboxRunner
+from backend.sandbox.runner import SandboxRunner, SandboxUnavailableError
 
 
 async def collect(process):
@@ -86,13 +86,78 @@ async def test_process_observer_subscribes_before_fast_output_and_failure_preven
         await process.aclose()
         marker = tmp_path / "must-not-launch"
 
+        refused = []
         def reject(_process):
+            refused.append(_process)
             raise RuntimeError("owned observer rejected before spawn")
 
         with pytest.raises(RuntimeError, match="before spawn"):
             await backend.start(python("-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"),
                 tmp_path.as_uri(), sandbox=None, process_observer=reject)
         assert not marker.exists() and not backend.processes
+        assert refused[0].closed and not refused[0].accepted and refused[0].watch_task is None
+        assert (await refused[0].aclose())["closed"]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_executable_closes_original_unaccepted_handle_with_start_failure(tmp_path):
+    backend = LocalProcessBackend()
+    captured = []
+    try:
+        with pytest.raises(OSError):
+            await backend.start([str(tmp_path / "not-an-executable")], tmp_path.as_uri(), sandbox=None,
+                process_observer=captured.append)
+        [handle] = captured
+        receipt = await handle.aclose()
+        assert receipt["closed"] and receipt["failure"]
+        assert handle.closed and not handle.accepted and handle.watch_task is None
+        assert handle.process is None and not backend.processes
+        receiver = handle.subscribe_events()
+        assert (await receiver.recv())["method"] == "process/closed"
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tty", [False, True])
+async def test_rejected_readiness_after_actual_spawn_closes_original_handle_and_child(tmp_path, monkeypatch, tty):
+    backend = LocalProcessBackend()
+    captured, children = [], []
+    async def reject_ready(runner, process, **kwargs):
+        children.append(process)
+        raise SandboxUnavailableError("owned actual-child readiness rejection")
+    monkeypatch.setattr(SandboxRunner, "_await_sandbox_ready", reject_ready)
+    try:
+        with pytest.raises(SandboxUnavailableError, match="actual-child readiness rejection"):
+            await backend.start(python("-c", "import time;time.sleep(60)"), tmp_path.as_uri(), sandbox=None,
+                tty=tty, process_observer=captured.append)
+        [handle], [child] = captured, children
+        receipt = await handle.aclose()
+        assert receipt["closed"] and "readiness rejection" in receipt["failure"]
+        assert not handle.accepted and handle.watch_task is None and handle.closed
+        assert child.returncode is not None and not psutil.pid_exists(child.pid)
+        assert not backend.processes
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_rejected_start_cleanup_does_not_report_closed(tmp_path, monkeypatch):
+    backend = LocalProcessBackend()
+    captured = []
+    async def unsettled_cleanup(runner):
+        return False
+    monkeypatch.setattr(SandboxRunner, "cleanup", unsettled_cleanup)
+    try:
+        with pytest.raises(ExceptionGroup, match="startup and cleanup failed"):
+            await backend.start([str(tmp_path / "not-an-executable")], tmp_path.as_uri(), sandbox=None,
+                process_observer=captured.append)
+        [handle] = captured
+        assert not handle.closed and not handle.accepted and handle.watch_task is None
+        with pytest.raises(ExceptionGroup, match="did not close"):
+            await handle.aclose()
     finally:
         await backend.close()
 

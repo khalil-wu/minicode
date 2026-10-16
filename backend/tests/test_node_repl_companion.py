@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -444,6 +445,50 @@ async def test_configured_same_name_override_retires_original_builtin_after_its_
         finally:
             await manager.stop_all()
             await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="actual Windows native sandbox account rejection")
+async def test_native_account_rejected_node_start_closes_original_handle_and_thread(tmp_path, monkeypatch):
+    from backend.sandbox.policy import FileSystemSandboxPolicy, FileSystemSandboxEntry, FileSystemPath, FileSystemSpecialPath, FileSystemAccessMode, NetworkSandboxPolicy
+    from backend.sandbox import windows_native
+
+    missing_home = tmp_path / "missing-owned-native-account-state"
+    monkeypatch.setenv(windows_native._HOME_ENV, str(missing_home))
+    profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath("path", tmp_path.as_uri()), FileSystemAccessMode.WRITE),
+    ]), network=NetworkSandboxPolicy.RESTRICTED)
+    config = EnvironmentConfig(profile, (tmp_path.as_uri(),), windows_sandbox_type="windowsRestrictedToken", windows_sandbox_level="restricted-token")
+    backend = LocalExecutionEnvironmentBackend()
+    environments = EnvironmentManager(tmp_path, local_backend=backend)
+    async def resolve(selection, config, environment, info):
+        return config
+    thread = ThreadEnvironments(environments, ThreadEnvironmentDefaults(config, "disabled"), resolve_config=resolve)
+    await thread.update_selections([TurnEnvironmentSelection.from_request(TurnEnvironmentRequest("local", tmp_path.as_uri(), (tmp_path.as_uri(),), EnvironmentConfigState.ready(config)))])
+    snapshot = await thread.snapshot()
+    owner = NodeReplCompanions()
+    runtime = MCPEnvironmentRuntime(environments, snapshot, local_cwd=tmp_path.as_uri())
+    runtime.node_repl_companions = owner
+    registered = await owner.admit(snapshot.primary(), None)
+    manager = MCPServerManager(config_path=tmp_path / "native-rejected.json", workspace_root=tmp_path,
+        environment_runtime=runtime, runtime_configs=(registered,))
+    try:
+        await manager.start_all()
+        [companion] = owner.instances.values()
+        handle = companion.client.process_handle
+        assert manager.get_client("node_repl") is None
+        assert "native sandbox account state is unavailable" in manager.get_all_status()[0]["error"]
+        assert handle is not None and not handle.accepted and handle.process is None and handle.watch_task is None
+        assert (await handle.aclose())["closed"] and handle.closed and handle.failure is not None
+        assert not backend.process.processes and not missing_home.exists()
+    finally:
+        await manager.stop_all()
+        await owner.aclose()
+        await runtime.aclose()
+        await snapshot.aclose()
+        await thread.aclose()
+        await environments.close()
 
 
 @pytest.mark.asyncio

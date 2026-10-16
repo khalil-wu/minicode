@@ -21,3 +21,9 @@ AsyncLocalStorage 保留异步回调的原 execution/request metadata。完整�
 Root 随后显式提供同一个 installed Source，补跑此前因未指定 Source 而跳过的 stdio/Skill 四项，`root-source-native-consumers.xml` **4/4 passed**。与集中批按原节点替换后是 **90 passed / 1 skipped**，不是又一轮完整套件执行。剩余 skip 为该 Windows 宿主的 unelevated filesystem read restrictions 原生限制，没有改成无沙箱测试。
 
 完整调用链、版本、原 fatal/初败、晚输出真实客户端日志属性、独立审阅问题与修正、进程清理结果见 `output/node-runtime-followup-20261016/AUDIT.md`、`audit-facts.json` 及对应 XML。内核边界与工具去重检查通过。`.mjs` 已纳入正式 wheel package data；独立安装包验证由后续交付记录另行确认，本页不借源码测试算安装通过。
+
+## 完整 CI 发现的拒绝启动终态
+
+`ee80a807` 的 Windows harness 发现原 SDK 用例退出失败：该 CI 没有 native sandbox account state，Node 启动被真实拒绝；执行器已关闭 job、runner、网络并释放记录，却因没有 watcher 一直保留 `closed=false`。本批修正实际执行器终态：只有原资源清理全部 ACK、无错误且无 watcher 时发布 `process/closed`；保留原启动失败、`accepted=false` 和未知 exit code。没有配置账号、绕过沙箱或在 Node 外层吞错。
+
+`rejected-start-close.xml` 的当前聚焦回归 **46 passed / 1 native skip**，覆盖 missing executable、observer 拒绝、已真实 spawn 后 readiness 拒绝的 pipe/PTY、清理未 ACK 阴性、Windows 缺账号的真实 Node owner 拒绝及原 SDK CI 用例。该修复不追写成 `ee80a807` 已通过；原 CI 失败和过期 r10 候选保留，后续包从新源码重建。

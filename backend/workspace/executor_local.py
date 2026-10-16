@@ -315,6 +315,12 @@ class LocalExecutorProcess:
                     errors.append(error)
             if errors:
                 raise ExceptionGroup(f"local process {self.process_id} did not close", errors)
+            # A rejected start never creates the watcher that normally emits
+            # closed. Its original job/runner/network owners have now all
+            # acknowledged cleanup, even if readiness failed after spawning.
+            if self.watch_task is None:
+                self.closed = True
+                self._publish("process/closed")
             return {"process_id": self.process_id, "closed": self.closed, "exit_code": self.exit_code,
                 "failure": str(self.failure) if self.failure is not None else None}
         finally:
