@@ -1,6 +1,6 @@
 # 代码主题与 MCP App 媒体上下文
 
-本批继续依据实际 Codex 桌面截图、安装资源和 `.tmp/codex-src` 对齐行为。字体、字号、字重与已有草稿保持原样；官方账号服务不在范围内。
+本批继续依据实际 Codex 桌面截图、安装资源和 `.tmp/codex-src` 对齐行为。字体、字号、字重与已有草稿保持原样；官方账号服务不在范围内。随后实机发现的目录深度错误已另在[Source 即时目录后续修复](2026-10-17-source-directory-depth.md)闭合；该页的 19058aef 与 r15 是最新后端冻结和安装候选，下面 r14 记录保留为这一阶段的历史验证。
 
 ## 代码主题
 
@@ -34,7 +34,7 @@ Source 数据、SHA、符号、版本比较与分享合同：
 
 完整本地前端回归为 370 文件、4392 项：4391 passed、1 failed。唯一失败是旧 ToolCallCard mock 没有新增的主题字段；只补测试夹具后该文件 13/13 复验通过。没有把这个组合结果冒称为重新跑过整套。随后实机发现嵌套 Settings 焦点 trap 忽略显式触发器，补齐真实根因后关联 5 文件 25/25 通过，含带父 trap 的导入回归。Monaco 的注释、字符串、HTML script/style 嵌入语言及双模型未保存状态有真实原生 tokenizer 验证；旧异步 Diff 定义不能全局切回旧主题的竞态也有回归。
 
-最终 TSC、Vite、bundle/UI debt 和协议同步通过。入口 `assets/index-WzIWjdjR.js`；index SHA256 `684f9691c65912832d1bf9e6f21d34f920783284f71683328623c41eaa2f9b76`。本地完整结果和后续构建日志在 `output/code-theme-20261016/`；完整 GitHub CI 按最终提交独立核对，收据保存在 `output/ci-theme-media-20261017/`，不借用此前 CI 结果代替。
+最终 TSC、Vite、bundle/UI debt 和协议同步通过。入口 `assets/index-WzIWjdjR.js`；index SHA256 `684f9691c65912832d1bf9e6f21d34f920783284f71683328623c41eaa2f9b76`。本地完整结果和后续构建日志在 `output/code-theme-20261016/`；最终实现 19058aef 的 GitHub CI 独立 **8/8 成功**，其中完整前端 370 文件、4393 项通过。收据保存在 `output/ci-theme-media-20261017/`，不借用此前 CI 结果代替。
 
 实际生产 Electron 使用自有 profile、真实后端和受控模型 HTTP。`output/playwright/code-themes-20261017/inspection.json` 保留操作和实际 WS：浅色 8 个候选、深色 Dracula、真实分享串导入、无效提交禁用、13px/400 原字体、代码块同模式更新，以及键盘编辑的真实脏 Monaco 内容均已核对。目录 `12` 之后的截图和 `validation.json` 核对最终入口、重载后的两个主题、活动草稿 `THEME_ACTIVE_DRAFT_KEEP`、隐藏工作区草稿 `THEME_UNSENT_DRAFT`、未保存 `THEME_DIRTY_KEEP` 和导入后回到原触发器。前面的 Dyp 构建验证与最后 Wz 焦点修复后复验分别保留，没有声称所有操作都在同一入口重跑。
 

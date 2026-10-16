@@ -1,8 +1,10 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
+2026-10-17 后续验收：当前实现冻结 `19058aef` 的[完整 CI 38932478631](https://github.com/khalil-wu/minicode/actions/runs/38932478631)已 8/8 成功；前端 4393 passed，backend 6956 passed / 111 skipped。最新 Windows backend 候选为 r15，基础 41、媒体 7、目录 6 三组在独立新安装分别通过，Source peer 与 CI 跳过项分开记。当前前端仍为下文 Wz 构建。详情及实际目录修复、冷重启草稿保留见[最终目录与安装交付](2026-10-17-source-directory-depth.md)；下面 8dfff051 / r13 是此前专项检查点的历史验证。
+
 核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新实现检查点 `8dfff051` 的[完整 CI 38920283863](https://github.com/khalil-wu/minicode/actions/runs/38920283863)八项全部成功，backend 6946 passed / 108 skipped，frontend 4350 tests，desktop smoke 6/6。r13 后端候选另独立安装 41/41、startup ERROR=[]，原 host/内核修复及实际桌面投影均有各自证据。旧 `ee80a807`、r12 启动错误及 `0c10889e` Desktop 失败保留为历史，r12 仍暂停交付。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
 
-本轮最新收尾以[Node 与桌面后续交付](2026-10-16-node-desktop-followup-delivery.md)为准。实际生产 Electron 的 Node 两轮、标题、图片、最终自动折叠、草稿及稳定图片布局均有证据。`0c10889e` CI 发现的多窗口测试提前退出已修 fixture，并在 `8dfff051` Ubuntu 完整运行中核对全部清理标记及正常退出，不将它误记为 Node 内核回归失败。
+Node 专项收尾见[Node 与桌面后续交付](2026-10-16-node-desktop-followup-delivery.md)。2026-10-17 最新后续为[主题与 MCP 媒体](2026-10-16-code-themes-mcp-media.md)及[Source 即时目录修复](2026-10-17-source-directory-depth.md)：实现冻结 19058aef、前端 Wz、Windows backend r15 候选分别留证；不再拿旧 r13 候选证明新输入。实际生产 Electron 的 Node 两轮、标题、图片、最终自动折叠、草稿及稳定图片布局均有既有证据。`0c10889e` CI 发现的多窗口测试提前退出已修 fixture，并在 `8dfff051` Ubuntu 完整运行中核对全部清理标记及正常退出，不将它误记为 Node 内核回归失败。
 
 ## 已确认的能力缺口
 
