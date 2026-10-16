@@ -2,6 +2,8 @@
 
 ## 2026-10-16 当前后续批：Node、工作树、设置与 Linux 路由
 
+最近完整检查点已更新到 `25e98f7a` 的 [CI 38910536542](https://github.com/khalil-wu/minicode/actions/runs/38910536542)：**8/8 jobs success**。backend 6935 passed / 108 skipped，root 1768 passed / 51 skipped，Windows 362 passed / 15 skipped，frontend 363 files / 4350 tests，desktop 161 passed / 9 skipped + 6 smoke，Electron 1 passed，两项 native build/验证成功。原 logs/XML 和计数见 `output/ci-25e98f7a-20261016/CI-REPORT.md`。它不是下述安装问题消失的证据：r12 的 40 功能断言通过，但实际日志有三次 Node 前置启动错误，已标 stale/hold。后续 `e7a9fc86` 修复原 host 捕获、SDK fork 和动态配置/catalog 准入；内核另已移除 Worker-local Inspector、修复直接 CPU dispatcher 死锁和异常退出结算。最终本机消费者 43 passed / 1 native skip，新八项在 Node 22/Electron 各通过，三运行时各 100 双 reset + 20 direct CPU 通过；详见[分批 Node 报告](2026-10-16-node-companion.md)。新源码仍需自己的完整 CI 与新候选安装冷验。
+
 本节优先于下文旧构建、旧 wheel 和已失效的待办。`ee80a807` 的[完整 CI 38905092822](https://github.com/khalil-wu/minicode/actions/runs/38905092822)为 **6 jobs success / 2 failure**：backend 6917 passed / 106 skipped / 12 failed；Windows 81 passed / 1 failed 后停止。root 1768 passed / 51 skipped、frontend 4335 tests、desktop 161 passed / 9 skipped 及 6 项 smoke、Electron 1 项、两项 native build 均通过。后续修复不能借这轮结果记成八项全绿。
 
 - **Linux OS managed 路由已接通**：pinned Source helper 进入正式 Linux native binary，包含 `--verify-fd-mount` 前置参数分派；原 namespace、SCM_RIGHTS、attribution、proxy、seccomp 与生命周期均沿 Source。该次 CI 的路由 16/16 通过，含七项真实 namespace/proxy/cancel。`output/linux-managed-routing-20261016/` 与该 CI 的原日志保留原始证据。
@@ -16,7 +18,7 @@
 
 三色编辑最新唯一 **195/195**，JS 标题及相关四文件 **80/80**，两范围分别记录而不累计为全产品数。最终 TSC/build/两预算通过，入口 `assets/index-CCh13oC-.js`，index SHA256 `17dff27b79573909e5cedaf6d1a27dff9e5465c65fed84c31f23dbb6a69ba129`；主 CSS 与此前一致。Root 使用该实际 dist 的独立生产 Electron 完成十项观测、六张截图，核对 picker 键盘/模式/重载/草稿/原字体，pageerrors 为空；组件 QA 另核原 Monaco dirty buffer。见[外观配色报告](2026-10-16-appearance-colors.md)及 `output/playwright/latest-ui-followup-20261016/validation.json`。
 
-修复后的完整八项 CI 与冻结后 r12 独立安装冷验仍需分别完成，不借 `ee80a807` 或 r11 结果算新源码通过。最新剩余范围统一见[当前差距](2026-10-16-current-desktop-gaps.md)，不按测试数量推算产品完成率。
+上面三项修复的完整八项 CI 已在本节顶部单列；后续安装审查发现的问题也独立保留。r12 不能交付，新 host/内核修复完成后将重新冻结候选并验收，不能借旧包断言。最新剩余范围统一见[当前差距](2026-10-16-current-desktop-gaps.md)，不按测试数量推算产品完成率。
 
 ## 2026-10-16 最新补齐：桌面过程、MCP App 与 executor 配套
 

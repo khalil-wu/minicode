@@ -54,4 +54,16 @@ CI 四项 cleanup owner 失败揭示真实寿命问题：SDK 保留会话环境�
 
 `HOST-ADMISSION.md` 及九文件冻结清单位于 `output/node-runtime-followup-20261016/`。主范围 **54 passed / 2 skipped**；子链补充 **32 passed / 2 skipped**。实际父会话两 prompt 只启动一次 Node，fork 启动自己的内核且没有父绑定；原 host 为 None/非 None 的身份及无前置 ERROR 均核对。跳过分别是既有 Source 外部依赖与未 provision 的原生 proxy 条件，没有改为通过。
 
+Root 后续显式提供原 installed Source 补跑主批的两项 skip：`root-host-source-native.xml` 为 **1 passed / 1 skipped**。选定 plugin→Skill/MCP→lazy child→原 lease 的真实链通过；另一项实际确认安装版 26.1007 仅声明 `environmentConfigRead`，实现仍为 stub，保留 skip。主 56 节点按相同节点最新结果替换为 **55 passed / 1 stub skip**，不是又跑过完整 56 项；未执行账号或系统 provisioning。
+
 原始大批仍为 **71 passed / 3 skipped / 1 failed**；失败是 system Node 24.5 的动态 import/CPU/double-reset 再次触发 V8 `DisallowJavascriptExecutionScope`，不是 host 捕获测试通过就可以隐藏的失败。输出缓冲曾造成误判运行阶段，核实后没有实际执行 Stop-Process。该原生关闭顺序问题正由独立子任务修复；新的完整 CI 和新安装候选必须包含其最终结果，不能借上面的八项绿灯或 r12 四十项断言。
+
+## 最终内核控制修复
+
+已把 Inspector 的 evaluate/terminate/disable 回调统一移到 supervisor isolate，Worker 保留原 VM、ALS 和持久绑定，不再拥有内部 Inspector Session。原 Worker-local 回调在中断时重入 V8 禁止执行区的路径被移除。每次执行在完整 directive/hashbang 之后进入原请求 ALS，再通过 `setImmediate` Promise 的真实事件阶段交接后执行用户代码；直接同步 CPU 循环也不会堵住终止命令的 dispatcher。没有固定毫秒等待、重试、切换执行器或丢弃请求归属。
+
+正常结果先取得 Worker 对原 call 的 finished ACK，再返回 MCP。重置共享原中断 promise，收到 terminate/disable ACK 后由 Worker 在自己的控制 turn 退出，等真实 native exit 才结算原请求并启动新内核。初始化期的请求也绑定具体 kernel；异常退出结算其 ready、commands 和 pending，保留真实日志，下一请求不借死内核。已核原请求输出、晚 metadata、严格模式、hashbang、script/function `this`、var/function/let/const、npm、图片及独立子会话语义。
+
+最终消费者批 `production-consumers-02.xml` 为 **43 passed / 1 native skip / 0 failed**，包括真实 QueryEngine→CodeMode→图片/Guardian，以及 SDK 实际两次审批、跨 prompt、host 有/无和独立 fork。Node 22.23.3、Electron Node 24.18.1 的新八项各 **8/8**；最终生产输入在三种运行时各通过 **100 次 import/CPU 双 reset** 和 **20 次直接 CPU timeout/恢复**，native stderr 为空。不同范围重叠，不累加。历史三种运行时各 1000 次属于早期候选，不借给最终字节。
+
+机制、双通道顺序、旧 native fatal、旧受控自退失败、旧 direct CPU 消费者挂起中止及最终结果均在 `output/node-kernel-quiescence-20261016/RETIREMENT.md`、`FINAL-RESULTS.json`。仓库按 `.gitattributes` 将两文件 CRLF 归一 LF，Python 实际 `read_text` 的执行文本逐字节不变，收据为 `root-canonical-source.json`；归一后的实际 MCP 八项在 `root-canonical.xml` **8/8**。最终 `.mjs` SHA256 `7f1177fa2c5d8bdde6361362087fb55e3d3a7407bf116c81d5d03bf8c39ce30b`。后续完整 CI 和 r13 冷验仍须各自核对，不用本机结果替代。

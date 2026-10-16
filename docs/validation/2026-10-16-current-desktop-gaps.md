@@ -1,12 +1,13 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
-核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新完整 CI 检查点为 `ee80a807` 的 [run 38905092822](https://github.com/khalil-wu/minicode/actions/runs/38905092822)：八个 job 六个成功、两个失败，原失败正在后续修复，不能借此前基线绿灯算当前已通过。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
+核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新完整 CI 检查点为 `25e98f7a` 的 [run 38910536542](https://github.com/khalil-wu/minicode/actions/runs/38910536542)，八项全部成功，backend 6935 passed / 108 skipped，frontend 4350 tests。原 `ee80a807` 六成功、两失败保留为历史。后续 r12 安装验收仍发现前置 Node 启动错误；原 host 捕获及重构后的内核控制已完成本机验证，正在新完整 CI 和新候选验收，不能借旧绿灯算通过。r12 明确暂停交付。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
 
 ## 已确认的能力缺口
 
 | 范围 | 当前实际边界 | 源码依据 |
 | --- | --- | --- |
-| Computer Use 配套服务 | 系统桌面操作服务仍未实现。真实 Node 持久 MCP companion 已接通工具注册、Code Mode、图片/Guardian、WS/SDK 长会话归属、实际审批及关闭；公开 Source 不含 Node 执行器，不能宣称复刻其未公开内部实现。CI 暴露的 Node 22 重置崩溃已修复并在本机 22/24/Electron 24 验证，新 Linux CI 另记。内嵌浏览器 CDP 不代表系统桌面操作服务。 | [Node companion](2026-10-16-node-companion.md)；`backend/tools/browser_control_tool.py` |
+| Computer Use 配套服务 | 系统桌面操作服务仍未实现。真实 Node 持久 MCP companion 已接通工具注册、Code Mode、图片/Guardian、WS/SDK 长会话归属和实际审批；公开 Source 不含 Node 执行器，不能宣称复刻其未公开内部实现。内嵌浏览器 CDP 不代表系统桌面操作服务。 | [Node companion](2026-10-16-node-companion.md)；`backend/tools/browser_control_tool.py` |
+| Node 内核与原始准入的后续验收 | 安装暴露的原 host 捕获/动态配置提前启动已修复。内核控制已重构，三运行时实际 reset、直接 CPU timeout、取消、初始 ready、异常退出、元数据、JS 语义及真实 SDK/CodeMode/图片/Guardian 消费通过本机相应范围。新完整 CI 和 r13 安装冷验尚待完成，r12 不交付；不再把这项记为没有 Node 执行服务。 | [完整分批结果](2026-10-16-node-companion.md)；`output/node-kernel-quiescence-20261016/` |
 | MCP 交互式 App 界面 | 已补注册 descriptor→原调用会话→事件/恢复→交互 App；完成后常驻、原 iframe 跨历史/虚拟行/真实侧栏连续。官方 ext-apps postMessage 与 Codex 私有 sandbox relay 的协议差异明确保留，不能宣称私有 relay 已复刻。 | [本批集成与验证](2026-10-16-desktop-harness-integration.md)；`output/mcp-apps-20261016/implementation-audit.md` |
 | Windows 原生权限边界 | 目标 LSP、环境安装、Git delivery、工作树快照/移除/恢复与真实 WS 新会话切换均已有实现。linked Git metadata、实际 cwd/policy cwd 分离及模型/GUI 共用快照消费链已修复；原 Unicode 归因已排除。仍保留 Source restricted token 对私有 OWNER RIGHTS Temp ACL 的拒绝，以及 unelevated deny-read 明确不支持的原生边界。 | [Windows 工作树后续修复](2026-10-16-windows-worktree-followup.md)；[目标语言服务](2026-10-16-executor-editor-lsp.md) |
 | Linux 本地 managed 网络路由 | 已接通 pinned Source helper 的 namespace、SCM_RIGHTS、attribution、proxy bridge、seccomp 与生命周期，含 Source 的 FD 前置参数分派。`ee80a807` CI 的 Linux 路由 16/16 通过，其中七项真实 namespace/proxy/cancel；不再列为未实现。Linux 独立安装包冷验仍不由本 Windows wheel 证明。 | `desktop/native-network/linux/entry.rs`；`output/linux-managed-routing-20261016/`；`output/ci-ee80a807-20261016/CI-REPORT.md` |
