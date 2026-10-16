@@ -4,7 +4,7 @@
 
 本次后续批新增完整答案后的主/子过程折叠修正、交互 MCP App 的原会话寿命与常驻展示、目标 LSP/环境安装/Git delivery、工作树实际新会话切换及 Windows PTY resize。逐项证据、原失败与 Source 边界见 [桌面 harness 集成](2026-10-16-desktop-harness-integration.md) 和 [当前差距](2026-10-16-current-desktop-gaps.md)。下文旧 entry、r5 wheel 及“尚无 LSP/resize”等描述继续作为其当时构建的历史事实，不代表最新源码。
 
-当前集中结果为前端全量 **4333 passed**、目标环境/LSP/文件/生命周期 **112 passed**、MCP/remote Skill/PTY/host **209 passed + 1 skipped**、桌面单元 **170 passed**。工作树另批明确保留 **10 passed / 2 failed / 1 skipped**；受限 Windows 的 Git metadata 和 split writable root 操作仍未闭合。r8 独立候选 wheel 冷验 **28/28**，但因此仍标候选，不称为全产品完成。测试范围各自记录，不与本文件历史数累计。
+当前集中结果为前端全量 **4333 passed**、目标环境/LSP/文件/生命周期 **112 passed**、MCP/remote Skill/PTY/host **209 passed + 1 skipped**、桌面单元 **170 passed**。MCP 的最新 7 项窄验删除无 Source 依据的 App 上下文上限，替换原相同节点而不重复相加。工作树另批明确保留 **10 passed / 2 failed / 1 skipped**；受限 Windows 的 Git metadata 和 split writable root 操作仍未闭合。r9 独立候选 wheel 冷验 **28/28**，但因此仍标候选，不称为全产品完成。测试范围各自记录，不与本文件历史数累计。
 
 ## 2026-10-16：executor、远程桌面与网络链后续批
 

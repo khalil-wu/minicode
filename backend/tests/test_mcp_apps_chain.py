@@ -68,7 +68,11 @@ async def test_real_stdio_app_outlives_turn_catalog_and_preserves_private_ui_bou
         for tool in ("model_only", "mcp__foreign__tool"):
             with pytest.raises(MCPAppError, match="permitted server catalog"):
                 await request("tools/call", {"name": tool})
-        await request("ui/update-model-context", {"content": [{"type": "text", "text": "external selection"}]})
+        selection = "external selection " + "x" * 40_000
+        await request("ui/update-model-context", {"content": [{"type": "text", "text": selection}]})
+        await request("ui/legacy/set-widget-state", {"state": {"selection": selection}})
+        reopened = await runtime.open(receipt.invocation_id, "conversation")
+        assert reopened["widgetState"] == {"selection": selection}
         assert runtime.model_context("another-store", "conversation") == []
         builder = ContextBuilder(conversation_id="conversation", workspace_root=tmp_path)
         builder.bind_tool_context(context)
@@ -78,6 +82,7 @@ async def test_real_stdio_app_outlives_turn_catalog_and_preserves_private_ui_bou
         messages = await builder.build(state)
         app_message = next(message for message in messages if "<mcp_app_context>" in message.content)
         assert "not a human instruction or authorization" in app_message.content and "external selection" in app_message.content
+        assert selection in app_message.content
         assert not any("external selection" in message.content for message in builder._history)
         assert builder.guardian_evidence.snapshot().transcript == before.transcript
         await runtime.close_view(receipt.invocation_id, "conversation", view["viewId"])

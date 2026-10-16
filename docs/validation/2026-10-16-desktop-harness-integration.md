@@ -18,12 +18,15 @@
 | 批次 | 实际结果 | 原始记录 |
 | --- | --- | --- |
 | 环境、Git、LSP、文件、admission、环境生命周期，7 文件 | 112 passed / 0 failed / 0 skipped | `output/desktop-harness-final-20261016/backend-batch01-results.json`、同目录 XML/log |
-| 全部 MCP 文件、remote Skill runtime、PTY、remote host | 209 passed / 1 skipped / 0 failed | `output/desktop-harness-final-20261016/backend-mcp-pty.xml`、`.log` |
+| 全部 MCP 文件、remote Skill runtime、PTY、remote host | 最新唯一 209 passed / 1 skipped / 0 failed | `backend-mcp-pty.xml` 原批 210 节点，其中 App 文件以 `backend-app-context-final.xml` 的 7 项更新，不称为又一次全批重跑 |
 | 桌面 unit suite | 170 passed / 0 failed / 0 skipped | `output/desktop-harness-final-20261016/desktop-unit.log` |
 | 前端全量，360 文件 | 4333 passed / 0 failed / 0 skipped | `output/desktop-harness-final-20261016/frontend-full.xml`、`.log` |
+| Windows 固定源码的离线 patch/provisioning 合同 | 7 passed / 0 failed / 0 skipped | `output/windows-sandbox-offline-fixture-20261016/validation.xml` |
 | App、主/子过程折叠与右侧栏等前端 6 文件 | 最新唯一 145 passed | `output/mcp-apps-20261016/root/frontend-02.xml`，其中 SidebarRight 用 `frontend-sidebar-03.xml` 的 40 项替换原 39 项；不是又一次六文件全跑 |
 
 MCP 批次的唯一 skip 是 installed Source `config/read` interoperability probe，原结果没有算通过。第三方弃用警告保留在日志中。
+
+最后源码审阅删除了没有依据的 App 上下文 32768 字符上限，保留 JSON 校验。桌面 `widget-a63f1d48d8cc.js` 的 `ui/update-model-context` 只做 JSON/schema、来源和 active 状态检查，没有该长度限制。真实 stdio App 用 40,000 字符上下文及 widget state 复验了保存、重新打开、下一次模型输入、私有 `_meta` 和 Guardian 边界；同一 App 文件 7/7 通过，不另加重复节点数。
 
 Chromium 验收使用真实 ChatTurn、AgentTurn、SidebarRight 及生产 App 宿主，MCP server 为自有测试 peer；这不是普通用户窗口录屏。证据为 `output/playwright/mcp-apps-20261016/chat-turn-lifecycle-evidence.json`、`actual-sidebar-evidence.json` 及对应 PNG。iframe 初始化次数始终为 1，原 server nonce、PID、计数及测试 MessagePort 连续；草稿 `UNSAVED_HUMAN_DRAFT` 保留。
 
@@ -43,10 +46,12 @@ Chromium 验收使用真实 ChatTurn、AgentTurn、SidebarRight 及生产 App �
 
 最终 TSC、Vite、bundle budget 和 UI debt budget 均通过。entry 为 `assets/index-Cq3J2rPH.js`，index SHA-256 为 `3103f03f7d0cc45e2d1277f521178908a98d6f8a84ca8f4c9d52f76a49f01bd1`。全量前端运行后仅将新图标改从项目统一出口导入同一符号，修复实际 UI debt 87 > 86；随后重新检查类型、构建和两项预算，没有抬高预算。
 
-当前独立候选为 `output/source-executor-remote-final-wheel-r8-20261016/minicode-0.2.0-py3-none-win_amd64.whl`，SHA-256 `ecfdaae1841b6fe5fa46e36a6118be041e523c8c97e9d904368a6a30b7016593`，16,055,405 bytes。1264 个冻结输入、1244 个 backend 包成员与全新安装目录逐字节一致，`changed_inputs=[]`；bundled Python 3.11、`-I`、私有 Temp cwd/state 和限定 PATH 下冷验 **28/28**。它验证新模块可独立导入、MCP bridge 字节、原生策略与既有执行链；不能替代上文失败的受限工作树能力，所以保留 `candidate_only=true`。
+当前独立候选为 `output/source-executor-remote-final-wheel-r9-20261016/minicode-0.2.0-py3-none-win_amd64.whl`，SHA-256 `c7cdda1f03140f44a78758040913cd5179a281693572f56922fd0171bc230ca7`，16,055,413 bytes。1264 个冻结输入、1244 个 backend 包成员与全新安装目录逐字节一致，`changed_inputs=[]`；bundled Python 3.11、`-I`、私有 Temp cwd/state 和限定 PATH 下冷验 **28/28**。它验证新模块可独立导入、MCP bridge 字节、原生策略与既有执行链；不能替代上文失败的受限工作树能力，所以保留 `candidate_only=true`。
 
-r6 的 wheel 构建和安装完成，但冷验脚本缺少历史 native producer 来源副本而中断，没有记成通过。之后校正最后一处工作树按钮可用条件，用新的 r7 冻结树及新的安装目录完整重验。提交检查再发现一个新文件尾部的额外空行；仅移除该空行后，从新的 r8 树及新的安装目录重新完成 28 项冷验，未借旧包结果。原生网络和 execpolicy 二进制没有因无关修改重编，也没有修改其 manifest 去迁就字节。全部记录在上述候选目录与 `output/desktop-harness-final-20261016/`。
+r6 的 wheel 构建和安装完成，但冷验脚本缺少历史 native producer 来源副本而中断，没有记成通过。之后校正最后一处工作树按钮可用条件，用新的 r7 冻结树及新的安装目录完整重验。提交检查再移除一个新文件尾部的额外空行，r8 独立冷验通过；删除上述无依据 App 上限后，再由当前 r9 树和新安装目录完整重验 28 项，未借旧包结果。原生网络和 execpolicy 二进制没有因无关修改重编，也没有修改其 manifest 去迁就字节。全部记录在上述候选目录与 `output/desktop-harness-final-20261016/`。
 
 没有重载或关闭普通 MiniCode 窗口，没有读取、归档、stage 或删除用户 `data/`，也没有清除隐藏工作区草稿、附件或未保存编辑器内容。普通窗口原 backend 进程不会自动加载本批 Python 修改；新进程才会使用新后端。
+
+首个新 CI `38890876831` 的 root suite 发现 5 个 fixture setup error：PTY patch 新使用的 `stdio_bridge.rs` 未被离线 fixture 收录。已从原 pin 归档（SHA `e0a5e3ba9421f3f3f46836974d0396bbd8782721b4913b614ff0267911e0a3ee`）提取完整原文件，文件 SHA `6f5aa7818ec5508f28f5857f6ffda4215ad50951d85ecab0a1df1d4b77dacb93`，4334 bytes，与归档成员逐字节一致；7 项离线合同均通过，包含幂等与错误锚点拒绝。没有给 patcher 添加缺文件回退；该文件属于 root 测试夹具，不改变 r9 backend wheel 输入。原 CI 失败日志与来源证明均保留。
 
 仍独立保留 Node/CUA 配套服务、Linux OS managed 网络路由、外部 SSH/真实 WSL、WFP provisioning/流量矩阵及完整同构建 UI 状态矩阵等未验收范围，详见 [当前差距](2026-10-16-current-desktop-gaps.md)。

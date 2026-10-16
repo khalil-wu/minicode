@@ -163,9 +163,7 @@ class MCPAppRuntime:
             if method in {"ui/update-model-context", "ui/legacy/set-widget-state"}:
                 if invocation.receipt.read_only:
                     raise MCPAppError("This agent's work record is read-only", code="read_only", status=403)
-                encoded = json.dumps(params, ensure_ascii=False, allow_nan=False)
-                if len(encoded) > 32768:
-                    raise MCPAppError("MCP App context exceeds 32768 characters", code="context_too_large", status=422)
+                json.dumps(params, ensure_ascii=False, allow_nan=False)
                 if method == "ui/update-model-context":
                     invocation.model_context = deepcopy(params)
                 else:
