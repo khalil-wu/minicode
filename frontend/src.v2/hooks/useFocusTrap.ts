@@ -129,8 +129,11 @@ export function useFocusTrap(isActive: boolean, fallbackFocusRef?: RefObject<HTM
       const previous = previouslyFocusedRef.current;
       const remainingTrap = activeFocusTraps.at(-1);
       if (remainingTrap) {
+        const explicitTarget = fallbackFocusRef?.current;
         restoreFocus(previous && remainingTrap.contains(previous)
           ? previous
+          : explicitTarget && remainingTrap.contains(explicitTarget)
+          ? explicitTarget
           : focusableElements(remainingTrap)[0] ?? remainingTrap);
         return;
       }

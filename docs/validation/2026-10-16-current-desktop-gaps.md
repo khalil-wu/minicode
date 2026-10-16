@@ -46,9 +46,9 @@ Root 另外通过 Playwright CLI 实际点击隔离浏览器中的真实 ChatTur
 
 ### 全界面一致性尚未完成验收
 
-过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。后续已补设置标题、无历史的真实有效 provider、浏览器设备和 Problems 筛选菜单，并实测设备尺寸、字体及重载后的草稿保留，见[设置与预览后续修复](2026-10-16-settings-preview-followup.md)。三色主题编辑也已完成：采用真实 picker，浅深色独立保存，页面与 Monaco 同步，键盘焦点及未保存 buffer 保留均验证，见[外观配色](2026-10-16-appearance-colors.md)。完整代码主题选择、主题分享/导入仍未实现。
+过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。后续已补设置标题、无历史的真实有效 provider、浏览器设备和 Problems 筛选菜单，并实测设备尺寸、字体及重载后的草稿保留，见[设置与预览后续修复](2026-10-16-settings-preview-followup.md)。三色主题编辑也已完成，见[外观配色](2026-10-16-appearance-colors.md)。最新一批进一步加入 Source 中 15 个开源代码主题、23 个明暗变体、分享/导入，以及 Markdown、Diff 和 Monaco 的真实 TextMate 消费链；字体、未保存代码、当前及隐藏草稿保持原样。14 个许可不明的定制主题未收录，因此不是完整 29 主题目录；OS 半透明效果和 Source app Diff 最终背景覆盖链也未借此宣称闭合。详见[主题与 MCP 媒体后续交付](2026-10-16-code-themes-mcp-media.md)。
 
-当前前端入口为 `assets/index-CCh13oC-.js`，index SHA256 `17dff27b79573909e5cedaf6d1a27dff9e5465c65fed84c31f23dbb6a69ba129`。最新生产 Electron 独立核对了真实设置/配色入口、Tab/方向键/Escape、明暗切换、重载后的色板及草稿，`output/playwright/latest-ui-followup-20261016/validation.json` 十项观测通过、六张图、无 page error；字体仍为原 13px/400。组件 QA 另核同一 Monaco 模型和脏内容。JS 工具的真实 `title` 过程短行也已按参考源码修正，原参数/输出保留。没有覆盖这一同构建、相同窗口尺寸和缩放下所有区域的普通、hover、focus、disabled、菜单定位、滚动及过渡状态。
+当前前端入口为 `assets/index-WzIWjdjR.js`，index SHA256 `684f9691c65912832d1bf9e6f21d34f920783284f71683328623c41eaa2f9b76`。本批实际生产 Electron 的主题菜单、导入、代码块与脏编辑器切色、嵌套焦点及重载后的活动/隐藏草稿见 `output/playwright/code-themes-20261017/`，字体仍为原 13px/400；QA 错误与隔离环境 Git 失败单列保留。此前 CCh 构建的十项配色观测仍保留在 `output/playwright/latest-ui-followup-20261016/validation.json`，不混记为 Wz 的整场复验。JS 工具的真实 `title` 过程短行也已按参考源码修正，原参数/输出保留。没有覆盖这一同构建、相同窗口尺寸和缩放下所有区域的普通、hover、focus、disabled、菜单定位、滚动及过渡状态。
 
 因此仍需逐区域核对主聊天过程/最终答案、子 agent、左右栏、输入与审批、设置菜单、Diff/编辑器和浏览器预览。未逐项核对不等于已证明这些区域都存在样式缺陷；本页不编造具体像素差。字体、字号、字重按用户要求保留，不列为待修改项。
 

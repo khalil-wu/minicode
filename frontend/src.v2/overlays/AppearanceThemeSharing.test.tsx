@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { codeThemesForVariant } from "../lib/code-themes";
 import { LanguageProvider } from "../i18n";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import type { ReactNode } from "react";
 import { exportThemeString, type CodeThemeAppearance } from "../lib/theme-sharing";
 import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
 
@@ -19,6 +21,11 @@ const snapshot: CodeThemeAppearance = {
 };
 beforeEach(() => { vi.clearAllMocks(); mocks.copyText.mockResolvedValue(true); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+function SettingsTrap({ children }: { children: ReactNode }) {
+  const ref = useFocusTrap(true);
+  return <div ref={ref} tabIndex={-1}><button>返回应用</button>{children}</div>;
+}
 
 it("copies the current complete theme using the existing clipboard action", () => {
   render(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={vi.fn()} />);
@@ -41,9 +48,9 @@ it("uses registered English copy and updates the same import draft when the loca
   expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
 });
 
-it("disables invalid imports, applies a valid font-free snapshot and clears on reopen", async () => {
+it("imports inside the Settings focus trap, restores its trigger and clears on reopen", async () => {
   const onImport = vi.fn();
-  render(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);
+  render(<SettingsTrap><AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} /></SettingsTrap>);
   const trigger = screen.getByRole("button", { name: "导入浅色主题" });
   trigger.focus(); fireEvent.click(trigger);
   const input = screen.getByRole("textbox", { name: "浅色主题分享字符串" }) as HTMLInputElement;

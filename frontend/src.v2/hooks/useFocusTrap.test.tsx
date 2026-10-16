@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useFocusTrap } from "./useFocusTrap";
-import type { ReactNode } from "react";
+import { createRef, type ReactNode, type RefObject } from "react";
 
 const Harness = ({ active }: { active: boolean }) => {
   const ref = useFocusTrap(active);
@@ -97,5 +97,29 @@ describe("useFocusTrap", () => {
     expect(document.activeElement).toBe(within(outer.container).getByText("Remaining control"));
     expect(document.body.style.overflow).toBe("hidden");
     outer.unmount();
+  });
+
+  it("restores the explicit parent trigger after a nested autofocus input captured previous focus", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
+    const trigger = createRef<HTMLButtonElement>();
+    const ParentTrap = () => {
+      const ref = useFocusTrap(true);
+      return <div ref={ref} tabIndex={-1}><button>Return to app</button><button ref={trigger}>Import theme</button></div>;
+    };
+    const ChildTrap = ({ returnTo }: { returnTo: RefObject<HTMLButtonElement> }) => {
+      const ref = useFocusTrap(true, returnTo);
+      return <div ref={ref} tabIndex={-1}><input aria-label="Theme share string" autoFocus /><button>Import</button></div>;
+    };
+    const parent = render(<ParentTrap />);
+    const firstParentControl = within(parent.container).getByText("Return to app");
+    expect(document.activeElement).toBe(firstParentControl);
+    trigger.current!.focus();
+    const child = render(<ChildTrap returnTo={trigger} />);
+    expect(document.activeElement).toBe(within(child.container).getByRole("textbox"));
+    child.unmount();
+    expect(document.activeElement).toBe(trigger.current);
+    expect(document.body.style.overflow).toBe("hidden");
+    parent.unmount();
+    expect(document.body.style.overflow).toBe("");
   });
 });
