@@ -28,6 +28,8 @@ import processEn from "./process.en.json";
 import processZh from "./process.zh-CN.json";
 import rootEn from "./root.en.json";
 import rootZh from "./root.zh-CN.json";
+import appearanceEn from "./appearance.en.json";
+import appearanceZh from "./appearance.zh-CN.json";
 
 function ComposerFixture() {
   const { t } = useI18n();
@@ -105,5 +107,6 @@ describe("UI language boundary", () => {
     expect(Object.keys(desktopZh).sort()).toEqual(Object.keys(desktopEn).sort());
     expect(Object.keys(processZh).sort()).toEqual(Object.keys(processEn).sort());
     expect(Object.keys(rootZh).sort()).toEqual(Object.keys(rootEn).sort());
+    expect(Object.keys(appearanceZh).sort()).toEqual(Object.keys(appearanceEn).sort());
   });
 });

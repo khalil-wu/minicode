@@ -12,6 +12,7 @@ import type {
 } from "./types";
 import { clamp } from "../lib/clamp";
 import { applyAppearanceColors, parseAppearanceColors } from "../lib/appearance-colors";
+import { parseAppearanceThemes } from "../lib/appearance-themes";
 import { rightPanelDefaultWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
 import { clampTextScale } from "../lib/text-scale";
 import { safeJsonParse } from "../lib/safe-parse";
@@ -36,6 +37,7 @@ import {
 export const LS = {
   theme: "minicode.theme",
   appearanceColors: "minicode.appearance.colors",
+  appearanceThemes: "minicode.appearance.themes",
   textScale: "minicode.textScale",
   codeTextScale: "minicode.codeTextScale",
   reducedMotion: "minicode.reducedMotion",
@@ -119,7 +121,7 @@ export const applyTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
   const resolved = resolveTheme(mode);
   if (typeof document !== "undefined") {
     document.documentElement.setAttribute("data-theme", resolved);
-    applyAppearanceColors(resolved, initialAppearanceColors());
+    applyAppearanceColors(resolved, initialAppearanceColors(), initialAppearanceThemes());
   }
   return resolved;
 };
@@ -148,6 +150,7 @@ export const initialTheme = (): UISlice["themeMode"] => {
 };
 
 export const initialAppearanceColors = () => parseAppearanceColors(readLS(LS.appearanceColors));
+export const initialAppearanceThemes = () => parseAppearanceThemes(readLS(LS.appearanceThemes));
 
 export const initialTextScale = (): number => {
   const v = parseFloat(readLS(LS.textScale) ?? "");

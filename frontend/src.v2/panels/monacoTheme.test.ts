@@ -8,6 +8,8 @@ import { StandaloneServices } from "monaco-editor/editor/standalone/browser/stan
 import { IStandaloneThemeService } from "monaco-editor/editor/standalone/common/standaloneTheme.js";
 import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "./monacoTheme";
 import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { loadCodeTheme } from "../lib/code-themes";
+import { defaultThemePreferences } from "../lib/appearance-themes";
 
 vi.hoisted(() => {
   Object.defineProperty(document, "queryCommandSupported", { configurable: true, value: () => false });
@@ -32,6 +34,41 @@ const applyThemeTokens = (theme: "light" | "dark") => {
 afterEach(() => document.documentElement.removeAttribute("style"));
 
 describe("MiniCode native code syntax", () => {
+  it("switches actual TextMate providers on the existing dirty model, then restores native providers", async () => {
+    applyThemeTokens("dark");
+    const model = Monaco.editor.createModel('// 注释\nconst message = "hello";', "javascript", Monaco.Uri.parse("inmemory://appearance/textmate.js"));
+    model.applyEdits([{ range: new Monaco.Range(2, 1, 2, 1), text: "// unsaved\n" }]);
+    const source = model.getValue();
+    const version = model.getVersionId();
+    try {
+      await TokenizationRegistry.getOrCreate("javascript");
+      document.documentElement.dataset.codeTheme = "github";
+      const obsolete = defineMiniCodeMonacoTheme(Monaco, "dark");
+      delete document.documentElement.dataset.codeTheme;
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      await obsolete;
+      expect(Monaco.editor.tokenize("// native after pending selection", "javascript")[0][0].type).toMatch(/^comment/);
+      for (const [id, expected] of [["github", [139, 148, 158]], ["dracula", [98, 114, 164]]] as const) {
+        const { chromeSeed } = await loadCodeTheme(id, "dark");
+        applyAppearanceColors("dark", { light: null, dark: chromeSeed }, { light: null, dark: { codeThemeId: id, ...defaultThemePreferences("dark"), semanticColors: chromeSeed.semanticColors } });
+        await defineMiniCodeMonacoTheme(Monaco, "dark");
+        Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+        const provider = await TokenizationRegistry.getOrCreate("javascript");
+        const result = provider!.tokenizeEncoded("// 注释", true, provider!.getInitialState());
+        const color = TokenizationRegistry.getColorMap()![TokenMetadata.getForeground(result.tokens[1])].rgba;
+        expect([color.r, color.g, color.b]).toEqual(expected);
+        expect(model.getValue()).toBe(source);
+        expect(model.getVersionId()).toBe(version);
+      }
+      applyAppearanceColors("dark", emptyAppearanceColors());
+      applyThemeTokens("dark");
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+      const tokens = Monaco.editor.tokenize("// native again", "javascript")[0];
+      expect(tokens[0].type).toMatch(/^comment/);
+      expect(model.getValue()).toBe(source);
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
+  });
   it.each(["dark", "light"] as const)("renders native C++ and JS comments in green with distinct syntax in %s mode", async (theme) => {
     applyThemeTokens(theme);
     expect(getComputedStyle(document.documentElement).getPropertyValue("--editor-foreground").trim()).toBe(theme === "light" ? "#30343b" : "#d4d4d4");

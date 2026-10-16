@@ -23,6 +23,7 @@ import {
   readLS,
   initialTheme,
   initialAppearanceColors,
+  initialAppearanceThemes,
   initialResolvedTheme,
   initialTextScale,
   initialCodeTextScale,
@@ -43,6 +44,8 @@ import {
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
 import { applyAppearanceColors, effectiveAppearanceColors } from "../lib/appearance-colors";
+import { defaultThemePreferences } from "../lib/appearance-themes";
+import { loadCodeTheme } from "../lib/code-themes";
 import { clamp } from "../lib/clamp";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
@@ -260,12 +263,30 @@ function panelSlotsEqual(left: AppStore["panelSlots"], right: AppStore["panelSlo
   });
 }
 
-export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => ({
+export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => {
+  const themeEditRevision = { light: 0, dark: 0 };
+  const commitAppearanceTheme: UISlice["importAppearanceTheme"] = async (variant, snapshot) => {
+    const revision = ++themeEditRevision[variant];
+    const { prepareCodeHighlighting } = await import("../lib/code-highlighting");
+    await prepareCodeHighlighting(snapshot.codeThemeId, variant);
+    if (revision !== themeEditRevision[variant]) return;
+    const { accent, surface, ink, contrast, opaqueWindows, semanticColors } = snapshot.theme;
+    const appearanceColors = { ...get().appearanceColors, [variant]: { accent, surface, ink } };
+    const appearanceThemes = { ...get().appearanceThemes, [variant]: {
+      codeThemeId: snapshot.codeThemeId, contrast, opaqueWindows, semanticColors,
+    } };
+    writeLS(LS.appearanceColors, JSON.stringify(appearanceColors));
+    writeLS(LS.appearanceThemes, JSON.stringify(appearanceThemes));
+    applyAppearanceColors(get().resolvedTheme, appearanceColors, appearanceThemes);
+    set({ appearanceColors, appearanceThemes });
+  };
+  return ({
   contextCardCollapsed: true,
   setContextCardCollapsed: (collapsed) => set({ contextCardCollapsed: collapsed }),
   themeMode: initialTheme(),
   resolvedTheme: initialResolvedTheme(),
   appearanceColors: initialAppearanceColors(),
+  appearanceThemes: initialAppearanceThemes(),
   textScale: initialTextScale(),
   codeTextScale: initialCodeTextScale(),
   reducedMotion: initialReducedMotion(),
@@ -342,12 +363,21 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set({ themeMode: mode, resolvedTheme });
   },
   setAppearanceColor: (variant, role, value) => {
+    ++themeEditRevision[variant];
     const appearanceColors = { ...get().appearanceColors,
       [variant]: { ...(get().appearanceColors[variant] ?? effectiveAppearanceColors()), [role]: value } };
     writeLS(LS.appearanceColors, JSON.stringify(appearanceColors));
-    applyAppearanceColors(get().resolvedTheme, appearanceColors);
+    applyAppearanceColors(get().resolvedTheme, appearanceColors, get().appearanceThemes);
     set({ appearanceColors });
   },
+  setCodeThemeId: async (variant, codeThemeId) => {
+    const revision = ++themeEditRevision[variant];
+    const { chromeSeed } = await loadCodeTheme(codeThemeId, variant);
+    if (revision !== themeEditRevision[variant]) return;
+    const preferences = get().appearanceThemes[variant] ?? defaultThemePreferences(variant);
+    await commitAppearanceTheme(variant, { codeThemeId, theme: { ...preferences, ...chromeSeed, accentSource: "custom" } });
+  },
+  importAppearanceTheme: commitAppearanceTheme,
   setTextScale: (s) => {
     const v = clampTextScale(s);
     writeLS(LS.textScale, String(v));
@@ -1036,4 +1066,5 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }, { silent: true });
     if (!workingTreeSent || !stagedSent) get().setGitChangesLoading(false);
   },
-});
+  });
+};

@@ -1,5 +1,9 @@
 .settings-card.settings-appearance-colors { margin-top: 16px; }
 .settings-card.settings-appearance-colors .settings-row { min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+.settings-card.settings-appearance-colors .appearance-theme-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.appearance-theme-heading > h4 { margin: 0; font-size: inherit; }
+.appearance-theme-heading-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+@media (max-width: 560px) { .appearance-theme-heading { flex-wrap: wrap; } .appearance-theme-heading-controls { flex-wrap: wrap; margin-left: auto; } }
 .appearance-color-control {
   display: flex;
   align-items: center;

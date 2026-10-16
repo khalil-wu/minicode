@@ -1,14 +1,18 @@
 import { formatHex, formatHex8 } from "culori";
 import type { editor } from "monaco-editor";
 import type { ResolvedTheme } from "../stores/types";
+import type * as Monaco from "monaco-editor";
+import type { CodeThemeId } from "../lib/code-themes";
 
 export const miniCodeMonacoThemeName = (theme: ResolvedTheme) => `minicode-${theme}`;
 
 export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name: string, theme: editor.IStandaloneThemeData) => void } }, theme: ResolvedTheme) {
+  const revision = (themeRequests.get(monaco) ?? 0) + 1;
+  themeRequests.set(monaco, revision);
   const style = getComputedStyle(document.documentElement);
   const color = (token: string) => formatHex8(style.getPropertyValue(token).trim())!;
   const syntax = (token: string) => formatHex(style.getPropertyValue(token).trim())!.slice(1);
-  monaco.editor.defineTheme(miniCodeMonacoThemeName(theme), {
+  const data: editor.IStandaloneThemeData = {
     base: theme === "light" ? "vs" : "vs-dark",
     inherit: false,
     rules: [
@@ -95,5 +99,17 @@ export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name
       "diffEditorGutter.insertedLineBackground": color("--diff-added-background"),
       "diffEditorGutter.removedLineBackground": color("--diff-removed-background"),
     },
-  });
+  };
+  monaco.editor.defineTheme(miniCodeMonacoThemeName(theme), data);
+  const codeThemeId = document.documentElement.dataset.codeTheme as CodeThemeId | undefined;
+  // The default path remains synchronous and does not load the grammar engine.
+  if (codeThemeId || textMateLoaded) {
+    return import("./monacoTextMate").then(({ applyMonacoTextMate }) => {
+      if (themeRequests.get(monaco) !== revision) return;
+      textMateLoaded = true;
+      return applyMonacoTextMate(monaco as typeof Monaco, theme, codeThemeId ?? null, data);
+    });
+  }
 }
+let textMateLoaded = false;
+const themeRequests = new WeakMap<object, number>();

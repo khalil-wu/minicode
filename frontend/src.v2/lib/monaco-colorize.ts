@@ -124,8 +124,10 @@ export function useColorizedLines(
   lines: { kind: string; text: string }[],
   language: string,
 ): string[] | null {
-  const [result, setResult] = useState<{ lines: typeof lines; language: string; theme: string; html: string[] } | null>(null);
   const theme = useAppStore((state) => state.resolvedTheme);
+  const colors = useAppStore((state) => state.appearanceColors[theme]);
+  const selection = useAppStore((state) => state.appearanceThemes[theme]);
+  const [result, setResult] = useState<{ lines: typeof lines; language: string; theme: string; colors: typeof colors; selection: typeof selection; html: string[] } | null>(null);
 
   useEffect(() => {
     if (language === "plaintext" || lines.length === 0) {
@@ -144,15 +146,28 @@ export function useColorizedLines(
     }
 
     const code = codeLines.join("\n");
+    const isCurrent = () => {
+      const current = useAppStore.getState();
+      return !canceled && current.resolvedTheme === theme
+        && current.appearanceColors[theme] === colors && current.appearanceThemes[theme] === selection;
+    };
 
-    getMonaco(language).then((monaco) => {
-      if (canceled) return null;
-      defineMiniCodeMonacoTheme(monaco, theme);
+    const colorize = async () => {
+      if (selection) {
+        const { highlightCode } = await import("./code-highlighting");
+        const tokens = await highlightCode(code, language, selection.codeThemeId, theme);
+        const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return tokens.map(line => line.map(token => `<span${token.color ? ` style="color: ${token.color}"` : ""}>${escape(token.content)}</span>`).join(""));
+      }
+      const monaco = await getMonaco(language);
+      if (!isCurrent()) return [];
+      await defineMiniCodeMonacoTheme(monaco, theme);
+      if (!isCurrent()) return [];
       monaco.editor.setTheme(miniCodeMonacoThemeName(theme));
-      return monaco.editor.colorize(code, language, { tabSize: 2 });
-    }).then((html) => {
+      return (await monaco.editor.colorize(code, language, { tabSize: 2 })).split("<br/>");
+    };
+    colorize().then((htmlLines) => {
         if (canceled) return;
-        const htmlLines = html!.split("<br/>");
         const htmlByLine: string[] = [];
         let codeIdx = 0;
         for (const line of lines) {
@@ -163,12 +178,13 @@ export function useColorizedLines(
             htmlByLine.push("");
           }
         }
-        setResult({ lines, language, theme, html: htmlByLine });
-    }).catch(() => {
-      if (!canceled) setResult(null);
+        setResult({ lines, language, theme, colors, selection, html: htmlByLine });
+    }).catch(error => {
+      if (!canceled) { console.error("Code colorization failed", error); setResult(null); }
     });
     return () => { canceled = true; };
-  }, [lines, language, theme]);
+  }, [lines, language, theme, colors, selection]);
 
-  return result?.lines === lines && result.language === language && result.theme === theme ? result.html : null;
+  return result?.lines === lines && result.language === language && result.theme === theme
+    && result.colors === colors && result.selection === selection ? result.html : null;
 }

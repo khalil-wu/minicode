@@ -1,0 +1,13 @@
+{
+  "导入主题": "Import theme",
+  "导入{variant}主题": "Import {variant} theme",
+  "复制{variant}主题": "Copy {variant} theme",
+  "{variant}主题": "{variant} theme",
+  "{variant}主题分享字符串": "{variant} theme share string",
+  "已导入{variant}主题": "{variant} theme imported",
+  "无法导入{variant}主题": "Couldn’t import {variant} theme",
+  "已复制{variant}主题": "{variant} theme copied",
+  "{variant}代码主题": "{variant} code theme",
+  "加载{theme}主题预览失败": "Couldn’t load {theme} theme preview",
+  "无法应用{variant}代码主题": "Couldn’t apply {variant} code theme"
+}

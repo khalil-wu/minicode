@@ -1,5 +1,6 @@
 import { useI18n } from "../i18n";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type * as Monaco from "monaco-editor";
 import { createPortal } from "react-dom";
 import { ArrowLeft, Search, X } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -32,9 +33,15 @@ const sessions = new Map<string, SearchSession>();
 const initialSession = (): SearchSession => ({ options: { query: "", regex: false, caseSensitive: false, wholeWord: false, include: "", exclude: "" }, replacement: "", result: null, selected: new Set() });
 
 function ReplacementDiff({ file, theme, scale }: { file: { path: string; before: string; after: string }; theme: "light" | "dark"; scale: number }) {
+  const monacoRef = useRef<typeof Monaco | null>(null);
+  const appearanceColors = useAppStore(state => state.appearanceColors);
+  const appearanceThemes = useAppStore(state => state.appearanceThemes);
+  useLayoutEffect(() => {
+    if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
+  }, [theme, appearanceColors, appearanceThemes]);
   const onMount = useOwnedDiffModelCleanup();
   return <NativeDiff height="100%" original={file.before} modified={file.after} language={guessLanguageFromPath(file.path)} theme={miniCodeMonacoThemeName(theme)}
-    beforeMount={(monaco) => defineMiniCodeMonacoTheme(monaco, theme)} onMount={onMount}
+    beforeMount={(monaco) => { monacoRef.current = monaco; defineMiniCodeMonacoTheme(monaco, useAppStore.getState().resolvedTheme); }} onMount={onMount}
     options={{ readOnly: true, renderSideBySide: true, automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false,
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(), fontSize: Math.round(14 * scale), lineHeight: Math.round(22 * scale),
       fontLigatures: false, roundedSelection: false, renderLineHighlight: "all", renderValidationDecorations: "off", originalEditable: false, lineNumbers: "on", wordWrap: "on", padding: { top: 8 } }} />;

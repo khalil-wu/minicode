@@ -1,0 +1,25 @@
+.mc-select-menu.appearance-code-theme-picker { width: 176px; max-width: 100%; flex: 0 0 auto; }
+.appearance-code-theme-picker .mc-select-trigger { border-radius: 999px; padding-left: 6px; }
+.appearance-code-theme-picker .mc-select-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appearance-code-theme-preview {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  margin-right: 2px;
+  border: 1px solid var(--code-theme-preview-border);
+  border-radius: 50%;
+  background: var(--code-theme-preview-surface);
+  color: var(--code-theme-preview-accent);
+  line-height: 1;
+}
+.appearance-code-theme-picker .appearance-code-theme-preview {
+  width: 20px;
+  height: 20px;
+  border-color: var(--code-theme-current-border);
+  background: var(--code-theme-current-surface);
+  color: var(--code-theme-current-accent);
+}

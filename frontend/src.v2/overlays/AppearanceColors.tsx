@@ -4,6 +4,9 @@ import { HexColorPicker } from "react-colorful";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { colorInputDraft, completeColorInput, effectiveAppearanceColors, type AppearanceColorRole } from "../lib/appearance-colors";
+import { defaultThemePreferences } from "../lib/appearance-themes";
+import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
+import { AppearanceCodeThemePicker } from "./AppearanceCodeThemePicker";
 import "./AppearanceColors.css";
 
 function ColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
@@ -93,9 +96,19 @@ export function AppearanceColors() {
   const variant = useAppStore(state => state.resolvedTheme);
   const colors = useAppStore(state => state.appearanceColors);
   const setColor = useAppStore(state => state.setAppearanceColor);
+  const selection = useAppStore(state => state.appearanceThemes[variant]);
+  const setCodeThemeId = useAppStore(state => state.setCodeThemeId);
+  const importTheme = useAppStore(state => state.importAppearanceTheme);
   const effective = colors[variant] ?? effectiveAppearanceColors();
+  const codeThemeId = selection?.codeThemeId ?? "vscode-plus";
+  const { contrast, opaqueWindows, semanticColors } = selection ?? defaultThemePreferences(variant);
+  const snapshot = { codeThemeId, theme: { contrast, opaqueWindows, semanticColors, ...effective, accentSource: "custom" as const } };
   const variantLabel = t(variant === "light" ? "浅色" : "深色");
   return <section className="settings-card settings-appearance-colors" aria-label={t("主题")}>
+    <div className="settings-row appearance-theme-heading"><h4 className="settings-row-title">{t("主题")}</h4><div className="appearance-theme-heading-controls">
+      <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} />
+      <AppearanceCodeThemePicker variant={variant} colors={effective} value={codeThemeId} onSelect={id => setCodeThemeId(variant, id)} />
+    </div></div>
     {roles.map(({ role, label, input }) => <div className="settings-row" key={role}>
       <div className="settings-row-copy"><div className="settings-row-title">{t(label)}</div></div>
       <div className="settings-row-control"><ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}

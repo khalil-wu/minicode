@@ -1,0 +1,13 @@
+{
+  "导入主题": "导入主题",
+  "导入{variant}主题": "导入{variant}主题",
+  "复制{variant}主题": "复制{variant}主题",
+  "{variant}主题": "{variant}主题",
+  "{variant}主题分享字符串": "{variant}主题分享字符串",
+  "已导入{variant}主题": "已导入{variant}主题",
+  "无法导入{variant}主题": "无法导入{variant}主题",
+  "已复制{variant}主题": "已复制{variant}主题",
+  "{variant}代码主题": "{variant}代码主题",
+  "加载{theme}主题预览失败": "加载{theme}主题预览失败",
+  "无法应用{variant}代码主题": "无法应用{variant}代码主题"
+}

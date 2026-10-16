@@ -10,6 +10,9 @@ import type {
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import type { ShortcutActionId, ShortcutBindings } from "../lib/keyboard-shortcuts";
 import type { AppearanceColorRole, AppearanceColors, AppearanceVariant } from "../lib/appearance-colors";
+import type { AppearanceThemes } from "../lib/appearance-themes";
+import type { CodeThemeId } from "../lib/code-themes";
+import type { CodeThemeAppearance } from "../lib/theme-sharing";
 import type {
   PreviewLaunchConfigInfo,
   PreviewLaunchProcessInfo,
@@ -399,6 +402,7 @@ export interface UISlice {
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
   appearanceColors: AppearanceColors;
+  appearanceThemes: AppearanceThemes;
   textScale: number;
   codeTextScale: number;
   reducedMotion: boolean;
@@ -461,6 +465,8 @@ export interface UISlice {
   agentEditorOpen: boolean;
   setThemeMode: (m: ThemeMode) => void;
   setAppearanceColor: (variant: AppearanceVariant, role: AppearanceColorRole, value: string) => void;
+  setCodeThemeId: (variant: AppearanceVariant, id: CodeThemeId) => Promise<void>;
+  importAppearanceTheme: (variant: AppearanceVariant, snapshot: CodeThemeAppearance) => Promise<void>;
   setTextScale: (s: number) => void;
   setCodeTextScale: (s: number) => void;
   setReducedMotion: (reduced: boolean) => void;

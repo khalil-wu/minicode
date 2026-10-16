@@ -17,6 +17,8 @@ const { sendMock, openLivePreviewMock, mockStoreState } = vi.hoisted(() => {
     rightStackTab: "tasks",
     rightPanelOpen: false,
     runtimeCapabilities: null as unknown,
+    appearanceColors: { light: null, dark: null },
+    appearanceThemes: { light: null, dark: null },
   };
   return {
     sendMock: vi.fn(),

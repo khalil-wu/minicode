@@ -1,5 +1,6 @@
 import { formatHex } from "culori";
 import { z } from "zod";
+import type { AppearanceThemeSelection, AppearanceThemes } from "./appearance-themes";
 
 export type AppearanceVariant = "light" | "dark";
 export type AppearanceColorRole = "accent" | "surface" | "ink";
@@ -41,12 +42,12 @@ const onAccent = (color: RGB) => {
 };
 
 /** Source Pba/Bba/Iba/Rba/Vba/Fba at the reference app-initial theme cluster.
- * Contrast remains Source's fixed default for each variant; this feature only
- * edits the three color roles and never writes typography or syntax colors.
+ * Theme selection/import also supplies contrast and semantic colors. Typography
+ * and TextMate syntax stay owned by their existing consumers.
  */
-export function appearanceColorTokens(colors: AppearanceColorValues, variant: AppearanceVariant): Record<string, string> {
+export function appearanceColorTokens(colors: AppearanceColorValues, variant: AppearanceVariant, theme?: AppearanceThemeSelection | null): Record<string, string> {
   const light = variant === "light";
-  const contrast = light ? .45 : .6;
+  const contrast = theme ? theme.contrast / 100 : light ? .45 : .6;
   const surface = rgb(colors.surface), ink = rgb(colors.ink), accent = rgb(colors.accent);
   const under = solid(mix(surface, light ? ink : black, light ? .04 : .16));
   const control = solid(mix(surface, light ? white : ink, light ? .09 + contrast * .04 : .06 + contrast * .05));
@@ -62,6 +63,7 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
   const borderLight = alpha(ink, light ? .04 + contrast * .02 : .03 + contrast * .02);
   const focus = light ? colors.accent : alpha(mix(accent, white, .3 + contrast * .15), .7 + contrast * .1);
   const muted = alpha(ink, light ? .45 + contrast * .1 : .42 + contrast * .13);
+  const semantic = theme?.semanticColors;
   return {
     "--desktop-shell-background": under,
     "--desktop-frame-border": border,
@@ -113,11 +115,27 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
     "--editor-widget-selection": hover,
     "--editor-find-match": accentSelected,
     "--editor-find-range": accentSoft,
+    ...(semantic ? {
+      "--diff-added-foreground": semantic.diffAdded,
+      "--diff-removed-foreground": semantic.diffRemoved,
+      "--diff-added-background": alpha(rgb(semantic.diffAdded), light ? .15 : .23),
+      "--diff-removed-background": alpha(rgb(semantic.diffRemoved), light ? .15 : .23),
+      "--diff-added-word-background": alpha(rgb(semantic.diffAdded), light ? .15 : .23),
+      "--diff-removed-word-background": alpha(rgb(semantic.diffRemoved), light ? .15 : .23),
+      "--diff-add-text": semantic.diffAdded,
+      "--diff-del-text": semantic.diffRemoved,
+      "--diff-add-bg": alpha(rgb(semantic.diffAdded), light ? .15 : .23),
+      "--diff-del-bg": alpha(rgb(semantic.diffRemoved), light ? .15 : .23),
+      "--app-color-accent-purple": semantic.skill,
+    } : {}),
   };
 }
 
 const appliedRoots = new WeakSet<HTMLElement>();
-const ownedTokens = Object.keys(appearanceColorTokens({ accent: "#000000", surface: "#000000", ink: "#ffffff" }, "dark"));
+const ownedTokens = Object.keys(appearanceColorTokens({ accent: "#000000", surface: "#000000", ink: "#ffffff" }, "dark", {
+  codeThemeId: "vscode-plus", contrast: 60, opaqueWindows: false,
+  semanticColors: { diffAdded: "#000000", diffRemoved: "#000000", skill: "#000000" },
+}));
 const baseTokens: Record<AppearanceColorRole, string> = { accent: "--accent-primary", surface: "--surface-base", ink: "--text-primary" };
 
 export const effectiveAppearanceColors = (): AppearanceColorValues => {
@@ -125,14 +143,16 @@ export const effectiveAppearanceColors = (): AppearanceColorValues => {
   return Object.fromEntries(Object.entries(baseTokens).map(([role, token]) => [role, formatHex(style.getPropertyValue(token).trim())!])) as AppearanceColorValues;
 };
 
-export function applyAppearanceColors(variant: AppearanceVariant, saved: AppearanceColors) {
+export function applyAppearanceColors(variant: AppearanceVariant, saved: AppearanceColors, themes?: AppearanceThemes) {
   const root = document.documentElement;
+  if (themes?.[variant]) root.dataset.codeTheme = themes[variant].codeThemeId;
+  else delete root.dataset.codeTheme;
   if (appliedRoots.has(root)) {
     for (const token of ownedTokens) root.style.removeProperty(token);
     appliedRoots.delete(root);
   }
   const colors = saved[variant];
   if (colors === null) return;
-  for (const [token, value] of Object.entries(appearanceColorTokens(colors, variant))) root.style.setProperty(token, value);
+  for (const [token, value] of Object.entries(appearanceColorTokens(colors, variant, themes?.[variant]))) root.style.setProperty(token, value);
   appliedRoots.add(root);
 }

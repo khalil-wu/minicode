@@ -1,0 +1,396 @@
+{
+  "sourceSha256": "799331dde54905c4df5e360f23a9621141759e2c0acb230aeab909f9904b646f",
+  "cases": [
+    {
+      "registrationName": "ayu-dark",
+      "variant": "dark",
+      "tokenRuleCount": 66,
+      "semanticTokenCount": 21,
+      "seed": {
+        "accent": "#e6b450",
+        "ink": "#bfbdb6",
+        "semanticColors": {
+          "diffAdded": "#70bf56",
+          "diffRemoved": "#f26d78",
+          "skill": "#d0a1ff"
+        },
+        "surface": "#10141c",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "catppuccin-latte",
+      "variant": "light",
+      "tokenRuleCount": 179,
+      "semanticTokenCount": 30,
+      "seed": {
+        "accent": "#8839ef",
+        "ink": "#4c4f69",
+        "semanticColors": {
+          "diffAdded": "#40a02b",
+          "diffRemoved": "#d20f39",
+          "skill": "#8839ef"
+        },
+        "surface": "#eff1f5",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "catppuccin-mocha",
+      "variant": "dark",
+      "tokenRuleCount": 179,
+      "semanticTokenCount": 30,
+      "seed": {
+        "accent": "#cba6f7",
+        "ink": "#cdd6f4",
+        "semanticColors": {
+          "diffAdded": "#a6e3a1",
+          "diffRemoved": "#f38ba8",
+          "skill": "#cba6f7"
+        },
+        "surface": "#1e1e2e",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "dark-plus",
+      "variant": "dark",
+      "tokenRuleCount": 65,
+      "semanticTokenCount": 4,
+      "seed": {
+        "accent": "#007acc",
+        "ink": "#d4d4d4",
+        "semanticColors": {
+          "diffAdded": "#369432",
+          "diffRemoved": "#f44747",
+          "skill": "#000080"
+        },
+        "surface": "#1e1e1e",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "dracula",
+      "variant": "dark",
+      "tokenRuleCount": 85,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#ff79c6",
+        "ink": "#f8f8f2",
+        "semanticColors": {
+          "diffAdded": "#50fa7b",
+          "diffRemoved": "#ff5555",
+          "skill": "#ff79c6"
+        },
+        "surface": "#282a36",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "everforest-dark",
+      "variant": "dark",
+      "tokenRuleCount": 276,
+      "semanticTokenCount": 26,
+      "seed": {
+        "accent": "#a7c080",
+        "ink": "#d3c6aa",
+        "semanticColors": {
+          "diffAdded": "#a7c080",
+          "diffRemoved": "#e67e80",
+          "skill": "#d699b6"
+        },
+        "surface": "#2d353b",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "everforest-light",
+      "variant": "light",
+      "tokenRuleCount": 276,
+      "semanticTokenCount": 26,
+      "seed": {
+        "accent": "#93b259",
+        "ink": "#5c6a72",
+        "semanticColors": {
+          "diffAdded": "#8da101",
+          "diffRemoved": "#f85552",
+          "skill": "#df69ba"
+        },
+        "surface": "#fdf6e3",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "github-dark-default",
+      "variant": "dark",
+      "tokenRuleCount": 49,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#1f6feb",
+        "ink": "#e6edf3",
+        "semanticColors": {
+          "diffAdded": "#3fb950",
+          "diffRemoved": "#f85149",
+          "skill": "#bc8cff"
+        },
+        "surface": "#0d1117",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "github-light-default",
+      "variant": "light",
+      "tokenRuleCount": 49,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#0969da",
+        "ink": "#1f2328",
+        "semanticColors": {
+          "diffAdded": "#1a7f37",
+          "diffRemoved": "#cf222e",
+          "skill": "#8250df"
+        },
+        "surface": "#ffffff",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "gruvbox-dark-medium",
+      "variant": "dark",
+      "tokenRuleCount": 127,
+      "semanticTokenCount": 9,
+      "seed": {
+        "accent": "#458588",
+        "ink": "#ebdbb2",
+        "semanticColors": {
+          "diffAdded": "#ebdbb2",
+          "diffRemoved": "#cc241d",
+          "skill": "#b16286"
+        },
+        "surface": "#282828",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "gruvbox-light-medium",
+      "variant": "light",
+      "tokenRuleCount": 127,
+      "semanticTokenCount": 9,
+      "seed": {
+        "accent": "#458588",
+        "ink": "#3c3836",
+        "semanticColors": {
+          "diffAdded": "#3c3836",
+          "diffRemoved": "#cc241d",
+          "skill": "#b16286"
+        },
+        "surface": "#fbf1c7",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "light-plus",
+      "variant": "light",
+      "tokenRuleCount": 64,
+      "semanticTokenCount": 4,
+      "seed": {
+        "accent": "#007acc",
+        "ink": "#000000",
+        "semanticColors": {
+          "diffAdded": "#008000",
+          "diffRemoved": "#ee0000",
+          "skill": "#0000ff"
+        },
+        "surface": "#ffffff",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "material-theme-darker",
+      "variant": "dark",
+      "tokenRuleCount": 82,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#80cbc4",
+        "ink": "#eeffff",
+        "semanticColors": {
+          "diffAdded": "#c3e88d",
+          "diffRemoved": "#f07178",
+          "skill": "#c792ea"
+        },
+        "surface": "#212121",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "monokai",
+      "variant": "dark",
+      "tokenRuleCount": 52,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#99947c",
+        "ink": "#f8f8f2",
+        "semanticColors": {
+          "diffAdded": "#86b42b",
+          "diffRemoved": "#c4265e",
+          "skill": "#8c6bc8"
+        },
+        "surface": "#272822",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "night-owl",
+      "variant": "dark",
+      "tokenRuleCount": 196,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#44596b",
+        "ink": "#d6deeb",
+        "semanticColors": {
+          "diffAdded": "#c5e478",
+          "diffRemoved": "#ef5350",
+          "skill": "#c792ea"
+        },
+        "surface": "#011627",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "nord",
+      "variant": "dark",
+      "tokenRuleCount": 140,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#88c0d0",
+        "ink": "#d8dee9",
+        "semanticColors": {
+          "diffAdded": "#a3be8c",
+          "diffRemoved": "#bf616a",
+          "skill": "#b48ead"
+        },
+        "surface": "#2e3440",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "one-dark-pro",
+      "variant": "dark",
+      "tokenRuleCount": 275,
+      "semanticTokenCount": 10,
+      "seed": {
+        "accent": "#4d78cc",
+        "ink": "#abb2bf",
+        "semanticColors": {
+          "diffAdded": "#8cc265",
+          "diffRemoved": "#e05561",
+          "skill": "#c162de"
+        },
+        "surface": "#282c34",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "one-light",
+      "variant": "light",
+      "tokenRuleCount": 211,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#526fff",
+        "ink": "#383a42",
+        "semanticColors": {
+          "diffAdded": "#3bba54",
+          "diffRemoved": "#e45649",
+          "skill": "#526fff"
+        },
+        "surface": "#fafafa",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "rose-pine-dawn",
+      "variant": "light",
+      "tokenRuleCount": 33,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#d7827e",
+        "ink": "#575279",
+        "semanticColors": {
+          "diffAdded": "#56949f",
+          "diffRemoved": "#797593",
+          "skill": "#907aa9"
+        },
+        "surface": "#faf4ed",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "rose-pine-moon",
+      "variant": "dark",
+      "tokenRuleCount": 33,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#ea9a97",
+        "ink": "#e0def4",
+        "semanticColors": {
+          "diffAdded": "#9ccfd8",
+          "diffRemoved": "#908caa",
+          "skill": "#c4a7e7"
+        },
+        "surface": "#232136",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "solarized-dark",
+      "variant": "dark",
+      "tokenRuleCount": 41,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#d30102",
+        "ink": "#839496",
+        "semanticColors": {
+          "diffAdded": "#859900",
+          "diffRemoved": "#dc322f",
+          "skill": "#d33682"
+        },
+        "surface": "#002b36",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "solarized-light",
+      "variant": "light",
+      "tokenRuleCount": 41,
+      "semanticTokenCount": 0,
+      "seed": {
+        "accent": "#b58900",
+        "ink": "#657b83",
+        "semanticColors": {
+          "diffAdded": "#859900",
+          "diffRemoved": "#dc322f",
+          "skill": "#d33682"
+        },
+        "surface": "#fdf6e3",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "registrationName": "tokyo-night",
+      "variant": "dark",
+      "tokenRuleCount": 114,
+      "semanticTokenCount": 8,
+      "seed": {
+        "accent": "#3d59a1",
+        "ink": "#a9b1d6",
+        "semanticColors": {
+          "diffAdded": "#449dab",
+          "diffRemoved": "#914c54",
+          "skill": "#9d7cd8"
+        },
+        "surface": "#1a1b26",
+        "accentSource": "custom"
+      }
+    }
+  ]
+}

@@ -136,10 +136,12 @@ export function MonacoDiffView({
   const diffEditorRef = useRef<Monaco.editor.IStandaloneDiffEditor | null>(null);
   const instanceId = useId();
   const theme = useAppStore((state) => state.resolvedTheme);
+  const appearanceColors = useAppStore((state) => state.appearanceColors);
+  const appearanceThemes = useAppStore((state) => state.appearanceThemes);
   const codeTextScale = useAppStore((state) => state.codeTextScale);
   useLayoutEffect(() => {
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
-  }, [theme]);
+  }, [theme, appearanceColors, appearanceThemes]);
 
   const { original, modified, filePath, originalLines, modifiedLines } = useMemo(() => {
     const parsed = parseUnifiedDiffExcerpt(patch);

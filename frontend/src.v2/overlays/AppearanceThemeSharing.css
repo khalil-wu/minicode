@@ -1,0 +1,70 @@
+.appearance-theme-sharing { display: inline-flex; align-items: center; gap: 8px; }
+.appearance-theme-share-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.appearance-theme-share-button:hover { background: var(--surface-hover); }
+.appearance-theme-share-button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.appearance-theme-import-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #0002;
+}
+.appearance-theme-import-dialog {
+  width: 520px;
+  max-width: 92vw;
+  box-sizing: border-box;
+  padding: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--surface-raised) 90%, transparent);
+  backdrop-filter: blur(24px);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-panel);
+}
+@supports (corner-shape: superellipse(1.5)) {
+  .appearance-theme-import-dialog { border-radius: 25px; corner-shape: superellipse(1.5); }
+}
+.appearance-theme-import-dialog form { display: flex; flex-direction: column; gap: 12px; }
+.appearance-theme-import-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.appearance-theme-import-heading h2 { margin: 0; font: inherit; }
+.appearance-theme-import-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  outline: none;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font: inherit;
+}
+.appearance-theme-import-input::placeholder { color: var(--text-muted); }
+.appearance-theme-import-input:focus { border-color: var(--border-focus); }
+.appearance-theme-import-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.appearance-theme-import-actions button {
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+.appearance-theme-import-cancel { background: transparent; color: var(--text-primary); }
+.appearance-theme-import-cancel:hover { background: var(--surface-hover); }
+.appearance-theme-import-submit { background: var(--text-primary); color: var(--surface-base); }
+.appearance-theme-import-submit:disabled { opacity: .4; cursor: default; }
