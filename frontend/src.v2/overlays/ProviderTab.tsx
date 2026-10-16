@@ -1047,6 +1047,24 @@ export const ProviderTab = ({
         source: "history",
       });
     });
+    const activeProvider = toActiveUiProvider(settingsPayload);
+    const activeSection = activeProvider ? settingsPayload?.[backendProvider(activeProvider)] : undefined;
+    if (activeProvider && activeSection?.model?.trim()) {
+      const identity = cardIdentityForDraft(activeProvider, activeSection);
+      if (!seen.has(identity)) {
+        cards.unshift({
+          key: cardKeyFor(activeProvider, activeSection, "saved"),
+          provider: activeProvider,
+          title: cardTitle(activeProvider, activeSection),
+          subtitle: providerTypeLabel(activeProvider),
+          model: activeSection.model,
+          wireApi: effectiveCustomWireApi(activeProvider, activeSection.base_url || "",
+            activeSection.wire_api === "responses" || activeSection.wire_api === "anthropic" ? activeSection.wire_api : "chat"),
+          section: activeSection,
+          source: "saved",
+        });
+      }
+    }
     return cards;
   })();
 

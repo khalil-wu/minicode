@@ -393,8 +393,9 @@ def test_static_preview_preserves_html_url_and_stops_cleanly(tmp_path):
         pytest.skip(f"enforceable preview sandbox unavailable: {exc}")
 
 
-def test_static_preview_serves_assets_but_denies_workspace_secrets(tmp_path):
+def test_static_preview_serves_assets_but_denies_workspace_secrets(tmp_path, monkeypatch):
     launcher._RUNNING.clear()
+    monkeypatch.setattr(launcher.secrets, "token_urlsafe", lambda _size: "-preview-token-starting-dash")
     (tmp_path / "index.html").write_text('<link rel="stylesheet" href="site.css">', encoding="utf-8")
     (tmp_path / "site.css").write_text("body { color: green; }\n", encoding="utf-8")
     (tmp_path / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
@@ -410,7 +411,7 @@ def test_static_preview_serves_assets_but_denies_workspace_secrets(tmp_path):
             from backend.preview.verifier import wait_until_ready
 
             verification = await wait_until_ready(process.effective_url, timeout=10.0, interval=0.1)
-            assert verification.ok
+            assert verification.ok, (verification, process.process.returncode, process.stderr_tail, process.output_tail)
             base_url = process.effective_url.rsplit("/", 1)[0]
             css = await asyncio.to_thread(lambda: urlopen(f"{base_url}/site.css", timeout=3).read())
             assert b"color: green" in css

@@ -264,7 +264,8 @@ describe("BrowserPanel", () => {
     runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
     render(<BrowserPanel />);
     await screen.findByRole("tab", { name: "Page A" });
-    fireEvent.change(screen.getByRole("combobox", { name: "预览设备" }), { target: { value: "phone" } });
+    fireEvent.click(screen.getByRole("button", { name: "预览设备，当前：自适应" }));
+    fireEvent.click(screen.getByRole("option", { name: "手机", exact: true }));
     await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewport: { width: 390, height: 844, mobile: true } })));
     fireEvent.click(screen.getByRole("button", { name: "旋转" }));
     await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewport: { width: 844, height: 390, mobile: true } })));
@@ -1103,14 +1104,15 @@ describe("BrowserPanel", () => {
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "agent_browser", "console"));
     expect(screen.getByRole("tab", { name: /控制台/ })).toBeTruthy();
 
-    fireEvent.change(screen.getByRole("combobox", { name: "筛选页面诊断" }), { target: { value: "warnings" } });
+    fireEvent.click(screen.getByRole("button", { name: "筛选页面诊断，当前：全部" }));
+    fireEvent.click(screen.getByRole("option", { name: "警告", exact: true }));
 
     fireEvent.click(screen.getByRole("tab", { name: /网络/ }));
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenLastCalledWith("conv-browser", "agent_browser", "network"));
-    expect((screen.getByRole("combobox", { name: "筛选页面诊断" }) as HTMLSelectElement).value).toBe("all");
-    fireEvent.change(screen.getByRole("combobox", { name: "筛选页面诊断" }), { target: { value: "fetch" } });
+    fireEvent.click(screen.getByRole("button", { name: "筛选页面诊断，当前：全部" }));
+    fireEvent.click(screen.getByRole("option", { name: "Fetch / XHR", exact: true }));
     fireEvent.click(screen.getByRole("tab", { name: /控制台/ }));
-    expect((screen.getByRole("combobox", { name: "筛选页面诊断" }) as HTMLSelectElement).value).toBe("all");
+    expect(screen.getByRole("button", { name: "筛选页面诊断，当前：全部" })).toBeTruthy();
   });
 
   it("loads and updates embedded browser site settings", async () => {

@@ -342,10 +342,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     })));
   });
 
-  it("describes the active page without duplicating composer permission controls", () => {
+  it("uses the desktop page heading without adding a subtitle or composer permission controls", () => {
     render(<SettingsCenter />);
 
-    expect(screen.getByText("设置工作方式、消息跟进、过程展示与内容加载。")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
+    expect(screen.queryByText("设置工作方式、消息跟进、过程展示与内容加载。")).toBeNull();
     expect(screen.queryByRole("radiogroup", { name: "默认运行权限" })).toBeNull();
     expect(screen.queryByText("当前模型")).toBeNull();
     expect(screen.queryByRole("radio", { name: "使用自动审核" })).toBeNull();
@@ -547,7 +548,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
     fireEvent.click(screen.getByRole("button", { name: "技能管理", exact: true }));
-    expect(screen.getByText("管理插件、技能和 MCP。")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "插件", level: 2 })).toBeTruthy();
     expect(screen.queryByText("插件是能力包；技能是工作流；MCP 是外部工具服务。")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "使用" }));
 

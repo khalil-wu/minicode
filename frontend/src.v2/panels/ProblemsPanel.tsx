@@ -1,6 +1,7 @@
 import { useI18n } from "../i18n";
 import { ChevronDown, ChevronRight, CircleAlert, CircleX, Info, Lightbulb, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
+import { SelectMenu } from '../components/SelectMenu'
 import type { ProblemQuickFix, WorkspaceProblem, WorkspaceProblemsState } from './workspaceProblems'
 import './ProblemsPanel.css'
 
@@ -53,8 +54,8 @@ export const ProblemsPanel = ({ state, onRefresh, onNavigate, onQuickFixes, onAp
   return <section className="mc-problems-panel" aria-label={tr("代码问题")}>
     <div className="mc-problems-toolbar">
       <input aria-label={tr("按文件筛选问题")} placeholder={tr("筛选文件…")} value={file} onChange={(event) => setFile(event.target.value)} />
-      <select aria-label={tr("问题级别")} value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="all">{tr("全部级别")}</option>{Object.entries(severityLabel).map(([value, label]) => <option value={value} key={value}>{tr(label)}</option>)}</select>
-      <select aria-label={tr("问题来源")} value={source} onChange={(event) => setSource(event.target.value)}><option value="all">{tr("全部来源")}</option>{[...new Set(state.items.map((problem) => problem.source))].map((value) => <option value={value} key={value}>{value}</option>)}</select>
+      <SelectMenu ariaLabel={tr("问题级别")} value={severity} onValueChange={setSeverity}><option value="all">{tr("全部级别")}</option>{Object.entries(severityLabel).map(([value, label]) => <option value={value} key={value}>{tr(label)}</option>)}</SelectMenu>
+      <SelectMenu ariaLabel={tr("问题来源")} value={source} onValueChange={setSource}><option value="all">{tr("全部来源")}</option>{[...new Set(state.items.map((problem) => problem.source))].map((value) => <option value={value} key={value}>{value}</option>)}</SelectMenu>
       <span className="mc-problems-count">{state.phase === 'ready' || state.phase === 'partial' ? tr("{v0} 错误 · {v1} 警告 · {v2} 项匹配", { v0: errors, v1: warnings, v2: filtered.length }) : tr("诊断尚未完成")}</span>
       <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("刷新代码问题")} onClick={onRefresh}><RefreshCw size={14} /></button>
     </div>

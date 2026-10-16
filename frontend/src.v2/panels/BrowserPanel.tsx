@@ -1165,14 +1165,14 @@ export const BrowserPanel = () => {
             spellCheck={false}
           />
         </form>
-        <label className="mc-browser-device"><Smartphone size={15} /><select aria-label={t("预览设备")}
+        <div className="mc-browser-device"><Smartphone size={15} aria-hidden="true" /><SelectMenu ariaLabel={t("预览设备")} align="end"
           value={viewport ? (viewport.width === 390 ? "phone" : viewport.width === 768 ? "tablet" : viewport.width === 1440 ? "desktop" : "custom") : "auto"}
-          onChange={(event) => setViewport(event.target.value === "auto" ? null : {
+          onValueChange={(value) => setViewport(value === "auto" ? null : {
             phone: { width: 390, height: 844, mobile: true }, tablet: { width: 768, height: 1024, mobile: true },
             desktop: { width: 1440, height: 900, mobile: false }, custom: { width: 1024, height: 768, mobile: false },
-          }[event.target.value]!)}>
+          }[value]!)}>
           <option value="auto">{t("自适应")}</option><option value="phone">{t("手机")}</option><option value="tablet">{t("平板")}</option><option value="desktop">{t("桌面")}</option><option value="custom">{t("自定义")}</option>
-        </select></label>
+        </SelectMenu></div>
         <button
           type="button"
           className="mc-browser-select-target"
@@ -1293,10 +1293,10 @@ export const BrowserPanel = () => {
           </div>
           <div className="mc-browser-diagnostic-filters">
             <input aria-label={t("搜索页面诊断")} placeholder={t("搜索消息或 URL")} value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
-            <select aria-label={t("筛选页面诊断")} value={diagnosticFilter} onChange={(event) => setDiagnosticFilter(event.target.value)}>
+            <SelectMenu ariaLabel={t("筛选页面诊断")} align="end" value={diagnosticFilter} onValueChange={setDiagnosticFilter}>
               <option value="all">{t("全部")}</option><option value="errors">{t("错误")}</option>
               {inspectorKind === "console" ? <option value="warnings">{t("警告")}</option> : <option value="fetch">Fetch / XHR</option>}
-            </select><small>{visibleDiagnostics.length} / {diagnostics.length}</small>
+            </SelectMenu><small>{visibleDiagnostics.length} / {diagnostics.length}</small>
           </div>
           <div className="mc-browser-inspector-list">
             {inspectorError ? (

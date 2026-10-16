@@ -295,7 +295,6 @@ export const SettingsCenter = () => {
             <header className="settings-page-heading">
               <div className="settings-page-heading-copy">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
-              <p>{activeTabMeta.description}</p>
               </div>
               <div ref={setToolbarHost} className="settings-page-heading-actions" />
             </header>

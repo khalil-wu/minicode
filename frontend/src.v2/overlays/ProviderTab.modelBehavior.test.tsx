@@ -12,6 +12,31 @@ vi.mock("../protocol/api", async (importOriginal) => ({
 vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
+it("shows and edits the actual configured provider when it has no saved history entry", () => {
+  const payload: LLMSettingsPayload = { provider: "custom", active_model: "local-model", provider_history: [], custom: {
+    display_name: "Local gateway", base_url: "http://127.0.0.1:9123/v1", model: "local-model",
+    available_models: ["local-model"], wire_api: "chat", has_api_key: false, auth_header: false,
+  }};
+  render(<ProviderTab selectedProvider="custom" settingsPayload={payload} settingsPayloadRef={{ current: payload }} onProviderChange={vi.fn()} />);
+
+  expect(screen.queryByText("尚未配置提供商")).toBeNull();
+  expect((screen.getByRole("button", { name: "Local gateway 已启用" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "编辑 Local gateway" }));
+  expect(screen.getByDisplayValue("http://127.0.0.1:9123/v1")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "默认模型，当前：local-model" })).toBeTruthy();
+});
+
+it("keeps one provider card for a configured endpoint already present in saved history", () => {
+  const section = { display_name: "Configured gateway", base_url: "https://fixture.invalid/v1", model: "alpha", wire_api: "responses" as const };
+  const payload: LLMSettingsPayload = { provider: "openai", active_model: "alpha", openai: section,
+    provider_history: [{ ...section, display_name: "Saved gateway", provider: "openai", provider_id: "openai" }] };
+  render(<ProviderTab selectedProvider="openai" settingsPayload={payload} settingsPayloadRef={{ current: payload }} onProviderChange={vi.fn()} />);
+
+  expect(screen.getAllByRole("button", { name: /^编辑 / })).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "编辑 Saved gateway" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "编辑 Configured gateway" })).toBeNull();
+});
+
 it("edits each model independently and submits native tools and prompt settings in the saved profile", async () => {
   const payload: LLMSettingsPayload = { provider: "openai", openai: {
     base_url: "https://fixture.invalid/v1", api_key: "fixture", model: "alpha", wire_api: "responses",

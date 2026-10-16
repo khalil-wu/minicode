@@ -730,8 +730,7 @@ async def start_static_preview(
         str(port),
         "--root",
         str(target.parent),
-        "--token",
-        access_token,
+        f"--token={access_token}",
     ]
     command = _preview_shell_command(argv)
     identity = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
