@@ -66,6 +66,9 @@ class AppBootstrap:
         self.config: AppConfig | None = None
         self.environment_manager: Any | None = None
         self.mcp_manager: Any | None = None
+        from backend.mcp.app_runtime import MCPAppRuntime
+
+        self.mcp_apps = MCPAppRuntime()
         self._mcp_managers: dict[str, Any] = {}
         self._mcp_start_tasks: dict[str, asyncio.Task[Any]] = {}
         self._mcp_manager_lock = asyncio.Lock()
@@ -277,6 +280,7 @@ class AppBootstrap:
     async def shutdown(self) -> None:
         self.begin_drain()
         try:
+            await self.mcp_apps.aclose()
             if self._sandbox_probe_task is not None:
                 if not self._sandbox_probe_task.done():
                     self._sandbox_probe_task.cancel()
@@ -647,6 +651,9 @@ class AppBootstrap:
         session_id = str(owner.get("session_id") or "").strip()
         conversation_id = str(owner.get("conversation_id") or "").strip()
         owner_manager = owner.get("mcp_manager")
+        app_owned = self.mcp_apps.owns_request(owner) if owner.get("mcp_app_invocation_id") else False
+        if owner.get("mcp_app_invocation_id") and not app_owned:
+            return None, owner
         try:
             owner_generation = int(owner.get("conversation_run_generation"))
         except (TypeError, ValueError):
@@ -655,7 +662,7 @@ class AppBootstrap:
             not session_id
             or not conversation_id
             or owner_manager is None
-            or owner_generation <= 0
+            or (not app_owned and owner_generation <= 0)
         ):
             return None, owner
         iter_sessions = getattr(self.ws_manager, "iter_sessions", None)
@@ -678,6 +685,10 @@ class AppBootstrap:
                 )
                 if conversation is None:
                     return None, owner
+                if app_owned:
+                    if repository.store_instance_id() != owner["conversation_store_id"]:
+                        return None, owner
+                    return session, owner
                 workspace_root = session.session_lifecycle.workspace_root_for_conversation(
                     conversation
                 )

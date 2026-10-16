@@ -1,0 +1,12 @@
+.mc-mcp-app { position: relative; margin: 12px 0; min-width: 0; }
+.mc-mcp-app-inline, .mc-mcp-app-frame-host { width: 100%; min-width: 0; }
+.mc-mcp-app-frame-host iframe { display: block; width: 100%; border: 0; background: transparent; }
+.mc-mcp-app-bordered { border: 1px solid var(--border-default); border-radius: 12px; overflow: hidden; }
+.mc-mcp-app-frame-host.mc-mcp-app-fullscreen { height: 100%; border: 0; border-radius: 0; }
+.mc-mcp-app-frame-host.mc-mcp-app-fullscreen iframe { height: 100% !important; }
+.mc-mcp-app-status { padding: 12px 0; color: var(--text-secondary); font-size: 13px; }
+.mc-mcp-app-attribution { margin-bottom: 8px; padding-right: 28px; color: var(--text-secondary); font-size: 13px; }
+.mc-mcp-app-expand { position: absolute; top: 6px; right: 6px; z-index: 1; display: flex; padding: 5px; border: 0; border-radius: 6px; background: var(--surface-base); color: var(--text-secondary); cursor: pointer; }
+.mc-mcp-app-expand:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-mcp-app-slot { min-width: 0; }
+.mc-mcp-app-panel-slot { height: 100%; min-height: 0; width: 100%; }

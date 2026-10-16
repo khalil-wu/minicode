@@ -1,7 +1,7 @@
 import { GuardianCommandDenial, GuardianReviewGlyph, GuardianToolReviews } from "./GuardianReviewCell";
 import { GuardianManualApproval } from "./GuardianManualApproval";
 import { Check, ChevronRight, Copy } from "../../lib/icons";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { ExecCellState } from "./cellTypes";
 import { StatusIcon } from "../../components/icons";
 import {
@@ -13,7 +13,7 @@ import {
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { toolCleanupNotice } from "../../lib/tool-call-reducer";
-import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { ProcessDetailReadingContext, useTranscriptReadingPreference } from "../transcriptReadingState";
 import { ToolArtifactImage } from "./ActivityCell";
 import { openArtifactPreview } from "../openAttachmentPreview";
 import { commandActionKind, commandActionTarget } from "./activityCellHelpers";
@@ -51,6 +51,7 @@ export function ExecCell({
   const shouldAutoExpand = !cell.collapsed;
   const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`exec:${cell.id}`, shouldAutoExpand);
   const expanded = useTranscriptSearch() || expansionPreference;
+  const protectDetailReading = useContext(ProcessDetailReadingContext);
   const disclosure = useProcessDisclosure(expanded);
   const actionKind = commandActionKind(cell.commandActions);
   const isExploration = actionKind !== "commandExecution";
@@ -119,6 +120,7 @@ export function ExecCell({
           aria-label={t("{action}命令详情：{title} {command}", { action: t(expanded ? "收起" : "展开"), title, command: cell.command })}
           onClick={() => {
             userToggled.current = true;
+            if (!expanded) protectDetailReading?.();
             setExpanded((value) => !value);
           }}
         >

@@ -56,6 +56,7 @@ class RunContext:
     environment_manager: EnvironmentManager | None = None
     environment_manager_lease: EnvironmentManagerLease | None = None
     environment_requests: tuple[TurnEnvironmentRequest, ...] | None = None
+    execution_cwd_uri: str = ""
     inherited_turn_environments: TurnEnvironmentSnapshot | None = None
     selected_capability_roots: tuple[dict[str, Any], ...] = ()
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -87,6 +88,7 @@ class RunContext:
     model_owner_task: asyncio.Task | None = None
     execution_journal: ExecutionJournal | None = None
     mcp_manager: MCPServerManager | None = None
+    mcp_app_runtime: Any | None = None
     mcp_tool_approvals: MCPApprovalStore | None = None
     skill_manager: Any | None = None
     mcp_owner_session_id: str = ""

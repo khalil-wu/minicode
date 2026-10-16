@@ -90,13 +90,14 @@ def _candidate_executables() -> Iterable[Path]:
         yield PROJECT_ROOT / "desktop" / "windows-sandbox-runtime" / "codex.exe"
 
 
-def pty_command(argv: list[str], *, cwd: str | Path | None) -> list[str]:
+def pty_command(argv: list[str], *, cwd: str | Path | None, control_handles: tuple[int, int] | None = None) -> list[str]:
     executable = next((candidate.resolve() for candidate in _candidate_executables() if candidate.is_file()), None)
     if executable is None:
         from backend.sandbox.runner import SandboxUnavailableError
 
         raise SandboxUnavailableError("Windows PTY runtime is unavailable; build the bundled native runtime.")
-    return [str(executable), "--run-as-pty", "--command-cwd", str(Path(cwd or Path.cwd()).resolve()), "--", *argv]
+    control = ["--control-handles", *(str(handle) for handle in control_handles)] if control_handles is not None else []
+    return [str(executable), "--run-as-pty", *control, "--command-cwd", str(Path(cwd or Path.cwd()).resolve()), "--", *argv]
 
 
 def discover_runtime() -> tuple[WindowsNativeRuntime | None, str]:

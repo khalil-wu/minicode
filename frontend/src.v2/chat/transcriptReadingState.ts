@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { createContext, useCallback, useContext, useRef, useState, useSyncExternalStore, type Dispatch, type SetStateAction } from "react";
 import type { VirtualItem } from "@tanstack/react-virtual";
 
 export type TranscriptViewport = {
@@ -10,17 +10,25 @@ export type TranscriptViewport = {
 type ConversationReadingState = {
   viewport?: TranscriptViewport;
   turns: Map<string, Map<string, unknown>>;
+  lastInteractedTurn?: string;
+  detailListeners: Set<() => void>;
 };
 
 // Reading choices belong to the transcript, not to a mounted virtual row.
 // They survive switching and virtualization; deleting the owner releases them.
 const conversationReadingStates = new Map<string, ConversationReadingState>();
 export const TranscriptReadingContext = createContext<Map<string, unknown> | null>(null);
+export const TranscriptConversationReadingContext = createContext<ConversationReadingState | null>(null);
+export const ProcessDetailReadingContext = createContext<(() => void) | null>(null);
+
+export const createConversationReadingState = (): ConversationReadingState => ({
+  turns: new Map(), detailListeners: new Set(),
+});
 
 export function conversationReadingState(conversationId: string): ConversationReadingState {
   let reading = conversationReadingStates.get(conversationId);
   if (!reading) {
-    reading = { turns: new Map() };
+    reading = createConversationReadingState();
     conversationReadingStates.set(conversationId, reading);
   }
   return reading;
@@ -39,6 +47,22 @@ export function turnReadingState(conversationId: string, turnId: string): Map<st
 export const releaseConversationReadingState = (conversationId: string): void => {
   conversationReadingStates.delete(conversationId);
 };
+
+export function useProcessDetailReading(turnId: string) {
+  const reading = useContext(TranscriptConversationReadingContext);
+  const subscribe = useCallback((listener: () => void) => {
+    reading?.detailListeners.add(listener);
+    return () => { reading?.detailListeners.delete(listener); };
+  }, [reading]);
+  const snapshot = useCallback(() => reading?.lastInteractedTurn === turnId, [reading, turnId]);
+  const protectedReading = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const markReading = useCallback(() => {
+    if (!reading) return;
+    reading.lastInteractedTurn = turnId;
+    for (const listener of reading.detailListeners) listener();
+  }, [reading, turnId]);
+  return [protectedReading, markReading] as const;
+}
 
 export function useTranscriptReadingPreference<T>(key: string, initial: T) {
   const preferences = useContext(TranscriptReadingContext);

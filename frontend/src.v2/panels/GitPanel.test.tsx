@@ -186,6 +186,41 @@ describe("GitPanel workspace workflows", () => {
     expect((screen.getByRole("button", { name: "移除隔离工作区" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("activates a remote worktree only from its new conversation and preserves visible and hidden drafts", async () => {
+    const remoteRoot = "file:///executor/project";
+    const remoteLinked = `${remoteRoot}/.minicode/worktrees/owned`;
+    const hiddenRoot = "file:///executor/hidden-project";
+    const draft = (path: string, content: string) => ({ id: path, path, content, original: "saved", loading: false, error: null });
+    useAppStore.setState({ workingDirectory: remoteRoot, conversationId: "remote-old",
+      conversations: [{ id: "remote-old", title: "Old remote task", workspaceRoot: remoteRoot, updatedAt: "2026-10-16T00:00:00Z" }],
+      editorTabs: [draft("old.ts", "visible unsaved")], activeTabPath: "old.ts", activeEditorPath: "old.ts" });
+    useAppStore.getState().setWorkingDirectory(hiddenRoot);
+    useAppStore.setState({ editorTabs: [draft("hidden.ts", "hidden unsaved")], activeTabPath: "hidden.ts", activeEditorPath: "hidden.ts" });
+    useAppStore.getState().setWorkingDirectory(remoteRoot);
+    mocks.worktree.mockResolvedValue({ current_path: remoteRoot, worktrees: [
+      { path: remoteRoot, branch: "main", is_current: true },
+      { path: remoteLinked, branch: "owned", is_current: false, is_isolated: true, can_remove: true },
+    ] });
+    const activation = deferred<{ level: string; data: { conversation_id: string; workspace_root: string } }>();
+    mocks.command.mockReturnValueOnce(activation.promise);
+    render(<GitPanel />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "切换工作区" }))[1]);
+    expect(mocks.command).toHaveBeenCalledWith({ type: "workspace.set", path: remoteLinked, permission_mode: expect.any(String) }, "workspace.set");
+    expect(useAppStore.getState().workingDirectory).toBe(remoteRoot);
+    expect(useAppStore.getState().editorTabs[0].content).toBe("visible unsaved");
+    await act(async () => {
+      useAppStore.setState((state) => ({ conversations: [...state.conversations,
+        { id: "remote-new", title: "New worktree task", workspaceRoot: remoteLinked, updatedAt: "2026-10-16T01:00:00Z" }] }));
+      useAppStore.getState().applyConversationSwitched({ conversationId: "remote-new" });
+      activation.resolve({ level: "success", data: { conversation_id: "remote-new", workspace_root: remoteLinked } });
+    });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "remote-new", workingDirectory: remoteLinked });
+    act(() => useAppStore.getState().applyConversationSwitched({ conversationId: "remote-old" }));
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ path: "old.ts", content: "visible unsaved", original: "saved" });
+    act(() => useAppStore.getState().setWorkingDirectory(hiddenRoot));
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ path: "hidden.ts", content: "hidden unsaved", original: "saved" });
+  });
+
   it("shows a rejected removal without losing the worktree", async () => {
     mocks.remove.mockRejectedValueOnce(new Error("Worktree has local changes"));
     render(<GitPanel />);

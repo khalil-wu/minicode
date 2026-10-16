@@ -29,7 +29,7 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
+export type RightStackTab = "preview" | "browser" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}`;
 export type EffortLevel =
   | "off"
   | "minimal"
@@ -1510,6 +1510,12 @@ export interface ChatSlice {
 }
 
 export type PendingToolCallResume = {
+  mcpApp?: ToolCallRecord["mcpApp"];
+  mcp_app?: ToolCallRecord["mcpApp"];
+  mcpAppResourceUri?: string;
+  mcp_app_resource_uri?: string;
+  mcpAppUi?: ToolCallRecord["mcpAppUi"];
+  mcp_app_ui?: ToolCallRecord["mcpAppUi"];
   id: string;
   name: string;
   args: Record<string, unknown>;

@@ -1,6 +1,6 @@
 import { GuardianReviewGlyph, GuardianToolReviews } from "./GuardianReviewCell";
 import { GuardianPatchCell } from "./GuardianPatchCell";
-import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { memo, useContext, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil } from "lucide-react";
 import { Blocks } from "../../lib/icons";
 import type { ActivityCellState } from "./cellTypes";
@@ -59,7 +59,7 @@ import {
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "../tool-calls/renderers/ToolTextRenderer";
-import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { ProcessDetailReadingContext, useTranscriptReadingPreference } from "../transcriptReadingState";
 import { useProcessDisclosure } from "../../agent-loop/components/useProcessDisclosure";
 import { useI18n } from "../../i18n";
 
@@ -117,6 +117,7 @@ export const ActivityCell = memo(function ActivityCell({
   const shouldAutoExpand = !cell.collapsed;
   const [expansionPreference, setIsExpanded, userToggled] = useTranscriptReadingPreference(`activity:${cell.id}`, shouldAutoExpand);
   const isExpanded = useTranscriptSearch() || expansionPreference;
+  const protectDetailReading = useContext(ProcessDetailReadingContext);
   const disclosure = useProcessDisclosure(isExpanded);
   const previousId = useRef(cell.id);
 
@@ -332,6 +333,8 @@ export const ActivityCell = memo(function ActivityCell({
           onClick={() => {
             if (!canToggle) return;
             userToggled.current = true;
+            if (!isExpanded && hasRecords && (cell.activityKind === "mcpToolCall"
+              || records.some(record => record.activityKind === "mcpToolCall"))) protectDetailReading?.();
             setIsExpanded((value) => !value);
           }}
         >

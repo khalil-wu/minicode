@@ -37,12 +37,35 @@ def remote_mcp_environment_policy(names: tuple[str, ...]) -> dict:
         "exclude": [], "set": {}, "includeOnly": [*core, "SYSTEMROOT", "TEMP", "TMP", *names] if names else []}
 
 
+@dataclass
+class MCPAppEnvironmentLease:
+    runtime: object
+    borrow_released: bool = False
+
+    async def aclose(self) -> None:
+        runtime = self.runtime
+        if runtime is not None:
+            if not self.borrow_released:
+                runtime._app_borrowers -= 1
+                self.borrow_released = True
+            if runtime._app_borrowers == 0 and runtime._app_close_requested:
+                await runtime.aclose()
+            self.runtime = None
+
+
 class MCPEnvironmentRuntime:
     def __init__(self, environment_manager, turn_environments: TurnEnvironmentSnapshot | None, *, local_cwd: str):
         self.environment_manager = environment_manager
         self.snapshot = turn_environments.clone() if turn_environments is not None else None
         self.local_cwd = local_cwd
         self.borrowed = {}
+        self._app_borrowers = 0
+        self._app_close_requested = False
+        self._close_lock = asyncio.Lock()
+
+    def acquire_app_lease(self) -> MCPAppEnvironmentLease:
+        self._app_borrowers += 1
+        return MCPAppEnvironmentLease(self)
 
     def permission_scope(self, environment_id: str):
         if self.snapshot is None:
@@ -137,10 +160,16 @@ class MCPEnvironmentRuntime:
             remote_mcp_environment_policy(remote_names), bearer)
 
     async def aclose(self) -> None:
-        for lease in self.borrowed.values():
-            await lease.aclose()
-        if self.snapshot is not None:
-            await self.snapshot.aclose()
+        self._app_close_requested = True
+        if self._app_borrowers:
+            return
+        async with self._close_lock:
+            for lease in self.borrowed.values():
+                await lease.aclose()
+            self.borrowed.clear()
+            if self.snapshot is not None:
+                await self.snapshot.aclose()
+                self.snapshot = None
 
 
 @dataclass

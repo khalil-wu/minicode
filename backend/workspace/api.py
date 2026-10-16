@@ -266,17 +266,14 @@ def create_workspace_router() -> APIRouter:
     @router.post("/language")
     async def workspace_language_api(
         request: EditorLanguageRequest,
+        http_request: Request,
         workspace_root: str = Query(..., min_length=1),
         window_binding_token: str = Header(default="", alias="x-minicode-window-binding-token"),
         service=Depends(_request_service),
     ) -> dict:
-        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
-            from .editor_language import authenticate_editor_window
-            await authenticate_editor_window(request, binding_token=window_binding_token)
-            raise HTTPException(503, {"code": "editor.executor_language_server_unconfigured",
-                "message": "No target language-server command and executor LSP transport are configured for this environment.",
-                "environment_id": service.scope.environment_id})
-        return await editor_language_request(_local_service(service), request, binding_token=window_binding_token)
+        from .editor_language import editor_language_http_request
+        target = service if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote else _local_service(service)
+        return await editor_language_http_request(http_request, target, request, binding_token=window_binding_token)
 
     @router.post("/language/lifecycle")
     async def workspace_language_lifecycle_api(
@@ -299,18 +296,32 @@ def create_workspace_router() -> APIRouter:
 
     @router.get("/git/delivery")
     async def workspace_git_delivery_status(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_delivery import executor_delivery_status
+            return await executor_delivery_status(service)
         return await git_delivery_status(_local_service(service).workspace_root_path())
 
     @router.get("/environment")
     async def workspace_environment_status(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_environment import executor_environment_status
+            result = await executor_environment_status(service)
+            return {key: value for key, value in result.items() if key != "programs"}
         return environment_setup_status(_local_service(service).workspace_root_path())
 
     @router.post("/environment/setup")
     async def workspace_environment_setup(request: EnvironmentSetupRequest, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_environment import executor_environment_setup
+            return await executor_environment_setup(service, request)
         return environment_setup_response(_local_service(service).workspace_root_path(), request)
 
     @router.post("/git/delivery")
-    async def workspace_git_delivery_action(request: GitDeliveryRequest, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+    async def workspace_git_delivery_action(request: GitDeliveryRequest, http_request: Request, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_delivery import executor_delivery_action
+            from .executor_commands import workbench_http_request
+            return await workbench_http_request(http_request, executor_delivery_action(service, request))
         return await git_delivery_action(_local_service(service).workspace_root_path(), request)
 
     @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
@@ -512,18 +523,27 @@ def create_workspace_router() -> APIRouter:
         service=Depends(_request_service),
     ) -> ProjectImportResponse:
         """Switch the active workspace to an existing git worktree."""
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_worktree import executor_worktree_action
+            return ProjectImportResponse(**(await executor_worktree_action(service, "switch", path=request.path)))
         return ProjectImportResponse(
             **(await switch_workspace_git_worktree_payload(_local_service(service).workspace_root_path(), request.path))
         )
 
     @router.delete("/git/worktree", response_model=WorkspaceGitWorktreeRemoveResponse)
     async def git_worktree_remove_api(
+        http_request: Request,
         path: str = Query(..., min_length=1),
         force: bool = Query(False),
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeRemoveResponse:
         """Remove a MiniCode isolated worktree."""
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_worktree import executor_worktree_action
+            from .executor_commands import workbench_http_request
+            return WorkspaceGitWorktreeRemoveResponse(**(await workbench_http_request(http_request,
+                executor_worktree_action(service, "remove", path=path, force=force))))
         return WorkspaceGitWorktreeRemoveResponse(
             **(await to_thread_cancel_safe(
                 remove_workspace_git_worktree_payload,
@@ -540,7 +560,10 @@ def create_workspace_router() -> APIRouter:
         service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeSnapshotsResponse:
         """List pre-deletion worktree snapshots, newest first."""
-        root = await asyncio.to_thread(_service(workspace_root).workspace_root_path)
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_worktree import executor_worktree_action
+            return WorkspaceGitWorktreeSnapshotsResponse(**(await executor_worktree_action(service, "snapshots", conversation_id=conversation_id)))
+        root = await asyncio.to_thread(_local_service(service).workspace_root_path)
         payload = await asyncio.to_thread(
             workspace_git_worktree_snapshots_payload,
             root,
@@ -551,10 +574,16 @@ def create_workspace_router() -> APIRouter:
     @router.post("/git/worktree/restore", response_model=WorkspaceGitWorktreeRestoreResponse)
     async def git_worktree_restore_api(
         request: WorkspaceGitWorktreeRestoreRequest,
+        http_request: Request,
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> WorkspaceGitWorktreeRestoreResponse:
         """Restore a worktree snapshot to a detached worktree."""
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            from .executor_worktree import executor_worktree_action
+            from .executor_commands import workbench_http_request
+            return WorkspaceGitWorktreeRestoreResponse(**(await workbench_http_request(http_request,
+                executor_worktree_action(service, "restore", snapshot_id=request.snapshot_id, dest=request.dest))))
         return WorkspaceGitWorktreeRestoreResponse(
             **(await to_thread_cancel_safe(
                 restore_workspace_git_worktree_snapshot_payload,

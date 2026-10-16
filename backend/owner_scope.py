@@ -24,6 +24,11 @@ def canonical_workspace_root(value: str | Path | None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    if text.startswith("file:"):
+        from backend.workspace.executor_paths import ExecutorPath
+
+        path = ExecutorPath.parse(text)
+        return path.uri.lower() if path.convention == "windows" else path.uri
     try:
         resolved = str(Path(text).resolve(strict=False))
     except OSError:

@@ -163,7 +163,8 @@ class ExecutorWorkspaceService:
 
     async def write_bytes(self, value: str | ExecutorPath, contents: bytes) -> None:
         path = self.resolve(value) if isinstance(value, str) else value
-        await self.filesystem.create_directory(path.parent.uri, sandbox=self.sandbox, recursive=True)
+        if await self.metadata(path.parent) is None:
+            await self.filesystem.create_directory(path.parent.uri, sandbox=self.sandbox, recursive=True)
         await self.filesystem.write_file(path.uri, contents, sandbox=self.sandbox)
 
     async def remove(self, value: str | ExecutorPath) -> None:

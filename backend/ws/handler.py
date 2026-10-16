@@ -589,6 +589,8 @@ class WebSocketSession(
             active = None
             self.active_conversation_id = None
         workspace_root = self.session_lifecycle.current_workspace_root() if active is not None else None
+        if active is not None and active.execution_cwd.startswith("file:"):
+            workspace_root = active.execution_cwd
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
             worktree_path=getattr(active, "worktree_path", "") if active is not None else "",

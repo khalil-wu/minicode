@@ -28,6 +28,9 @@
     "@iconify/react": "^6.0.2",
     "@iconify/types": "^2.0.0",
     "@lobehub/icons-static-svg": "^1.94.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
     "@monaco-editor/react": "^4.7.0",
     "@noble/hashes": "^2.2.0",
     "@tanstack/react-virtual": "3.13.12",
@@ -50,6 +53,7 @@
     "remark-math": "^6.0.0",
     "string-argv": "^0.3.2",
     "strip-ansi": "^7.2.0",
+    "zod": "4.2.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

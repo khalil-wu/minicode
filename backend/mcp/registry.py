@@ -9,6 +9,7 @@ agent can call them like built-in tools. Tool names follow:
 from __future__ import annotations
 
 import base64
+import asyncio
 import copy
 import hashlib
 import logging
@@ -162,6 +163,9 @@ class MCPToolProxy(BaseTool):
         # Map MCP annotations/_meta to local capability hints (Phase 3.2).
         ann = getattr(tool_def, "annotations", {}) or {}
         meta = getattr(tool_def, "meta", {}) or {}
+        from backend.mcp.app_ui import registered_app_declaration
+
+        self.app_declaration = registered_app_declaration(meta)
         self._destructive_hint = ann.get("destructiveHint")
         self._open_world_hint = ann.get("openWorldHint")
         self._read_only_hint = ann.get("readOnlyHint")
@@ -440,6 +444,10 @@ class MCPToolProxy(BaseTool):
                 "Check .mcp.json or restart the server."
             )
 
+        app_runtime = (context.run_context.mcp_app_runtime if context is not None and context.run_context is not None else None)
+        app_source = (app_runtime.retain_source(self, client)
+            if self.app_declaration is not None and self._manager is not None and app_runtime is not None else None)
+
         try:
             request_owner = None
             if context is not None:
@@ -493,10 +501,19 @@ class MCPToolProxy(BaseTool):
                 args,
                 request_owner=request_owner,
             )
+        except asyncio.CancelledError:
+            if app_source is not None:
+                await app_source.aclose()
+            raise
         except Exception as exc:
+            if app_source is not None:
+                await app_source.aclose()
             return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
 
         wall_time = time.monotonic() - call_started
+        if result.is_error and app_source is not None:
+            await app_source.aclose()
+            app_source = None
         images: list[dict[str, str]] = []
         audios: list[dict[str, str]] = []
         resource_artifacts: list[dict[str, Any]] = []
@@ -552,6 +569,9 @@ class MCPToolProxy(BaseTool):
         plain_log = mcp_log_output(public_result)
         typed_content = f"Wall time: {wall_time:.4f} seconds\nOutput:" + ("\n" + plain_log if plain_log else "")
         first_artifact = resource_artifacts[0] if resource_artifacts else None
+        app_receipt = None
+        if app_source is not None:
+            app_receipt = app_runtime.capture(self, app_source, args, result, context, request_owner)
 
         # Raw CallToolResult is retained for Code Mode. ContextBuilder admits
         # a separate model body with the issuing Source truncation policy.
@@ -576,6 +596,7 @@ class MCPToolProxy(BaseTool):
                 "mcp_output_token_limit": self._output_token_limit,
                 "mcp_wall_time_seconds": wall_time,
                 "mcp_resource_artifacts": resource_artifacts,
+                "mcp_app_receipt": app_receipt,
             },
         )
 

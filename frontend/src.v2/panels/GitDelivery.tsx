@@ -1,8 +1,8 @@
 import { useI18n } from "../i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, Upload } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
-import { appendWorkspaceOwner } from "../protocol/workspace-owner";
+import { appendWorkspaceOwner, workspaceFileOwner, workspaceRequestOwner, type WorkspaceRequestOwner } from "../protocol/workspace-owner";
 import { showConfirm } from "../overlays/DialogService";
 import { useAppStore } from "../stores";
 import { openExternal } from "../desktop/runtime";
@@ -11,12 +11,18 @@ import { safeJsonParse } from "../lib/safe-parse";
 import { SelectMenu } from "../components/SelectMenu";
 import { openSettings } from "../lib/settings-navigation";
 
-interface DeliveryStatus {
+interface DeliveryStatus extends Partial<WorkspaceRequestOwner> {
+  registration_id?: string;
   is_git_repo: boolean; branch: string; repo_root: string; remotes: string[]; upstream: string;
   commits: Array<{ hash: string; subject: string }>; detached: boolean; error?: string;
-  github?: { eligible: boolean; host: string; available: boolean; authenticated: boolean | null; message: string };
+  github?: { eligible: boolean; host: string; available: boolean; authenticated: boolean | null; message: string; remote?: boolean };
 }
-export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey = 0, active = true }: { workspaceRoot: string; stagedCount: number; onChanged: () => void; refreshKey?: number; active?: boolean }) {
+type GitDeliveryProps = { workspaceRoot: string; stagedCount: number; onChanged: () => void; refreshKey?: number; active?: boolean };
+type LoadedDelivery = { value: DeliveryStatus; owner: WorkspaceRequestOwner | undefined; conversationId: string | null; root: string };
+export function GitDelivery(props: GitDeliveryProps) {
+  return <GitDeliveryPanel key={props.workspaceRoot} {...props} />;
+}
+function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 0, active = true }: GitDeliveryProps) {
   const { t: tr } = useI18n();
   const [draft] = useState(() => safeJsonParse<Record<string, string>>(readLS("minicode.git.draft:" + workspaceRoot) ?? "{}", {}));
   const [status, setStatus] = useState<DeliveryStatus | null>(null);
@@ -33,45 +39,70 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
   const [url, setUrl] = useState("");
   const [revision, setRevision] = useState(0);
   const [statusLoading, setStatusLoading] = useState(true);
-  const endpoint = new URL("/api/workspace/git/delivery", apiBase());
-  endpoint.searchParams.set("workspace_root", workspaceRoot);
-  appendWorkspaceOwner(endpoint);
+  const conversationId = useAppStore((state) => state.conversationId);
+  const loaded = useRef<LoadedDelivery | null>(null);
+  const operation = useRef<AbortController | null>(null);
+  const owns = (snapshot: LoadedDelivery) => Boolean(loaded.current
+    && loaded.current.value.registration_id === snapshot.value.registration_id
+    && loaded.current.value.environment_id === snapshot.value.environment_id
+    && useAppStore.getState().conversationId === snapshot.conversationId
+    && useAppStore.getState().workingDirectory === snapshot.root);
+  const endpoint = (owner?: WorkspaceRequestOwner) => {
+    const url = new URL("/api/workspace/git/delivery", apiBase());
+    url.searchParams.set("workspace_root", workspaceRoot); appendWorkspaceOwner(url, owner); return url;
+  };
+  useEffect(() => {
+    loaded.current = null; operation.current?.abort();
+    setStatus(null); setBusy(""); setError(""); setFeedback(""); setUrl("");
+    return () => operation.current?.abort();
+  }, [workspaceRoot, conversationId]);
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
     setStatusLoading(true);
-    void fetchWithTimeout(endpoint, { signal: controller.signal, headers: authHeaders() }).then(async (response) => {
+    const owner = workspaceRequestOwner();
+    void fetchWithTimeout(endpoint(owner), { signal: controller.signal, headers: authHeaders() }).then(async (response) => {
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
       return response.json() as Promise<DeliveryStatus>;
-    }).then((next) => { if (!controller.signal.aborted) { setStatus(next); setRemote((value) => next.remotes?.includes(value) ? value : next.remotes?.[0] ?? ""); } })
+    }).then((next) => { if (!controller.signal.aborted && useAppStore.getState().conversationId === conversationId && useAppStore.getState().workingDirectory === workspaceRoot) {
+      loaded.current = { value: next, owner, conversationId, root: workspaceRoot };
+      setStatus(next); setRemote((value) => next.remotes?.includes(value) ? value : next.remotes?.[0] ?? "");
+    } })
       .catch((reason) => { if (!controller.signal.aborted) { setStatus(null); setError(String(reason)); } })
       .finally(() => { if (!controller.signal.aborted) setStatusLoading(false); });
     return () => controller.abort();
-  }, [workspaceRoot, revision, refreshKey, active]);
+  }, [workspaceRoot, conversationId, revision, refreshKey, active]);
   const run = async (action: string) => {
-    const branchAtClick = status?.branch ?? "";
+    const snapshot = loaded.current;
+    if (!snapshot) return;
+    const branchAtClick = snapshot.value.branch ?? "";
     if (action === "push" || action === "draft_pr") {
       const confirmed = await showConfirm({ title: action === "push" ? tr("推送当前分支") : tr("创建草稿 PR"),
         message: action === "push" ? tr("将 {branch} 推送到 {remote}。", { branch: branchAtClick, remote }) : tr("从 {branch} 向 {base} 创建草稿 PR：{title}", { branch: branchAtClick, base, title: "\n" + title }),
         confirmLabel: action === "push" ? tr("推送") : tr("创建草稿 PR") });
-      if (!confirmed || useAppStore.getState().workingDirectory !== workspaceRoot) return;
+      if (!confirmed || !owns(snapshot)) return;
     }
+    if (!owns(snapshot)) return;
+    const controller = operation.current = new AbortController();
     setBusy(action); setError(""); setFeedback("");
     try {
-      const response = await fetchWithTimeout(endpoint, { method: "POST", headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ action, message, remote, branch, title, base, body, expected_branch: branchAtClick }) }, { timeoutMs: 130000 });
+      const owner = snapshot.value.registration_id ? workspaceFileOwner(snapshot.value) : snapshot.owner;
+      const response = await fetchWithTimeout(endpoint(owner), { method: "POST", headers: authHeaders({ "content-type": "application/json" }), signal: controller.signal,
+        body: JSON.stringify({ action, message, remote, branch, title, base, body, expected_branch: branchAtClick,
+          expected_registration_id: snapshot.value.registration_id ?? "" }) }, { timeoutMs: 130000 });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
       const result = await response.json() as { message: string; url?: string };
-      if (useAppStore.getState().workingDirectory !== workspaceRoot) return;
+      if (!owns(snapshot) || controller.signal.aborted) return;
       setFeedback(result.message || tr("操作完成")); setUrl(result.url ?? "");
       if (action === "commit") setMessage("");
       setRevision((value) => value + 1); onChanged();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(""); }
+    } catch (reason) { if (owns(snapshot) && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (owns(snapshot) && operation.current === controller) setBusy(""); }
   };
   const github = status?.github;
   const githubReady = !statusLoading && Boolean(github?.eligible && github.available && github.authenticated === true);
   const githubReason = statusLoading ? tr("正在读取 GitHub 连接状态…") : !github ? tr("GitHub 连接状态待确认。")
+    : github.remote && github.message ? github.message
     : !github.eligible ? github.message || tr("当前仓库未关联 GitHub 远端。")
     : !github.available ? tr("GitHub 连接组件未就绪。")
     : github.authenticated === null ? github.message || tr("GitHub 连接状态待确认。")
@@ -85,7 +116,7 @@ export function GitDelivery({ workspaceRoot, stagedCount, onChanged, refreshKey 
         <div className="mc-git-delivery-row"><SelectMenu ariaLabel={tr("推送远端")} value={remote} onValueChange={setRemote} disabled={Boolean(busy) || !status?.remotes?.length} style={{ flex: 1, minWidth: 0 }}>{!status?.remotes?.length && <option value="">{tr("没有远端")}</option>}{status?.remotes?.map((item) => <option key={item} value={item}>{item}</option>)}</SelectMenu>
           <button type="button" disabled={!remote || Boolean(busy) || status?.detached} onClick={() => void run("push")}><Upload size={13} />{tr("推送")}</button></div>
       </details>
-      {!githubReady && <div className="mc-git-pr-connection"><p role="status">{githubReason}</p><button type="button" onClick={() => openSettings("workspaceGit")}>{tr("查看 GitHub 连接设置")}</button></div>}
+      {!githubReady && <div className="mc-git-pr-connection"><p role="status">{githubReason}</p>{!github?.remote && <button type="button" onClick={() => openSettings("workspaceGit")}>{tr("查看 GitHub 连接设置")}</button>}</div>}
       <details><summary>{tr("创建草稿 PR")}</summary><input aria-label={tr("PR 标题")} placeholder={tr("标题")} value={title} disabled={!githubReady || Boolean(busy)} onChange={(event) => setTitle(event.target.value)} /><input aria-label={tr("PR 目标分支")} placeholder={tr("目标分支")} value={base} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBase(event.target.value)} />
         <textarea aria-label={tr("PR 说明")} placeholder={tr("说明与验证结果")} rows={4} value={body} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBody(event.target.value)} /><button type="button" disabled={!githubReady || !title.trim() || !base.trim() || Boolean(busy) || status?.detached} onClick={() => void run("draft_pr")}><GitPullRequest size={14} />{tr("创建草稿 PR")}</button>
       </details>

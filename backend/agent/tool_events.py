@@ -70,6 +70,7 @@ def tool_call_pending_event(
         phase="tool",
     )
     event.data["streaming_announcement"] = True
+    _append_registered_app_metadata(event, start.name, tool_registry)
     return event
 
 
@@ -240,6 +241,7 @@ def tool_call_start_event(
         command_actions=command_actions_for_tool(tc.name, tc.arguments, workspace_root),
     )
     event.data["streaming_announcement"] = False
+    _append_registered_app_metadata(event, tc.name, tool_registry)
     request = getattr(tc, "_final_tool_request", None)
     if request is not None and request.exec_policy is not None:
         presentation = getattr(tc, "_command_presentation", None)
@@ -261,3 +263,11 @@ def tool_call_start_event(
     if projection.private_model_only:
         event.data["private_model_only"] = True
     return event
+
+
+def _append_registered_app_metadata(event: AgentEvent, tool_name: str, registry: ToolRegistry | None) -> None:
+    from backend.mcp.registry import MCPToolProxy
+
+    tool = registry.get_tool(tool_name) if registry is not None else None
+    if isinstance(tool, MCPToolProxy) and tool.app_declaration is not None:
+        event.data.update(tool.app_declaration.public_fields())

@@ -98,6 +98,13 @@ class EditorLanguageServers:
             return True
         return bound[0] == owner_id and hmac.compare_digest(bound[1], binding_token)
 
+    @staticmethod
+    def _path_key(path):
+        if path.startswith("file:"):
+            from backend.workspace.executor_paths import ExecutorPath
+            return ExecutorPath.parse(path)._identity()
+        return os.path.normcase(path)
+
     def _check_snapshot(self, key, documents, snapshot_revision):
         if key[0] in self.closed_windows:
             raise EditorLanguageStateError("The editor window was closed.")
@@ -107,8 +114,9 @@ class EditorLanguageServers:
         for document in documents:
             if (*key[:2], document["document_id"]) in self.closed_documents:
                 raise EditorLanguageStateError("The editor document was closed.")
-            previous = owned.get(os.path.normcase(document["path"]))
-            if previous is not None and snapshot_revision < previous.snapshot_revision:
+            previous = owned.get(self._path_key(document["path"]))
+            if previous is not None and (snapshot_revision < previous.snapshot_revision
+                    or previous.document_id == document["document_id"] and document["model_version"] < previous.model_version):
                 raise EditorLanguageStateError("The editor document snapshot was superseded.")
 
     async def _await_document_operation(self, key, documents, snapshot_revision, operation: Callable[[], Coroutine[Any, Any, Any]]):
@@ -141,93 +149,111 @@ class EditorLanguageServers:
         window_instance_id: str,
         client_id: str,
         snapshot_revision: int,
+        executor=None,
+        server_spec=None,
     ) -> dict:
-        key = (window_instance_id, client_id, str(root), language)
+        root_key = str(root)
+        if executor is not None:
+            from backend.workspace.executor_service import executor_registration_id
+            root_key = f"executor:{executor_registration_id(executor.context)}:{executor.context.conversation_id}:{root}"
+        key = (window_instance_id, client_id, root_key, language)
         self._check_snapshot(key, documents, snapshot_revision)
         async with self.locks.setdefault(key, asyncio.Lock()):
             self._check_snapshot(key, documents, snapshot_revision)
             client = self.clients.get(key)
-            if client is None or not client.is_running():
+            changed_launch = (executor is not None and client is not None
+                and (client.server_spec != server_spec or client.execution_sandbox != executor.scope.process_sandbox_context()))
+            if client is None or not client.is_running() or changed_launch:
                 if client is not None:
                     await client.stop()
                 self._check_snapshot(key, documents, snapshot_revision)
-                resources = os.environ.get("MINICODE_APP_RESOURCES_DIR")
-                editor_resources = os.environ.get("MINICODE_EDITOR_LANGUAGE_SERVICES_DIR")
-                directory = (
-                    Path(editor_resources)
-                    if editor_resources else Path(resources) / "language-services"
-                    if resources
-                    else PROJECT_ROOT / "desktop/language-services"
-                )
-                if language in {"c", "cpp"}:
-                    entry = directory / "clangd/clangd_23.1.0/bin/clangd.exe"
-                    command = str(entry) if entry.is_file() else shutil.which("clangd")
-                    if not command:
-                        raise RuntimeError("C/C++ 语言服务尚未准备，请运行 desktop 的 npm run clangd:prepare。")
-                    flags, driver_args = await self._await_document_operation(key, documents, snapshot_revision, lambda: cpp_compiler_configuration(language))
-                    # Requests are serialized by this client. Let clangd finish
-                    # its current document parse before handling completion;
-                    # otherwise a new include can return an empty symbol list.
-                    args = ["--sync", "--background-index", "--clang-tidy", "--completion-parse=always", "--completion-style=detailed", "--header-insertion=never", *driver_args]
-                    initialization_options = {"fallbackFlags": flags}
-                else:
-                    command = os.environ.get("MINICODE_EDITOR_NODE") or shutil.which("node")
-                    entry = (
-                        directory
-                        / "node_modules"
-                        / (
-                            "pyright/langserver.index.js"
-                            if language == "python"
-                            else "yaml-language-server/bin/yaml-language-server"
-                        )
+                if executor is None:
+                    resources = os.environ.get("MINICODE_APP_RESOURCES_DIR")
+                    editor_resources = os.environ.get("MINICODE_EDITOR_LANGUAGE_SERVICES_DIR")
+                    directory = (
+                        Path(editor_resources)
+                        if editor_resources else Path(resources) / "language-services"
+                        if resources
+                        else PROJECT_ROOT / "desktop/language-services"
                     )
-                    if not command or not entry.is_file():
-                        raise RuntimeError(
-                            "内置语言服务尚未安装，请在 desktop/language-services 运行 npm ci 后重启。"
+                    if language in {"c", "cpp"}:
+                        entry = directory / "clangd/clangd_23.1.0/bin/clangd.exe"
+                        command = str(entry) if entry.is_file() else shutil.which("clangd")
+                        if not command:
+                            raise RuntimeError("C/C++ 语言服务尚未准备，请运行 desktop 的 npm run clangd:prepare。")
+                        flags, driver_args = await self._await_document_operation(key, documents, snapshot_revision, lambda: cpp_compiler_configuration(language))
+                        # Requests are serialized by this client. Let clangd finish
+                        # its current document parse before handling completion;
+                        # otherwise a new include can return an empty symbol list.
+                        args = ["--sync", "--use-dirty-headers", "--background-index", "--clang-tidy", "--completion-parse=always", "--completion-style=detailed", "--header-insertion=never", *driver_args]
+                        initialization_options = {"fallbackFlags": flags}
+                    else:
+                        command = os.environ.get("MINICODE_EDITOR_NODE") or shutil.which("node")
+                        entry = (
+                            directory
+                            / "node_modules"
+                            / (
+                                "pyright/langserver.index.js"
+                                if language == "python"
+                                else "yaml-language-server/bin/yaml-language-server"
+                            )
                         )
-                    args = [str(entry), "--stdio"]
-                    initialization_options = None
-                self._check_snapshot(key, documents, snapshot_revision)
-                client = LSPClient(
-                    command,
-                    args,
-                    str(root),
-                    sandbox_runner=EditorLanguageProcess(),
-                    initialization_options=initialization_options,
-                )
-                self.clients[key] = client
-                await self._await_document_operation(key, documents, snapshot_revision, client.start)
-                settings = (
-                    {
-                        "python": {
-                            "analysis": {
-                                "diagnosticMode": "openFilesOnly",
-                                "typeCheckingMode": "basic",
+                        if not command or not entry.is_file():
+                            raise RuntimeError(
+                                "内置语言服务尚未安装，请在 desktop/language-services 运行 npm ci 后重启。"
+                            )
+                        args = [str(entry), "--stdio"]
+                        initialization_options = None
+                    self._check_snapshot(key, documents, snapshot_revision)
+                    client = LSPClient(
+                        command,
+                        args,
+                        str(root),
+                        sandbox_runner=EditorLanguageProcess(),
+                        initialization_options=initialization_options,
+                    )
+                    settings = (
+                        {
+                            "python": {
+                                "analysis": {
+                                    "diagnosticMode": "openFilesOnly",
+                                    "typeCheckingMode": "basic",
+                                }
                             }
                         }
-                    }
-                    if language == "python"
-                    else {
-                        "yaml": {
-                            "validate": True,
-                            "hover": True,
-                            "completion": True,
-                            "format": {"enable": True},
-                            "schemaStore": {"enable": False},
+                        if language == "python"
+                        else {
+                            "yaml": {
+                                "validate": True,
+                                "hover": True,
+                                "completion": True,
+                                "format": {"enable": True},
+                                "schemaStore": {"enable": False},
+                            }
                         }
-                    }
-                    if language == "yaml" else {}
-                )
-                await client._send_notification(
-                    "workspace/didChangeConfiguration", {"settings": settings}
-                )
+                        if language == "yaml" else {}
+                    )
+                else:
+                    from backend.lsp.executor_editor import ExecutorEditorLSPClient
+                    client = ExecutorEditorLSPClient(executor, server_spec)
+                    settings = server_spec.settings if server_spec.settings is not None else (
+                        {"python": {"analysis": {"diagnosticMode": "openFilesOnly", "typeCheckingMode": "basic"}}}
+                        if language == "python" else
+                        {"yaml": {"validate": True, "hover": True, "completion": True, "format": {"enable": True}, "schemaStore": {"enable": False}}}
+                        if language == "yaml" else {})
+                self.clients[key] = client
+                client.settings = settings
+                await self._await_document_operation(key, documents, snapshot_revision, client.start)
+                await client._send_notification("workspace/didChangeConfiguration", {"settings": settings})
             # A close can arrive while startup is awaiting the server. Retire
             # that snapshot before publishing any didOpen/didChange message.
             self._check_snapshot(key, documents, snapshot_revision)
             owned = self.documents.setdefault(key, {})
-            for document in documents:
+            # The requested document is first. Publish its dirty dependencies
+            # before asking a synchronous server to parse that document.
+            for document in [*documents[1:], documents[0]]:
                 self._check_snapshot(key, documents, snapshot_revision)
-                path_key = os.path.normcase(document["path"])
+                path_key = self._path_key(document["path"])
                 previous = owned.get(path_key)
                 if previous is not None and previous.document_id != document["document_id"]:
                     self.closed_documents.add((*key[:2], previous.document_id))
@@ -236,7 +262,8 @@ class EditorLanguageServers:
                     document["document_id"], snapshot_revision, document["model_version"], document["path"],
                 )
                 await self._await_document_operation(key, documents, snapshot_revision,
-                    lambda: client._sync_file(document["path"], document["content"], document.get("language")))
+                    lambda: client._sync_file(document["path"], document["content"], document.get("language"),
+                        **({"model_version": document["model_version"]} if executor is not None else {})))
             self._check_snapshot(key, documents, snapshot_revision)
             if method == "diagnostics":
                 path = documents[0]["path"]
@@ -245,7 +272,7 @@ class EditorLanguageServers:
                 async def current_diagnostics():
                     while True:
                         client.diagnostics_changed.clear()
-                        snapshot = client.diagnostics.get(os.path.normcase(path))
+                        snapshot = client.diagnostics.get(self._path_key(path))
                         # LSP versions are optional; YAML publishes unversioned
                         # results. didChange clears its previous document result.
                         if snapshot and snapshot.get("version", expected) == expected:
@@ -253,7 +280,7 @@ class EditorLanguageServers:
                         await client.diagnostics_changed.wait()
 
                 result = await self._await_document_operation(key, documents, snapshot_revision, lambda: asyncio.wait_for(current_diagnostics(), 15))
-            elif method == "formatting" and language == "python":
+            elif method == "formatting" and language == "python" and executor is None:
                 async def format_python():
                     process = await spawn_exec(
                         sys.executable, "-m", "ruff", "format", "--stdin-filename", documents[0]["path"], "-",

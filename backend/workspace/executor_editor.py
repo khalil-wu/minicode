@@ -59,7 +59,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             raise HTTPException(400, "Path is outside workspace root.")
         launch = self.cwd.joinpath(".minicode/launch.json")
         if not inventory and (lexical != launch or canonical != launch):
-            if _is_dangerous_path(lexical.pure) or _is_dangerous_path(canonical.pure):
+            if _is_dangerous_path(lexical.relative_to(self.cwd)) or _is_dangerous_path(canonical.relative_to(self.cwd)):
                 raise HTTPException(403, "Refusing to access protected path.")
         return lexical
 
@@ -327,8 +327,11 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             entries = [{"path": display(self.resolve(item["worktree"])), "branch": item.get("branch", "").removeprefix("refs/heads/"),
                 "commit": item.get("HEAD", "")[:8], "is_main": index == 0, "is_current": self.resolve(item["worktree"]) == root,
                 "is_detached": "detached" in item, "is_isolated": self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees")),
-                "can_remove": not self.context.turn_environment.is_remote and self.resolve(item["worktree"]) != root
-                    and self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees")),
+                "can_remove": self.resolve(item["worktree"]) != root
+                    and self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees"))
+                    and (not self.context.turn_environment.is_remote
+                        or self.scope.resolve_access(self.cwd.uri).can_write
+                        and self.scope.resolve_access(self.resolve(item["worktree"]).uri).can_read),
                 **self.identity(self.resolve(item["worktree"]))} for index, item in enumerate(records)]
             return {"is_git_repo": True, "is_worktree": root != main, "current_path": display(root), "main_repo_path": display(main),
                 "current_branch": current.get("branch", "").removeprefix("refs/heads/"), "common_git_dir": display(common),

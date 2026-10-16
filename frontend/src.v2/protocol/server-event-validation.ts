@@ -8,6 +8,7 @@ import {
 } from "./streaming-types";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { isToolDelegations } from "../lib/tool-call-reducer";
+import { isMcpAppReceipt } from "./mcp-app-types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1419,6 +1420,13 @@ const hasValidSemanticPayload = (
     valid = valid
       && hasCommandActionPayload(value)
       && (!("visibility" in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)));
+  }
+  if (type === "tool_call" || type === "tool_result") {
+    valid = valid && (!("mcp_app_resource_uri" in value) || typeof value.mcp_app_resource_uri === "string")
+      && (!("mcp_app_ui" in value) || isRecord(value.mcp_app_ui)
+        && typeof value.mcp_app_ui.resourceUri === "string"
+        && ["inline", "fullscreen"].includes(String(value.mcp_app_ui.preferredModelDisplayMode)))
+      && (!("mcp_app" in value) || isMcpAppReceipt(value.mcp_app));
   }
   if (type === "tool_result") {
     const retryableArtifactFields = [

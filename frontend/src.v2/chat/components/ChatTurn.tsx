@@ -2,6 +2,7 @@ import { memo, useCallback, useMemo, useRef } from "react";
 import { loadEarlierToolItems } from "../historyPagination";
 import type {
   ChatTurnState,
+  ActivityCellState,
   HistoryCellState,
   UserMessageCellState,
 } from "../cells/cellTypes";
@@ -24,7 +25,9 @@ import {
 } from "../cells";
 import { useAppStore } from "../../stores";
 import { knownFilePathsForCell } from "../cells/activityCellHelpers";
-import { TranscriptReadingContext, turnReadingState } from "../transcriptReadingState";
+import { conversationReadingState, createConversationReadingState, TranscriptConversationReadingContext, TranscriptReadingContext, turnReadingState } from "../transcriptReadingState";
+import { McpAppInlineSlot } from "../mcp-apps/app-surfaces";
+import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 
 // ── ChatTurn ────────────────────────────────────────────────────────
 
@@ -50,6 +53,7 @@ export const ChatTurn = memo(function ChatTurn({
   workspaceRoot?: string;
 }) {
   const committedCells = turn.committedCells;
+  const conversationReading = useMemo(() => conversationId ? conversationReadingState(conversationId) : createConversationReadingState(), [conversationId]);
   const readingState = useMemo(() => conversationId ? turnReadingState(conversationId, turn.id) : new Map<string, unknown>(), [conversationId, turn.id]);
   const loadingTools = useRef(false);
   const hasMoreHistory = Boolean(turn.toolPage?.remaining && conversationId);
@@ -68,6 +72,9 @@ export const ChatTurn = memo(function ChatTurn({
     } : projected;
   }, [turn, committedCells, processDetailMode, isTranscriptMode]);
   const resourceKey = turn.resourceKey ?? agentTurn.processCells;
+  const mcpApps = useMemo(() => [...new Map(agentTurn.processCells.flatMap(cell => cell.kind === "activity"
+    ? (cell.toolCallRecords ?? []).flatMap(record => record.mcpApp ? [[record.mcpApp.id, { cell, record }] as const] : [])
+    : [])).values()], [agentTurn.processCells]);
   const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap(knownFilePathsForCell))], [resourceKey]);
   const renderCell = useCallback(
     ({ key, cell, isActive = false, className, afterContent }: RenderAgentCellArgs) => (
@@ -88,6 +95,7 @@ export const ChatTurn = memo(function ChatTurn({
   );
 
   return (
+    <TranscriptConversationReadingContext.Provider value={conversationReading}>
     <TranscriptReadingContext.Provider key={`${conversationId ?? ""}:${turn.id}`} value={readingState}>
     <AgentTurn
       turn={agentTurn}
@@ -96,8 +104,13 @@ export const ChatTurn = memo(function ChatTurn({
       defaultProcessExpanded={defaultProcessExpanded}
       hasMoreHistory={hasMoreHistory}
       onLoadHistory={hasMoreHistory ? loadHistory : undefined}
+      persistentContent={conversationId && mcpApps.length > 0 ? <div className="agent-loop-persistent-apps">
+        {mcpApps.map(({ cell, record }) => <McpAppActivity key={record.mcpApp!.id} cell={cell} record={record}
+          conversationId={conversationId} workspaceRoot={workspaceRoot} readOnly={isTranscriptMode} />)}
+      </div> : undefined}
     />
     </TranscriptReadingContext.Provider>
+    </TranscriptConversationReadingContext.Provider>
   );
 });
 
@@ -142,6 +155,13 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <CollaborationCell cell={cell} conversationId={conversationId} isTranscriptMode={isTranscriptMode} />;
 
     case "activity":
+      if (conversationId && cell.toolCallRecords?.some(record => record.mcpApp)) return <>
+        {cell.toolCallRecords.map(record => record.mcpApp
+          ? <McpAppActivity key={record.id} cell={cell} record={record} conversationId={conversationId}
+              workspaceRoot={workspaceRoot} readOnly={isTranscriptMode} />
+          : <ActivityCell key={record.id} cell={{ ...cell, id: record.id, toolCallRecords: [record], outputText: undefined }}
+              conversationId={conversationId} workspaceRoot={workspaceRoot} />)}
+      </>;
       return <ActivityCell cell={cell} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "exec":
@@ -170,3 +190,11 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return null;
   }
 });
+
+function McpAppActivity({ cell, record, conversationId, workspaceRoot, readOnly }: {
+  cell: ActivityCellState; record: ToolCallRecord; conversationId: string; workspaceRoot?: string; readOnly: boolean;
+}) {
+  return <McpAppInlineSlot app={record.mcpApp!} conversationId={conversationId} readOnly={readOnly}
+    fallback={<ActivityCell cell={{ ...cell, id: record.id, toolCallRecords: [record], outputText: undefined }}
+      conversationId={conversationId} workspaceRoot={workspaceRoot} />} />;
+}

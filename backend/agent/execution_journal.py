@@ -105,6 +105,9 @@ _TOOL_USE_OPTIONAL_FIELDS = (
 )
 
 _TOOL_RESULT_OPTIONAL_FIELDS = (
+    "mcp_app",
+    "mcp_app_resource_uri",
+    "mcp_app_ui",
     "private_model_only",
     "streaming_announcement",
     "command_presentation",

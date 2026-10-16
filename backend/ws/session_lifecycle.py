@@ -618,6 +618,14 @@ class SessionLifecycle:
         if not workspace_path:
             self.clear_workspace_runtime()
             return True
+        if workspace_path.startswith("file:"):
+            from backend.workspace.executor_activation import validate_executor_workspace
+
+            await validate_executor_workspace(self._session, conversation)
+            if not self.foreground_navigation_is_current():
+                return False
+            self.clear_workspace_runtime()
+            return True
 
         project_root = str(conversation.workspace_root or conversation.worktree_path or "").strip()
         if workspace_matches_context(workspace_path, self._workspace_context):
@@ -1198,6 +1206,8 @@ class SessionLifecycle:
             target = self._session.conversation_repo.get_conversation_summary(owner)
             if target is not None:
                 directory = self.workspace_path_for_conversation(target)
+                if directory.startswith("file:"):
+                    return None
                 mounted = self._workspace_context.root_path if self._workspace_context is not None else self._workspace_root
                 if not directory or mounted is None or Path(directory).expanduser().resolve() != mounted.resolve():
                     return None
@@ -1242,6 +1252,8 @@ class SessionLifecycle:
     def workspace_root_for_conversation(self, conversation: Any | None = None) -> Path | None:
         workspace_path = self.workspace_path_for_conversation(conversation)
         if not workspace_path:
+            return None
+        if workspace_path.startswith("file:"):
             return None
         return Path(workspace_path).expanduser().resolve()
 

@@ -34,6 +34,7 @@ import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
+import { closeMcpAppPanel, McpAppPanelSlot, mcpAppTabId, useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
 import {
   selectActiveConversationPreview,
   selectPreviewSurface,
@@ -82,6 +83,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const { t: tr } = useI18n();
   const mainConversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title || tr("主聊天"));
   const rightStackTab = useAppStore((s) => s.rightStackTab);
+  const conversationId = useAppStore((s) => s.conversationId);
+  const mcpAppEntries = useMcpAppSurfaces(s => s.entries);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
   const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
@@ -128,7 +131,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const normalizedRequestedTab = requestedActiveTab === "plan" || requestedActiveTab === "terminal" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
   const expanded = initialTab === undefined && rightPanelExpanded;
-  const canExpand = initialTab === undefined && ["browser", "preview", "diff", "artifacts"].includes(activeTab);
+  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts"].includes(activeTab) || activeTab.startsWith("mcp-app:"));
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
   const closeLauncher = useCallback(() => setLauncherPosition(null), []);
   useEffect(() => {
@@ -146,6 +149,9 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
+    ...mcpAppEntries.filter(entry => entry.scopeId === conversationId && entry.panelOpen).map(entry => ({
+      id: mcpAppTabId(entry.app.id), label: entry.app.title, icon: <Layers {...sidebarIconProps} />,
+    })),
     { id: "tasks", label: tr("上下文"), icon: <PanelRightOpen {...sidebarIconProps} /> },
     { id: "diff", label: tr("变更"), badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
     { id: "preview", label: tr("预览"), badge: previewSurfaceArtifact ? tr("开") : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
@@ -169,6 +175,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const closeOpenTab = useCallback((tab: StackTab) => {
     const tabIndex = openTabIds.indexOf(tab);
     if (tabIndex < 0) return;
+    if (tab.startsWith("mcp-app:")) closeMcpAppPanel(tab.slice("mcp-app:".length));
     const nextTabs = openTabIds.filter((id) => id !== tab);
     setOpenTabIds(nextTabs);
     if (tab === "sidechat") closeSideChat();
@@ -179,11 +186,13 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     }
     if (activeTab !== tab) return;
     const fallbackTab = nextTabs[Math.min(tabIndex, nextTabs.length - 1)] ?? "tasks";
+    const panelWasOpen = useAppStore.getState().rightPanelOpen;
     setActiveTab(fallbackTab);
+    if (initialTab === undefined && !panelWasOpen && useAppStore.getState().rightPanelOpen) toggleRightPanel();
     window.requestAnimationFrame(() => {
       tabListRef.current?.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${fallbackTab}"]`)?.focus();
     });
-  }, [activeTab, setActiveTab, openTabIds, closeSideChat, rightPanelOpen, toggleRightPanel]);
+  }, [activeTab, setActiveTab, openTabIds, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
   useEffect(() => {
     if (rightPanelOpen && (activeTab !== "sidechat" || sideChatOpen)) addOpenTab(activeTab);
   }, [activeTab, addOpenTab, rightPanelOpen, sideChatOpen]);
@@ -197,6 +206,21 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   useEffect(() => {
     if (!sideChatOpen && openTabIds.includes("sidechat")) closeOpenTab("sidechat");
   }, [sideChatOpen, openTabIds, closeOpenTab]);
+
+  useEffect(() => {
+    if (activeTab.startsWith("mcp-app:") && openTabIds.includes(activeTab)
+        && !mcpAppEntries.some(entry => mcpAppTabId(entry.app.id) === activeTab && entry.scopeId === conversationId && entry.panelOpen)) {
+      closeOpenTab(activeTab);
+    }
+  }, [activeTab, closeOpenTab, conversationId, mcpAppEntries, openTabIds]);
+
+  useLayoutEffect(() => {
+    if (!embedded && !rightPanelOpen) {
+      for (const entry of mcpAppEntries) {
+        if (entry.scopeId === conversationId && entry.panelOpen) closeMcpAppPanel(entry.app.id);
+      }
+    }
+  }, [conversationId, embedded, mcpAppEntries, rightPanelOpen]);
 
   useLayoutEffect(() => {
     const track = tabListRef.current!;
@@ -526,6 +550,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         style={{ display: activeTab === panelTab ? "flex" : "none" }}
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
+          {panelTab.startsWith("mcp-app:") && <McpAppPanelSlot id={panelTab.slice("mcp-app:".length)} />}
           {panelTab === "sidechat" && sideChatOpen && <SideChatPanel active={visible && activeTab === "sidechat" && rightPanelOpen} />}
           {panelTab === "preview" && (
             <ChunkErrorBoundary>

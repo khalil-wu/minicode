@@ -11,6 +11,7 @@ import { useAppStore } from "./stores";
 import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
 import { capabilityFeatureEnabled } from "./protocol/capabilities";
 import { DesktopLanguageProvider, useI18n } from "./i18n";
+import { McpAppSurfaces } from "./chat/mcp-apps/app-surfaces";
 
 const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
@@ -55,6 +56,7 @@ const AppContent = () => {
     <>
       <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>{t("发生错误。")} <button onClick={() => window.location.reload()}>{t("重新加载")}</button></div>}>
         <WorkbenchShell />
+        <McpAppSurfaces />
       </SafeBoundary>
       <ChunkErrorBoundary key={overlayRoute}>
         <Suspense fallback={<RouteLoading />}>

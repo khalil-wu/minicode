@@ -548,6 +548,22 @@ class _ThreadBinding:
 class ThreadEnvironments:
     """The receiving session's accepted selections and original executor leases."""
 
+    @classmethod
+    def retarget(cls, manager, defaults, *, resolve_config, attachment: TurnEnvironment,
+            cwd: str, workspace_roots: tuple[str, ...]):
+        """Open a new thread on a captured executor without a registry lookup."""
+        request = TurnEnvironmentRequest(attachment.selection.environment_id, cwd, workspace_roots,
+            attachment.input_selection().config)
+        requested = TurnEnvironmentSelection.from_request(request)
+        if requested.config.kind == "Ready":
+            requested = replace(requested, config=EnvironmentConfigState.ready(
+                replace(requested.config.value, workspace_roots=workspace_roots)))
+        owner = cls(manager, defaults, resolve_config=resolve_config,
+            selected_capability_roots=attachment.config.selected_capability_roots)
+        selection, origin = _normalize(requested, defaults)
+        owner._bindings = (owner._start(selection, origin, attachment.lease.clone(), cached_info=attachment.peer_info),)
+        return owner
+
     def __init__(self, manager: EnvironmentManager, defaults: ThreadEnvironmentDefaults, *,
             resolve_config: ConfigResolver, inherited: TurnEnvironmentSnapshot | None = None,
             non_blocking_snapshots: bool = False, manager_lease: EnvironmentManagerLease | None = None,

@@ -75,7 +75,7 @@ async def capture_conversation_environments(*, environment_manager, execution_re
         conversation_repository, conversation_id: str, permission_context, config_stack,
         cwd_uri: str, workspace_root_uris: tuple[str, ...],
         requests: tuple[TurnEnvironmentRequest, ...] | None = None,
-        selected_capability_roots: tuple[dict, ...] = ()):
+        selected_capability_roots: tuple[dict, ...] = (), require_existing_attachment: bool = False):
     """Capture the same store/thread owner used by WS, REST and the editor.
 
     Inputs come from the receiving host. Persisted prompts and context snapshots
@@ -86,6 +86,12 @@ async def capture_conversation_environments(*, environment_manager, execution_re
     runtime = execution_registry.thread_runtime(store_identity, conversation_id)
     defaults = thread_environment_defaults(permission_context, config_stack)
     async with runtime.environment_lock:
+        if require_existing_attachment:
+            from backend.environments.errors import ExecutorProtocolError
+
+            if runtime.thread_environments is None or not any(
+                    selection.cwd == cwd_uri for selection in runtime.thread_environments.selections()):
+                raise ExecutorProtocolError("The conversation's original execution environment is not attached to its recorded workspace.")
         runtime.thread_environments = await prepare_thread_environments(
             manager=environment_manager, defaults=defaults, cwd_uri=cwd_uri,
             workspace_root_uris=workspace_root_uris, owner=runtime.thread_environments,
@@ -98,13 +104,18 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
     manager = run_context.environment_manager
     if manager is None:
         return None
-    cwd_uri = Path(workspace_root if workspace_root is not None else Path.cwd()).as_uri()
-    roots = (cwd_uri,) if workspace_root is not None else ()
+    cwd_uri = run_context.execution_cwd_uri or Path(workspace_root if workspace_root is not None else Path.cwd()).as_uri()
+    roots = (cwd_uri,) if run_context.execution_cwd_uri or workspace_root is not None else ()
     defaults = thread_environment_defaults(permission_context, config_stack)
     runtime = run_context.environment_thread_runtime
     lock = runtime.environment_lock if runtime is not None else run_context.environment_lock
     async with lock:
         existing = runtime.thread_environments if runtime is not None else run_context.thread_environments
+        if run_context.execution_cwd_uri:
+            from backend.environments.errors import ExecutorProtocolError
+
+            if existing is None or not existing.selections() or existing.selections()[0].cwd != cwd_uri:
+                raise ExecutorProtocolError("The conversation's original execution environment is not attached to its recorded workspace.")
         owner = await prepare_thread_environments(manager=manager, defaults=defaults,
             cwd_uri=cwd_uri, workspace_root_uris=roots, owner=existing,
             requests=run_context.environment_requests, inherited=run_context.inherited_turn_environments,
@@ -115,6 +126,7 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
         if runtime is not None:
             runtime.thread_environments = owner
             runtime.retain_turn(asyncio.current_task(), run_context.lifecycle_cleanup_tasks)
+            runtime.mcp_app_runtime = run_context.mcp_app_runtime
         elif agent_session is not None:
             agent_session.thread_environments = owner
             agent_session.owns_thread_environments = not run_context.retain_thread_environments

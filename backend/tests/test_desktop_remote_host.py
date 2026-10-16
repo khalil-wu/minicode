@@ -169,10 +169,7 @@ async def test_actual_cli_native_pty_continues_offline_and_lifecycle_secret_rele
             assert (await _native(client, window, "fs:readFile", [str(finished)])).json()["content"] == "continued while detached"
             assert (await _native(client, window, "pty:snapshot", [session_id, 1000, "other-conversation"])).status_code == 403
             resize = await _native(client, window, "pty:resize", [session_id, 100, 30, "owned-native-conversation"])
-            if os.name == "nt":
-                assert resize.status_code == 409 and "does not expose a resize channel" in resize.text
-            else:
-                assert resize.status_code == 200
+            assert resize.status_code == 200 and resize.json() is True, resize.text
             other = {"window_instance_id": "other-native-window", "window_owner_id": "secondary", "window_binding_token": secrets.token_hex(16)}
             windows[other["window_instance_id"]] = other
             assert (await _native(client, other, "pty:spawn", [str(workspace), "other-native-conversation"])).status_code == 200

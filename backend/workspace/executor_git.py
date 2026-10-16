@@ -1,13 +1,15 @@
 """MiniCode Git capabilities executed in the accepted filesystem namespace."""
 from __future__ import annotations
 
+from dataclasses import replace
 from backend.environments.errors import ExecutorError
 from backend.sandbox.policy import (AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
     FileSystemPermissions, FileSystemSandboxEntry)
 from backend.workspace.executor_service import ExecutorWorkspaceService
+from backend.workspace.executor_paths import ExecutorPath
 
 
-async def run_executor_git(service, argv, *, cwd=None, write_metadata=False, timeout=30, index_file=None):
+def executor_git_environment(service, *, index_file=None):
     from backend.tools.git_support import _GIT_REPOSITORY_ENV
 
     policy = service.config.shell_environment_policy
@@ -18,25 +20,93 @@ async def run_executor_git(service, argv, *, cwd=None, write_metadata=False, tim
         overrides["GIT_CEILING_DIRECTORIES"] = service.resolve(service.scope.user_home_uri).native
     if index_file is not None:
         overrides["GIT_INDEX_FILE"] = service.resolve(str(index_file)).native
-    env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
-        "exclude": [*policy.exclude, *_GIT_REPOSITORY_ENV, "GIT_CONFIG*"],
-        "set": environment, "includeOnly": list(policy.include_only)}
-    process_scope = service.scope
-    if write_metadata:
-        if not service.scope.resolve_access(service.cwd.uri).can_write:
-            raise PermissionError("Git metadata writes require workspace-write authority")
+    return replace(policy, exclude=tuple([*policy.exclude, *_GIT_REPOSITORY_ENV, "GIT_CONFIG*"]),
+        set_values=environment), overrides
+
+
+async def registered_worktree_metadata(service, cwd, gitdir, common):
+    """Source git-utils worktree/trust ownership, through the original executor FS."""
+    async def canonical(path):
+        if not service.scope.resolve_access(path.uri).can_read:
+            raise PermissionError(f"Git metadata is not readable: {path.uri}")
+        return service.resolve(await service.filesystem.canonicalize(path.uri, sandbox=service.sandbox))
+
+    async def metadata_text(path):
+        if not service.scope.resolve_access(path.uri).can_read:
+            raise PermissionError(f"Git metadata is not readable: {path.uri}")
+        metadata = await service.filesystem.get_metadata(path.uri, sandbox=service.sandbox, follow_symlinks=False)
+        if not metadata["isFile"] or metadata["isSymlink"] or metadata["size"] > 64 * 1024:
+            raise PermissionError(f"Git ownership metadata is not a regular file: {path.uri}")
+        contents = await service.filesystem.read_file(path.uri, sandbox=service.sandbox, follow_symlinks=False)
+        if len(contents) > 64 * 1024:
+            raise PermissionError(f"Git ownership metadata exceeds the Source boundary: {path.uri}")
+        text = contents.decode("utf-8").strip()
+        if not text or "\n" in text or "\r" in text:
+            raise PermissionError(f"Git ownership metadata does not contain one path: {path.uri}")
+        return text
+
+    def relative(base, value):
+        return ExecutorPath.resolve(value, cwd_uri=base.uri, platform_os=service.scope.platform_os)
+
+    dot_git = cwd.joinpath(".git")
+    pointer = await metadata_text(dot_git)
+    if not pointer.startswith("gitdir:") or not pointer[len("gitdir:"):].strip():
+        raise PermissionError("The checkout does not identify a registered worktree")
+    linked = relative(cwd, pointer[len("gitdir:"):].strip())
+    link_metadata = await service.filesystem.get_metadata(linked.uri, sandbox=service.sandbox, follow_symlinks=False)
+    if not link_metadata["isDirectory"] or link_metadata["isSymlink"]:
+        raise PermissionError("The worktree Git directory is not a regular directory")
+    actual_gitdir, actual_common = await canonical(linked), await canonical(common)
+    if actual_gitdir.uri != (await canonical(gitdir)).uri or actual_gitdir.parent.name != "worktrees" or actual_gitdir.parent.parent.uri != actual_common.uri:
+        raise PermissionError("The worktree administrative directory does not belong to its common repository")
+    backlink = relative(actual_gitdir, await metadata_text(actual_gitdir.joinpath("gitdir")))
+    linked_common = relative(actual_gitdir, await metadata_text(actual_gitdir.joinpath("commondir")))
+    if (backlink.name != ".git" or (await canonical(backlink.parent)).uri != (await canonical(cwd)).uri
+            or (await canonical(linked_common)).uri != actual_common.uri):
+        raise PermissionError("The worktree administrative backlink does not identify this checkout")
+    main_git = actual_common.parent.joinpath(".git")
+    main_metadata = await service.filesystem.get_metadata(main_git.uri, sandbox=service.sandbox, follow_symlinks=False)
+    if not main_metadata["isDirectory"] or main_metadata["isSymlink"]:
+        raise PermissionError("The primary checkout does not have its own regular Git directory")
+    if (await canonical(main_git)).uri != actual_common.uri:
+        raise PermissionError("The main checkout no longer owns the worktree repository")
+    return (actual_gitdir, actual_common)
+
+
+async def executor_git_write_scope(service, *, cwd=None, initialize=False):
+    if not service.scope.resolve_access(service.cwd.uri).can_write:
+        raise PermissionError("Git metadata writes require workspace-write authority")
+    if initialize:
+        paths = [service.cwd.joinpath(".git")]
+    else:
         discovered = await run_executor_git(service,
             ["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd=cwd)
         if discovered.returncode != 0:
             raise PermissionError(discovered.stderr.decode("utf-8", errors="replace").strip())
-        grants = []
-        for name in discovered.stdout.decode("utf-8").splitlines():
-            path = service.resolve(name)
-            access = service.scope.resolve_access(path.uri)
-            if not access.can_read or not path.is_relative_to(service.cwd) and not access.can_write:
-                raise PermissionError(f"Git metadata needs explicit write authority: {path.uri}")
-            grants.append(FileSystemSandboxEntry(FileSystemPath("path", path.uri), FileSystemAccessMode.WRITE))
-        process_scope = service.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions(tuple(grants))))
+        paths = [service.resolve(name) for name in discovered.stdout.decode("utf-8").splitlines()]
+    external_readonly = [path for path in paths if not path.is_relative_to(service.cwd)
+        and not service.scope.resolve_access(path.uri).can_write]
+    verified_metadata = ()
+    if external_readonly:
+        # A user-initiated Git action may write the linked repository metadata,
+        # just as it may write cwd/.git. It never grants the main checkout.
+        verified_metadata = await registered_worktree_metadata(service, cwd or service.cwd, *paths)
+    grants = []
+    for path in paths:
+        access = service.scope.resolve_access(path.uri)
+        if not access.can_read or not path.is_relative_to(service.cwd) and not access.can_write and path not in verified_metadata:
+            raise PermissionError(f"Git metadata needs explicit write authority: {path.uri}")
+        grants.append(FileSystemSandboxEntry(FileSystemPath("path", path.uri), FileSystemAccessMode.WRITE))
+    return service.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions(tuple(grants))))
+
+
+async def run_executor_git(service, argv, *, cwd=None, write_metadata=False, timeout=30, index_file=None):
+    policy, overrides = executor_git_environment(service, index_file=index_file)
+    env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
+        "exclude": list(policy.exclude), "set": dict(policy.set_values), "includeOnly": list(policy.include_only)}
+    process_scope = service.scope
+    if write_metadata:
+        process_scope = await executor_git_write_scope(service, cwd=cwd)
     else:
         argv = [argv[0], "--no-optional-locks", *argv[1:]]
     return await service.run(argv, cwd=cwd, timeout=timeout, env_policy=env_policy, env=overrides, permission_scope=process_scope)

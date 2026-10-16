@@ -261,6 +261,8 @@ export type CommandAction =
   | { type: "unknown"; command: string };
 
 export interface ToolCallEvent {
+  mcp_app_resource_uri?: string;
+  mcp_app_ui?: { resourceUri: string; preferredModelDisplayMode: "inline" | "fullscreen" };
   type: "tool_call";
   id: string;
   name: string;
@@ -301,6 +303,9 @@ export interface ToolErrorInfo {
 }
 
 export interface ToolResultEvent {
+  mcp_app_resource_uri?: string;
+  mcp_app_ui?: ToolCallEvent["mcp_app_ui"];
+  mcp_app?: import("./mcp-app-types").McpAppReceipt;
   streaming_announcement?: boolean;
   command_presentation?: ToolCallEvent["command_presentation"];
   execution_started_at?: number;

@@ -111,7 +111,7 @@ const RENDERER_CSP = [
   "img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*",
   "font-src 'self' data:",
   "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://localhost:* https://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*",
-  "frame-src 'self' data: blob: http://localhost:* http://127.0.0.1:*",
+  "frame-src 'self' data: blob: http://localhost:* http://127.0.0.1:* http://*.localhost:*",
   "worker-src 'self' blob:",
   "media-src 'self' data: blob: http://localhost:* http://127.0.0.1:*",
   "form-action 'self'",

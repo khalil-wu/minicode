@@ -40,11 +40,12 @@ async def capture_workspace_execution(session, conversation_id: str, *, environm
     snapshot = await capture_conversation_environments(environment_manager=session.environment_manager,
         execution_registry=session.ws_manager.execution_contexts, conversation_repository=session.conversation_repo,
         conversation_id=conversation_id, permission_context=permission, config_stack=session.config.config_layer_stack,
-        cwd_uri=cwd_uri, workspace_root_uris=(cwd_uri,))
+        cwd_uri=cwd_uri, workspace_root_uris=(cwd_uri,), require_existing_attachment=directory.startswith("file:"))
     try:
         attachment = select_turn_environment(snapshot, environment_id)
         context = ToolExecutionContext(permission=permission, session_id=session.session_id, conversation_id=conversation_id,
-            run_context=RunContext(turn_environments=snapshot), permission_checker=session.permission_checker)
+            run_context=RunContext(turn_environments=snapshot, environment_manager=session.environment_manager),
+            permission_checker=session.permission_checker, background_manager=session.background_manager)
         captured = bind_tool_execution_environment(context, attachment)
         try:
             yield captured

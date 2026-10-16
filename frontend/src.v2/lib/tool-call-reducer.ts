@@ -26,6 +26,9 @@ export const isToolCallExecuting = (record: ToolCallRecord): boolean =>
   && !["queued", "prepared", "waiting_approval"].includes(record.transition || "");
 
 export interface ToolCallRecord {
+  mcpAppResourceUri?: string;
+  mcpAppUi?: ToolCallEvent["mcp_app_ui"];
+  mcpApp?: import("../protocol/mcp-app-types").McpAppReceipt;
   delegations?: ToolDelegation[];
   id: string;
   name: string;
@@ -172,6 +175,9 @@ export const mergeToolCallResultRecord = (
     return {
       ...existing,
       summary: existing.summary ?? incoming.summary,
+      mcpApp: existing.mcpApp ?? incoming.mcpApp,
+      mcpAppResourceUri: existing.mcpAppResourceUri ?? incoming.mcpAppResourceUri,
+      mcpAppUi: existing.mcpAppUi ?? incoming.mcpAppUi,
       artifactId: existing.artifactId ?? incoming.artifactId,
       artifactKind: existing.artifactKind ?? incoming.artifactKind,
       artifactMediaType: existing.artifactMediaType ?? incoming.artifactMediaType,
@@ -363,6 +369,8 @@ export const reduceToolCallStart = (
     startedAt: existing?.startedAt ?? e.started_at ?? now,
     displayHint: e.display_hint ?? existing?.displayHint,
     inputSummary: e.input_summary ?? existing?.inputSummary,
+    mcpAppResourceUri: e.mcp_app_resource_uri ?? existing?.mcpAppResourceUri,
+    mcpAppUi: e.mcp_app_ui ?? existing?.mcpAppUi,
     resultKind: e.result_kind ?? existing?.resultKind,
     activityKind: e.activity_kind ?? existing?.activityKind,
     callSource: e.call_source ?? existing?.callSource,
@@ -403,6 +411,9 @@ export const reduceToolCallResult = (
     waitingOn: undefined,
     blockingReason: undefined,
     summary: e.summary,
+    mcpApp: e.mcp_app ?? existing.mcpApp,
+    mcpAppResourceUri: e.mcp_app_resource_uri ?? existing.mcpAppResourceUri,
+    mcpAppUi: e.mcp_app_ui ?? existing.mcpAppUi,
     stdoutPreview: e.stdout_preview ?? existing.stdoutPreview,
     stderrPreview: e.stderr_preview ?? existing.stderrPreview,
     exitCode: e.exit_code ?? existing.exitCode,

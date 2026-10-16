@@ -4053,6 +4053,9 @@ class SessionAgentRunnerMixin:
         run_metadata["conversation_store_id"] = conversation_store_id
         run_context.environment_manager = self.environment_manager
         run_context.session_source = "desktop"
+        from backend.api import _state
+
+        run_context.mcp_app_runtime = _state.bootstrap.mcp_apps if _state.bootstrap is not None else None
         if self.ws_manager is not None:
             run_context.environment_thread_runtime = self.ws_manager.execution_contexts.thread_runtime(
                 conversation_store_id, conversation.id)
@@ -4066,6 +4069,8 @@ class SessionAgentRunnerMixin:
 
         conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
         run_workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        if conversation.execution_cwd.startswith("file:"):
+            run_context.execution_cwd_uri = conversation.execution_cwd
         if not conversation.workspace_root and getattr(conversation, "projectless_output_dir", ""):
             run_metadata["projectless_context"] = {
                 "cwd": str(run_workspace_root),

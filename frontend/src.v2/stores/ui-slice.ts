@@ -421,7 +421,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ...(canonicalTab === "sidechat" ? { sideChatOpen: true } : {}),
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
-        rightPanelExpanded: ["browser", "preview", "diff", "artifacts"].includes(canonicalTab) && s.rightPanelExpanded,
+        rightPanelExpanded: (["browser", "preview", "diff", "artifacts"].includes(canonicalTab) || canonicalTab.startsWith("mcp-app:")) && s.rightPanelExpanded,
       };
     }),
   setRightStackTabLocked: (locked) => set({ rightStackTabLocked: locked }),

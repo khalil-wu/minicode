@@ -57,7 +57,7 @@ class ExecutorCommandProcess:
 
 
 class ExecutorCommandRunner:
-    def __init__(self, policy: EnvironmentCommandPolicy):
+    def __init__(self, policy: EnvironmentCommandPolicy, *, cleanup_callbacks=()):
         self.policy = policy
         self.lease = policy.attachment.lease.clone()
         self.environment = self.lease.environment
@@ -77,6 +77,8 @@ class ExecutorCommandRunner:
         self.network_registration_closed = False
         self.network_closed = False
         self.process_cleanup_failure = None
+        self.cleanup_callbacks = list(cleanup_callbacks)
+        self._cleanup_lock = asyncio.Lock()
 
     def capability(self, *, cwd=None):
         managed = not self.policy.disable_os_sandbox
@@ -87,6 +89,17 @@ class ExecutorCommandRunner:
         return await self.cleanup()
 
     async def cleanup(self):
+        async with self._cleanup_lock:
+            return await self._cleanup_owned_resources()
+
+    async def add_cleanup_callback(self, callback):
+        async with self._cleanup_lock:
+            if self.closed:
+                await callback()
+            else:
+                self.cleanup_callbacks.append(callback)
+
+    async def _cleanup_owned_resources(self):
         if self.closed:
             return True
         if self.handle is None or self.never_started:
@@ -121,6 +134,14 @@ class ExecutorCommandRunner:
             # Proxy shutdown flushes its final real decisions before its ACK.
             await self._settle_network_observers(errors)
             self._capture_network_audit()
+            if resources_closed:
+                try:
+                    while self.cleanup_callbacks:
+                        await self.cleanup_callbacks[0]()
+                        self.cleanup_callbacks.pop(0)
+                except Exception as error:
+                    errors.append(error)
+                    resources_closed = False
             if resources_closed:
                 try:
                     await self.lease.aclose()

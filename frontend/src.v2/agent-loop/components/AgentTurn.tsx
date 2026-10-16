@@ -6,7 +6,7 @@ import { AgentProcessSummary } from "./AgentProcessSummary";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
-import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
+import { ProcessDetailReadingContext, useProcessDetailReading, useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
 
 export type RenderAgentCellArgs = {
   key?: React.Key;
@@ -25,6 +25,7 @@ export const AgentTurn = memo(function AgentTurn({
   defaultProcessExpanded,
   hasMoreHistory = false,
   onLoadHistory,
+  persistentContent,
 }: {
   turn: AgentLoopTurnProjection;
   wide?: boolean;
@@ -32,9 +33,11 @@ export const AgentTurn = memo(function AgentTurn({
   defaultProcessExpanded?: boolean;
   hasMoreHistory?: boolean;
   onLoadHistory?: () => void;
+  persistentContent?: React.ReactNode;
 }) {
   // Live and incomplete work starts open. Only a complete final answer folds
-  // it automatically; an explicit reading choice applies to every turn state.
+  // it automatically. The parent's toggle and explicit raw exec/MCP reading
+  // retain the parent; ordinary child groups keep independent preferences.
   const initialProcessExpanded = !turn.hasCompleteFinalAnswer
     ? true
     : defaultProcessExpanded ?? turn.initialProcessExpanded;
@@ -43,6 +46,7 @@ export const AgentTurn = memo(function AgentTurn({
     expanded: initialProcessExpanded,
   });
   const searching = useTranscriptSearch();
+  const [protectedDetailReading, protectDetailReading] = useProcessDetailReading(turn.id);
   const reachedCompleteAnswer = turn.hasCompleteFinalAnswer && !processPreference.complete;
   const lostCompleteAnswer = !turn.hasCompleteFinalAnswer && processPreference.complete;
   // Completion belongs to the saved reading choice, so it also folds when a
@@ -50,7 +54,8 @@ export const AgentTurn = memo(function AgentTurn({
   const nextExpanded = reachedCompleteAnswer && !userToggled.current ? defaultProcessExpanded ?? false
     : lostCompleteAnswer && !userToggled.current ? true
     : processPreference.expanded;
-  const processExpanded = searching || nextExpanded;
+  const processExpanded = searching || nextExpanded
+    || turn.hasCompleteFinalAnswer && protectedDetailReading && !userToggled.current;
   const previouslyExpanded = useRef(false);
   useEffect(() => {
     if (processExpanded && !previouslyExpanded.current) onLoadHistory?.();
@@ -80,10 +85,6 @@ export const AgentTurn = memo(function AgentTurn({
   // the reply so the user sees the complete change set at the end of the turn.
   const timelineCells = useMemo(() => turn.processCells.filter((cell) => cell.kind !== "diff"), [turn.processCells]);
   const diffCells = useMemo(() => turn.processCells.filter((cell) => cell.kind === "diff"), [turn.processCells]);
-  const onUserDisclosure = useCallback(() => {
-    userToggled.current = true;
-    setProcessExpanded(true);
-  }, [setProcessExpanded, userToggled]);
   const visibleTimelineCells = useMemo(() => processExpanded
     ? timelineCells
     : [], [processExpanded, timelineCells]);
@@ -106,7 +107,7 @@ export const AgentTurn = memo(function AgentTurn({
       position="top"
       onToggle={() => {
         userToggled.current = true;
-        setProcessExpanded((value) => !value);
+        setProcessExpanded(!processExpanded);
       }}
     />
   );
@@ -128,20 +129,16 @@ export const AgentTurn = memo(function AgentTurn({
       })}
 
       {(turn.hasProcessContent || Boolean(turn.workItems?.length)) && (
+        <ProcessDetailReadingContext.Provider value={protectDetailReading}>
         <section
           className="chat-turn-process agent-loop-process agent-loop-work-area"
           data-zone="work"
           data-active={turn.status === "running" && !turn.hasCompleteFinalAnswer ? "true" : "false"}
           data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent 处理进度"
-          onClickCapture={(event) => {
-            if ((event.target as Element).closest("button[aria-expanded], button.agent-loop-timeline-group-title, summary")) {
-              userToggled.current = true;
-              setProcessExpanded(nextExpanded);
-            }
-          }}
         >
           {turn.hasProcessContent && processSummary}
+          {!processExpanded && persistentContent}
 
           {turn.workItems ? turn.workItems.map((item) => item.kind === "user"
             ? renderCell({ key: item.id, cell: item.cell, className: "chat-turn-user-cell agent-loop-user-cell" })
@@ -153,7 +150,6 @@ export const AgentTurn = memo(function AgentTurn({
                 isRunning={turn.status === "running" && item === turn.workItems?.at(-1)}
                 expandWorkGroups={false}
                 showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
-                onUserDisclosure={onUserDisclosure}
                 onHistoryStartReached={item === turn.workItems?.find((entry) => entry.kind === "process") ? onLoadHistory : undefined}
               />
             )) : showProcessStack && (
@@ -163,12 +159,12 @@ export const AgentTurn = memo(function AgentTurn({
               isRunning={turn.status === "running"}
               expandWorkGroups={false}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
-              onUserDisclosure={onUserDisclosure}
               onHistoryStartReached={onLoadHistory}
             />
           )}
 
         </section>
+        </ProcessDetailReadingContext.Provider>
       )}
 
       {turn.answerCell && (

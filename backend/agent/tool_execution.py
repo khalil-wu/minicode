@@ -2335,6 +2335,11 @@ def store_result(
         command_actions=command_actions,
     )
     # Transport consumers add their own owner/envelope fields to event.data.
+    from backend.mcp.app_runtime import MCPAppReceipt
+
+    app_receipt = truncated.runtime_metadata.get("mcp_app_receipt")
+    if isinstance(mcp_identity, MCPAcceptedResultIdentity) and isinstance(app_receipt, MCPAppReceipt):
+        result_event.data.update(app_receipt.public_fields())
     if command_presentation is not None:
         result_event.data["command_presentation"] = deepcopy(command_presentation)
         result_event.data["streaming_announcement"] = False

@@ -640,7 +640,20 @@ async def handle_conversation_create(
             })
             return True
         workspace_root = source_fields["workspace_root"]
-    if workspace_root:
+    remote_activation = None
+    if workspace_root.startswith("file:"):
+        from fastapi import HTTPException
+        from backend.environments.errors import ExecutorError
+        from backend.workspace.executor_activation import prepare_executor_workspace_activation
+        from backend.ws.command_results import emit_command_error
+
+        try:
+            remote_activation = await prepare_executor_workspace_activation(session, workspace_root)
+        except (ExecutorError, ValueError, PermissionError, HTTPException) as exc:
+            await emit_command_error(session, command, str(exc))
+            return True
+        workspace_root = execution_cwd = remote_activation.path_uri
+    elif workspace_root:
         from backend.services.workspace_service import parse_workspace_activation_request
         from backend.ws.command_results import emit_command_error
 
@@ -652,10 +665,12 @@ async def handle_conversation_create(
             await emit_command_error(session, command, workspace.error_event)
             return True
         workspace_root = str(workspace.project_path)
-    if execution_cwd:
+    if execution_cwd and remote_activation is None:
         execution_cwd = str(Path(execution_cwd).expanduser().resolve())
     if source_fields:
         git_branch = source_fields.get("git_branch", "")
+    elif remote_activation is not None:
+        git_branch = remote_activation.branch
     else:
         git_branch = await asyncio.to_thread(session.git_branch_for, Path(workspace_root)) if workspace_root and not request.git_isolated else ""
 
@@ -694,13 +709,24 @@ async def handle_conversation_create(
         from backend.ws.command_results import emit_command_error
 
         cleanup_plan_file(copied_plan_path)
+        if remote_activation is not None:
+            await remote_activation.aclose()
         await emit_command_error(session, command, exc, data={"conversation_id": request.conversation_id or ""})
         return True
     except Exception:
         from backend.agent.plans import cleanup_plan_file
 
         cleanup_plan_file(copied_plan_path)
+        if remote_activation is not None:
+            await remote_activation.aclose()
         raise
+    if remote_activation is not None:
+        try:
+            await remote_activation.bind(session, created)
+        except (ExecutorError, ValueError, PermissionError) as exc:
+            session.conversation_repo.delete_conversation(created.id)
+            await emit_command_error(session, command, str(exc), data={"created": False, "activated": False})
+            return True
     if request.conversation_type == "side_chat" and request.source_conversation_id:
         try:
             session.attachment_store.share_for_conversation(request.source_conversation_id, created.id, created.execution_cwd)

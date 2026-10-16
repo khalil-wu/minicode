@@ -63,6 +63,8 @@ from backend.api.routes_skills import router as skills_router
 from backend.api.routes_agents import router as agents_router
 from backend.api.routes_replay import router as replay_router
 from backend.api.routes_health import router as health_router
+from backend.api.routes_mcp_apps import router as mcp_apps_router
+from backend.mcp.app_ui import is_app_sandbox_hostname, is_app_sandbox_origin
 from backend.api import _state
 
 logger = logging.getLogger(__name__)
@@ -267,6 +269,8 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
     are not the CSWSH vector and remain gated by the token/host auth above.
     """
     origin = websocket.headers.get("origin")
+    if is_app_sandbox_hostname(websocket.url.hostname) or is_app_sandbox_origin(origin):
+        return False
     if origin is None:
         return True  # non-browser client; token/host auth is the gate
     origin = origin.strip()
@@ -302,6 +306,14 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
 async def _api_v1_path_alias(request: Request, call_next):
     """Rewrite /api/v1/* -> /api/* so v1 callers reach the same handlers."""
     path = request.scope.get("path", "")
+    # HTML capabilities are the sandbox's entire HTTP authority. In tokenless
+    # loopback mode the normal API gate alone cannot distinguish this origin.
+    sandbox_host = is_app_sandbox_hostname(request.url.hostname)
+    sandbox_origin = is_app_sandbox_origin(request.headers.get("origin"))
+    if sandbox_host or sandbox_origin:
+        if not (sandbox_host and request.method == "GET"
+                and re.fullmatch(r"/mcp-app/frame/[A-Za-z0-9_-]+(?:/legacy\.js)?", path)):
+            return Response("MCP App origin cannot access the host runtime", status_code=403)
     is_embedded_asset_authorized = (
         _is_artifact_asset_token_authorized(request)
         or _is_attachment_asset_token_authorized(request)
@@ -351,6 +363,7 @@ app.include_router(skills_router)
 app.include_router(agents_router)
 app.include_router(replay_router)
 app.include_router(health_router)
+app.include_router(mcp_apps_router)
 
 
 # ── Workspace router ──

@@ -44,6 +44,8 @@ _SHUTDOWN_EXIT_TIMEOUT_SECONDS = 2.0
 _LANGUAGE_SERVERS: dict[str, str] = {
     "py": "pyright-langserver",
     "pyi": "pyright-langserver",
+    "yaml": "yaml-language-server",
+    "yml": "yaml-language-server",
     "ts": "typescript-language-server",
     "tsx": "typescript-language-server",
     "js": "typescript-language-server",
@@ -62,10 +64,11 @@ _LANGUAGE_SERVERS: dict[str, str] = {
 # Common args for servers that need them
 _SERVER_ARGS: dict[str, list[str]] = {
     "pyright-langserver": ["--stdio"],
+    "yaml-language-server": ["--stdio"],
     "typescript-language-server": ["--stdio"],
     "gopls": ["serve"],
     "rust-analyzer": [],
-    "clangd": [],
+    "clangd": ["--use-dirty-headers"],
 }
 
 @dataclass
@@ -140,6 +143,7 @@ class LSPClient:
         self._lock = asyncio.Lock()
         self.startup_cleanup_pending = False
         self.capabilities: dict[str, Any] = {}
+        self.settings: dict[str, Any] = {}
         self.diagnostics: dict[str, dict[str, Any]] = {}
         self.diagnostics_changed = asyncio.Event()
 
@@ -260,7 +264,7 @@ class LSPClient:
 
     async def _initialize(self) -> None:
         result = await self._send_request("initialize", {
-            "processId": os.getpid(),
+            "processId": self._client_process_id(),
             "rootUri": self._path_to_uri(self._workspace_root),
             **({"initializationOptions": self._initialization_options} if self._initialization_options is not None else {}),
             "capabilities": {
@@ -283,7 +287,7 @@ class LSPClient:
                 },
             },
             "workspaceFolders": [
-                {"uri": self._path_to_uri(self._workspace_root), "name": Path(self._workspace_root).name}
+                {"uri": self._path_to_uri(self._workspace_root), "name": self._workspace_name()}
             ],
         })
         self.capabilities = result.get("capabilities", {})
@@ -294,21 +298,19 @@ class LSPClient:
         async with self._lock:
             await self._sync_file(file_path)
 
-    async def _sync_file(self, file_path: str, content: str | None = None, language_id: str | None = None) -> None:
-        abs_path = str(Path(file_path).resolve())
+    async def _sync_file(self, file_path: str, content: str | None = None, language_id: str | None = None,
+                         *, model_version: int | None = None) -> None:
+        abs_path = self._normalize_file_path(file_path)
         if content is None:
-            try:
-                content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                raise RuntimeError(f"Unable to read source file for LSP: {abs_path}") from exc
+            content = await self._read_source_file(abs_path)
         content_hash = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()
         opened = self._opened_files.get(abs_path)
         if opened is not None:
             version, previous_hash = opened
-            if previous_hash == content_hash:
+            if previous_hash == content_hash and (model_version is None or model_version == version):
                 return
-            self.diagnostics.pop(os.path.normcase(abs_path), None)
-            version = self._file_versions[abs_path] + 1
+            self.diagnostics.pop(self._file_key(abs_path), None)
+            version = model_version if model_version is not None else self._file_versions[abs_path] + 1
             self._file_versions[abs_path] = version
             self._opened_files[abs_path] = (version, content_hash)
             try:
@@ -318,12 +320,11 @@ class LSPClient:
                 })
             except (OSError, LSPTransportClosed):
                 self._opened_files[abs_path] = opened
-                self.diagnostics.pop(os.path.normcase(abs_path), None)
+                self.diagnostics.pop(self._file_key(abs_path), None)
                 raise
             return
-        ext = Path(abs_path).suffix.lstrip(".")
-        lang_id = language_id or _language_id_for_extension(ext)
-        version = self._file_versions.get(abs_path, 0) + 1
+        lang_id = language_id or _language_id_for_extension(Path(abs_path).suffix.lstrip("."))
+        version = model_version if model_version is not None else self._file_versions.get(abs_path, 0) + 1
         self._file_versions[abs_path] = version
         self._opened_files[abs_path] = (version, content_hash)
         try:
@@ -337,20 +338,20 @@ class LSPClient:
             })
         except (OSError, LSPTransportClosed):
             self._opened_files.pop(abs_path)
-            self.diagnostics.pop(os.path.normcase(abs_path), None)
+            self.diagnostics.pop(self._file_key(abs_path), None)
             raise
 
     async def close_file(self, file_path: str) -> None:
         """Notify the server that a tracked document is no longer active."""
         async with self._lock:
-            abs_path = str(Path(file_path).resolve())
+            abs_path = self._normalize_file_path(file_path)
             if abs_path not in self._opened_files:
                 return
             await self._send_notification("textDocument/didClose", {
                 "textDocument": {"uri": self._path_to_uri(abs_path)},
             })
             self._opened_files.pop(abs_path, None)
-            self.diagnostics.pop(os.path.normcase(abs_path), None)
+            self.diagnostics.pop(self._file_key(abs_path), None)
             self.diagnostics_changed.set()
 
     async def definition(self, file_path: str, line: int, character: int) -> list[LSPLocation]:
@@ -459,7 +460,13 @@ class LSPClient:
     async def _respond_to_server_request(self, message: dict[str, Any]) -> None:
         response: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
         if message["method"] == "workspace/configuration":
-            response["result"] = [None for _ in message["params"]["items"]]
+            response["result"] = []
+            for item in message["params"]["items"]:
+                value = self.settings
+                section = item.get("section")
+                for part in section.split(".") if section else ():
+                    value = value.get(part) if isinstance(value, dict) else None
+                response["result"].append(value)
         else:
             response["error"] = {"code": -32601, "message": f"Unsupported client method: {message['method']}"}
         await self._write_message(response)
@@ -495,9 +502,8 @@ class LSPClient:
                             await self._respond_to_server_request(message)
                         elif message["method"] == "textDocument/publishDiagnostics":
                             params = message["params"]
-                            diagnostic_path = _uri_to_path(params["uri"], path_mapper=self._sandbox_runner.map_path_from_sandbox)
-                            path_key = os.path.normcase(str(Path(diagnostic_path).resolve()))
-                            opened = next((state for path, state in self._opened_files.items() if os.path.normcase(path) == path_key), None)
+                            path_key = self._file_key(self._file_path_from_uri(params["uri"]))
+                            opened = next((state for path, state in self._opened_files.items() if self._file_key(path) == path_key), None)
                             if opened is not None and params.get("version", opened[0]) == opened[0]:
                                 self.diagnostics[path_key] = params
                                 self.diagnostics_changed.set()
@@ -544,6 +550,27 @@ class LSPClient:
         if mapped.startswith("/"):
             return "file://" + quote(mapped, safe="/")
         return _path_to_uri(mapped)
+
+    def _normalize_file_path(self, path: str) -> str:
+        return str(Path(path).resolve())
+
+    def _file_key(self, path: str):
+        return os.path.normcase(path)
+
+    def _file_path_from_uri(self, uri: str) -> str:
+        return self._normalize_file_path(_uri_to_path(uri, path_mapper=self._sandbox_runner.map_path_from_sandbox))
+
+    async def _read_source_file(self, path: str) -> str:
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read source file for LSP: {path}") from exc
+
+    def _client_process_id(self):
+        return os.getpid()
+
+    def _workspace_name(self):
+        return Path(self._workspace_root).name
 
 
 class LSPManager:

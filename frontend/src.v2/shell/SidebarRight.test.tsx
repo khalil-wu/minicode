@@ -89,6 +89,7 @@ import { useAppStore } from "../stores";
 import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { SidebarRight } from "./SidebarRight";
 import type { ChatMessage } from "../stores/types";
+import { useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
 
 const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">): ChatMessage => ({
   content: "",
@@ -98,6 +99,7 @@ const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "rol
 });
 
 const resetSidebarState = () => {
+  useMcpAppSurfaces.setState({ entries: [] });
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600, writable: true });
   vi.stubGlobal("ResizeObserver", class {
     constructor(callback: () => void) { notifyTabResize = callback; }
@@ -174,6 +176,25 @@ const resetSidebarState = () => {
 };
 
 describe("SidebarRight activity", () => {
+  it("returns an App inline without reopening a sidebar closed with other tabs present", async () => {
+    resetSidebarState();
+    useAppStore.setState({ conversationId: "app-owner", rightStackTab: "tasks" });
+    render(<SidebarRight />);
+    const app = { id: "b".repeat(32), server: "registered", tool: "chart", resourceUri: "ui://chart",
+      displayMode: "inline" as const, title: "已展开的应用", readOnly: false };
+    act(() => {
+      useMcpAppSurfaces.setState({ entries: [{ app, conversationId: "app-owner", scopeId: "app-owner", readOnly: false,
+        inlineTarget: null, panelTarget: null, panelOpen: true }] });
+      useAppStore.getState().setRightStackTab(`mcp-app:${app.id}`);
+    });
+    await waitFor(() => expect(screen.getByRole("tab", { name: /已展开的应用/ })).toBeTruthy());
+    act(() => useAppStore.getState().toggleRightPanel());
+    await waitFor(() => {
+      expect(useAppStore.getState().rightPanelOpen).toBe(false);
+      expect(useMcpAppSurfaces.getState().entries[0].panelOpen).toBe(false);
+      expect(screen.queryByRole("tab", { name: /已展开的应用/ })).toBeNull();
+    });
+  });
   beforeEach(() => {
     resetSidebarState();
   });

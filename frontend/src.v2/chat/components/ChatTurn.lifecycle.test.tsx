@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTurn } from "./ChatTurn";
@@ -11,6 +11,7 @@ import { TranscriptSearchContext } from "../TranscriptSearchContext";
 import { useAppStore } from "../../stores";
 import type { ServerEvent } from "../../protocol/events";
 import type { StreamBuffer } from "../../lib/stream-buffer";
+import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable:true, value:() => ({matches:false,addEventListener(){},removeEventListener(){}}) }));
 vi.mock("../../protocol/ws-outbox", () => ({ sendClientCommand:vi.fn() }));
@@ -23,6 +24,13 @@ const turn = () => projectMessagesToTurns(useAppStore.getState().messages,useApp
 const complete = () => handle({type:"item.completed",conversation_id:"lifecycle",message_id:"assistant",turn_id:"actual-turn",
   item:{id:"model-final",type:"agent_message",text:"完成验证。",source:"model_final",status:"completed"},finish_reason:"stop"});
 const done = () => handle({type:"done",conversation_id:"lifecycle",message_id:"assistant",turn_id:"actual-turn",status:"completed",usage:{}});
+const replaceTool = (record: ToolCallRecord) => useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant"
+  ? { ...message, blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record } : block) } : message) }));
+const rawTool = (kind: "exec" | "mcp"): ToolCallRecord => ({ id:"read", name:kind === "exec" ? "run_command" : "catalog_lookup",
+  args:kind === "exec" ? { command:"printf 'first'" } : { query:"actual catalog" },
+  activityKind:kind === "exec" ? "commandExecution" : "mcpToolCall", resultKind:kind === "exec" ? "command" : "mcp",
+  status:"success", startedAt:3, finishedAt:4, stdoutPreview:kind === "exec" ? "Protected raw output" : undefined,
+  outputPreview:kind === "mcp" ? "Protected MCP output" : undefined, exitCode:kind === "exec" ? 0 : undefined });
 
 beforeEach(() => {
   releaseConversationReadingState("lifecycle");
@@ -83,18 +91,107 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(useAppStore.getState().draft).toBe("保留的草稿");
   });
 
-  it("keeps explicitly opened tool details visible when the final answer arrives", () => {
+  it.each([false,true])("folds the parent after reading tool details and restores the child choice on reopen, transcript=%s", (child) => {
     useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
       blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Actual file contents" } } : block) } : message) }));
-    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
     fireEvent.click(screen.getByRole("button",{name:"展开活动详情"}));
     expect(screen.getByText("Actual file contents")).toBeTruthy();
-    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
-    expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
-    expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
+    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
+    expect(screen.queryByText("我会先查询来源并核对日期。")).toBeNull();
+    expect(screen.queryByText("Actual file contents")).toBeNull();
+    done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button",{name:"展开处理步骤"})).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"展开处理步骤"}));
     expect(screen.getByText("Actual file contents")).toBeTruthy();
-    done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
-    expect(screen.getByText("Actual file contents")).toBeTruthy();
+  });
+
+  it.each([false,true])("keeps a group's own reading choice without pinning the parent open, transcript=%s", (child) => {
+    useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
+      blocks: [...message.blocks!, { type: "tool_call", record: { id: "read-two", name: "read_file", args: { file_path: "second.md" },
+        status: "success", startedAt: 4, finishedAt: 5, outputPreview: "Second file contents" } }] } : message) }));
+    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    fireEvent.click(screen.getByRole("button", { name: "已读取文件" }));
+    expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
+    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "已读取文件" })).toBeNull();
+    done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("second.md")).toBeTruthy();
+  });
+
+  it.each([
+    ["exec",false,false], ["exec",false,true], ["exec",true,false], ["exec",true,true],
+    ["mcp",false,false], ["mcp",false,true], ["mcp",true,false], ["mcp",true,true],
+  ] as const)("protects explicit raw %s reading only on open, transcript=%s closeDetail=%s", (kind, child, closeDetail) => {
+    replaceTool(rawTool(kind));
+    const first = render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    const detail = () => kind === "exec" ? first.container.querySelector<HTMLButtonElement>(".exec-cell-header-button")!
+      : first.container.querySelector<HTMLButtonElement>(".activity-cell-main-button")!;
+    fireEvent.click(detail());
+    if (closeDetail) fireEvent.click(detail());
+    complete();first.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    expect(detail().getAttribute("aria-expanded")).toBe(String(!closeDetail));
+    done();first.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    first.unmount();
+    render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name:"收起处理步骤" }));
+    expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name:"展开处理步骤" }));
+    const restored = document.querySelector(kind === "exec" ? ".exec-cell-header-button" : ".activity-cell-main-button");
+    expect(restored?.getAttribute("aria-expanded")).toBe(String(!closeDetail));
+  });
+
+  it.each([false,true])("does not infer protected MCP reading from a tool name, transcript=%s", (child) => {
+    replaceTool({ id:"read", name:"mcp__pretend__lookup", activityKind:"genericTool", resultKind:"generic", args:{},
+      status:"success", startedAt:3, finishedAt:4, outputPreview:"Ordinary generic evidence" });
+    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    fireEvent.click(screen.getByRole("button", { name:"展开活动详情" }));
+    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name:"展开处理步骤" }));
+    expect(screen.getByText("Ordinary generic evidence")).toBeTruthy();
+  });
+
+  it("protects only the last raw-read turn in its conversation and gives the parent toggle priority", () => {
+    replaceTool(rawTool("exec"));
+    const runningFirst = turn();
+    const view = render(<ChatTurn turn={runningFirst} conversationId="lifecycle" />);
+    fireEvent.click(view.container.querySelector(".exec-cell-header-button")!);
+    complete();
+    const settledFirst = turn();
+    const runningSecond = { ...runningFirst, id:"assistant-next", committedCells:runningFirst.committedCells.map(cell => cell.kind === "exec"
+      ? { ...cell, id:"second-exec", command:"printf 'second'" } : { ...cell, id:`second-${cell.id}` }) };
+    const pair = (second = runningSecond) => <><ChatTurn key="first" turn={settledFirst} conversationId="lifecycle" />
+      <ChatTurn key="second" turn={second} conversationId="lifecycle" /></>;
+    view.rerender(pair());
+    const first = () => view.container.querySelector<HTMLElement>('[data-message-id="assistant"]')!;
+    const second = () => view.container.querySelector<HTMLElement>('[data-message-id="assistant-next"]')!;
+    expect(within(first()).getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("false");
+    fireEvent.click(second().querySelector(".exec-cell-header-button")!);
+    expect(within(first()).getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("true");
+    const settledSecond = { ...runningSecond, status:"completed" as const, finalAnswerCell:settledFirst.finalAnswerCell };
+    view.rerender(pair(settledSecond));
+    expect(within(second()).getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    fireEvent.click(within(second()).getByRole("button", { name:"收起处理步骤" }));
+    view.rerender(pair(settledSecond));
+    expect(within(second()).getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("true");
+  });
+
+  it.each([false,true])("keeps the parent's explicit live toggle across completion, transcript=%s", (child) => {
+    const {rerender}=render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    fireEvent.click(screen.getByRole("button", { name:"收起处理步骤" }));
+    fireEvent.click(screen.getByRole("button", { name:"展开处理步骤" }));
+    complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name:"收起处理步骤" }));
+    done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
   });
 
   it("folds a child work record when its complete final item arrives", () => {
@@ -108,26 +205,27 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(screen.getByRole("button",{name:"收起处理步骤"})).toBeTruthy();
   });
 
-  it.each([false,true])("preserves pre-final reading across virtual remount with completion offscreen=%s", (offscreen) => {
+  it.each([[false,false],[false,true],[true,false],[true,true]])("restores child reading after the parent folds across virtual remount, offscreen=%s transcript=%s", (offscreen, child) => {
     useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
       blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Remounted details" } } : block) } : message) }));
-    const first = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    const first = render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
     fireEvent.click(screen.getByRole("button", { name:"展开活动详情" }));
     expect(screen.getByText("Remounted details")).toBeTruthy();
     if (offscreen) first.unmount();
     complete();
     if (!offscreen) {
-      first.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
-      expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+      first.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+      expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
       first.unmount();
     }
-    const restored = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
-    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
-    expect(screen.getByText("Remounted details")).toBeTruthy();
+    const restored = render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
+    expect(screen.queryByText("Remounted details")).toBeNull();
     restored.unmount();
     done();
-    render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
-    expect(screen.getByRole("button", { name:"收起处理步骤" })).toBeTruthy();
+    render(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name:"展开处理步骤" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name:"展开处理步骤" }));
     expect(screen.getByText("Remounted details")).toBeTruthy();
   });
 
@@ -197,12 +295,17 @@ describe("real item/terminal disclosure and child roles", () => {
   });
 
   it("temporarily exposes explicit search results without changing the completed disclosure choice", () => {
-    const {rerender}=render(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
-    complete();rerender(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
+    useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
+      blocks: message.blocks?.map((block) => block.type === "tool_call" ? { ...block, record: { ...block.record, outputPreview: "Searched tool details" } } : block) } : message) }));
+    const {rerender}=render(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} conversationId="lifecycle" /></TranscriptSearchContext.Provider>);
+    fireEvent.click(screen.getByRole("button", { name:"收起活动详情" }));
+    complete();rerender(<TranscriptSearchContext.Provider value><ChatTurn turn={turn()} conversationId="lifecycle" /></TranscriptSearchContext.Provider>);
     expect(screen.getByText("我会先查询来源并核对日期。")).toBeTruthy();
-    done();rerender(<TranscriptSearchContext.Provider value={false}><ChatTurn turn={turn()} /></TranscriptSearchContext.Provider>);
+    done();rerender(<TranscriptSearchContext.Provider value={false}><ChatTurn turn={turn()} conversationId="lifecycle" /></TranscriptSearchContext.Provider>);
     expect(screen.queryByText("我会先查询来源并核对日期。")).toBeNull();
     expect(screen.getByRole("button", {name:"展开处理步骤"})).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", {name:"展开处理步骤"}));
+    expect(screen.getByText("Searched tool details")).toBeTruthy();
   });
 
   it.each(["failed","partial","cancelled"] as const)("reopens automatically folded evidence when terminal status becomes %s", (status) => {

@@ -1,4 +1,5 @@
 import { isGuardianAssessment } from "../protocol/guardian-types";
+import { isMcpAppReceipt } from "../protocol/mcp-app-types";
 import { isTerminalToolCallStatus, normalizeToolDiff, isToolDelegations, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
 import {
@@ -371,6 +372,9 @@ export const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.display_summary === "string"
         ? tool.display_summary
         : undefined,
+    mcpApp: isMcpAppReceipt(tool.mcpApp ?? tool.mcp_app) ? (tool.mcpApp ?? tool.mcp_app) as ToolCallRecord["mcpApp"] : undefined,
+    mcpAppResourceUri: (tool.mcpAppResourceUri ?? tool.mcp_app_resource_uri) as string | undefined,
+    mcpAppUi: (tool.mcpAppUi ?? tool.mcp_app_ui) as ToolCallRecord["mcpAppUi"],
     resultKind: typeof tool.resultKind === "string"
       ? tool.resultKind
       : typeof tool.result_kind === "string"

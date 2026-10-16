@@ -3270,6 +3270,7 @@ class TaskTool(BaseTool):
                     window_binding_token=context.window_binding_token,
                     mcp_manager=parent_run_context.environment_host_mcp_manager if parent_run_context.environment_manager is not None else parent_run_context.mcp_manager,
                     mcp_owner_session_id=parent_run_context.mcp_owner_session_id,
+                    mcp_app_runtime=parent_run_context.mcp_app_runtime,
                     skill_manager=sub_context_builder.skill_manager,
                     model_execution=child_model_snapshot,
                     agent_runtime=runtime,

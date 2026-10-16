@@ -22,6 +22,7 @@ from backend.conversations.context_delta import apply_context_snapshot_delta, co
 from backend.conversations.projection_log import append_projection, read_projection
 from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
 from backend.config import DATA_ROOT
+from backend.workspace.executor_paths import ExecutorPath
 
 from .models import (
     inherited_execution_cwd,
@@ -236,7 +237,8 @@ class ConversationRepository:
                 transcript=initial_transcript,
                 context_snapshot=copy.deepcopy(dict(context_snapshot or {})),
                 workspace_root=workspace_root,
-                execution_cwd=str(Path(execution_cwd).expanduser().resolve()) if execution_cwd else "",
+                execution_cwd=(ExecutorPath.parse(execution_cwd).uri
+                    if execution_cwd.startswith("file:") else str(Path(execution_cwd).expanduser().resolve()) if execution_cwd else ""),
                 projectless_output_dir=projectless.output_directory if projectless is not None else "",
                 projectless_browser_root=projectless.browser_root if projectless is not None else "",
                 git_branch=git_branch,

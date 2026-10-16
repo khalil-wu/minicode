@@ -18,6 +18,7 @@ from backend.subprocesses import spawn_exec, terminate_process_tree
 
 class EnvironmentSetupRequest(BaseModel):
     action: Literal["python_venv", "python_dependencies", "node_dependencies"]
+    expected_registration_id: str = ""
 
 
 def environment_commands(root: Path) -> dict[str, list[str]]:

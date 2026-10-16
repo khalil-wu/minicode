@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import os
+import struct
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from backend.subprocesses import spawn_exec, spawn_shell
@@ -61,6 +64,72 @@ class PtyProcess:
     def terminate(self):
         self._process.terminate()
 
+    async def resize(self, cols: int, rows: int):
+        import fcntl
+        import termios
+
+        pipe = self.stdin.get_extra_info("pipe")
+        fcntl.ioctl(pipe.fileno(), termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        return True
+
+
+class _WindowsPtyControl:
+    def __init__(self, owner: ExitStack):
+        import msvcrt
+        import subprocess
+
+        request_read, request_write = os.pipe()
+        self._request_read = owner.enter_context(os.fdopen(request_read, "rb", buffering=0))
+        self._request_write = owner.enter_context(os.fdopen(request_write, "wb", buffering=0))
+        response_read, response_write = os.pipe()
+        self._response_read = owner.enter_context(os.fdopen(response_read, "rb"))
+        self._response_write = owner.enter_context(os.fdopen(response_write, "wb", buffering=0))
+        os.set_inheritable(request_read, True)
+        os.set_inheritable(response_write, True)
+        self.handles = (msvcrt.get_osfhandle(request_read), msvcrt.get_osfhandle(response_write))
+        self.startupinfo = subprocess.STARTUPINFO(lpAttributeList={"handle_list": list(self.handles)})
+        self._lock = asyncio.Lock()
+
+    def release_child_ends(self):
+        self._request_read.close()
+        self._response_write.close()
+
+    def _resize(self, cols: int, rows: int):
+        self._request_write.write(struct.pack("!HH", cols, rows))
+        response = self._response_read.readline()
+        if not response:
+            raise EOFError("the original Windows PTY resize channel closed")
+        result = json.loads(response)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        return result["resized"]
+
+    async def resize(self, cols: int, rows: int):
+        from backend.async_cleanup import to_thread_cancel_safe
+
+        async with self._lock:
+            return await to_thread_cancel_safe(self._resize, cols, rows)
+
+    async def close(self):
+        async with self._lock:
+            self._request_write.close()
+            self._response_read.close()
+
+
+class _WindowsPtyProcess(PtyProcess):
+    def __init__(self, process, control):
+        super().__init__(process, process.stdout, process.stdin)
+        self.stderr = process.stderr
+        self._control = control
+
+    async def resize(self, cols: int, rows: int):
+        return await self._control.resize(cols, rows)
+
+    async def wait(self):
+        exit_code = await super().wait()
+        await self._control.close()
+        return exit_code
+
 
 def _attach_controlling_terminal():
     import fcntl
@@ -70,7 +139,8 @@ def _attach_controlling_terminal():
 
 
 async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: dict[str, str],
-        pass_fds: tuple[int, ...] = (), on_exit=None, creationflags: int | None = None, on_created=None):
+        pass_fds: tuple[int, ...] = (), on_exit=None, creationflags: int | None = None, on_created=None,
+        resizable: bool = False):
     if sys.platform == "win32":
         from backend.sandbox.windows_native import pty_command
 
@@ -78,6 +148,18 @@ async def spawn_pty(command: str | list[str], *, cwd: str | Path | None, env: di
         # Source codex-utils-pty owns ConPTY and its Job Object. The Python owner
         # still owns the wrapper process, captured output and exact tree cancel.
         kwargs = {"creationflags": creationflags} if creationflags is not None else {}
+        if resizable:
+            with ExitStack() as owner:
+                control = _WindowsPtyControl(owner)
+                process = await spawn_exec(*pty_command(argv, cwd=cwd, control_handles=control.handles),
+                    cwd=str(cwd) if cwd else None, env=env, on_exit=on_exit,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    startupinfo=control.startupinfo, **kwargs)
+                control.release_child_ends()
+                if on_created is not None:
+                    on_created(process)
+                owner.pop_all()
+                return _WindowsPtyProcess(process, control)
         process = await spawn_exec(*pty_command(argv, cwd=cwd), cwd=str(cwd) if cwd else None,
                                 env=env, on_exit=on_exit, stdin=asyncio.subprocess.PIPE,
                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **kwargs)

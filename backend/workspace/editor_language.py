@@ -111,17 +111,22 @@ async def editor_language_request(
     service: WorkspaceService, request: EditorLanguageRequest, *, binding_token: str
 ):
     from backend.lsp.editor import EditorLanguageStateError, editor_language_servers
+    from backend.workspace.executor_editor import ExecutorEditorService
 
     await authenticate_editor_window(request, binding_token=binding_token)
-    root = service.workspace_root_path()
+    executor = isinstance(service, ExecutorEditorService)
+    root = service.cwd.uri if executor else service.workspace_root_path()
     documents = []
     for document in request.documents:
-        path = service.resolve_workspace_path(document.path)
-        service.ensure_editor_file_allowed(
-            root / service.normalize_workspace_relative(document.path),
-            operation="read",
-            resolved_path=path,
-        )
+        if executor:
+            path = await service.allowed(document.path)
+        else:
+            path = service.resolve_workspace_path(document.path)
+            service.ensure_editor_file_allowed(
+                root / service.normalize_workspace_relative(document.path),
+                operation="read",
+                resolved_path=path,
+            )
         language = document.language or {
             ".py": "python", ".pyi": "python", ".yaml": "yaml", ".yml": "yaml",
             ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
@@ -131,7 +136,7 @@ async def editor_language_request(
             raise HTTPException(
                 status_code=422, detail="语言服务只接受 Python、YAML、C 或 C++ 文档。"
             )
-        documents.append({"path": str(path), "content": document.content, "language": language,
+        documents.append({"path": path.uri if executor else str(path), "content": document.content, "language": language,
                           "document_id": document.document_id, "model_version": document.model_version})
     path = service.resolve_workspace_path(request.documents[0].path)
     language = documents[0]["language"]
@@ -141,7 +146,7 @@ async def editor_language_request(
         if doc["language"] == language or (language in {"c", "cpp"} and doc["language"] in {"c", "cpp"})
     ]
     params = {
-        "textDocument": {"uri": path.as_uri()},
+        "textDocument": {"uri": path.uri if executor else path.as_uri()},
         "position": {"line": request.line, "character": request.character},
     }
     if request.method == "references":
@@ -154,13 +159,49 @@ async def editor_language_request(
             "insertSpaces": request.insert_spaces,
         }
     try:
-        return await editor_language_servers.request(
+        options = {}
+        if executor:
+            from backend.lsp.executor_editor import target_language_server
+            options = {"executor": service, "server_spec": await target_language_server(service, language)}
+        result = await editor_language_servers.request(
             root, language, request.method, documents, params,
             window_instance_id=request.window_instance_id, client_id=request.client_id, snapshot_revision=request.snapshot_revision,
+            **options,
         )
+        return {**result, **service.identity(path)} if executor else result
     except EditorLanguageStateError as exc:
         raise HTTPException(status_code=409, detail={"code": "editor.document_stale", "message": str(exc)}) from exc
     except (RuntimeError, TimeoutError) as exc:
         raise HTTPException(
             status_code=503, detail=str(exc) or "语言服务未及时返回诊断，请重试。"
         ) from exc
+
+
+async def editor_language_http_request(http_request, service, request, *, binding_token):
+    """Renderer cancellation reaches the original LSP request, including startup."""
+    async def disconnected():
+        while True:
+            if (await http_request.receive())["type"] == "http.disconnect":
+                return
+
+    operation = asyncio.create_task(editor_language_request(service, request, binding_token=binding_token))
+    disconnect = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait({operation, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+        if operation in done:
+            return await operation
+        operation.cancel()
+        try:
+            await operation
+        except asyncio.CancelledError:
+            pass
+        raise HTTPException(499, "Editor language request cancelled because the client disconnected.")
+    finally:
+        disconnect.cancel()
+        await asyncio.gather(disconnect, return_exceptions=True)
+        if not operation.done():
+            operation.cancel()
+            try:
+                await operation
+            except asyncio.CancelledError:
+                pass

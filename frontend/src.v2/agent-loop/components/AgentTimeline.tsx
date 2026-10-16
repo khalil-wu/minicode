@@ -176,7 +176,7 @@ const liveWorkTitle = (cell: AgentLoopProcessCell, t: Translate): string => {
   return t(cell.kind === "diff" ? "正在编辑文件" : "正在思考");
 };
 
-function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDisclosure, onHistoryStartReached }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onUserDisclosure?: () => void; onHistoryStartReached?: () => void }) {
+function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onHistoryStartReached }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onHistoryStartReached?: () => void }) {
   const { t, locale } = useI18n();
   const searching = useTranscriptSearch();
   const defaultExpanded = expandWorkGroups;
@@ -223,7 +223,6 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onUserDiscl
     <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} data-processing={liveGroup} aria-label={title}>
       <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
         userToggled.current = true;
-        onUserDisclosure?.();
         setExpanded((value) => !value);
       }}>
         <span className="agent-loop-timeline-group-icon" aria-hidden="true">{workGlyph(liveGroup && summary.key !== "summary" ? group.cells.find((cell) => cell.id === summary.key) : summaryIconCell)}</span>
@@ -272,7 +271,7 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
   );
 }
 
-export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, onUserDisclosure, onHistoryStartReached }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; onUserDisclosure?: () => void; onHistoryStartReached?: () => void }) {
+export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, onHistoryStartReached }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; onHistoryStartReached?: () => void }) {
   const groups = useMemo(() => groupTimelineCells(cells), [cells]);
   const firstWorkGroup = groups.find((group) => group.kind === "work");
   return (
@@ -297,7 +296,7 @@ export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, sh
           if ((group.cells.length > 1 || activeSingleItem) && group.cells.some((cell) => cell.kind === "guardian_review" || workLabel(cell) !== undefined)) {
             const activeGroup = isRunning && group === groups.at(-1)
               && group.cells.some((cell) => (cell.kind === "exec" || cell.kind === "activity" || cell.kind === "guardian_review") && cell.segmentClosed !== true);
-            return <WorkGroup key={group.key} group={group} renderCell={renderCell} isRunning={activeGroup} expandWorkGroups={expandWorkGroups || showAllOpenWork} onUserDisclosure={onUserDisclosure} onHistoryStartReached={group === firstWorkGroup ? onHistoryStartReached : undefined} />;
+            return <WorkGroup key={group.key} group={group} renderCell={renderCell} isRunning={activeGroup} expandWorkGroups={expandWorkGroups || showAllOpenWork} onHistoryStartReached={group === firstWorkGroup ? onHistoryStartReached : undefined} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }

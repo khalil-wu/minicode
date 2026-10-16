@@ -221,18 +221,23 @@ async def test_real_ws_checkpoint_list_and_rewind_use_selected_environment_uri(e
 
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
 @pytest.mark.asyncio
-async def test_independent_executor_reports_missing_lsp_transport_without_controller_server(editor_server, monkeypatch):
-    from backend.lsp.editor import editor_language_servers
+async def test_independent_executor_reports_real_target_server_start_failure_without_controller_server(editor_server, monkeypatch):
+    from backend.lsp.editor import EditorLanguageProcess, editor_language_servers
     async def no_controller_server(*args, **kwargs):
         raise AssertionError("An independent executor document cannot enter the controller LSP client")
-    monkeypatch.setattr(editor_language_servers, "request", no_controller_server)
+    monkeypatch.setattr(EditorLanguageProcess, "spawn_interactive", no_controller_server)
+    directory = editor_server.host.workspace / ".minicode"
+    directory.mkdir()
+    (directory / "language-servers.json").write_text(json.dumps({"language_servers": {
+        "python": {"argv": ["minicode-owned-missing-target-language-server"]}}}), encoding="utf-8")
     response = await editor_server.client.post("/api/workspace/language", params=editor_server.params,
         headers={"x-minicode-window-binding-token": "owned-editor-binding"}, json={
             "method": "hover", "window_owner_id": "owned-editor-owner", "window_instance_id": "owned-editor-window",
             "client_id": "owned-editor-client", "snapshot_revision": 1, "documents": [{"path": "same.py", "content": "unsaved = True",
                 "document_id": "owned-model", "model_version": 1, "language": "python"}], "line": 0, "character": 1})
-    assert response.status_code == 503, response.text
-    assert response.json()["detail"]["code"] == "editor.executor_language_server_unconfigured"
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"] == {"message": "program not found", "executor_code": -32603}
+    await editor_language_servers.shutdown()
 
 
 def test_signed_workspace_raw_owner_cannot_be_retargeted(monkeypatch):

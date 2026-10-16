@@ -53,7 +53,7 @@ class NativeTerminals:
             else:
                 argv = [shell, "/Q", "/K", "chcp 65001 >nul"]
             process = await spawn_pty(argv, cwd=cwd,
-                env=shell_subprocess_env(extra={"TERM": "xterm-256color"}, vault_scope=None))
+                env=shell_subprocess_env(extra={"TERM": "xterm-256color"}, vault_scope=None), resizable=True)
             record = TerminalSession(session_id, cwd=cwd, conversation_id=conversation_id)
             record.update_external_metadata(cwd=cwd, shell=shell, pid=process.pid)
             terminal = _Terminal(window_id, record, process)
@@ -122,16 +122,11 @@ class NativeTerminals:
             await terminal.process.stdin.drain()
             return True
         if action == "resize":
-            if os.name == "nt":
-                raise HTTPException(409, "the remote Windows PTY runtime does not expose a resize channel")
-            import fcntl
-            import struct
-            import termios
-
             cols, rows = args[1:3]
-            pipe = terminal.process.stdin.get_extra_info("pipe")
-            fcntl.ioctl(pipe.fileno(), termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-            return True
+            max_size = 32767 if os.name == "nt" else 65535
+            if any(type(value) is not int or not 1 <= value <= max_size for value in (cols, rows)):
+                raise HTTPException(422, f"terminal columns and rows must be integers between 1 and {max_size}")
+            return await terminal.process.resize(cols, rows)
         if action == "snapshot":
             return terminal.record.snapshot(max_chars=args[1])
         if action == "clear":

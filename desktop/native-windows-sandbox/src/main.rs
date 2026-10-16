@@ -9,6 +9,10 @@ use codex_windows_sandbox::windows_sandbox_owner_resources;
 use codex_windows_sandbox::bind_windows_sandbox_owner;
 use codex_windows_sandbox::clean_up_packaged_windows_sandbox;
 use std::path::Path;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::windows::io::{FromRawHandle, RawHandle};
+use std::sync::Arc;
 
 #[cfg(test)]
 use codex_windows_sandbox::{OwnerIdentity, sandbox_dir, sandbox_bin_dir, sandbox_secrets_dir};
@@ -113,6 +117,16 @@ fn main() -> Result<()> {
 }
 
 fn run_pty(args: &[String]) -> Result<()> {
+    let (control, args) = match args {
+        [flag, input, output, rest @ ..] if flag == "--control-handles" => {
+            let input = input.parse::<usize>()? as RawHandle;
+            let output = output.parse::<usize>()? as RawHandle;
+            // Only the wrapper inherits these handles. Source's ConPTY
+            // CreateProcessW uses bInheritHandles=FALSE for the shell.
+            (Some(unsafe { (File::from_raw_handle(input), File::from_raw_handle(output)) }), rest)
+        }
+        _ => (None, args),
+    };
     let [cwd_flag, cwd, separator, program, arguments @ ..] = args else {
         bail!("usage: --run-as-pty --command-cwd PATH -- PROGRAM [ARGS...]");
     };
@@ -125,7 +139,36 @@ fn run_pty(args: &[String]) -> Result<()> {
             program, arguments, Path::new(cwd), &std::env::vars().collect(),
             &None, codex_utils_pty::TerminalSize::default(), &[],
         ).await?;
-        Ok::<_, anyhow::Error>(codex_windows_sandbox::forward_sandbox_session_stdio(spawned).await)
+        Ok::<_, anyhow::Error>(codex_windows_sandbox::forward_sandbox_session_stdio_with_session(spawned, move |session| {
+            if let Some((input, output)) = control {
+                std::thread::spawn(move || {
+                    if let Err(error) = resize_pty(session, input, output) {
+                        eprintln!("Windows PTY resize channel failed: {error:#}");
+                    }
+                });
+            }
+        }).await)
     })?;
     std::process::exit(exit_code);
+}
+
+fn resize_pty(session: Arc<codex_utils_pty::ProcessHandle>, mut input: File, mut output: File) -> Result<()> {
+    loop {
+        let mut size = [0u8; 4];
+        if input.read(&mut size[..1])? == 0 {
+            return Ok(());
+        }
+        input.read_exact(&mut size[1..])?;
+        let size = codex_utils_pty::TerminalSize {
+            cols: u16::from_be_bytes([size[0], size[1]]),
+            rows: u16::from_be_bytes([size[2], size[3]]),
+        };
+        let response = match session.resize(size) {
+            Ok(()) => serde_json::json!({"resized": true}),
+            Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+        };
+        serde_json::to_writer(&mut output, &response)?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
 }

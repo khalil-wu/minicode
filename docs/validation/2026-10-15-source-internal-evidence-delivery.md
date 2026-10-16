@@ -1,5 +1,11 @@
 # 原生命令投影与内部证据链：最终交付
 
+## 2026-10-16 最新补齐：桌面过程、MCP App 与 executor 配套
+
+本次后续批新增完整答案后的主/子过程折叠修正、交互 MCP App 的原会话寿命与常驻展示、目标 LSP/环境安装/Git delivery、工作树实际新会话切换及 Windows PTY resize。逐项证据、原失败与 Source 边界见 [桌面 harness 集成](2026-10-16-desktop-harness-integration.md) 和 [当前差距](2026-10-16-current-desktop-gaps.md)。下文旧 entry、r5 wheel 及“尚无 LSP/resize”等描述继续作为其当时构建的历史事实，不代表最新源码。
+
+当前集中结果为前端全量 **4333 passed**、目标环境/LSP/文件/生命周期 **112 passed**、MCP/remote Skill/PTY/host **209 passed + 1 skipped**、桌面单元 **170 passed**。工作树另批明确保留 **10 passed / 2 failed / 1 skipped**；受限 Windows 的 Git metadata 和 split writable root 操作仍未闭合。r8 独立候选 wheel 冷验 **28/28**，但因此仍标候选，不称为全产品完成。测试范围各自记录，不与本文件历史数累计。
+
 ## 2026-10-16：executor、远程桌面与网络链后续批
 
 本节是后续实现的交付范围；下文 2026-10-15 的前端、wheel 和冻结清单均保留为历史身份，不能代表本节源码。此前 GitHub 检查点为 `ae278f910148f9c731a0dfaa51453431d66179c7`；本节代码推送后由独立的八项 CI 检查，不能借旧 CI 记通过。[本分支 CI 运行页](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927)保留每次真实提交及完整结果。

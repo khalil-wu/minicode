@@ -586,6 +586,8 @@ class ThinkingDeltaData(TypedDict, total=False):
 
 
 class ToolCallData(TypedDict, total=False):
+    mcp_app_resource_uri: str
+    mcp_app_ui: dict[str, Any]
     id: str
     name: str
     args: dict[str, Any]
@@ -627,6 +629,9 @@ class CommandOutputChunkData(TypedDict):
 
 
 class ToolResultData(TypedDict, total=False):
+    mcp_app_resource_uri: str
+    mcp_app_ui: dict[str, Any]
+    mcp_app: dict[str, Any]
     streaming_announcement: bool
     command_presentation: dict[str, Any]
     execution_started_at: int

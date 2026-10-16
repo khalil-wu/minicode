@@ -652,9 +652,13 @@ class AgentTurnState:
         for source_key, target_key in (
             ('artifact_kind', 'artifactKind'),
             ('artifact_media_type', 'artifactMediaType'),
+            ('mcp_app_resource_uri', 'mcpAppResourceUri'),
         ):
             if data.get(source_key):
                 updated_record[target_key] = str(data.get(source_key) or '')
+        for source_key, target_key in (('mcp_app', 'mcpApp'), ('mcp_app_ui', 'mcpAppUi')):
+            if source_key in data:
+                updated_record[target_key] = deepcopy(data[source_key])
         if data.get('artifact_bytes') is not None:
             updated_record['artifactBytes'] = max(0, _int_or(data.get('artifact_bytes'), 0))
         if data.get('diff') is not None:

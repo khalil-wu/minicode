@@ -20,6 +20,7 @@ class GitDeliveryRequest(BaseModel):
     title: str = Field(default="", max_length=200)
     body: str = Field(default="", max_length=50000)
     expected_branch: str = ""
+    expected_registration_id: str = ""
 
 
 async def run_delivery_command(

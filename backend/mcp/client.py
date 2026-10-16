@@ -18,6 +18,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -70,6 +71,15 @@ _NativeCallToolResult = RootModel[dict[str, Any]]
 _callback_owner: ContextVar[tuple[bool, dict[str, Any] | None] | None] = ContextVar("mcp_callback_owner", default=None)
 
 
+@contextmanager
+def mcp_request_owner(owner: dict[str, Any]):
+    token = _request_owner.set(owner)
+    try:
+        yield
+    finally:
+        _request_owner.reset(token)
+
+
 def _sanitize_tool_schema_descriptions(schema: Any) -> None:
     """Project prose only; schema constraints and data literals are wire values."""
     if isinstance(schema, list):
@@ -113,9 +123,14 @@ class _LifecycleClientSession(ClientSession):
         self._request_owners: dict[Any, dict[str, Any]] = {}
 
     async def send_request(self, request: Any, result_type: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(request.root, types.InitializeRequest):
+            from backend.mcp.app_ui import MCP_APP_EXTENSION, MCP_APP_MIME_TYPES
+
+            request.root.params.capabilities = request.root.params.capabilities.model_copy(update={
+                "extensions": {MCP_APP_EXTENSION: {"mimeTypes": list(MCP_APP_MIME_TYPES)}}})
         request_id = self._request_id
         owner = _request_owner.get()
-        if owner is not None and isinstance(request.root, types.CallToolRequest):
+        if owner is not None:
             self._request_owners[request_id] = owner
         try:
             return await super().send_request(request, result_type, *args, **kwargs)
@@ -409,6 +424,24 @@ def _positive_timeout(value: Any, field: str) -> float:
     return float(value)
 
 
+@dataclass
+class MCPAppConnectionLease:
+    client: Any
+    borrow_released: bool = False
+
+    async def aclose(self) -> None:
+        client = self.client
+        if client is not None:
+            if not self.borrow_released:
+                client._app_borrowers -= 1
+                self.borrow_released = True
+            if client._app_borrowers == 0 and client._app_close_requested:
+                if not await client._close_transport():
+                    if not await client.finish_pending_cleanup():
+                        raise ConnectionError(f"MCP App source {client.server_name} cleanup is still pending")
+            self.client = None
+
+
 class MCPClient:
     """Stable MiniCode facade over the official MCP SDK client session."""
 
@@ -502,6 +535,9 @@ class MCPClient:
         self._tool_owner_seq = itertools.count(1)
         self._active_tool_request_owners: dict[int, dict[str, Any]] = {}
         self._active_request_tasks: set[asyncio.Task[Any]] = set()
+        self._app_request_tasks: set[asyncio.Task[Any]] = set()
+        self._app_borrowers = 0
+        self._app_close_requested = False
         self._disconnect_notified = False
         self._cleanup_pending = False
         self._cleanup_reason = ""
@@ -977,7 +1013,13 @@ class MCPClient:
         return tools
 
     def pending_requests(self) -> tuple[asyncio.Task, ...]:
-        return tuple(task for task in self._active_request_tasks if not task.done())
+        """Model-turn borrowers; interactive Apps have their own thread owner."""
+        return tuple(task for task in self._active_request_tasks
+            if not task.done() and task not in self._app_request_tasks)
+
+    def acquire_app_lease(self) -> MCPAppConnectionLease:
+        self._app_borrowers += 1
+        return MCPAppConnectionLease(self)
 
     async def call_tool(
         self,
@@ -1008,6 +1050,9 @@ class MCPClient:
                 )
                 request_task = asyncio.create_task(self._request("tools/call", params))
                 self._active_request_tasks.add(request_task)
+                if request_owner is not None and request_owner.get("mcp_app_invocation_id"):
+                    self._app_request_tasks.add(request_task)
+                    request_task.add_done_callback(self._app_request_tasks.discard)
                 request_task.add_done_callback(self._active_request_tasks.discard)
                 request_task.add_done_callback(lambda _task: self._active_tool_request_owners.pop(owner_key, None))
                 if isinstance(cancel_event, asyncio.Event):
@@ -1397,6 +1442,14 @@ class MCPClient:
                     self._loop.call_soon_threadsafe(lambda: self._loop.create_task(self._notify_disconnect()))
 
     async def close(self) -> bool:
+        # Relinquishing the model owner must not kill an App's original MCP
+        # session or hold the completed turn's cleanup fence open.
+        self._app_close_requested = True
+        if self._app_borrowers:
+            return True
+        return await self._close_transport()
+
+    async def _close_transport(self) -> bool:
         self._cleanup_requested_at = time.time()
         self._cleanup_completed_at = None
         self._cleanup_reason = "close"

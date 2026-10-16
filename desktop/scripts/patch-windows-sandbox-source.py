@@ -39,6 +39,19 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
 
     replace("lib.rs", 'mod runtime_ownership;', 'mod runtime_ownership;\n#[cfg(target_os = "windows")]\nmod owner_identity;\n#[cfg(target_os = "windows")]\npub use owner_identity::{OwnerIdentity, windows_sandbox_owner_identity, bind_windows_sandbox_runner, windows_sandbox_read_acl_mutex};\n#[cfg(target_os = "windows")]\npub use owner_identity::bind_for_user as bind_windows_sandbox_owner;\n#[cfg(target_os = "windows")]\npub use runtime_ownership::current_setup_user;\n#[cfg(target_os = "windows")]\npub use wfp::windows_sandbox_owner_resources;')
     replace("runtime_ownership.rs", 'pub(crate) fn current_setup_user()', 'pub fn current_setup_user()')
+    replace("lib.rs", 'pub use stdio_bridge::forward_sandbox_session_stdio;',
+        'pub use stdio_bridge::{forward_sandbox_session_stdio, forward_sandbox_session_stdio_with_session};')
+    replace("stdio_bridge.rs", '''pub async fn forward_sandbox_session_stdio(spawned: SpawnedProcess) -> i32 {
+    let session = Arc::new(spawned.session);''', '''pub async fn forward_sandbox_session_stdio(spawned: SpawnedProcess) -> i32 {
+    forward_sandbox_session_stdio_with_session(spawned, |_| {}).await
+}
+
+pub async fn forward_sandbox_session_stdio_with_session(
+    spawned: SpawnedProcess,
+    on_session: impl FnOnce(Arc<codex_utils_pty::ProcessHandle>),
+) -> i32 {
+    let session = Arc::new(spawned.session);
+    on_session(Arc::clone(&session));''')
     proxy_arm = '            PROXY_ENFORCED_FLAG => proxy_enforced = true,'
     tty_arm = '            "--tty" => tty = true,\n'
     existing_arm = '            "--require-existing-sandbox" => crate::owner_identity::set_require_existing_setup(),\n'

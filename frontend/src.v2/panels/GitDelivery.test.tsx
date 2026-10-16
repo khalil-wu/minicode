@@ -1,9 +1,10 @@
 /* @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GitDelivery } from "./GitDelivery";
 import { useAppStore } from "../stores";
 import { showConfirm } from "../overlays/DialogService";
+import { bindWorkspaceOwnerRuntime } from "../protocol/workspace-owner";
 
 vi.mock("../overlays/DialogService", () => ({ showConfirm: vi.fn(async () => false) }));
 const localStatus = { is_git_repo: true, branch: "feature", repo_root: "C:/project", remotes: ["origin", "backup"], upstream: "origin/feature", commits: [], detached: false };
@@ -12,12 +13,12 @@ beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
-  useAppStore.setState({ workingDirectory: "C:/project", settingsOpen: false, settingsTab: "general" });
+  useAppStore.setState({ workingDirectory: "C:/project", conversationId: null, settingsOpen: false, settingsTab: "general" });
   vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(
     init?.method === "POST" ? { message: "已提交。" } : { ...localStatus, github },
   ))));
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); bindWorkspaceOwnerRuntime(() => undefined); });
 const renderDelivery = () => render(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={() => {}} />);
 const expandPR = () => fireEvent.click(screen.getByText("创建草稿 PR", { selector: "summary" }));
 
@@ -87,4 +88,89 @@ it("requires the original confirmation even when GitHub is ready for a draft PR"
   fireEvent.click(screen.getByRole("button", { name: "创建草稿 PR" }));
   await waitFor(() => expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "创建草稿 PR", message: "从 feature 向 main 创建草稿 PR：\nImprove editor" })));
   expect(vi.mocked(fetch).mock.calls.every(([, init]) => init?.method !== "POST")).toBe(true);
+});
+
+const targetStatus = (conversation = "one", registration = "original") => ({ ...localStatus,
+  session_id: "old-session", conversation_id: conversation, environment_id: "target", registration_id: registration,
+  github: { ...github, remote: true, message: "请在所选设备连接 GitHub 后刷新。" } });
+function targetOwner() {
+  useAppStore.setState({ conversationId: "one" });
+  bindWorkspaceOwnerRuntime(() => ({ session_id: "current-session", conversation_id: useAppStore.getState().conversationId ?? "", workspace_root: "C:/project" }));
+}
+
+it("keeps target GitHub authorization on the target device", async () => {
+  targetOwner();
+  vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(targetStatus())));
+  renderDelivery();
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  expect(screen.queryByRole("button", { name: "查看 GitHub 连接设置" })).toBeNull();
+});
+
+it("posts the accepted target registration and environment", async () => {
+  targetOwner();
+  vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(targetStatus())));
+  const changed = vi.fn();
+  render(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={changed} />);
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  fireEvent.change(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "目标提交\n\n真实正文" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交已暂存的 2 个文件" }));
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  const [url, init] = vi.mocked(fetch).mock.calls.find(([, options]) => options?.method === "POST")!;
+  expect(new URL(String(url)).searchParams.get("environment_id")).toBe("target");
+  expect(new URL(String(url)).searchParams.get("conversation_id")).toBe("one");
+  expect(new URL(String(url)).searchParams.get("session_id")).toBe("current-session");
+  expect(JSON.parse(String(init?.body))).toMatchObject({ message: "目标提交\n\n真实正文", expected_registration_id: "original", expected_branch: "feature" });
+});
+
+it("does not push after confirmation switches to another conversation at the same cwd", async () => {
+  targetOwner();
+  let confirm!: (value: boolean) => void;
+  vi.mocked(showConfirm).mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve; }));
+  vi.mocked(fetch).mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? { message: "pushed" } : targetStatus(useAppStore.getState().conversationId ?? ""))));
+  renderDelivery();
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  fireEvent.click(screen.getByText("分支与推送", { selector: "summary" }));
+  fireEvent.click(screen.getByRole("button", { name: "推送" }));
+  await waitFor(() => expect(showConfirm).toHaveBeenCalled());
+  await act(async () => { useAppStore.setState({ conversationId: "two" }); });
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  await act(async () => { confirm(true); });
+  expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+});
+
+it("does not clear a new owner's draft when an old commit response arrives", async () => {
+  targetOwner();
+  let finish!: (value: Response) => void;
+  let signal: AbortSignal | null | undefined;
+  vi.mocked(fetch).mockImplementation(async (_url, init) => {
+    if (init?.method === "POST") { signal = init.signal; return new Promise((resolve) => { finish = resolve; }); }
+    return new Response(JSON.stringify(targetStatus(useAppStore.getState().conversationId ?? "")));
+  });
+  const changed = vi.fn();
+  render(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={changed} />);
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  fireEvent.change(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "original draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交已暂存的 2 个文件" }));
+  await waitFor(() => expect(signal).toBeTruthy());
+  await act(async () => { useAppStore.setState({ conversationId: "two" }); });
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  fireEvent.change(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "new owner's unsaved draft" } });
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { finish(new Response(JSON.stringify({ message: "old commit finished" }))); });
+  expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("new owner's unsaved draft");
+  expect(screen.queryByText("old commit finished")).toBeNull(); expect(changed).not.toHaveBeenCalled();
+});
+
+it("restores each workspace's draft without overwriting the hidden workspace", async () => {
+  localStorage.setItem("minicode.git.draft:C:/another", JSON.stringify({ message: "another preserved draft" }));
+  const { rerender } = renderDelivery();
+  await screen.findByText("连接 GitHub 后可创建草稿 PR。");
+  fireEvent.change(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "project preserved draft" } });
+  await act(async () => { useAppStore.setState({ workingDirectory: "C:/another" }); });
+  rerender(<GitDelivery workspaceRoot="C:/another" stagedCount={2} onChanged={() => {}} />);
+  expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("another preserved draft");
+  await act(async () => { useAppStore.setState({ workingDirectory: "C:/project" }); });
+  rerender(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={() => {}} />);
+  expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("project preserved draft");
+  expect(JSON.parse(localStorage.getItem("minicode.git.draft:C:/another")!).message).toBe("another preserved draft");
 });
