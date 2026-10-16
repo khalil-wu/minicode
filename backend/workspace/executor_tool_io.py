@@ -227,7 +227,8 @@ async def executor_list_files(tool, args, context):
 
 
 async def _directory_entries(service, directory):
-    result = await service.walk(directory, max_depth=1)
+    # This caller owns recursion; Source depth zero returns only this directory.
+    result = await service.walk(directory, max_depth=0)
     if result["errors"]:
         raise OSError(f"Executor filesystem walk failed: {result['errors']}")
     if result["truncated"]:

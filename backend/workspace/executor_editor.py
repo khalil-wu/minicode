@@ -68,7 +68,8 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         return path.name not in WORKSPACE_IGNORED_NAMES and path.suffix.lower() not in WORKSPACE_IGNORED_SUFFIXES
 
     async def directory_entries(self, path):
-        outcome = await self.walk(path, max_depth=1)
+        # Source counts directory descents below the root: zero lists its children.
+        outcome = await self.walk(path, max_depth=0)
         if outcome["errors"]:
             raise OSError(f"Executor directory read failed: {outcome['errors']}")
         if outcome["truncated"]:
