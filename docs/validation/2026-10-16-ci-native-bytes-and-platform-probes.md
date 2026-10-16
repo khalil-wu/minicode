@@ -26,4 +26,12 @@ Windows 保留原 SID 子进程与明确 provision 门槛。非 Windows 测试�
 
 audit 到达是独立真实事件：进程先退出不能代替 policyDecision 已发送。该事件等待计入原有 15 秒预算后才 flush/assert，没有扩大阈值。本机 Windows 集中验证仍为 21 passed / 2 个原有 provision 条件跳过；非 Windows 新分支由修复提交的新 Linux CI 实际执行，不能借本机结果记通过。
 
-最终本地 wheel 使用另外冻结的 r4 输入；r3 的二十六项仍只属于其原包，身份和边界见 [原生打包报告](2026-10-16-native-wheel-packaging.md)。修复提交的完整八项结果按 [本分支 CI](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927)独立核对。
+两处 CI 测试夹具由独立冻结的 r4 输入承接；后续 Source 缓存初始化修改由新 r5 包承接并完整冷验 26/26。旧包的二十六项仍只属于各自原包，身份和边界见 [原生打包报告](2026-10-16-native-wheel-packaging.md)。修复提交的完整八项结果按 [本分支 CI](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927)独立核对。
+
+## Source 初始化与 target-only 缓存
+
+修复提交 `0eb959255c5342219eef04ffa593394d49cdbc8e` 的 [复验 38872672167](https://github.com/khalil-wu/minicode/actions/runs/38872672167) 真实恢复了 1.23 GB Cargo 缓存，却在 cargo 调用前因 `source-identity.json` 不存在而失败。缓存只保存 `source/codex-rs/target`，恢复时自然创建了 `source` 祖先目录；原脚本错误使用该目录存在作为 Source 已准备的事实，因此跳过真正的 `git archive`。这是构建初始化与缓存的契约错误，不是 Rust 编译或网络波动。后端与桌面依赖 job 未执行，不能记通过。
+
+修复以原 build 的 Source 身份文件确定是否已完成初始化。target-only 缓存仍走固定 Git object 的真实 archive、解压，成功后才写身份；已有身份仍严格比对原 Source pin。解压保留原编译 target，不清缓存、不伪造身份、不捕获并忽略缺失文件。Windows 已分发原生二进制的 provenance 保留其实际 producer 脚本身份，不随构建脚本修改重写历史来源。构建输入变化由新的冻结与独立安装验证承接，不能继续借 r4 的输入一致性证明当前脚本。
+
+新增冷目录、target-only 缓存、归档失败不发布身份、错误 pin 原样拒绝四项回归，连同原生打包合同统一 **12/12、0 skipped**。另外在自有 target-only 目录实际执行固定 pin 的 `git archive`：解压的 Source Cargo.toml 字节等于真实 Git object，原缓存 sentinel 保留，身份在成功归档后写入，第二次调用复用同一已准备源码。证据为 `network-cache-source-init-contract-batch01.xml` 与 `verify-network-cache-source-init-actual.json`。这个实际归档检查不冒充 Linux 原生编译；完整缓存恢复后的编译和两个 Python job 仍由后续新 CI 执行。

@@ -1,5 +1,7 @@
 # 本地可配置远程执行环境：当前边界只读核对
 
+2026-10-16 状态更新：本页保留最初只读审计时的调用链和待办事实，不再代表当前未完成清单。后续已实现 registry/connection、receiving-thread selection、目标命令/文件/checkpoint、MCP/Skill、编辑器/API 和 SSH/WSL desktop host，交付索引见 [后续实现与验证](2026-10-15-source-internal-evidence-delivery.md)。实际外机 SSH/WSL、Windows WFP provision、独立 executor LSP/PTY 和 Linux OS managed routing 的边界继续按新报告保留；不能从本页的最初“未实现”判断当前代码，也不能将后续本地验证扩大为外机验收。
+
 本文件为后续范围审计，未实现或验证远程 executor，也没有增加桌面控件。参考 `.tmp/codex-src`，commit `822e58cc3d666166c7446c5b1ea2e52f5d09594c`。不将此前“远程环境/高级审阅”这一笼统待办当作已完成证据。
 
 Source 的可配置执行环境不全依赖官方账号。`codex-rs/exec-server/src/environment_toml.rs` 从 `environments.toml` 读取真实 `default/include_local/[[environments]]`，每项可以使用 WebSocket `url`（可选 bearer token）或 `program/args/env/cwd` 的 stdio executor，不能将两者替换成只在界面上切换的环境名称。普通本地环境仍是独立的内置项。

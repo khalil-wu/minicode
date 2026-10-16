@@ -43,6 +43,24 @@ def run(argv, *, cwd, environment, capture=False, payload=None):
     return subprocess.CompletedProcess(argv, code)
 
 
+def prepare_source_tree(checkout: Path, build: Path, environment) -> Path:
+    source = build / "source"
+    identity_path = build / "source-identity.json"
+    if not identity_path.exists():
+        build.mkdir(parents=True, exist_ok=True)
+        archive = build / "source.tar"
+        run(["git", "-c", "core.autocrlf=false", "archive", "--format=tar", "--output", str(archive), SOURCE_COMMIT],
+            cwd=checkout, environment=environment)
+        source.mkdir(exist_ok=True)
+        with tarfile.open(archive) as contents:
+            contents.extractall(source, filter="data")
+        identity_path.write_text(json.dumps({"sourceCommit": SOURCE_COMMIT}), encoding="utf-8")
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    if identity != {"sourceCommit": SOURCE_COMMIT}:
+        raise RuntimeError("Network build directory contains a different Source revision")
+    return source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cargo", type=Path, required=True)
@@ -58,19 +76,7 @@ def main():
         cwd=ROOT, environment=environment, capture=True).stdout.decode("utf-8")
     if not compiler.startswith("rustc 1.95.0 "):
         raise RuntimeError("The Source network runtime requires Rust 1.95.0")
-    source = build / "source"
-    if not source.exists():
-        build.mkdir(parents=True, exist_ok=True)
-        archive = build / "source.tar"
-        run(["git", "-c", "core.autocrlf=false", "archive", "--format=tar", "--output", str(archive), SOURCE_COMMIT],
-            cwd=checkout, environment=environment)
-        source.mkdir()
-        with tarfile.open(archive) as contents:
-            contents.extractall(source, filter="data")
-        (build / "source-identity.json").write_text(json.dumps({"sourceCommit": SOURCE_COMMIT}), encoding="utf-8")
-    identity = json.loads((build / "source-identity.json").read_text(encoding="utf-8"))
-    if identity != {"sourceCommit": SOURCE_COMMIT}:
-        raise RuntimeError("Network build directory contains a different Source revision")
+    source = prepare_source_tree(checkout, build, environment)
     workspace = source / "codex-rs"
     project = workspace / "minicode-network"
     project.mkdir(exist_ok=True)

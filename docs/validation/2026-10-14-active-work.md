@@ -1,5 +1,11 @@
 # 当前 Source 对齐工作记录（总任务尚未完成）
 
+## 2026-10-16 当前范围与入口
+
+当前实现与验证入口为 [内部证据最终交付](2026-10-15-source-internal-evidence-delivery.md) 顶部的 2026-10-16 后续批。下方此前“remote 完整消费链未闭合”的状态是历史记录：executor 注册/连接、receiving-thread owner、目标命令/文件/checkpoint、编辑器/API、MCP/Skill 与 SSH/WSL desktop host 已完成实现，按该批各独立报告核对。Windows WFP 未 provision、真实外机 SSH/WSL 未验收，以及独立 executor 的 LSP/PTY 和 Linux OS managed routing 限制仍明确保留；不宣称整款产品等价。
+
+本批由三个实际子 agent 分别核后端执行链、前端桌面和原生打包。首次完整 CI `38868950710` 六项成功、两个 Python job 失败；已修入库原生字节与两处跨平台测试夹具并推送 `0eb95925`。其复验 `38872672167` 又暴露 target-only 编译缓存被误认作 Source 已初始化，导致 native-network 失败、后端/桌面依赖未执行；真实修复与后续运行由 [CI 证据](2026-10-16-ci-native-bytes-and-platform-probes.md) 记录，未执行不算通过。
+
 ## 当前优先项：CI 已通过，继续剩余 Source 行为
 
 最新完整检查点为提交 `2c3cae04ca0a121d74d91cc26b40d68689a6d417`，GitHub run `38764385600` 七项全部通过，Backend **6579 passed / 27 skipped / 0 failed/error**。它包含 heartbeat、Memory WS 以及全量回归揭示的测试生命周期/配置隔离修正，详见 `2026-10-15-heartbeat-memory-ci-checkpoint.md`。原 CI 修复基线 18e8bd8d 的七项绿灯保留于 `2026-10-15-ci-lifecycle-and-linux-mount-repairs.md`；新会话及文件夹动作已修。当前继续 remote 完整消费链，不把独立客户端基础层或只读审计计为整项完成。历史窗口和 wheel 身份不能代指当前源码。
