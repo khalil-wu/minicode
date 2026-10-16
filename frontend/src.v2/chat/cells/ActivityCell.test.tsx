@@ -1453,4 +1453,27 @@ describe("ActivityCell", () => {
     expect(screen.getAllByText("github.search_users").length).toBeGreaterThanOrEqual(1);
     expect(document.body.textContent).not.toContain("mcp__github__search_users");
   });
+
+  it.each([
+    ["node_repl", "js", "  核对\n  文件内容  ", "核对 文件内容"],
+    ["cua_repl", "js", "打开当前页面", "打开当前页面"],
+    ["node_repl", "js", "x".repeat(80), "x".repeat(80)],
+    ["node_repl", "js", "x".repeat(81), `${"x".repeat(79)}…`],
+    ["node_repl", "js", " \n ", "node_repl.js"],
+    ["node_repl", "js_reset", "保留原工具身份", "node_repl.js_reset"],
+  ])("projects the Source js title for %s.%s without changing raw arguments", (server, tool, title, expected) => {
+    const args = { title, code: "nodeRepl.write('ACTUAL_OUTPUT')" };
+    const record = { id: "js-call", name: `mcp__${server}__${tool}`, args,
+      displayHint: `${server}.${tool}`, status: "success" as const, startedAt: 1, finishedAt: 2,
+      outputPreview: "ACTUAL_OUTPUT" };
+    const cell: ActivityCellState = { kind: "activity", id: "js-title", activityKind: "mcpToolCall",
+      title: record.displayHint, status: "done", collapsed: true, startedAt: 1, toolCallRecords: [record] };
+    const view = render(<ActivityCell cell={cell} />);
+    expect(view.container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe(expected);
+    expect(view.container.textContent).not.toContain(args.code);
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(screen.getByText("ACTUAL_OUTPUT")).toBeTruthy();
+    expect(record.args).toEqual(args);
+    expect(args.title).toBe(title);
+  });
 });

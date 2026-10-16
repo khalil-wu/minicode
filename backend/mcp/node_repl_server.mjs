@@ -131,7 +131,12 @@ const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 const text = value => ({ type: 'text', text: value });
 const errorResult = message => ({ content: [text(message)], isError: true });
 function createKernel() {
-  const kernel = new Worker(workerSource, { eval: true, execArgv: ['--expose-internals'], workerData: { moduleDirs }, stdout: true, stderr: true });
+  // Node 22 exposes AsyncContextFrame through this flag; Node 24 enables it
+  // by default and removes the flag. Keep ALS on that backend: interrupting
+  // its older async_hooks backend leaves a native async-id stack unbalanced.
+  const execArgv = ['--expose-internals'];
+  if (process.allowedNodeEnvironmentFlags.has('--experimental-async-context-frame')) execArgv.push('--experimental-async-context-frame');
+  const kernel = new Worker(workerSource, { eval: true, execArgv, workerData: { moduleDirs }, stdout: true, stderr: true });
   const workerId = String(kernel.threadId);
   const attached = new Promise(resolve => workerSessions.has(workerId) ? resolve(workerSessions.get(workerId)) : workerAttachments.set(workerId, resolve));
   kernel.once('exit', () => { workerSessions.delete(workerId); workerAttachments.delete(workerId); });

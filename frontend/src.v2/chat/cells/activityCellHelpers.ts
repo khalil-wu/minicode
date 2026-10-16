@@ -166,6 +166,12 @@ export function readableRecordLabel(record: ActivityToolRecord, t: Translate = k
     return BROWSER_ACTION_LABELS[action] || action || "Browser";
   }
   if (isCodeModeRecord(record)) return t("运行");
+  // Codex mcp-tool-activity-label Sa uses js's supplied title before the
+  // server/tool label, with the same whitespace and 80-character boundary.
+  if (/^mcp__.+__js$/i.test(record.name) && typeof record.args.title === "string") {
+    const title = record.args.title.trim().replace(/\s+/g, " ");
+    if (title) return title.length <= 80 ? title : `${title.slice(0, 79).trimEnd()}…`;
+  }
   const running = isToolCallExecuting(record);
   if (record.name.startsWith("mcp__") && record.displayHint) return record.displayHint;
   const operation = readableToolLabel(record.name, running);

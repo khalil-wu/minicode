@@ -27,3 +27,11 @@ Root 随后显式提供同一个 installed Source，补跑此前因未指定 Sou
 `ee80a807` 的 Windows harness 发现原 SDK 用例退出失败：该 CI 没有 native sandbox account state，Node 启动被真实拒绝；执行器已关闭 job、runner、网络并释放记录，却因没有 watcher 一直保留 `closed=false`。本批修正实际执行器终态：只有原资源清理全部 ACK、无错误且无 watcher 时发布 `process/closed`；保留原启动失败、`accepted=false` 和未知 exit code。没有配置账号、绕过沙箱或在 Node 外层吞错。
 
 `rejected-start-close.xml` 的当前聚焦回归 **46 passed / 1 native skip**，覆盖 missing executable、observer 拒绝、已真实 spawn 后 readiness 拒绝的 pipe/PTY、清理未 ACK 阴性、Windows 缺账号的真实 Node owner 拒绝及原 SDK CI 用例。该修复不追写成 `ee80a807` 已通过；原 CI 失败和过期 r10 候选保留，后续包从新源码重建。
+
+## Node 22 活跃重置与过程标题
+
+同一次 Linux CI 还暴露 Node `22.23.3` 的 `InternalCallbackScope::Close` 原生 abort。本机使用官方便携版同版本，复现了相同断言；原生崩溃与 timeout 分开记录。定位为 Inspector 中断旧 ALS async-hooks 后端的微任务回调后，async ID 栈未展开。正式实现保留 ALS 和原 Inspector terminate/ACK/Worker-close 顺序：Node 22 使用其实际存在的 `--experimental-async-context-frame`，Node 24 已默认启用该机制且移除了该参数，因此通过官方 `allowedNodeEnvironmentFlags` 决定是否传入。没有按失败重试、移除请求归属或降级执行。
+
+官方 Node 22 源码、下载 SHA、诊断变体和正式修复分开保存在 `output/node-runtime-followup-20261016/NODE22-RESET.md`。`node22-after.xml` **20 passed / 1 native skip**；`node24-regressions.xml` **53 passed / 1 native skip**。实际 Node 22.23.3、系统 24.5.0、Electron 24.18.1 均核实 Frame 已启用，并覆盖 active reset、timeout/cancel 和晚输出的原 request metadata。两批有重叠，不相加；Windows 实测不替代修复后的 Linux CI。
+
+桌面参考 `mcp-tool-activity-label` 的 `Sa` 会优先使用 `js` 参数中的 `title`，清除首尾空白、合并空白并限制 80 个字符。MiniCode 此前总先显示 `server.js`，现在主/子过程和工具详情共用该标题合同，其余工具保持实际身份，原参数和输出仍保留。实际 DOM 与相关四文件 **80/80**，含六项新增标题边界；Source SHA、函数原文和范围限制见同目录 `js-title-evidence.json`。这不是新一轮真实 Node→Electron WS 实机验收。

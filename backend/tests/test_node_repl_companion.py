@@ -57,7 +57,7 @@ def body(result):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["system", "desktop-bundled"])
-async def test_real_node_mcp_catalog_persistent_redeclaration_imports_and_metadata(tmp_path, monkeypatch, runtime):
+async def test_real_node_mcp_catalog_persistent_redeclaration_imports_and_metadata(tmp_path, monkeypatch, runtime, request):
     if runtime == "desktop-bundled":
         binary = Path(__file__).resolve().parents[2] / "desktop/node_modules/electron/dist/electron.exe"
         if not binary.is_file():
@@ -83,6 +83,10 @@ async def test_real_node_mcp_catalog_persistent_redeclaration_imports_and_metada
         assert body(await fixture.client.call_tool("js", {"code": "nodeRepl.write(answer)"})) == "42"
         ordinary = await fixture.client.call_tool("js", {"code": "const pkg=await import('ordinary-node-package');nodeRepl.write(pkg.version)"})
         assert not ordinary.is_error and body(ordinary).startswith("v"), body(ordinary)
+        frame = await fixture.client.call_tool("js", {"code": "const mod=await import('node:module');nodeRepl.write(mod.createRequire(nodeRepl.cwd+'/frame.cjs')('internal/async_context_frame').enabled)"})
+        assert not frame.is_error and body(frame) == "true", body(frame)
+        request.node.user_properties.append(("actual_node_context_backend", json.dumps({"executable":fixture.config.command,
+            "version":body(ordinary),"async_context_frame_enabled":True})))
         installed_modules = Path(__file__).resolve().parents[2] / "desktop/language-services/node_modules"
         added = await fixture.client.call_tool("js_add_node_module_dir", {"path": str(installed_modules)})
         assert not added.is_error
@@ -133,7 +137,7 @@ async def test_modules_survive_reset_while_bindings_are_cleared(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["system", "desktop-bundled"])
-async def test_timeout_and_cancel_really_reset_worker_and_next_execution_works(tmp_path, monkeypatch, runtime):
+async def test_timeout_and_cancel_really_reset_worker_and_next_execution_works(tmp_path, monkeypatch, runtime, request):
     if runtime == "desktop-bundled":
         binary = Path(__file__).resolve().parents[2] / "desktop/node_modules/electron/dist/electron.exe"
         if not binary.is_file():
@@ -155,11 +159,12 @@ async def test_timeout_and_cancel_really_reset_worker_and_next_execution_works(t
         # finish instead of waiting for an abandoned async evaluation.
         observed = await asyncio.wait_for(fixture.client.call_tool("js", {"code": "nodeRepl.write(typeof pending)"}), 3)
         assert not observed.is_error and body(observed) == "undefined", body(observed)
+        request.node.user_properties.append(("actual_timeout_cancel", fixture.config.command))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["system", "desktop-bundled"])
-async def test_explicit_reset_interrupts_active_code_and_does_not_run_stale_queue(tmp_path, monkeypatch, runtime):
+async def test_explicit_reset_interrupts_active_code_and_does_not_run_stale_queue(tmp_path, monkeypatch, runtime, request):
     if runtime == "desktop-bundled":
         binary = Path(__file__).resolve().parents[2] / "desktop/node_modules/electron/dist/electron.exe"
         if not binary.is_file():
@@ -184,10 +189,17 @@ async def test_explicit_reset_interrupts_active_code_and_does_not_run_stale_queu
         assert not (tmp_path / "stale-queue").exists()
         current = await following
         assert not current.is_error and body(current) == "undefined", body(current)
+        request.node.user_properties.append(("actual_import_cpu_double_reset", fixture.config.command))
 
 
 @pytest.mark.asyncio
-async def test_delayed_outputs_keep_original_request_and_do_not_kill_the_kernel(tmp_path, caplog, request):
+@pytest.mark.parametrize("runtime", ["system", "desktop-bundled"])
+async def test_delayed_outputs_keep_original_request_and_do_not_kill_the_kernel(tmp_path, caplog, request, monkeypatch, runtime):
+    if runtime == "desktop-bundled":
+        binary = Path(__file__).resolve().parents[2] / "desktop/node_modules/electron/dist/electron.exe"
+        if not binary.is_file():
+            pytest.skip("desktop-bundled Node binary is unavailable on this host")
+        monkeypatch.setenv("MINICODE_EDITOR_NODE", str(binary))
     caplog.set_level("INFO", logger="backend.mcp.client")
     async with companion(tmp_path) as fixture:
         first = await fixture.client.call_tool("js", {"code": "const retained=8;setTimeout(()=>console.log('LATE='+nodeRepl.requestMeta.owner),30);nodeRepl.write('FIRST')"}, request_meta={"owner": "first"})
@@ -205,6 +217,7 @@ async def test_delayed_outputs_keep_original_request_and_do_not_kill_the_kernel(
         assert late["requestId"] != idle["requestId"]
         assert late["requestMeta"] == {"owner": "first"} and idle["requestMeta"] == {"owner": "second"}
         request.node.user_properties.append(("actual_late_output_notifications", json.dumps(notifications)))
+        request.node.user_properties.append(("actual_late_output_executable", fixture.config.command))
 
 
 @pytest.mark.asyncio
