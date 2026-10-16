@@ -11,6 +11,9 @@ import { flushEditorDrafts } from "../stores/editor-drafts";
 import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, loadPersistedEditorTabs, persistEditorTabs } from "../stores/shared-helpers";
 import { EditorPanel } from "./EditorPanel";
 import type { CodeSelectionRange } from "../stores/types";
+import { defineMiniCodeMonacoTheme } from "./monacoTheme";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { installAppThemeTokens } from "../../test/app-theme-tokens";
 
 const editorMocks = vi.hoisted(() => ({
   actions: [] as Array<{ id: string; run: (editor: unknown) => void }>,
@@ -286,6 +289,32 @@ describe("EditorPanel", () => {
     expect(editor.value).toBe("before INSERT after");
     expect(editorMocks.editOperations).toEqual(["stop", "chat-code-insert", "stop"]);
     expect(event.detail.handled).toBe(true);
+  });
+
+  it("updates the mounted Monaco palette in the same mode without replacing or saving its dirty model", async () => {
+    const removeTokens = installAppThemeTokens();
+    useAppStore.setState({ appearanceColors: emptyAppearanceColors() });
+    useAppStore.getState().setThemeMode("light");
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "theme.ts", content: "original", content_hash: "original" });
+    try {
+      useAppStore.getState().openEditorFile("theme.ts", "theme.ts", { exact: true });
+      render(<EditorPanel />);
+      const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+      fireEvent.change(editor, { target: { value: "unsaved source" } });
+      editor.setSelectionRange(2, 5); fireEvent.select(editor);
+      vi.mocked(defineMiniCodeMonacoTheme).mockClear();
+      act(() => useAppStore.getState().setAppearanceColor("light", "surface", "#e7eef4"));
+      expect(defineMiniCodeMonacoTheme).toHaveBeenCalledWith(expect.anything(), "light");
+      expect(screen.getByTestId("monaco-editor")).toBe(editor);
+      expect(editor.value).toBe("unsaved source");
+      expect([editor.selectionStart, editor.selectionEnd]).toEqual([2, 5]);
+      expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "unsaved source", original: "original" });
+      expect(compareWriteWorkspaceFile).not.toHaveBeenCalled();
+    } finally {
+      cleanup(); applyAppearanceColors("light", emptyAppearanceColors());
+      useAppStore.setState({ appearanceColors: emptyAppearanceColors() });
+      removeTokens();
+    }
   });
 
   it("recovers unsaved text and native reading position after an editor and workspace-cache restart", async () => {

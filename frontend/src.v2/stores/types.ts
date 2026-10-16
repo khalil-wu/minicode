@@ -9,6 +9,7 @@ import type {
 } from "../protocol/streaming-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import type { ShortcutActionId, ShortcutBindings } from "../lib/keyboard-shortcuts";
+import type { AppearanceColorRole, AppearanceColors, AppearanceVariant } from "../lib/appearance-colors";
 import type {
   PreviewLaunchConfigInfo,
   PreviewLaunchProcessInfo,
@@ -397,6 +398,7 @@ export interface UISlice {
   setContextCardCollapsed: (collapsed: boolean) => void;
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
+  appearanceColors: AppearanceColors;
   textScale: number;
   codeTextScale: number;
   reducedMotion: boolean;
@@ -458,6 +460,7 @@ export interface UISlice {
   liveArtifactsOpen: boolean;
   agentEditorOpen: boolean;
   setThemeMode: (m: ThemeMode) => void;
+  setAppearanceColor: (variant: AppearanceVariant, role: AppearanceColorRole, value: string) => void;
   setTextScale: (s: number) => void;
   setCodeTextScale: (s: number) => void;
   setReducedMotion: (reduced: boolean) => void;

@@ -3,6 +3,7 @@ import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { KeyboardEvent } from "react";
 import { EditorPreferencesSettings } from "./EditorPreferencesSettings";
+import { AppearanceColors } from "./AppearanceColors";
 
 const onRadioGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
   if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -63,6 +64,7 @@ export const AppearanceTab = () => {
           ))}
         </div>
         </div></div>
+        <AppearanceColors />
       </section>
 
       <EditorPreferencesSettings><section className="settings-group">

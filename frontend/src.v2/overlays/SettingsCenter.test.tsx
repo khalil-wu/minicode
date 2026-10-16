@@ -8,6 +8,11 @@ import type { LLMSettingsPayload } from "./settingsShared";
 import { ProviderTab } from "./ProviderTab";
 import { SettingsCenter } from "./SettingsCenter";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
+import { installAppThemeTokens } from "../../test/app-theme-tokens";
+
+let removeThemeTokens: () => void;
+beforeEach(() => { removeThemeTokens = installAppThemeTokens(); });
+afterEach(() => removeThemeTokens());
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 vi.hoisted(() => {

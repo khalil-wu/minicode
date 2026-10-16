@@ -12,9 +12,13 @@ import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 import { AppearanceTab } from "./AppearanceTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { KeyboardShortcutsHelp } from "./KeyboardShortcutsHelp";
+import { installAppThemeTokens } from "../../test/app-theme-tokens";
+
+let removeThemeTokens: () => void;
 
 function RuntimeShortcuts() { useKeyboardShortcuts(); return null; }
 beforeEach(() => {
+  removeThemeTokens = installAppThemeTokens();
   localStorage.clear();
   useAppStore.setState({ themeMode: "dark", textScale: 1, codeTextScale: 1, reducedMotion: false,
     workbenchPreferences: { ...defaultWorkbenchPreferences },
@@ -22,7 +26,7 @@ beforeEach(() => {
     shortcutsHelpOpen: false, commandPaletteOpen: false, quickOpenVisible: false, skillsMarketplaceOpen: false,
     liveArtifactsOpen: false, agentEditorOpen: false, sendShortcut: "enter" });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); removeThemeTokens(); });
 
 it("persists keyboard-selected theme and exact numeric sizes without font-style controls", () => {
   render(<AppearanceTab />);

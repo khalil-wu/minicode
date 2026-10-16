@@ -2137,5 +2137,12 @@
   "移出项目": "Remove from project",
   "允许 {v0} 运行此命令？": "Do you want {v0} to run this command?",
   "允许类似命令": "Allow similar commands",
-  "允许在此对话中使用以 {command} 开头的命令": "Allow commands that start with {command} for this conversation"
+  "允许在此对话中使用以 {command} 开头的命令": "Allow commands that start with {command} for this conversation",
+  "强调色": "Accent",
+  "背景": "Background",
+  "前景": "Foreground",
+  "{variant}强调色": "{variant} accent color",
+  "{variant}背景颜色": "{variant} background color",
+  "{variant}前景颜色": "{variant} foreground color",
+  "选择{color}": "Choose {color}"
 }

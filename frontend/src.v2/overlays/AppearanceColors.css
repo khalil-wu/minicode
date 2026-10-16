@@ -1,0 +1,49 @@
+.settings-card.settings-appearance-colors { margin-top: 16px; }
+.settings-card.settings-appearance-colors .settings-row { min-height: 44px; padding-top: 8px; padding-bottom: 8px; }
+.appearance-color-control {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  box-sizing: border-box;
+  width: max(96px, 8em);
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-primary);
+}
+.appearance-color-control:focus-within { box-shadow: 0 0 0 2px var(--accent-soft); }
+.appearance-color-control > .appearance-color-swatch {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.appearance-color-control > input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+.appearance-color-popover {
+  position: fixed;
+  z-index: var(--z-context-menu);
+  box-sizing: border-box;
+  width: 162px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-panel);
+}
+.appearance-color-popover .react-colorful { width: 136px; height: 136px; }

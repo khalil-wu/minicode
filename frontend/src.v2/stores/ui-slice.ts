@@ -22,6 +22,7 @@ import {
   writeLS,
   readLS,
   initialTheme,
+  initialAppearanceColors,
   initialResolvedTheme,
   initialTextScale,
   initialCodeTextScale,
@@ -41,6 +42,7 @@ import {
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
+import { applyAppearanceColors, effectiveAppearanceColors } from "../lib/appearance-colors";
 import { clamp } from "../lib/clamp";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
@@ -263,6 +265,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setContextCardCollapsed: (collapsed) => set({ contextCardCollapsed: collapsed }),
   themeMode: initialTheme(),
   resolvedTheme: initialResolvedTheme(),
+  appearanceColors: initialAppearanceColors(),
   textScale: initialTextScale(),
   codeTextScale: initialCodeTextScale(),
   reducedMotion: initialReducedMotion(),
@@ -337,6 +340,13 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     writeLS(LS.theme, mode);
     const resolvedTheme = applyTheme(mode);
     set({ themeMode: mode, resolvedTheme });
+  },
+  setAppearanceColor: (variant, role, value) => {
+    const appearanceColors = { ...get().appearanceColors,
+      [variant]: { ...(get().appearanceColors[variant] ?? effectiveAppearanceColors()), [role]: value } };
+    writeLS(LS.appearanceColors, JSON.stringify(appearanceColors));
+    applyAppearanceColors(get().resolvedTheme, appearanceColors);
+    set({ appearanceColors });
   },
   setTextScale: (s) => {
     const v = clampTextScale(s);

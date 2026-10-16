@@ -7,6 +7,7 @@ import { TokenMetadata } from "monaco-editor/editor/common/encodedTokenAttribute
 import { StandaloneServices } from "monaco-editor/editor/standalone/browser/standaloneServices.js";
 import { IStandaloneThemeService } from "monaco-editor/editor/standalone/common/standaloneTheme.js";
 import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "./monacoTheme";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
 
 vi.hoisted(() => {
   Object.defineProperty(document, "queryCommandSupported", { configurable: true, value: () => false });
@@ -94,5 +95,22 @@ describe("MiniCode native code syntax", () => {
     } finally {
       model.dispose();
     }
+  });
+
+  it("redefines the already active Monaco theme from current chrome colors without changing its model", () => {
+    applyThemeTokens("dark");
+    defineMiniCodeMonacoTheme(Monaco, "dark");
+    Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+    const model = Monaco.editor.createModel("unsaved source", "plaintext", Monaco.Uri.parse("inmemory://appearance/model.txt"));
+    try {
+      applyAppearanceColors("dark", { light: null, dark: { surface: "#101010", ink: "#d0d0d0", accent: "#2468ac" } });
+      defineMiniCodeMonacoTheme(Monaco, "dark");
+      const theme = StandaloneServices.get(IStandaloneThemeService).getColorTheme();
+      const background = theme.getColor("editor.background")!.rgba;
+      expect([background.r, background.g, background.b, background.a]).toEqual([29, 29, 29, 1]);
+      expect(theme.getColor("editor.foreground")!.toString()).toBe("#d0d0d0");
+      expect(model.getValue()).toBe("unsaved source");
+      expect(model.getLanguageId()).toBe("plaintext");
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
   });
 });

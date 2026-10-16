@@ -420,6 +420,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const editorExplorerOpen = useAppStore((s) => s.editorExplorerOpen);
   const setEditorExplorerOpen = useAppStore((s) => s.setEditorExplorerOpen);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
+  const appearanceColors = useAppStore((s) => s.appearanceColors);
   const codeTextScale = useAppStore((s) => s.codeTextScale);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const predictionUsage = useAppStore((s) => s.inlineCompletionUsage);
@@ -560,7 +561,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   useLayoutEffect(() => {
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, resolvedTheme);
-  }, [resolvedTheme]);
+  }, [resolvedTheme, appearanceColors]);
   useEffect(() => () => monacoOpenerRef.current?.dispose(), []);
   useLayoutEffect(() => {
     for (const tab of tabs) {
