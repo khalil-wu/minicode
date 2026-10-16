@@ -87,6 +87,7 @@ class AgentSession:
     owns_guardian_host: bool = True
     thread_environments: ThreadEnvironments | None = None
     owns_thread_environments: bool = False
+    node_repl_companions: Any | None = None
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
     _command_shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -104,11 +105,13 @@ class AgentSession:
             if self._command_shutdown_task.done():
                 self._command_shutdown_task.result()
             return
-        if self._owned_commands is not None or self.owns_thread_environments:
+        if self._owned_commands is not None or self.owns_thread_environments or self.node_repl_companions is not None:
             borrowers = {task for task in self.lifecycle_cleanup_tasks if not task.done()}
             if not borrowers:
                 if self._owned_commands is not None:
                     await self._owned_commands.shutdown()
+                if self.node_repl_companions is not None:
+                    await self.node_repl_companions.aclose()
                 if self.owns_thread_environments and self.thread_environments is not None:
                     await self.thread_environments.aclose()
                 return
@@ -124,6 +127,8 @@ class AgentSession:
                         continue
                 if self._owned_commands is not None:
                     await self._owned_commands.shutdown()
+                if self.node_repl_companions is not None:
+                    await self.node_repl_companions.aclose()
                 if self.owns_thread_environments and self.thread_environments is not None:
                     await self.thread_environments.aclose()
 

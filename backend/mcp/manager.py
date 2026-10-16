@@ -527,6 +527,7 @@ class MCPServerManager:
         self._pending_tool_refreshes: dict[str, MCPClient] = {}
         self._cleanup_reaper_tasks: dict[str, asyncio.Task[Any]] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
+        self._node_companion_views: dict[str, Any] = {}
         self._reload_lock = asyncio.Lock()
         # OAuth tokens for HTTP MCP servers, persisted alongside the MCP config.
         from backend.mcp.oauth import TokenStore
@@ -1311,6 +1312,14 @@ class MCPServerManager:
         _record_operation_failure(state, "credential_store", exc, retryable=True)
         await self._notify_status(name, ServerStatus.ERROR)
 
+    async def _close_client_owner(self, name: str, client: MCPClient) -> bool:
+        view = self._node_companion_views.get(name)
+        if view is not None and view.client is client:
+            closed = await view.aclose()
+            self._node_companion_views.pop(name)
+            return closed
+        return await client.close()
+
     async def stop_server(self, name: str) -> bool:
         state = self._servers.get(name)
         if state is None:
@@ -1330,7 +1339,7 @@ class MCPServerManager:
             client = state.client
             if client is not None:
                 try:
-                    closed = await client.close()
+                    closed = await self._close_client_owner(name, client)
                 except Exception as exc:
                     state.status = ServerStatus.ERROR
                     state.tools = []
@@ -1631,7 +1640,7 @@ class MCPServerManager:
                 stale_client = state.client
                 if stale_client is not None:
                     try:
-                        closed = await stale_client.close()
+                        closed = await self._close_client_owner(name, stale_client)
                     except Exception as exc:
                         state.client = stale_client
                         state.status = ServerStatus.ERROR
@@ -1751,7 +1760,7 @@ class MCPServerManager:
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
         except asyncio.CancelledError:
-            closed = await client.close()
+            closed = await self._close_client_owner(name, client)
             state.client = None if closed else client
             state.tools = []
             state.status = ServerStatus.OFFLINE if closed else ServerStatus.ERROR
@@ -1765,7 +1774,7 @@ class MCPServerManager:
             cleanup_pending = False
             if client is not None:
                 try:
-                    cleanup_pending = not await client.close()
+                    cleanup_pending = not await self._close_client_owner(name, client)
                 except Exception as close_exc:
                     cleanup_error = close_exc
             state.client = client if cleanup_pending or cleanup_error is not None else None
@@ -1819,7 +1828,7 @@ class MCPServerManager:
         if state.client is not None and (connection_changed or not state.client.connected):
             stale_client = state.client
             try:
-                closed = await stale_client.close()
+                closed = await self._close_client_owner(config.name, stale_client)
             except Exception as exc:
                 _record_operation_failure(state, "cleanup", exc, retryable=True)
                 raise RuntimeError(
@@ -1898,6 +1907,14 @@ class MCPServerManager:
 
         async def on_tools_changed(_: str) -> None:
             self._schedule_tool_refresh(config.name, client)
+
+        from backend.mcp.node_repl import SOURCE_PREFIX
+
+        if config.source.startswith(SOURCE_PREFIX):
+            client, view = self.environment_runtime.node_repl_companions.client_for(config,
+                on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
+            self._node_companion_views[config.name] = view
+            return client
 
         client = MCPClient(
             server_name=config.name,

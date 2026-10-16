@@ -59,6 +59,7 @@ class MCPEnvironmentRuntime:
         self.snapshot = turn_environments.clone() if turn_environments is not None else None
         self.local_cwd = local_cwd
         self.borrowed = {}
+        self.node_repl_companions = None
         self._app_borrowers = 0
         self._app_close_requested = False
         self._close_lock = asyncio.Lock()

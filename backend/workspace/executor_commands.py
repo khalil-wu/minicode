@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import json
 from pathlib import Path
 import shlex
@@ -38,7 +37,7 @@ async def workbench_policy(service, *, timeout, env=None, shell_policy=None, per
         run.network_step = await prepare_environment_network_step(environment_manager=run.environment_manager,
             snapshot=run.turn_environments, config_stack=stack, exec_policy_sources=owner.sources)
     attachment = service.context.turn_environment
-    scope = replace(permission_scope or service.scope, cwd_uri=service.cwd.uri)
+    scope = permission_scope or service.scope
     network = run.network_step.policy_for(attachment) if run.network_step is not None else None
     return EnvironmentCommandPolicy(scope, attachment, shell_policy or service.config.shell_environment_policy, env or {}, timeout,
         service.context.permission.allow_unsandboxed_commands,
@@ -59,9 +58,10 @@ async def run_workbench_command(service, argv, *, timeout=120, env=None, stream_
             temporary_root = service.resolve(programs["__temp__"])
             message_file = temporary_root.joinpath(f"minicode-git-message-{uuid4().hex}.txt")
             write_finished = asyncio.Event()
+            input_sandbox = policy.scope.sandbox_context()
             async def write_message_file():
                 try:
-                    await service.filesystem.write_file(message_file.uri, input_text.encode("utf-8"), sandbox=service.sandbox)
+                    await service.filesystem.write_file(message_file.uri, input_text.encode("utf-8"), sandbox=input_sandbox)
                 finally:
                     write_finished.set()
             write_task = asyncio.create_task(write_message_file(), name="executor-git-message-write")
@@ -70,7 +70,7 @@ async def run_workbench_command(service, argv, *, timeout=120, env=None, stream_
                 if not write_task.cancelled() and isinstance(write_task.exception(), (ExecutorClosed, ExecutorDisconnected)):
                     raise ExecutorProtocolError(f"Target message-file write is unconfirmed: {message_file.uri}") from write_task.exception()
                 if await service.metadata(message_file) is not None:
-                    await service.remove(message_file)
+                    await service.filesystem.remove(message_file.uri, sandbox=input_sandbox)
             await runner.add_cleanup_callback(remove_message_file)
             await asyncio.shield(write_task)
             argv.append(message_file.native)
@@ -146,7 +146,9 @@ async def target_programs(service):
     else:
         raise HTTPException(503, f"Target tool discovery requires a POSIX or PowerShell shell; received {shell['name']}")
     argv = executor_shell_argv(service.context.turn_environment, script, login=False)
-    result = await service.run(argv)
+    from backend.workspace.executor_git import executor_git_action_scope
+
+    result = await service.run(argv, permission_scope=executor_git_action_scope(service.scope))
     if result.returncode:
         raise HTTPException(503, result.stderr.decode("utf-8", errors="replace").strip())
     if shell["name"] == "powershell":

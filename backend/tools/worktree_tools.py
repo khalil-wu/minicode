@@ -420,9 +420,11 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
 
         def git_runner(argv, *, cwd, env, check, index_file=None, text=False, encoding="utf-8", **options):
             policy = captured_policy
+            worktree_write_paths = ()
             if argv[1:3] in (["worktree", "add"], ["worktree", "remove"]):
                 target_index = 5 if argv[3] == "-b" else 4 if argv[3] in {"--detach", "--force"} else 3
                 target = Path(argv[target_index]).resolve()
+                worktree_write_paths = (target.parent,)
                 # A fixed Git operation addresses the tool's owned path (or
                 # a repository-validated restore record). Reopen only the
                 # default metadata mask where this captured policy already
@@ -452,6 +454,7 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
             operation = asyncio.run_coroutine_threadsafe(_run_git(
                 argv, root=workspace, cwd=launch_cwd, context=context,
                 sandbox_policy=policy, write_git_metadata=not read_only,
+                worktree_write_paths=worktree_write_paths,
                 timeout=options["timeout"],
                 index_file=index_file,
             ), loop)
@@ -514,6 +517,10 @@ class SnapshotWorktreeTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, args, context)
         manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
@@ -588,6 +595,11 @@ class RestoreWorktreeTool(BaseTool):
         if not snapshot_id:
             return self._error_result("缺少 snapshot_id 参数")
 
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, {**args, "snapshot_id": snapshot_id}, context)
+
         manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
@@ -646,6 +658,10 @@ class ListWorktreeSnapshotsTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, args, context)
         manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")

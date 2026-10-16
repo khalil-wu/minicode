@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from backend.workspace.executor_commands import require_workspace_registration, run_workbench_command, target_programs
 from backend.workspace.executor_git import executor_git_environment, executor_git_write_scope, run_executor_git
 from backend.workspace.executor_service import executor_registration_id
+from backend.sandbox.policy import SandboxEnforcement
 
 
 async def _git(service, *args, allow_failure=False):
@@ -77,6 +78,8 @@ async def executor_delivery_action(service, request):
     if request.expected_branch != status["branch"]:
         raise HTTPException(409, "当前分支已经变化，请刷新后再操作。")
     scope = await executor_git_write_scope(service)
+    if scope.permission_profile.enforcement is SandboxEnforcement.MANAGED:
+        programs = {**programs, "__temp__": service.resolve(scope.cwd_uri).native}
     input_text = None
     if request.action == "branch":
         await _git(service, "check-ref-format", "--branch", request.branch)

@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import replace
 import json
 import os
+import re
 
 import pytest
 
@@ -437,6 +438,8 @@ async def test_retargeted_workspace_write_can_commit_only_registered_git_metadat
                             assert not service.scope.resolve_access(source.cwd.joinpath("tracked.txt").uri).can_write
                             record_testsuite_property("retarget_commit_original_wire", json.dumps(service.sandbox))
                             assert "git" in await target_programs(service)
+                            seeded = await service.run(["git", "--version"])
+                            assert seeded.returncode == 0, seeded.stderr
                             await service.write_bytes("tracked.txt", b"confirmed linked change\n")
                             staged = await run_executor_git(service, ["git", "add", "tracked.txt"], write_metadata=True)
                             assert staged.returncode == 0, staged.stderr
@@ -446,6 +449,12 @@ async def test_retargeted_workspace_write_can_commit_only_registered_git_metadat
                             granted = await executor_git_write_scope(service)
                             assert granted.resolve_access(source.cwd.joinpath(".git/config").uri).can_write
                             assert not granted.resolve_access(source.cwd.joinpath("tracked.txt").uri).can_write
+                            assert not granted.resolve_access(linked.uri).can_write
+                            assert service.resolve(granted.cwd_uri) == source.cwd.joinpath(".git")
+                            record_testsuite_property("retarget_commit_metadata_wire", json.dumps(granted.sandbox_context()))
+                            await executor_delivery_action(service, GitDeliveryRequest(action="branch", branch="owned-confirm-branch",
+                                expected_branch="owned", expected_registration_id=executor_registration_id(bound)))
+                            assert await _git(service, "branch", "--show-current") == "owned-confirm-branch"
                             backlink = server.host.workspace / ".git/worktrees/owned/gitdir"
                             before = backlink.read_bytes()
                             try:
@@ -465,8 +474,10 @@ async def test_retargeted_workspace_write_can_commit_only_registered_git_metadat
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
 @pytest.mark.asyncio
 async def test_gui_worktree_action_temporarily_writes_only_its_validated_directory_pool(editor_server, record_testsuite_property):
+    from backend.environments.errors import ExecutorRpcError
     from backend.sandbox.policy import FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile
     from backend.workspace.executor_commands import target_programs
+    from backend.workspace.executor_git import executor_git_action_scope
     from backend.workspace.executor_worktree import _action_parent, _inventory
 
     server = editor_server
@@ -501,6 +512,73 @@ async def test_gui_worktree_action_temporarily_writes_only_its_validated_directo
                     FileSystemSandboxPolicy.restricted((*entries,
                         FileSystemSandboxEntry(FileSystemPath("path", denied.uri), FileSystemAccessMode.DENY)))))
                 service.sandbox = service.scope.sandbox_context()
-                granted = await _action_parent(service, inventory, pool)
-                assert granted.scope.resolve_access(denied.uri) is FileSystemAccessMode.DENY
+                granted = executor_git_action_scope(service.scope, write_paths=(pool,), policy_cwd=pool)
+                assert granted.resolve_access(denied.uri) is FileSystemAccessMode.DENY
                 assert service.scope.resolve_access(linked.uri) is FileSystemAccessMode.READ
+                if service.scope.platform_os == "windows":
+                    with pytest.raises(ExecutorRpcError, match="windows unelevated restricted-token sandbox cannot enforce deny-read restrictions directly; refusing to run unsandboxed") as rejected:
+                        await _action_parent(service, inventory, pool)
+                    record_testsuite_property("gui_deny_read_source_rejection", str(rejected.value))
+                else:
+                    actual = await _action_parent(service, inventory, pool)
+                    assert actual.scope.resolve_access(denied.uri) is FileSystemAccessMode.DENY
+                assert await source.read_bytes(linked.joinpath("tracked.txt")) == b"workspace-write recovery\n"
+                assert await source.metadata(denied) is None
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.asyncio
+async def test_model_worktree_tools_share_executor_refs_index_owner_and_raw_restore(executor_host, monkeypatch):
+    from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment
+    from backend.sandbox.policy import FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile
+    from backend.tools.worktree_tools import CreateWorktreeTool, ListWorktreeSnapshotsTool, RemoveWorktreeTool, RestoreWorktreeTool, SnapshotWorktreeTool
+    from backend.workspace.worktree import WorktreeManager
+
+    host = executor_host
+    bound = bind_tool_execution_environment(host.context, host.environments.primary())
+    try:
+        async with ExecutorEditorService(bound, application_config=host.context.model_execution.config) as source:
+            linked = await _prepare(None, source)
+            profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted((
+                FileSystemSandboxEntry(FileSystemPath("special", FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+                FileSystemSandboxEntry(FileSystemPath("path", source.cwd.uri), FileSystemAccessMode.WRITE),
+                FileSystemSandboxEntry(FileSystemPath("path", source.cwd.joinpath(".git").uri), FileSystemAccessMode.READ),
+                FileSystemSandboxEntry(FileSystemPath("path", linked.parent.uri), FileSystemAccessMode.WRITE))))
+            scope = replace(source.scope, permission_profile=profile)
+            context = replace(bound, permission=replace(bound.permission, mode="confirm", sandbox_mode="workspace-write", environment_scope=scope))
+            target = linked.parent.joinpath("模型")
+            created = await CreateWorktreeTool().execute({"path": "模型", "branch": "model-owned", "new_branch": True}, context)
+            assert not created.is_error, created.content
+            await source.write_bytes(target.joinpath("tracked.txt"), b"selected staging\n")
+            await _git(source, "add", "tracked.txt", cwd=target)
+            gitdir = source.resolve(await _git(source, "rev-parse", "--path-format=absolute", "--git-dir", cwd=target))
+            original_index = await source.read_bytes(gitdir.joinpath("index"))
+            working = {"tracked.txt": b"raw LF working\n", "untracked.txt": b"raw binary\x00\xff", "ignored.txt": b"ignored raw CRLF\r\n"}
+            for name, contents in working.items():
+                await source.write_bytes(target.joinpath(name), contents)
+
+            def no_legacy_snapshot(*args, **kwargs):
+                pytest.fail("Executor worktree snapshots reached the controller TEMP/JSON store")
+
+            for name in ("snapshot_worktree", "restore_snapshot", "list_snapshots"):
+                monkeypatch.setattr(WorktreeManager, name, no_legacy_snapshot)
+            saved = await SnapshotWorktreeTool().execute({"path": target.uri, "label": "模型原始字节"}, context)
+            assert not saved.is_error, saved.content
+            snapshot_id = re.search(r"wtsnap_[a-f0-9]{32}", saved.content).group()
+            assert await source.read_bytes(gitdir.joinpath("index")) == original_index
+            listed = await ListWorktreeSnapshotsTool().execute({}, context)
+            assert not listed.is_error and snapshot_id in listed.content and "模型原始字节" in listed.content, listed.content
+            gui_records = await executor_worktree_action(source, "snapshots")
+            assert next(record for record in gui_records["snapshots"] if record["id"] == snapshot_id)["label"] == "模型原始字节"
+            removed = await RemoveWorktreeTool().execute({"path": target.native, "force": True}, context)
+            assert not removed.is_error, removed.content
+            assert await source.metadata(target) is None
+            restored = await RestoreWorktreeTool().execute({"snapshot_id": snapshot_id}, context)
+            assert not restored.is_error, restored.content
+            for name, contents in working.items():
+                assert await source.read_bytes(target.joinpath(name)) == contents
+            assert not [item for item in await source.list_directory(source.cwd.joinpath(".git"))
+                if item["fileName"].startswith("minicode-wt-index-")]
+            assert scope.resolve_access(source.cwd.joinpath(".git/config").uri) is FileSystemAccessMode.READ
+    finally:
+        await close_tool_execution_environment(bound)

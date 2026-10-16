@@ -12,11 +12,10 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from backend.workspace.executor_commands import run_workbench_command, target_programs, workbench_policy
-from backend.workspace.executor_git import executor_git_environment, executor_git_write_scope, run_executor_git, registered_worktree_metadata
+from backend.workspace.executor_git import executor_git_environment, executor_git_write_scope, run_executor_git, registered_worktree_metadata, executor_git_action_scope
 from backend.workspace.executor_paths import ExecutorPath
 from backend.terminal.executor_runner import ExecutorCommandRunner
-from backend.environments.errors import ExecutorProtocolError
-from backend.sandbox.policy import AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath, FileSystemPermissions, FileSystemSandboxEntry
+from backend.environments.errors import ExecutorError, ExecutorProtocolError
 
 
 _REFS = "refs/minicode/wt-snapshots/"
@@ -40,9 +39,9 @@ async def _canonical(service, path, *, write=False):
     return actual
 
 
-async def _git(service, programs, *args, cwd=None, write=False, index=None, env=None, allowed=(0,), runners=None):
+async def _git(service, programs, *args, cwd=None, write=False, index=None, env=None, allowed=(0,), runners=None, write_paths=()):
     policy, overrides = executor_git_environment(service, index_file=index)
-    scope = await executor_git_write_scope(service, cwd=cwd) if write else service.scope
+    scope = await executor_git_write_scope(service, cwd=cwd, write_paths=write_paths) if write else executor_git_action_scope(service.scope)
     command_service = copy(service)
     command_service.cwd = cwd or service.cwd
     stdout = []
@@ -128,8 +127,7 @@ async def _action_parent(service, inventory, parent):
     if not parent.is_relative_to(root):
         raise HTTPException(409, "Worktree action parent is outside the registered isolated directory")
     scoped = copy(service)
-    scoped.scope = service.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions((
-        FileSystemSandboxEntry(FileSystemPath("path", parent.uri), FileSystemAccessMode.WRITE),))))
+    scoped.scope = executor_git_action_scope(service.scope, write_paths=(parent,), policy_cwd=parent)
     scoped.sandbox = scoped.scope.sandbox_context()
     return scoped
 
@@ -170,7 +168,7 @@ async def _snapshot_records(service, programs, inventory):
     return sorted(records, key=lambda item: item["created_at"], reverse=True)
 
 
-async def _snapshot(service, programs, inventory, target, entry):
+async def _snapshot(service, programs, inventory, target, entry, *, label="Before worktree removal"):
     identity = "wtsnap_" + uuid4().hex
     ref = _REFS + identity
     head, code, _ = await _git(service, programs, "rev-parse", "--verify", "--quiet", "HEAD", cwd=target, allowed=(0, 1))
@@ -178,7 +176,7 @@ async def _snapshot(service, programs, inventory, target, entry):
     record = {"id": identity, "conversation_id": service.context.conversation_id,
         "branch": entry.get("branch", "").removeprefix("refs/heads/"), "original_path": target.uri,
         "main_repo_path": inventory.main.uri, "common_git_dir": inventory.common.uri, "head": head,
-        "label": "Before worktree removal", "created_at": datetime.now(UTC).isoformat()}
+        "label": label, "created_at": datetime.now(UTC).isoformat()}
     index = inventory.common.joinpath("minicode-wt-index-" + uuid4().hex)
     runners = []
     index_scope = await executor_git_write_scope(service, cwd=target)
@@ -244,6 +242,19 @@ async def _prune(service, programs, inventory, keep_id):
             await _git(service, programs, "update-ref", "-d", record["snapshot_ref"], record["snapshot_sha"], write=True)
 
 
+async def _snapshot_action(service, programs, path, label):
+    inventory = await _inventory(service, programs)
+    target, entry = await _registered(service, programs, inventory, service.resolve(path or service.cwd.uri))
+    await _isolated(service, inventory, target)
+    async with service.mutate([inventory.common, target]):
+        entries = await _complete_files(service, target)
+        if any((candidate := service.resolve(item["path"])).name == ".git" and candidate.parent != target for item in entries):
+            raise HTTPException(409, "Worktrees containing initialized submodules or embedded Git repositories cannot be snapshotted")
+        record = await _snapshot(service, programs, inventory, target, entry, label=label)
+        await _prune(service, programs, inventory, record["id"])
+        return record
+
+
 async def _remove(service, programs, path, force):
     inventory = await _inventory(service, programs)
     target, entry = await _registered(service, programs, inventory, path)
@@ -262,7 +273,7 @@ async def _remove(service, programs, path, force):
             result.update(snapshot_id=snapshot["id"], snapshot_ref=snapshot["snapshot_ref"])
             await _prune(service, programs, inventory, snapshot["id"])
         _, code, error = await _git(service, programs, "worktree", "remove", *(["--force"] if force else []),
-            "--", target.native, write=True, allowed=(0, 1, 128))
+            "--", target.native, write=True, write_paths=(target.parent,), allowed=(0, 1, 128))
         return {**result, "removed": code == 0, "error": error.strip() if code else None}
 
 
@@ -294,7 +305,7 @@ async def _restore(service, programs, snapshot_id, dest):
         if await service.metadata(target) is not None and await service.list_directory(target):
             raise HTTPException(409, "Restore destination is not empty")
         _, code, error = await _git(service, programs, "-c", "core.symlinks=true", "worktree", "add", "--detach", "--", target.native,
-            record["snapshot_sha"], write=True, allowed=(0, 1, 128))
+            record["snapshot_sha"], write=True, write_paths=(parent,), allowed=(0, 1, 128))
         if code == 0:
             tree, _, _ = await _git(service, programs, "ls-tree", "-r", "-z", record["snapshot_sha"])
             for item in tree.split("\0"):
@@ -331,7 +342,7 @@ async def executor_worktree_action(service, operation, **kwargs):
 
     async def execute():
         async with ExecutorEditorService(service.context, application_config=service.application_config) as captured:
-            if operation in {"remove", "restore"} and not captured.scope.resolve_access(captured.cwd.uri).can_write:
+            if operation in {"remove", "restore", "snapshot"} and not captured.scope.resolve_access(captured.cwd.uri).can_write:
                 raise PermissionError(f"Executor write permission denied: {captured.cwd.uri}")
             programs = await target_programs(captured)
             if operation == "switch":
@@ -340,6 +351,8 @@ async def executor_worktree_action(service, operation, **kwargs):
                 return await _remove(captured, programs, **kwargs)
             if operation == "restore":
                 return await _restore(captured, programs, **kwargs)
+            if operation == "snapshot":
+                return await _snapshot_action(captured, programs, **kwargs)
             inventory = await _inventory(captured, programs)
             records = await _snapshot_records(captured, programs, inventory)
             return {"snapshots": [record for record in records if not kwargs.get("conversation_id")
@@ -361,3 +374,39 @@ async def executor_worktree_action(service, operation, **kwargs):
         except BaseException:
             pass
         raise
+
+
+async def executor_worktree_tool(tool, args, context):
+    """Model snapshots share the workbench's executor refs and byte recovery."""
+    from backend.workspace.executor_editor import ExecutorEditorService
+
+    try:
+        async with ExecutorEditorService(context, application_config=context.model_execution.config) as service:
+            if tool.name == "worktree_snapshot":
+                record = await executor_worktree_action(service, "snapshot", path=args.get("path"), label=str(args.get("label", "")))
+                return tool._success_result(
+                    f"已保存 worktree 快照\n  快照 ID: {record['id']}\n  提交: {record['snapshot_sha'][:8]}\n"
+                    f"  引用: {record['snapshot_ref']}\n  原路径: {record['original_path']}\n"
+                    f"用 worktree_restore(snapshot_id=\"{record['id']}\") 可恢复。")
+            if tool.name == "worktree_restore":
+                result = await executor_worktree_action(service, "restore", snapshot_id=args["snapshot_id"], dest=args.get("dest"))
+                if not result["restored"]:
+                    return tool._error_result(f"恢复失败: {result['error']}")
+                return tool._success_result(f"已从快照 {result['snapshot_id']} 恢复 worktree\n  路径: {result['path']}\n"
+                    "该 worktree 处于 detached HEAD,改动以快照提交的形式存在。")
+            result = await executor_worktree_action(service, "snapshots", conversation_id=args.get("conversation_id"))
+            records = result["snapshots"]
+            if not records:
+                return tool._success_result("没有找到 worktree 快照")
+            lines = [f"找到 {len(records)} 个快照:\n"]
+            for index, record in enumerate(records, 1):
+                lines.append(f"{index}. {record['id']}  ({record['snapshot_sha'][:8]})")
+                lines.append(f"   原路径: {record['original_path']}")
+                lines.append(f"   分支: {record['branch'] or '-'}  时间: {record['created_at']}")
+                if record["label"]:
+                    lines.append(f"   备注: {record['label']}")
+            return tool._success_result("\n".join(lines))
+    except HTTPException as error:
+        return tool._error_result(str(error.detail))
+    except (OSError, ValueError, ExecutorError, TimeoutError) as error:
+        return tool._error_result(str(error))

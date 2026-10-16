@@ -116,10 +116,12 @@ class _LifecycleClientSession(ClientSession):
         self,
         *args: Any,
         transport_closed: asyncio.Event,
+        notify_cancellation: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._transport_closed = transport_closed
+        self._notify_cancellation = notify_cancellation
         self._request_owners: dict[Any, dict[str, Any]] = {}
 
     async def send_request(self, request: Any, result_type: Any, *args: Any, **kwargs: Any) -> Any:
@@ -134,6 +136,13 @@ class _LifecycleClientSession(ClientSession):
             self._request_owners[request_id] = owner
         try:
             return await super().send_request(request, result_type, *args, **kwargs)
+        except asyncio.CancelledError:
+            if self._notify_cancellation and isinstance(request.root, types.CallToolRequest):
+                with anyio.CancelScope(shield=True):
+                    await self.send_notification(types.ClientNotification(types.CancelledNotification(
+                        params=types.CancelledNotificationParams(requestId=request_id,
+                            reason="The owning Node tool execution was cancelled"))))
+            raise
         finally:
             self._request_owners.pop(request_id, None)
 
@@ -447,6 +456,7 @@ class MCPClient:
 
     CLIENT_INFO = {"name": "MiniCode", "version": "0.2.0"}
     PROTOCOL_VERSION = types.LATEST_PROTOCOL_VERSION
+    notify_request_cancellation = False
 
     def __init__(
         self,
@@ -632,6 +642,7 @@ class MCPClient:
                     read_stream,
                     write_stream,
                     transport_closed=transport_closed,
+                    notify_cancellation=self.notify_request_cancellation,
                     read_timeout_seconds=timedelta(seconds=self._request_timeout),
                     elicitation_callback=elicitation_callback,
                     list_roots_callback=roots_callback,
@@ -893,7 +904,7 @@ class MCPClient:
                     _meta=types.RequestParams.Meta(**meta) if meta else None,
                 ))),
                 _NativeCallToolResult,
-                request_read_timeout_seconds=timedelta(seconds=self._tool_timeout),
+                request_read_timeout_seconds=timedelta(seconds=self._tool_request_timeout_seconds(params)),
             )
         elif method == "resources/list":
             result = await session.list_resources(cursor=params.get("cursor"))
@@ -913,6 +924,9 @@ class MCPClient:
         else:
             raise ValueError(f"Unsupported MCP facade operation: {method}")
         return _bounded_response(self.server_name, method, result)
+
+    def _tool_request_timeout_seconds(self, params: dict[str, Any]) -> float:
+        return self._tool_timeout
 
     async def _page(
         self, method: str, result_key: str, cursor: str | None = None,

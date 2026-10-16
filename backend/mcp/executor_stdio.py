@@ -116,15 +116,16 @@ class _ProcessReader:
 
 
 @asynccontextmanager
-async def executor_stdio_client(lease, argv: list[str], cwd_uri: str, *, env: dict[str, str], env_policy: dict):
+async def executor_stdio_client(lease, argv: list[str], cwd_uri: str, *, env: dict[str, str], env_policy: dict,
+        sandbox: dict | None = None, process_options: dict | None = None):
     """Placement is explicit; the existing MCP SDK still owns every protocol call."""
     sdk_lease = lease.clone()
     process = None
     read_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_stream, write_reader = anyio.create_memory_object_stream[SessionMessage](0)
     try:
-        process = await sdk_lease.environment.process.start(argv, cwd_uri, sandbox=None, env=env,
-            env_policy=env_policy, tty=False, pipe_stdin=True, enforce_managed_network=False)
+        process = await sdk_lease.environment.process.start(argv, cwd_uri, sandbox=sandbox, env=env,
+            env_policy=env_policy, tty=False, pipe_stdin=True, **(process_options or {}))
         reader = _ProcessReader(process, argv[0])
 
         async def receive():

@@ -54,6 +54,7 @@ async def _run_git(
     context: ToolExecutionContext | None = None,
     sandbox_policy: SandboxPolicy | None = None,
     write_git_metadata: bool = False,
+    worktree_write_paths: tuple[Path, ...] = (),
     timeout: float | None = None,
     index_file: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -68,7 +69,8 @@ async def _run_git(
         from backend.workspace.executor_git import run_executor_git
         async with ExecutorWorkspaceService(context) as service:
             return await run_executor_git(service, argv, cwd=service.resolve(str(cwd or root)),
-                write_metadata=write_git_metadata, timeout=timeout, index_file=index_file)
+                write_metadata=write_git_metadata, timeout=timeout, index_file=index_file,
+                write_paths=tuple(service.resolve(str(path)) for path in worktree_write_paths))
     root = root.resolve()
     cwd = cwd or root
     policy = sandbox_policy

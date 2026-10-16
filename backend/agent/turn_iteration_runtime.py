@@ -160,6 +160,9 @@ class TurnIterationRuntime:
             run_context.network_step = await prepare_environment_network_step(
                 environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
                 config_stack=snapshot.config.config_layer_stack, exec_policy_sources=run_context.exec_policy_owner.sources)
+            from backend.mcp.node_repl import register_node_companion
+
+            await register_node_companion(run_context, self.base_tool_registry, self.agent_session, execution=snapshot)
         model_events: list[AgentEvent] = []
         if snapshot is not None and self.context._llm is not snapshot.llm:
             target_budget = snapshot.config.token_budget

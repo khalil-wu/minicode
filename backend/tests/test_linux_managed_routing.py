@@ -170,9 +170,11 @@ def test_compiled_native_binary_dispatches_source_linux_helper_before_proxy_runt
     native = runtime()
     binary, reason = discover_runtime(native.binary)
     assert binary is not None, reason
-    result = subprocess.run([str(binary), "--sandbox-policy-cwd", "/", "--help"], capture_output=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    assert b"--sandbox-policy-cwd" in result.stdout and b"--permission-profile" not in result.stderr
+    for prefix in ([], ["--verify-fd-mount", "999999:/not-executed-by-help"]):
+        result = subprocess.run([str(binary), *prefix, "--sandbox-policy-cwd", "/", "--help"],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert b"--sandbox-policy-cwd" in result.stdout and b"--permission-profile" not in result.stderr
 
 
 PROBE = r'''

@@ -103,6 +103,7 @@ class ConversationThreadRuntime:
     network_approval_service: Any | None = None
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     mcp_app_runtime: Any | None = None
+    node_repl_companions: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 
     def retain_turn(self, task: asyncio.Task[Any], cleanup_tasks: set[asyncio.Task[Any]]) -> None:
@@ -125,6 +126,8 @@ class ConversationThreadRuntime:
             await asyncio.wait(pending)
         if self.mcp_app_runtime is not None:
             await self.mcp_app_runtime.close_conversation(self.store_identity, self.conversation_id)
+        if self.node_repl_companions is not None:
+            await self.node_repl_companions.aclose()
         async with self.environment_lock:
             if self.thread_environments is not None:
                 await self.thread_environments.aclose()

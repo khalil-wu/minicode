@@ -63,7 +63,7 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 "backend.skills" = ["*.json"]
 "backend.tools" = ["*.json", "source_search_resources/*"]
 "backend.memory" = ["templates/*.md"]
-"backend.mcp" = ["*.js"]
+"backend.mcp" = ["*.js", "*.mjs"]
 
 [project.optional-dependencies]
 dev = [

@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import replace
 from backend.environments.errors import ExecutorError
 from backend.sandbox.policy import (AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
-    FileSystemPermissions, FileSystemSandboxEntry)
+    FileSystemPermissions, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSandboxKind,
+    FileSystemSpecialPath, PermissionProfile, SandboxEnforcement)
 from backend.workspace.executor_service import ExecutorWorkspaceService
 from backend.workspace.executor_paths import ExecutorPath
 
@@ -73,8 +74,31 @@ async def registered_worktree_metadata(service, cwd, gitdir, common):
     return (actual_gitdir, actual_common)
 
 
-async def executor_git_write_scope(service, *, cwd=None, initialize=False):
-    if not service.scope.resolve_access(service.cwd.uri).can_write:
+def executor_git_action_scope(scope, *, write_paths=(), policy_cwd=None):
+    """A fixed Git action writes only its declared data and metadata paths."""
+    profile = scope.permission_profile
+    if profile.enforcement is not SandboxEnforcement.MANAGED:
+        return scope
+    filesystem = profile.file_system
+    entries = []
+    if filesystem.kind is FileSystemSandboxKind.UNRESTRICTED:
+        entries.append(FileSystemSandboxEntry(FileSystemPath("special", FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ))
+    else:
+        for entry in filesystem.entries:
+            selector = entry.path
+            if selector.kind == "glob_pattern":
+                selector = FileSystemPath.glob(scope.resolve_path(str(selector.value)).native)
+            entries.append(replace(entry, path=selector,
+                access=FileSystemAccessMode.READ if entry.access is FileSystemAccessMode.WRITE else entry.access))
+    entries.extend(FileSystemSandboxEntry(FileSystemPath("path", path.uri), FileSystemAccessMode.WRITE) for path in write_paths)
+    return replace(scope, cwd_uri=policy_cwd.uri if policy_cwd is not None else scope.cwd_uri,
+        permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries,
+            glob_scan_max_depth=filesystem.glob_scan_max_depth), network=profile.network))
+
+
+async def executor_git_write_scope(service, *, cwd=None, initialize=False, write_paths=()):
+    accepted = service.context.permission.environment_scope
+    if not accepted.resolve_access(accepted.cwd_uri).can_write:
         raise PermissionError("Git metadata writes require workspace-write authority")
     if initialize:
         paths = [service.cwd.joinpath(".git")]
@@ -97,16 +121,26 @@ async def executor_git_write_scope(service, *, cwd=None, initialize=False):
         if not access.can_read or not path.is_relative_to(service.cwd) and not access.can_write and path not in verified_metadata:
             raise PermissionError(f"Git metadata needs explicit write authority: {path.uri}")
         grants.append(FileSystemSandboxEntry(FileSystemPath("path", path.uri), FileSystemAccessMode.WRITE))
-    return service.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions(tuple(grants))))
+    if initialize:
+        return service.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions(tuple(grants))))
+    for path in write_paths:
+        if not service.scope.resolve_access(path.uri).can_write:
+            raise PermissionError(f"Git action data path needs write authority: {path.uri}")
+    # The linked checkout's normal writable-root SID can retain its .git DENY
+    # ACE from earlier commands. Metadata actions do not need that write root.
+    # The real process cwd remains independent from this allowed policy cwd.
+    common = paths[-1]
+    return executor_git_action_scope(service.scope, write_paths=(common, *write_paths),
+        policy_cwd=write_paths[0] if write_paths else common)
 
 
-async def run_executor_git(service, argv, *, cwd=None, write_metadata=False, timeout=30, index_file=None):
+async def run_executor_git(service, argv, *, cwd=None, write_metadata=False, timeout=30, index_file=None, write_paths=()):
     policy, overrides = executor_git_environment(service, index_file=index_file)
     env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
         "exclude": list(policy.exclude), "set": dict(policy.set_values), "includeOnly": list(policy.include_only)}
-    process_scope = service.scope
+    process_scope = executor_git_action_scope(service.scope)
     if write_metadata:
-        process_scope = await executor_git_write_scope(service, cwd=cwd)
+        process_scope = await executor_git_write_scope(service, cwd=cwd, write_paths=write_paths)
     else:
         argv = [argv[0], "--no-optional-locks", *argv[1:]]
     return await service.run(argv, cwd=cwd, timeout=timeout, env_policy=env_policy, env=overrides, permission_scope=process_scope)

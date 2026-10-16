@@ -267,7 +267,7 @@ class ExecutorCommandRunner:
                         "network_decider": self.network_lease.decide, "network_observer": network_observer}
                 else:
                     network_kwargs = {"managed_network_policy": network, "network_decider": decider, "network_observer": network_observer}
-            self.handle = await self.environment.process.start(list(argv), self.policy.scope.cwd_uri,
+            self.handle = await self.environment.process.start(list(argv), cwd,
                 sandbox=self.policy.scope.process_sandbox_context(enforce_managed_network=network is not None), env=self.policy.env_overrides,
                 env_policy=self.policy.env_policy_wire(), tty=tty, pipe_stdin=keep_stdin_open and not tty,
                 process_observer=observe_process, process_id=identity, **network_kwargs)

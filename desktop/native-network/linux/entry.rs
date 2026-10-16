@@ -8,9 +8,10 @@ mod proxy_service {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Source's outer and inner stages both start with this argument. Dispatch
-    // before Tokio, since the original helper forks its host proxy bridges.
-    if std::env::args().nth(1).as_deref() == Some("--sandbox-policy-cwd") {
+    // Source may prepend --verify-fd-mount during inner-stage bwrap translation.
+    // Dispatch before Tokio, since the helper forks its host proxy bridges.
+    if std::env::args().skip(1).take_while(|arg| arg != "--")
+        .any(|arg| arg == "--sandbox-policy-cwd") {
         codex_linux_sandbox::run_main();
     }
     proxy_service::run()
