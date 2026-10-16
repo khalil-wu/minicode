@@ -250,7 +250,7 @@ def test_signed_workspace_raw_owner_cannot_be_retargeted(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fresh_backend_main_process_starts_real_http(tmp_path):
+async def test_fresh_backend_main_process_starts_real_http(tmp_path, record_testsuite_property):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
@@ -281,5 +281,9 @@ async def test_fresh_backend_main_process_starts_real_http(tmp_path):
         await process.stdin.drain()
         output, _ = await asyncio.wait_for(process.communicate(), 25)
         lines.append(output)
-        (root / "output/executor-editor-cold-http-20261016.log").write_bytes(b"".join(lines))
+        log_path = tmp_path / "executor-editor-cold-http.log"
+        log_bytes = b"".join(lines)
+        log_path.write_bytes(log_bytes)
+        record_testsuite_property("executor_editor_cold_http_log_path", str(log_path))
+        record_testsuite_property("executor_editor_cold_http_log", log_bytes.decode("utf-8", errors="replace"))
     assert process.returncode == 0, b"".join(lines).decode("utf-8", errors="replace")

@@ -7,3 +7,7 @@
 # source-manifest.json pins the bytes imported from the Windows reference
 # checkout. Keep those vendored inputs identical when checked out on Linux.
 /desktop/native-execpolicy/vendor/** text eol=crlf
+
+# Packaged native resources are a byte-addressed bundle: runtime.json hashes
+# include the producer's exact license/notice/manifest bytes on every host.
+/backend/permissions/resources/execpolicy/x86_64-pc-windows-msvc/* -text

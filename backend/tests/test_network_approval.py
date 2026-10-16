@@ -352,8 +352,8 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
             "socks_url": f"socks5://127.0.0.1:{int(os.environ['MINICODE_TEST_NETWORK_SOCKS_PORT'])}"}
 
     host = network_host
-    entered, respond = asyncio.Event(), asyncio.Event()
-    received = []
+    entered, respond, audited = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    received, native_requests, cancelled_processes = [], [], []
     origin_tasks = set()
 
     async def origin(reader, writer):
@@ -375,6 +375,10 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
         await respond.wait()
         return {"action": "approve" if decision == "approved" else "reject", "decision": decision}
 
+    async def native_decide(request):
+        native_requests.append(dict(request))
+        return await registration.decide(request)
+
     host.context.approval_handler = review
     runtime = native_runtime()
     server = await asyncio.start_server(origin, "127.0.0.1", 0)
@@ -382,10 +386,14 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
     started_path, finished_path = host.workspace / "original-post-started.txt", host.workspace / "original-post-finished.txt"
     body = "original one-shot payload 中文".encode()
     request = f"POST http://127.0.0.1:{port}/one-shot HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
+    attribution_frame = ("token=os.environ['CODEX_NETWORK_PROXY_ATTRIBUTION'].encode()\n"
+        "connection.sendall(b'\\x00CDXPXY1'+len(token).to_bytes(2,'big')+token)\n"
+        if sys.platform != "win32" else "")
     code = ("import os,socket\nfrom urllib.parse import urlsplit\nfrom pathlib import Path\n"
         f"with Path({str(started_path)!r}).open('a',encoding='utf-8') as marker: marker.write(str(os.getpid())+'\\n')\n"
         "proxy=urlsplit(os.environ['HTTP_PROXY'])\n"
         "connection=socket.create_connection((proxy.hostname,proxy.port),5)\n"
+        f"{attribution_frame}"
         f"connection.sendall({request!r})\n"
         "response=bytearray()\n"
         "while True:\n chunk=connection.recv(65536)\n if not chunk: break\n response.extend(chunk)\n"
@@ -400,31 +408,48 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
 
     def observe(process):
         processes.append(process)
-        borrowers.append(process.network_lease.clone())
+        if sys.platform == "win32":
+            borrowers.append(process.network_lease.clone())
 
     original_cancel = registration.cancel_execution
 
     async def cancel(reason):
         await original_cancel(reason)
+        cancelled_processes.append(processes[0])
         if not processes[0].exited:
             await processes[0].terminate()
 
     registration.cancel_execution = cancel
     try:
         captured = native_policy(host, **listener_config)
-        captured["windowsSandbox"] = "elevated"
-        inspected = await runtime.inspect(captured)
-        policy = NetworkExecutionPolicy(registration.environment_id, runtime, captured,
-            inspected["effectivePolicy"], inspected["remoteLaunch"])
-        sandbox = {"permissions": captured["permissionProfile"],
-            "policyContext": {"cwd": host.workspace.as_uri(), "workspaceRoots": [host.workspace.as_uri()]},
-            "windowsSandboxLevel": "elevated"}
         environment = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "PATH") if key in os.environ}
+        if sys.platform == "win32":
+            captured["windowsSandbox"] = "elevated"
+            inspected = await runtime.inspect(captured)
+            policy = NetworkExecutionPolicy(registration.environment_id, runtime, captured,
+                inspected["effectivePolicy"], inspected["remoteLaunch"])
+            sandbox = {"permissions": captured["permissionProfile"],
+                "policyContext": {"cwd": host.workspace.as_uri(), "workspaceRoots": [host.workspace.as_uri()]},
+                "windowsSandboxLevel": "elevated"}
+            network_launch = {"managed_network_policy": policy, "network_decider": native_decide,
+                "network_observer": lambda _event: audited.set()}
+        else:
+            # Exercise Source's trusted bridge protocol with an owned client;
+            # this does not claim Linux local OS managed-network routing.
+            attribution_token = f"original-post-{decision}"
+            lease = await runtime.prepare_local(captured, environment,
+                environment_id=registration.environment_id, execution_id=registration.execution_id,
+                attribution_token=attribution_token, decider=native_decide, observer=lambda _event: audited.set())
+            borrowers.append(lease)
+            assert lease.env["CODEX_NETWORK_PROXY_ATTRIBUTION"] == attribution_token
+            environment = lease.env
+            sandbox, network_launch = None, {}
         async with asyncio.timeout(20):
             process = await backend.start(list(registration.command.argv), host.workspace.as_uri(),
-                sandbox=sandbox, managed_network_policy=policy, network_decider=registration.decide,
-                process_observer=observe, process_id=registration.execution_id,
+                sandbox=sandbox, **network_launch, process_observer=observe, process_id=registration.execution_id,
                 env=environment, env_policy={"inherit": "none"})
+        if sys.platform != "win32":
+            assert process.network_lease is None and process.sandbox_type == "none"
         async with asyncio.timeout(10):
             await entered.wait()
             assert received == [], "The original POST must remain paused before approval"
@@ -437,22 +462,30 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
                 after = result.next_seq - 1
                 if result.closed:
                     break
+            await audited.wait()
         response = b"".join(chunks)
         if decision == "approved":
             assert b"HTTP/1.1 200" in response and b"ORIGINAL_OK" in response, response
             assert len(received) == 1 and received[0][1] == body
-            assert not host.cancelled
+            assert not host.cancelled and not cancelled_processes
             assert finished_path.read_text(encoding="utf-8") == started_path.read_text(encoding="utf-8").strip()
         else:
             assert received == [] and registration.outcome == "rejected by user"
             assert host.cancelled == [(registration.execution_id, "rejected by user")]
+            assert cancelled_processes == [process] and not finished_path.exists()
+        assert processes == [process]
         assert len(started_path.read_text(encoding="utf-8").splitlines()) == 1
+        assert len(native_requests) == 1
+        assert native_requests[0]["executionId"] == registration.execution_id
+        assert native_requests[0]["environmentId"] == registration.environment_id
+        assert native_requests[0]["method"] == "POST" and native_requests[0]["port"] == port
         prompts = [payload for kind, payload in host.events if kind == "approval_request"]
         assert len(prompts) == 1
         assert prompts[0]["args"]["port"] == port
         lease = borrowers[0]
         await lease.flush_audit()
-        assert lease.network_audit and all(event["executionId"] == registration.execution_id for event in lease.network_audit)
+        assert lease.network_audit and all(event["executionId"] == registration.execution_id
+            and event["environmentId"] == registration.environment_id for event in lease.network_audit)
     finally:
         respond.set()
         try:
@@ -469,6 +502,8 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
                     for lease in borrowers:
                         await lease.aclose()
                     await runtime.aclose()
+    assert all(lease.closed for lease in borrowers)
+    assert registration.execution_id not in runtime.leases
 
 
 @pytest.mark.asyncio

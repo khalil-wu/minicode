@@ -21,6 +21,7 @@
 | SDK 超时、真实 child 晚交接、原租约/能力与会话占用 | [SDK 清理持有链](2026-10-16-sdk-mcp-cleanup-ownership.md) |
 | 原生 wheel 平台、正式包身份与独立安装冷验 | [安装包验证](2026-10-16-native-wheel-packaging.md) |
 | 全部后端节点、分段执行/修复记录及真实跳过 | [后端最终合并](2026-10-16-backend-final-validation.md) |
+| 首次 Linux CI 的入库字节及平台测试入口修复 | [CI 修复证据](2026-10-16-ci-native-bytes-and-platform-probes.md) |
 
 网络域名/Unix socket 匹配、managed ceiling、permission-profile URI 与规则写入使用该 Source pin 的原生库。后台命令继续由原 BackgroundCommandManager 管理；未确认清理保留原 process/session ID 和网络决策，冷恢复不会用本机 PID 冒充远端终止。Windows 网络初始化只有明确的设置按钮会启动系统配置；status 和任务执行路径不做隐式提权、账号或防火墙初始化。
 
@@ -32,7 +33,7 @@
 
 最后的独立 SDK 审查另外证实 registry drain 之后的晚交接缺口：外层 wrapper 已结束，而实际 invoke child 仍在运行时，原环境曾提前关闭。bindings 现在只沿本次原 call ID 的原 `cleanup_tasks_by_call` 字典追踪 child；Prepared 退役捕获同一原字典，不能扫描包含自己的共享 lifecycle 集合，也不能转去下一回合的新字典。真实 SDK 的 bound/unbound × early/late 四场景及两阶段能力关闭/占用验证集中 16/16；对应 R3 最新 36 passed / 1 个安装版 Source stub skipped。这里保留原失败和修复证明，不将此前十三项、未越过该交接的验证泛化为完整生命周期已通过。
 
-正式 r3 Windows wheel 为 `output/source-executor-remote-final-wheel-r3-20261016/minicode-0.2.0-py3-none-win_amd64.whl`，15,994,043 bytes，SHA256 `3819717f2666831bae801b919f0263fe6afd13d08b8cbf0e8b70e064eacd1671`。1247 个冻结输入、1228 个 backend 包成员在当前工作区/冻结树/wheel/全新安装目录逐字节核对，`changed_inputs=[]`。bundled Python 3.11.9、`-I`、独立 Temp cwd/state 与限定 PATH 的完整冷验 26/26，0 failed/skipped；包含实际原生网络策略/规则 writer 与 minicode-host 入口。r2 保留为停止交付的历史候选，不能用其二十六项替代 r3。Windows WFP 和真实外机边界仍按上文保留。
+正式 r4 Windows wheel 为 `output/source-executor-remote-final-wheel-r4-20261016/minicode-0.2.0-py3-none-win_amd64.whl`，15,994,583 bytes，SHA256 `085d18b5431a1ef074d231eb9e1750d33afbded2c470ae8ee180a4608df468b7`。1247 个冻结输入、1228 个 backend 包成员在当前工作区/冻结树/wheel/全新安装目录逐字节核对，`changed_inputs=[]`、`candidate_only=false`。bundled Python 3.11.9、`-I`、全新独立 Temp cwd/state 与限定 PATH 的完整冷验 26/26，0 failed/skipped；包含实际原生网络策略/规则 writer 与 minicode-host 入口。r4 相对 r3 仅更新两处 CI 测试夹具，不复用 r3 的二十六项结果；r2 保留为停止交付的历史候选。Windows WFP 和真实外机边界仍按上文保留。
 
 此前 CI 检查点（2026-10-16）：新会话与侧栏按钮修复后的 `ae278f910148f9c731a0dfaa51453431d66179c7`，GitHub run `38775603301` 七项全部成功；此前两次异步测试失败和修复证据见 `2026-10-16-ci-async-ownership-boundaries.md`。该次运行不包括本节后续 executor 与 remote 实现；安装版 executor 不支持的 API 也不计入这次 CI 通过。
 
