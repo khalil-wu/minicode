@@ -1,5 +1,23 @@
 # 原生命令投影与内部证据链：最终交付
 
+## 2026-10-16 当前后续批：Node、工作树、设置与 Linux 路由
+
+本节优先于下文旧构建、旧 wheel 和已失效的待办。`ee80a807` 的[完整 CI 38905092822](https://github.com/khalil-wu/minicode/actions/runs/38905092822)为 **6 jobs success / 2 failure**：backend 6917 passed / 106 skipped / 12 failed；Windows 81 passed / 1 failed 后停止。root 1768 passed / 51 skipped、frontend 4335 tests、desktop 161 passed / 9 skipped 及 6 项 smoke、Electron 1 项、两项 native build 均通过。后续修复不能借这轮结果记成八项全绿。
+
+- **Linux OS managed 路由已接通**：pinned Source helper 进入正式 Linux native binary，包含 `--verify-fd-mount` 前置参数分派；原 namespace、SCM_RIGHTS、attribution、proxy、seccomp 与生命周期均沿 Source。该次 CI 的路由 16/16 通过，含七项真实 namespace/proxy/cancel。`output/linux-managed-routing-20261016/` 与该 CI 的原日志保留原始证据。
+- **Windows 工作树消费链已修复**：分开实际 cwd 与原策略 cwd，Git metadata 和 worktree pool 使用动作实际所需范围；模型 snapshot/list/restore 与 GUI 共用原执行器、Git refs 和事务，不再写控制端 TEMP。集中 76 passed / 1 symlink 权限 skip，最终三项受影响复验通过。原 Unicode 归因已排除；私有 OWNER RIGHTS Temp ACL 与 unelevated deny-read 保留为原生边界。见[后续报告](2026-10-16-windows-worktree-followup.md)。
+- **真实 Node MCP companion 已实现**：跨回合内核、正常 npm module realm、图片与 Guardian、captured 环境/权限/网络、同名用户 MCP 覆盖、原 borrower 退役和真实进程关闭均已接通。公开 Source 没有 Node 执行器实现，不宣称未公开内部等价；Computer Use 仍未实现。该 CI 另外暴露 Node 22 活跃重置原生 abort，正在修复，见[Node 报告](2026-10-16-node-companion.md)。
+- **设置与面板修复已推送**：删除额外页面副标题、呈现无 history 的真实有效 provider、统一设备/诊断/Problems 的选择菜单；预览改用 `--token=<value>`，解决随机令牌以 `-` 开头时实际启动失败。必要前端最新唯一 170 passed、TSC/build/两项预算通过；真实 Electron 核对手机尺寸、字体及重载草稿保留。该 CI 的固定 dash-token 用例通过。见[设置与预览报告](2026-10-16-settings-preview-followup.md)。
+- **拒绝启动的关闭终态已本地修复**：`83cf0d43` 只有在原 job/runner/network 清理全部 ACK、没有错误及 watcher 时发布 `closed`；保留真实启动拒绝、`accepted=false` 和未知 exit code。聚焦 46 passed / 1 native skip，未配置账号或绕过沙箱。该提交尚待后续完整 CI。
+
+`83cf0d43` 的 r11 Windows wheel 冷验实际 **37/37**，包括原 28 项和九项 Electron Node 检查，wheel SHA256 `b9140e18223957c3a9c73670c0e18c4a5a43e23d0e101fcd7bf33d168cabd8dc`。它只证明该冻结候选；后续 Node/SDK 修复会使其过期，不能作为新源码安装验收。具体候选身份和边界见 `output/source-executor-remote-final-wheel-r11-20261016/REPORT.md`。
+
+后续修复现已提交：`c0f3f684` 修 Node 22 中断时的实际 ALS 后端并对齐 JS 过程标题，`f5d1ed65` 补三色编辑，`418c130d` 修 SDK 长会话 owner、公开审批回调和 MCP 启动取消。Node 本机 22/24/Electron 24 的 reset/timeout/cancel/晚输出已通过；SDK/MCP/notes/observer 89 个不同 case 全通过，保留原四项精确 owner 集合，真实 SDK 同 PID 两 prompt 经两次审批后执行。原中间失败和准确范围见[Node 报告](2026-10-16-node-companion.md)。
+
+三色编辑最新唯一 **195/195**，JS 标题及相关四文件 **80/80**，两范围分别记录而不累计为全产品数。最终 TSC/build/两预算通过，入口 `assets/index-CCh13oC-.js`，index SHA256 `17dff27b79573909e5cedaf6d1a27dff9e5465c65fed84c31f23dbb6a69ba129`；主 CSS 与此前一致。Root 使用该实际 dist 的独立生产 Electron 完成十项观测、六张截图，核对 picker 键盘/模式/重载/草稿/原字体，pageerrors 为空；组件 QA 另核原 Monaco dirty buffer。见[外观配色报告](2026-10-16-appearance-colors.md)及 `output/playwright/latest-ui-followup-20261016/validation.json`。
+
+修复后的完整八项 CI 与冻结后 r12 独立安装冷验仍需分别完成，不借 `ee80a807` 或 r11 结果算新源码通过。最新剩余范围统一见[当前差距](2026-10-16-current-desktop-gaps.md)，不按测试数量推算产品完成率。
+
 ## 2026-10-16 最新补齐：桌面过程、MCP App 与 executor 配套
 
 本次后续批新增完整答案后的主/子过程折叠修正、交互 MCP App 的原会话寿命与常驻展示、目标 LSP/环境安装/Git delivery、工作树实际新会话切换及 Windows PTY resize。逐项证据、原失败与 Source 边界见 [桌面 harness 集成](2026-10-16-desktop-harness-integration.md) 和 [当前差距](2026-10-16-current-desktop-gaps.md)。下文旧 entry、r5 wheel 及“尚无 LSP/resize”等描述继续作为其当时构建的历史事实，不代表最新源码。

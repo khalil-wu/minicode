@@ -1,15 +1,15 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
-核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。基线提交 `e941919f` 的 [八项 CI](https://github.com/khalil-wu/minicode/actions/runs/38873848907) 已通过；CI 证明该批合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
+核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新完整 CI 检查点为 `ee80a807` 的 [run 38905092822](https://github.com/khalil-wu/minicode/actions/runs/38905092822)：八个 job 六个成功、两个失败，原失败正在后续修复，不能借此前基线绿灯算当前已通过。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
 
 ## 已确认的能力缺口
 
 | 范围 | 当前实际边界 | 源码依据 |
 | --- | --- | --- |
-| 配套 Node / Computer Use 服务 | 已能注册 MCP 并消费真实 Node/CUA 输出和 Guardian 证据；没有随包提供与 Codex 桌面配套服务等价的 Node 持久执行环境或系统桌面操作服务。现有 V8 CodeMode 与内嵌浏览器 CDP 不代表这些服务。 | `backend/services/tool_registry_factory.py`、`backend/agent/code_execution_vm.py`、`backend/agent/guardian/node_repl.py`、`backend/tools/browser_control_tool.py` |
+| Computer Use 配套服务 | 系统桌面操作服务仍未实现。真实 Node 持久 MCP companion 已接通工具注册、Code Mode、图片/Guardian、WS/SDK 长会话归属、实际审批及关闭；公开 Source 不含 Node 执行器，不能宣称复刻其未公开内部实现。CI 暴露的 Node 22 重置崩溃已修复并在本机 22/24/Electron 24 验证，新 Linux CI 另记。内嵌浏览器 CDP 不代表系统桌面操作服务。 | [Node companion](2026-10-16-node-companion.md)；`backend/tools/browser_control_tool.py` |
 | MCP 交互式 App 界面 | 已补注册 descriptor→原调用会话→事件/恢复→交互 App；完成后常驻、原 iframe 跨历史/虚拟行/真实侧栏连续。官方 ext-apps postMessage 与 Codex 私有 sandbox relay 的协议差异明确保留，不能宣称私有 relay 已复刻。 | [本批集成与验证](2026-10-16-desktop-harness-integration.md)；`output/mcp-apps-20261016/implementation-audit.md` |
-| 独立 executor 的编辑器与工作区配套 | 已有目标 LSP、环境安装、Git delivery、工作树快照/移除/恢复与真实 WS 新会话切换；不再笼统列为缺服务或 503。Windows installed Source 的非 ASCII 受限写入、linked Git metadata 和 unelevated split writable roots 仍有真实失败，不能算已通过；外机部署另列。 | [本批集成与边界](2026-10-16-desktop-harness-integration.md)；[目标语言服务](2026-10-16-executor-editor-lsp.md) |
-| Linux 本地 managed 网络路由 | 原生网络策略与 attributed proxy controller 已接通；OS 沙箱内的 managed 代理路由尚未接通，运行器明确拒绝。CI POST 通过不是 OS 网络隔离通过。 | `backend/sandbox/runner.py:472`；[CI 平台入口说明](2026-10-16-ci-native-bytes-and-platform-probes.md) |
+| Windows 原生权限边界 | 目标 LSP、环境安装、Git delivery、工作树快照/移除/恢复与真实 WS 新会话切换均已有实现。linked Git metadata、实际 cwd/policy cwd 分离及模型/GUI 共用快照消费链已修复；原 Unicode 归因已排除。仍保留 Source restricted token 对私有 OWNER RIGHTS Temp ACL 的拒绝，以及 unelevated deny-read 明确不支持的原生边界。 | [Windows 工作树后续修复](2026-10-16-windows-worktree-followup.md)；[目标语言服务](2026-10-16-executor-editor-lsp.md) |
+| Linux 本地 managed 网络路由 | 已接通 pinned Source helper 的 namespace、SCM_RIGHTS、attribution、proxy bridge、seccomp 与生命周期，含 Source 的 FD 前置参数分派。`ee80a807` CI 的 Linux 路由 16/16 通过，其中七项真实 namespace/proxy/cancel；不再列为未实现。Linux 独立安装包冷验仍不由本 Windows wheel 证明。 | `desktop/native-network/linux/entry.rs`；`output/linux-managed-routing-20261016/`；`output/ci-ee80a807-20261016/CI-REPORT.md` |
 | Windows 远端 PTY 尺寸调整 | 已补原 ConPTY 请求/ACK 通道，实际尺寸、原 PID、断线重连、重复取消与窗口释放均通过；正式 runtime 已激活并核对字节及输入哈希。普通用户窗口没有被重启，新 Python 消费链需新进程加载。 | [PTY 实测](2026-10-16-windows-remote-pty-resize.md)；`output/windows-remote-pty-resize-20261016/formal-runtime-activation.json` |
 
 永久 MCP 批准、discovery/tool_search、Skill/提示词注入、CodeMode、Guardian、多 agent 委派和消息不再按旧清单笼统列为“未实现”；它们已有生产消费链和各自范围的验证。它们的存在也不证明所有扩展服务已就绪。
@@ -39,11 +39,13 @@
 
 Root 另外通过 Playwright CLI 实际点击隔离浏览器中的真实 ChatTurn 组件，用原天气回复核对三项范围：主对话网页详情打开后完整 final 自动收起、重开父过程恢复原详情选择、子记录组打开后完整 final 自动收起且没有用户气泡。最终截图为 `output/playwright/fold-completion-20261016/03` 至 `07` 开头的 PNG。这是隔离组件与实际记录验证，不冒称普通用户窗口录屏；原始命令/MCP 窄阅读保护由上述回归单独覆盖。最初 QA 页的 favicon 404 和一次 CLI 引号错误保留，不算产品失败，也不抹掉诊断。
 
-`npm run build`（含 TSC）及两项预算检查通过，当前入口 `assets/index-DfQ9IEM8.js`。完整源码冻结哈希、产物 SHA、实际后端提供的入口和验证边界见 `output/fold-completion-20261016/root-final-validation.json`。该修复尚未推送 GitHub，不能借基线八项 CI 作为修复后的 CI。普通 MiniCode 窗口没有被调试过程重载或关闭；用户按 Ctrl+R 后才会加载新前端。独立 QA 浏览器及其自有 Vite server 已退出。
+该折叠批的入口为 `assets/index-DfQ9IEM8.js`，已通过当时 TSC、构建及两项预算；完整冻结身份见 `output/fold-completion-20261016/root-final-validation.json`，不是后续构建的当前入口。修复已随后续代码推送，`ee80a807` 的 frontend job 为 360 文件、4335 tests 通过；该次 backend 与 Windows job 的独立失败仍保留。普通 MiniCode 窗口没有被调试过程重载或关闭，独立 QA 浏览器及自有 Vite server 已退出。
 
 ### 全界面一致性尚未完成验收
 
-过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。但此前 R3 的实图集中在 Connections，本次新入口仅补上述折叠范围；此前主聊天、设置和菜单的完整实机场景分别属于其当时构建。没有覆盖最新同一构建、相同窗口尺寸和缩放下所有区域的普通、hover、focus、disabled、菜单定位、滚动及过渡状态。
+过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。后续已补设置标题、无历史的真实有效 provider、浏览器设备和 Problems 筛选菜单，并实测设备尺寸、字体及重载后的草稿保留，见[设置与预览后续修复](2026-10-16-settings-preview-followup.md)。三色主题编辑也已完成：采用真实 picker，浅深色独立保存，页面与 Monaco 同步，键盘焦点及未保存 buffer 保留均验证，见[外观配色](2026-10-16-appearance-colors.md)。完整代码主题选择、主题分享/导入仍未实现。
+
+当前前端入口为 `assets/index-CCh13oC-.js`，index SHA256 `17dff27b79573909e5cedaf6d1a27dff9e5465c65fed84c31f23dbb6a69ba129`。最新生产 Electron 独立核对了真实设置/配色入口、Tab/方向键/Escape、明暗切换、重载后的色板及草稿，`output/playwright/latest-ui-followup-20261016/validation.json` 十项观测通过、六张图、无 page error；字体仍为原 13px/400。组件 QA 另核同一 Monaco 模型和脏内容。JS 工具的真实 `title` 过程短行也已按参考源码修正，原参数/输出保留。没有覆盖这一同构建、相同窗口尺寸和缩放下所有区域的普通、hover、focus、disabled、菜单定位、滚动及过渡状态。
 
 因此仍需逐区域核对主聊天过程/最终答案、子 agent、左右栏、输入与审批、设置菜单、Diff/编辑器和浏览器预览。未逐项核对不等于已证明这些区域都存在样式缺陷；本页不编造具体像素差。字体、字号、字重按用户要求保留，不列为待修改项。
 
