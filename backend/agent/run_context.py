@@ -64,6 +64,7 @@ class RunContext:
     environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
     environment_host_mcp_manager: Any | None = None
     environment_host_skill_manager: Any | None = None
+    environment_host_captured: bool = False
     network_step: Any | None = None
     network_approval_service: Any | None = None
     session_source: str = "sdk"

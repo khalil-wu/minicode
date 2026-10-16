@@ -396,10 +396,12 @@ async def bootstrap_agent_loop(
     if run_context.environment_manager is not None:
         from backend.agent.environment_runtime import refresh_run_environment_capabilities
 
-        if run_context.environment_host_mcp_manager is None:
-            run_context.environment_host_mcp_manager = run_context.mcp_manager
-        if run_context.environment_host_skill_manager is None:
-            run_context.environment_host_skill_manager = skill_manager
+        if not run_context.environment_host_captured:
+            if run_context.environment_host_mcp_manager is None:
+                run_context.environment_host_mcp_manager = run_context.mcp_manager
+            if run_context.environment_host_skill_manager is None:
+                run_context.environment_host_skill_manager = skill_manager
+            run_context.environment_host_captured = True
         prepared_capabilities = await refresh_run_environment_capabilities(run_context,
             agent_session=agent_session, permission_context=effective_permission_context,
             config_stack=turn_config_stack, feature_flags=model_snapshot.config.feature_flags,

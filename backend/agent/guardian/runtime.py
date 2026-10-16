@@ -301,6 +301,7 @@ class GuardianRuntime:
             owner.user_shell = dict(parent_owner.user_shell)
             owner.environment_host_mcp_manager = parent_owner.environment_host_mcp_manager
             owner.environment_host_skill_manager = parent_owner.environment_host_skill_manager
+            owner.environment_host_captured = parent_owner.environment_host_captured
             if self.session.thread_environments is None and parent_owner.turn_environments is not None:
                 owner.inherited_turn_environments = parent_owner.turn_environments.clone()
                 from backend.agent.environment_selection import EnvironmentConfigState, FailedTurnEnvironment, TurnEnvironment

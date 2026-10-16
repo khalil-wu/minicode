@@ -248,7 +248,7 @@ async def test_retiring_manager_reuses_original_process_and_permission_change_ha
             await runtime.aclose()
 
 @pytest.mark.asyncio
-async def test_real_query_registration_code_mode_images_guardian_and_thread_close(tmp_path, monkeypatch, request):
+async def test_real_query_registration_code_mode_images_guardian_and_thread_close(tmp_path, monkeypatch, request, caplog):
     from backend.agent import query_engine
     from backend.agent.guardian.host import GuardianHostState
     from backend.tests import test_code_execution as harness
@@ -288,10 +288,14 @@ async def test_real_query_registration_code_mode_images_guardian_and_thread_clos
         [process] = backend.process.processes.values()
         pid = process.process.pid
         second = harness.ScriptModel('const r=await tools.mcp__node_repl__js({code:"const saved=42; nodeRepl.write(saved)"}); text(r.content[0].text);')
-        state2, _, _, _, _ = await asyncio.create_task(harness.run_model(tmp_path, second, approval=approve))
+        state2, _, _, _, run2 = await asyncio.create_task(harness.run_model(tmp_path, second, approval=approve))
         assert state2.terminal_status == "completed"
         assert "42" in json.dumps(second.reports)
         assert len(backend.process.processes) == 1 and process.process.pid == pid
+        assert run.environment_host_captured and run.environment_host_mcp_manager is None
+        assert run2.environment_host_captured and run2.environment_host_mcp_manager is None
+        assert not any(record.name == "backend.mcp.manager" and "Failed to start MCP server" in record.getMessage()
+            for record in caplog.records)
         request.node.user_properties.append(("actual_node_lifecycle", json.dumps({"pid": pid, "mcp_tool": receipt.tool_name,
             "source": receipt.call_source, "same_process_across_turns": True, "guardian_images": len(evidence.images()),
             "provider_image": True, "process_sandbox": process.sandbox, "approval_count": len(approvals)})))
@@ -409,6 +413,68 @@ async def test_scope_retirement_waits_for_original_call_then_stops_its_timer(tmp
             await changed_snapshot.aclose()
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_subagent", [False, True])
+async def test_prepared_capabilities_re_admit_node_after_scope_and_preserve_user_catalog(tmp_path, is_subagent, caplog, request):
+    from backend.agent.run_context import RunContext
+    from backend.artifact.store import ArtifactStore
+    from backend.config_layers import ConfigLayerStack
+    from backend.feature_flags import FeatureFlags
+    from backend.mcp.environment_runtime import prepare_environment_capabilities
+    from backend.mcp.node_repl import register_node_companion
+    from backend.tools.registry import ToolRegistry
+
+    async with companion(tmp_path) as fixture:
+        await fixture.client.call_tool("js", {"code":"const parentState=7"})
+        user_config = replace(fixture.config, name="configured_tools", source="user", cwd=str(tmp_path))
+        fixture.manager._runtime_configs += (user_config,)
+        await fixture.manager.start_server(user_config)
+        prepared = await prepare_environment_capabilities(turn_environments=fixture.snapshot,
+            host_skill_manager=None, host_mcp_manager=fixture.manager, feature_flags=FeatureFlags({}),
+            thread_id="receiving", turn_id="next", session_source="subagent" if is_subagent else "sdk",
+            isolated=True, is_subagent=is_subagent, environment_manager=fixture.environments, local_cwd=tmp_path.as_uri())
+        store = ArtifactStore(storage_dir=tmp_path / "prepared-artifacts")
+        host = SimpleNamespace(node_repl_companions=None if is_subagent else fixture.owner)
+        try:
+            assert prepared.mcp_manager.get_server_config("node_repl") is None
+            assert "node_repl" not in prepared.mcp_manager._cached_catalog
+            assert "node_repl" not in prepared.mcp_manager.get_all_tools()
+            assert prepared.mcp_manager.get_server_config("configured_tools").source == "user"
+            if is_subagent:
+                assert prepared.mcp_manager.get_client("configured_tools") is None
+                assert "configured_tools" in prepared.mcp_manager._lazy_servers
+                assert prepared.mcp_manager.get_all_tools()["configured_tools"]
+            else:
+                assert prepared.mcp_manager.get_client("configured_tools") is not None
+            registry = ToolRegistry()
+            prepared.bind_registry(registry, store)
+            run = RunContext(turn_environments=fixture.snapshot, environment_capabilities=prepared,
+                environment_thread_runtime=host, network_step=SimpleNamespace(policy_for=lambda attachment:None))
+            execution = SimpleNamespace(config=SimpleNamespace(config_layer_stack=ConfigLayerStack(())), model_info=None)
+            await register_node_companion(run, registry, None, execution=execution)
+            current = prepared.mcp_manager.get_client("node_repl")
+            assert current is not None
+            if is_subagent:
+                assert current is not fixture.client and host.node_repl_companions is not fixture.owner
+                result = await current.call_tool("js", {"code":"nodeRepl.write(typeof parentState)"})
+                assert not result.is_error and body(result) == "undefined", body(result)
+                await prepared.mcp_manager.prepare_server_call("configured_tools")
+                assert prepared.mcp_manager.get_client("configured_tools") is not None
+            else:
+                assert current is fixture.client
+            assert not any(record.name == "backend.mcp.manager" and "Failed to start MCP server" in record.getMessage()
+                for record in caplog.records)
+            request.node.user_properties.append(("actual_prepared_node_admission", json.dumps({
+                "subagent":is_subagent,"old_builtin_config_and_cache_not_inherited":True,
+                "user_catalog_retained":True,"child_lazy_until_first_call":is_subagent,
+                "node_owner_independent_for_child":is_subagent,"no_pre_admission_startup_errors":True})))
+        finally:
+            await prepared.aclose()
+            if host.node_repl_companions is not None and host.node_repl_companions is not fixture.owner:
+                await host.node_repl_companions.aclose()
+            store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_configured_same_name_override_retires_original_builtin_after_its_borrower(tmp_path):
     from backend.agent.run_context import RunContext
     from backend.mcp.client import MCPClient
@@ -416,6 +482,8 @@ async def test_configured_same_name_override_retires_original_builtin_after_its_
     from backend.mcp.node_repl import register_node_companion
     from backend.mcp.registry import MCPToolRegistry
     from backend.tools.registry import ToolRegistry
+    from backend.feature_flags import FeatureFlags
+    from backend.mcp.environment_runtime import prepare_environment_capabilities
 
     async with companion(tmp_path) as fixture:
         old = fixture.client
@@ -435,6 +503,16 @@ async def test_configured_same_name_override_retires_original_builtin_after_its_
             registry.mcp_tool_registry.sync()
             configured = manager.get_client("node_repl")
             assert type(configured) is MCPClient and configured is not old, manager.get_all_status()
+            inherited = await prepare_environment_capabilities(turn_environments=fixture.snapshot,
+                host_skill_manager=None, host_mcp_manager=manager, feature_flags=FeatureFlags({}),
+                thread_id="user-override-child", turn_id="next", session_source="subagent", is_subagent=True,
+                isolated=True, environment_manager=fixture.environments, local_cwd=tmp_path.as_uri())
+            try:
+                assert inherited.mcp_manager.get_server_config("node_repl").source == "user:explicit-node-repl"
+                assert "node_repl" in inherited.mcp_manager._lazy_servers
+                assert inherited.mcp_manager.get_all_tools()["node_repl"]
+            finally:
+                await inherited.aclose()
             prepared = PreparedEnvironmentCapabilities(manager, None, (), (), runtime, True, "conversation", "override")
             run = RunContext(turn_environments=fixture.snapshot, environment_capabilities=prepared,
                 environment_thread_runtime=SimpleNamespace(node_repl_companions=fixture.owner))

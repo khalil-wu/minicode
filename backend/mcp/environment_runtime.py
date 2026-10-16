@@ -260,6 +260,7 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
     selected_capability_roots: tuple[dict, ...] = ()) -> PreparedEnvironmentCapabilities:
     from backend.mcp.environment_discovery import discover_environment_http, selected_plugin_configs
     from backend.mcp.manager import MCPServerManager
+    from backend.mcp.node_repl import SOURCE_PREFIX as NODE_COMPANION_SOURCE
     from backend.skills.environment_catalog import ExecutorCapabilityRoot, ExecutorSkillCatalog, discover_executor_roots
     from backend.skills.manager import SkillManager
 
@@ -326,10 +327,14 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             requirements_path=source._requirements_path if source is not None else None,
             environment_runtime=runtime, runtime_configs=(),
             startup_policy="LazyWhenCached" if is_subagent else "Eager",
-            cached_catalog=source.catalog_snapshot() if source is not None else ())
+            cached_catalog=tuple(entry for entry in source.catalog_snapshot()
+                if not entry[0].source.startswith(NODE_COMPANION_SOURCE)) if source is not None else ())
         prepared.mcp_manager = manager
         prepared.owns_mcp_manager = True
-        configs = {config.name: deepcopy(config) for config in source.load_config()} if source is not None else {}
+        # Dynamic kernels are admitted only after this step captures its
+        # model/network scope and receiving owner; they are not host config.
+        configs = {config.name: deepcopy(config) for config in source.load_config()
+            if not config.source.startswith(NODE_COMPANION_SOURCE)} if source is not None else {}
         warnings = [*resolution_warnings, *catalog.warnings]
         plugins, disabled_roots = selected_plugin_configs(manager, discoveries,
             enabled=feature_flags.enabled("plugins", True), disabled_plugin_ids=disabled_plugin_ids, warnings=warnings)

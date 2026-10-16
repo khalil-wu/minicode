@@ -139,12 +139,14 @@ async def test_close_suspended_stream_does_not_cancel_its_consumer(sdk_owner):
 
 
 @pytest.mark.asyncio
-async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_environment(sdk_owner, monkeypatch, request):
+@pytest.mark.parametrize("host_present", [False, True])
+async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_environment(sdk_owner, monkeypatch, request, caplog, host_present):
     import json
     import shutil
     from backend.permissions.context import PermissionContext
     from backend.environments import EnvironmentManager
     from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+    from backend.mcp.manager import MCPServerManager
 
     node = shutil.which("node")
     if node is None:
@@ -153,6 +155,14 @@ async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_enviro
     workspace, runtime, artifacts, config = sdk_owner
     backend = LocalExecutionEnvironmentBackend()
     environments = EnvironmentManager(workspace.parent / "sdk-node-environments", local_backend=backend)
+    starts = []
+    original_start = backend.process.start
+    async def record_node_start(argv, *args, **kwargs):
+        process = await original_start(argv, *args, **kwargs)
+        if argv[0] == node:
+            starts.append(process.process.pid)
+        return process
+    monkeypatch.setattr(backend.process, "start", record_node_start)
 
     class PromptModel(ToolModel):
         invoked = False
@@ -166,7 +176,9 @@ async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_enviro
                 yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Node observation complete.", phase="final_answer")
             yield StreamEvent(type=StreamEventType.DONE)
 
-    run = RunContext(agent_runtime=runtime)
+    host = MCPServerManager(config_path=workspace.parent / "host-mcp.json", workspace_root=workspace,
+        runtime_configs=()) if host_present else None
+    run = RunContext(agent_runtime=runtime, mcp_manager=host)
     approvals = []
 
     async def approve(call_id):
@@ -184,6 +196,8 @@ async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_enviro
         result, = [event for event in first if event.type == "tool_result"]
         assert result.data["summary"].splitlines()[-1] == "41"
         assert len(approvals) == 1 and (workspace / "first-executed").read_text() == "41"
+        assert run.environment_host_captured and run.environment_host_mcp_manager is host
+        assert len(starts) == 1
         companion = session.node_repl_companions
         assert run.node_repl_owner is session and companion is not None
         client = companion.instances[companion.active_key].client
@@ -196,6 +210,28 @@ async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_enviro
         assert len(approvals) == 2 and (workspace / "second-executed").read_text() == "42"
         assert session.node_repl_companions is companion and client.process_handle is original
         assert original.process.pid == pid and client.connected and len(backend.process.processes) == 1
+        assert run.environment_host_captured and run.environment_host_mcp_manager is host
+        assert starts == [pid]
+        child = session.fork(session_id="sdk-node-fork")
+        child_run = child._query_kwargs["run_context"]
+        assert child_run.environment_host_captured and child_run.environment_host_mcp_manager is host
+        assert child_run.mcp_manager is host
+        async def approve_child(call_id):
+            return {"action": "approve"}
+        try:
+            child_events = [event async for event in child.query("Observe an independent child kernel",
+                llm=PromptModel("node", {"code":"nodeRepl.write(typeof sdkSaved)"}), approval_handler=approve_child)]
+            child_result, = [event for event in child_events if event.type == "tool_result"]
+            assert child_result.data["summary"].splitlines()[-1] == "undefined"
+            child_owner = child.node_repl_companions
+            child_client = child_owner.instances[child_owner.active_key].client
+            assert child_owner is not companion and child_client is not client
+            assert child_client.process_handle.process.pid != pid and len(starts) == 2
+        finally:
+            await child.aclose()
+        assert client.connected and not original.closed and len(backend.process.processes) == 1
+        assert not any(record.name == "backend.mcp.manager" and "Failed to start MCP server" in record.getMessage()
+            for record in caplog.records)
         thread = session._thread_environments
         close_environment = thread.aclose
         order = []
@@ -214,6 +250,10 @@ async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_enviro
             "pid": pid, "same_process_between_prompts": True, "bindings_preserved": True,
             "closed_ack_before_environment": True, "original_thread_lease_released": client.thread_lease.released,
             "approval_count": len(approvals), "execution_markers_absent_before_approval": True})))
+        request.node.user_properties.append(("actual_host_capture_and_node_starts", json.dumps({
+            "original_host_present":host_present,"original_host_identity_retained":True,
+            "parent_process_starts":1,"independent_child_process_starts":1,"pids":starts,
+            "no_pre_admission_startup_errors":True})))
     finally:
         await session.aclose()
         await environments.close()

@@ -3258,6 +3258,7 @@ class TaskTool(BaseTool):
                     environment_manager_lease=parent_run_context.environment_manager_lease,
                     environment_host_mcp_manager=parent_run_context.environment_host_mcp_manager,
                     environment_host_skill_manager=parent_run_context.environment_host_skill_manager,
+                    environment_host_captured=parent_run_context.environment_host_captured,
                     inherited_turn_environments=(parent_run_context.turn_environments.clone()
                         if child_agent_session.thread_environments is None and parent_run_context.turn_environments is not None else None),
                     user_shell=dict(parent_run_context.user_shell),

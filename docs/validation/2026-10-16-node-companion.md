@@ -45,3 +45,13 @@ CI 四项 cleanup owner 失败揭示真实寿命问题：SDK 保留会话环境�
 `output/ci-ee80a807-followup-20261016/focused-03.xml` **75/75**，`sdk-api-04.xml` **14/14**，均无跳过。首批新增用例因缺审批通道失败、旧 Never 尝试和最终真实回调复验分开保留；两批范围不累加为全产品通过数。notes 的六项 namespace 断言按实际已注册的三个 Node 工具核对完整额外 namespace，原 private/journal/cold replay 断言保留。
 
 同批修正 MCP 在 client 尚未创建时取消启动的清理路径：没有 client 就没有待关闭资源，保留原取消，不再以 `None.close` 覆盖。observe scheduler 原 CI 的 callback 等待则曾把配置/仓库/journal 启动也算进一秒；现在以真实 `Observer.start` 为阶段起点，仍保留原 callback 和取消的一秒约束，提前失败显示原终态。没有证据证明该初始超时由 Node 引起，两者不混为同一因果。
+
+## 安装验收发现的原 host 捕获与动态准入
+
+`25e98f7a` 的[完整 CI 38910536542](https://github.com/khalil-wu/minicode/actions/runs/38910536542)实际八项成功，backend 6935 passed / 108 skipped、frontend 4350 tests。它证明该冻结检查点的回归结果，不能否定独立 r12 冷验随后发现的启动错误：40 项实际断言通过，但日志有三次 `None.client_for`。r12 已标 `stale=true`、`delivery_hold=true`、`clean_acceptance=false`，没有把断言通过等同于干净的安装验收。
+
+根因有三层：原 host 合法为 `None` 时，bootstrap 曾在下一轮把临时 prepared manager 当作原 host；SDK fork 也继承了该临时对象；新 manager 又从配置及缓存 catalog 两路继承动态 builtin Node，早于当前 owner/model/network 准入而启动。现在用明确的捕获事实保留合法 `None` 与真实原 host 身份，沿 SDK fork、子 agent、Guardian 和网络审批传播；配置及缓存只排除 `builtin:node_repl:`，由本轮正式注册。普通用户同名配置及其他服务器的 `LazyWhenCached` 工具、指令和首次调用连接保持原链。
+
+`HOST-ADMISSION.md` 及九文件冻结清单位于 `output/node-runtime-followup-20261016/`。主范围 **54 passed / 2 skipped**；子链补充 **32 passed / 2 skipped**。实际父会话两 prompt 只启动一次 Node，fork 启动自己的内核且没有父绑定；原 host 为 None/非 None 的身份及无前置 ERROR 均核对。跳过分别是既有 Source 外部依赖与未 provision 的原生 proxy 条件，没有改为通过。
+
+原始大批仍为 **71 passed / 3 skipped / 1 failed**；失败是 system Node 24.5 的动态 import/CPU/double-reset 再次触发 V8 `DisallowJavascriptExecutionScope`，不是 host 捕获测试通过就可以隐藏的失败。输出缓冲曾造成误判运行阶段，核实后没有实际执行 Stop-Process。该原生关闭顺序问题正由独立子任务修复；新的完整 CI 和新安装候选必须包含其最终结果，不能借上面的八项绿灯或 r12 四十项断言。

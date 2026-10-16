@@ -155,7 +155,8 @@ class NetworkApprovalRegistration:
             run = replace(run, turn_environments=self.snapshot,
                 environment_manager=source.environment_manager, environment_manager_lease=source.environment_manager_lease,
                 user_shell=dict(source.user_shell), environment_host_mcp_manager=source.environment_host_mcp_manager,
-                environment_host_skill_manager=source.environment_host_skill_manager)
+                environment_host_skill_manager=source.environment_host_skill_manager,
+                environment_host_captured=source.environment_host_captured)
         permission = replace(active.permission, environment_scope=original.permission.environment_scope,
             additional_permissions=original.permission.additional_permissions,
             captured_exec_policy=original.permission.captured_exec_policy,
