@@ -61,6 +61,24 @@ def prepare_source_tree(checkout: Path, build: Path, environment) -> Path:
     return source
 
 
+def prepare_bridge(project: Path) -> tuple[Path, ...]:
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    inputs = []
+    for path in (BRIDGE / "Cargo.toml", *(BRIDGE / "src").glob("*.rs")):
+        target = project / path.relative_to(BRIDGE)
+        contents = path.read_bytes()
+        if sys.platform == "linux" and path.name == "Cargo.toml":
+            contents += b'\n[target.\'cfg(target_os = "linux")\'.dependencies]\ncodex-linux-sandbox = { path = "../linux-sandbox" }\n\n[[bin]]\nname = "minicode-network"\npath = "src/linux_entry.rs"\n'
+        if not target.exists() or target.read_bytes() != contents:
+            target.write_bytes(contents)
+        inputs.append(target)
+    if sys.platform == "linux":
+        target = project / "src/linux_entry.rs"
+        shutil.copyfile(BRIDGE / "linux/entry.rs", target)
+        inputs.append(target)
+    return tuple(inputs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cargo", type=Path, required=True)
@@ -79,12 +97,7 @@ def main():
     source = prepare_source_tree(checkout, build, environment)
     workspace = source / "codex-rs"
     project = workspace / "minicode-network"
-    project.mkdir(exist_ok=True)
-    (project / "src").mkdir(exist_ok=True)
-    for path in (BRIDGE / "Cargo.toml", *(BRIDGE / "src").glob("*.rs")):
-        target = project / path.relative_to(BRIDGE)
-        if not target.exists() or target.read_bytes() != path.read_bytes():
-            shutil.copyfile(path, target)
+    bridge_inputs = prepare_bridge(project)
     manifest = workspace / "Cargo.toml"
     text = manifest.read_text(encoding="utf-8")
     if '    "minicode-network",' not in text:
@@ -93,6 +106,8 @@ def main():
     lock_text = lock.read_text(encoding="utf-8")
     dependencies = ("anyhow", "codex-config", "codex-execpolicy", "codex-file-system", "codex-network-proxy", "codex-protocol",
             "codex-utils-path-uri", "codex-windows-sandbox", "serde", "serde_json", "tokio", "tracing", "tracing-subscriber")
+    if sys.platform == "linux":
+        dependencies = tuple(sorted((*dependencies, "codex-linux-sandbox")))
     lock_text = re.sub(r'\n\[\[package\]\]\nname = "minicode-network"\n.*?(?=\n\[\[package\]\]|\Z)', '', lock_text, flags=re.S)
     lock_text += '\n[[package]]\nname = "minicode-network"\nversion = "0.1.0"\ndependencies = [\n'
     lock_text += "".join(f' "{name}",\n' for name in dependencies) + "]\n"
@@ -100,6 +115,9 @@ def main():
         lock.write_text(lock_text, encoding="utf-8")
     pinned_files = ("core/src/config/network_proxy_spec.rs", "core/src/network_policy_decision.rs",
         "file-system/src/lib.rs", "file-system/src/exec_permission_profile_serde.rs")
+    if sys.platform == "linux":
+        pinned_files += ("linux-sandbox/src/linux_run_main.rs", "linux-sandbox/src/proxy_routing.rs",
+            "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/landlock.rs")
     for relative in pinned_files:
         original = run(["git", "show", f"{SOURCE_COMMIT}:codex-rs/{relative}"],
             cwd=checkout, environment=environment, capture=True).stdout
@@ -113,6 +131,9 @@ def main():
     message = json.loads(verified)
     if message != {"id": 1, "result": {"identity": "minicode-network", "protocol": 1, "sourceCommit": SOURCE_COMMIT}}:
         raise RuntimeError("The compiled network runtime has a different Source identity")
+    if sys.platform == "linux":
+        run([str(binary), "--sandbox-policy-cwd", "/", "--help"], cwd=project,
+            environment=environment, capture=True)
     target = next(line.removeprefix("host: ") for line in compiler.splitlines() if line.startswith("host: "))
     metadata = json.loads(run([str(cargo), "metadata", "--locked", "--format-version", "1", "--filter-platform", target],
         cwd=workspace, environment=environment, capture=True).stdout)
@@ -150,12 +171,14 @@ def main():
         "cargo_lock_sha256": digest(lock),
         "build_script_sha256": script_hash,
         "bridge_files": {str(path.relative_to(project)).replace("\\", "/"): digest(path)
-            for path in (project / "Cargo.toml", *(project / "src").glob("*.rs"))}}
+            for path in bridge_inputs}}
     (output / "source-manifest.json").write_text(json.dumps(source_manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     runtime = {**message["result"], "target": target, "files": {path.name: digest(path)
         for path in output.iterdir() if path.is_file() and path.name != "runtime.json"}}
     if sys.platform == "win32":
         runtime["managed_network_ready_protocol"] = 1
+    if sys.platform == "linux":
+        runtime["linux_sandbox_routing_protocol"] = 1
     (output / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(json.dumps({"runtime": str(output), "identity": message["result"]}))
 

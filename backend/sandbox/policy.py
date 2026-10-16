@@ -309,6 +309,7 @@ class SandboxPolicy:
     enforce_managed_network: bool = False
     managed_network: Mapping[str, Any] | None = None
     network_proxy_restricting_sid: str | None = None
+    linux_sandbox_executable: Path | None = None
 
     def __post_init__(self) -> None:
         workspace_root = (

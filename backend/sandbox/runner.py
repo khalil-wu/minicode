@@ -470,6 +470,20 @@ class SandboxRunner:
             return SandboxCapability(False, "windows-mxc", False, False,
                 reason="Windows MXC sandbox is unavailable in this execution environment")
         if resolved.enforce_managed_network:
+            if sys.platform == "linux":
+                from backend.sandbox.linux_native import discover_runtime
+
+                runtime, reason = discover_runtime(self._policy.linux_sandbox_executable)
+                if runtime is None:
+                    return SandboxCapability(False, "linux-managed-proxy", False, False, reason=reason)
+                available, reason = _bubblewrap_capability()
+                reason = reason or _sandbox_policy_preflight_error(resolved)
+                if not available or reason:
+                    return SandboxCapability(False, "linux-managed-proxy", False, False, reason=reason)
+                return SandboxCapability(True, "linux-managed-proxy",
+                    not resolved.full_disk_write, True,
+                    deny_read_isolated=True, protected_paths_isolated=_protected_paths_fully_isolated(resolved),
+                    reason=reason)
             if sys.platform != "win32":
                 return SandboxCapability(False, "unavailable", False, False,
                     reason="Local managed network routing is implemented only for the elevated Windows sandbox")
@@ -1277,6 +1291,17 @@ class SandboxRunner:
             return list(argv) if argv is not None else host_command or command
 
         shell_command = shlex.join(argv) if argv is not None else command
+
+        if capability.backend == "linux-managed-proxy":
+            from backend.sandbox.linux_native import command as linux_command, discover_runtime
+
+            runtime, reason = discover_runtime(self._policy.linux_sandbox_executable)
+            if runtime is None:
+                raise SandboxUnavailableError(reason)
+            effective_cwd = Path(cwd or self._policy.policy_cwd or Path.cwd()).resolve()
+            return linux_command(runtime, resolved,
+                policy_cwd=self._policy.policy_cwd or effective_cwd, command_cwd=effective_cwd,
+                argv=list(argv) if argv is not None else ["sh", "-c", command])
 
         if capability.backend == "windows-restricted-token":
             from backend.sandbox.windows_native import discover_runtime, _permission_profile

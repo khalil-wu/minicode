@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[2]
@@ -23,4 +24,9 @@ if sys.platform == "win32":
     native = json.loads((root / "desktop/windows-sandbox-runtime/runtime.json").read_text(encoding="utf-8"))
     if native.get("managed_network_ready_protocol") != 1:
         raise RuntimeError("The Windows sandbox runtime does not support explicit managed network setup")
+elif sys.platform == "linux":
+    if manifest.get("linux_sandbox_routing_protocol") != 1:
+        raise RuntimeError("The network runtime does not contain the pinned Linux sandbox helper")
+    subprocess.run([str(runtime.binary), "--sandbox-policy-cwd", "/", "--help"],
+        check=True, stdout=subprocess.DEVNULL)
 print("Pinned network runtime and explicit sandbox readiness verified")

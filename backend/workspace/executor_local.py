@@ -40,7 +40,7 @@ def _native_uri(path: str | Path) -> str:
 
 def _source_sandbox_type(backend: str) -> str | None:
     return {"full-access": "none", "external-sandbox": "none", "seatbelt": "macosSeatbelt",
-        "bubblewrap": "linuxSeccomp", "windows-restricted-token": "windowsRestrictedToken",
+        "bubblewrap": "linuxSeccomp", "linux-managed-proxy": "linuxSeccomp", "windows-restricted-token": "windowsRestrictedToken",
         "windows-elevated-wfp": "windowsRestrictedToken"}.get(backend)
 
 
@@ -359,6 +359,8 @@ class LocalProcessBackend:
         policy = local_sandbox_policy(sandbox, env=env, env_policy=env_policy)
         if managed_network_policy is not None:
             policy = replace(policy, enforce_managed_network=True)
+            if sys.platform == "linux":
+                policy = replace(policy, linux_sandbox_executable=managed_network_policy.runtime.binary)
         runner = SandboxRunner(policy)
         identity = process_id or uuid4().hex
         if identity in self.processes:
@@ -374,12 +376,13 @@ class LocalProcessBackend:
                     environment_id=managed_network_policy.environment_id, execution_id=identity,
                     attribution_token=secrets.token_hex(32), decider=network_decider, observer=network_observer)
                 process.network_audit = process.network_lease.network_audit
-                from backend.sandbox.windows_native import capture_local_network_prerequisite
+                if sys.platform == "win32":
+                    from backend.sandbox.windows_native import capture_local_network_prerequisite
 
-                prerequisite = await asyncio.to_thread(capture_local_network_prerequisite, process.network_lease)
-                status = await asyncio.to_thread(prerequisite.status)
-                if not status["ready"]:
-                    raise SandboxUnavailableError(status["reason"])
+                    prerequisite = await asyncio.to_thread(capture_local_network_prerequisite, process.network_lease)
+                    status = await asyncio.to_thread(prerequisite.status)
+                    if not status["ready"]:
+                        raise SandboxUnavailableError(status["reason"])
                 runner._policy = replace(policy, captured_env=process.network_lease.env,
                     managed_network=process.network_lease.sandbox_context,
                     network_proxy_restricting_sid=process.network_lease.restricting_sid)
