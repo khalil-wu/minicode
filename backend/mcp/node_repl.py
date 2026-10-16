@@ -210,7 +210,7 @@ async def register_node_companion(run_context, registry, agent_session, *, execu
         return
     manager = prepared.mcp_manager
     thread = run_context.environment_thread_runtime
-    owner_host = thread if thread is not None else agent_session
+    owner_host = thread if thread is not None else run_context.node_repl_owner or agent_session
     existing = manager.get_server_config("node_repl")
     if existing is not None and not existing.source.startswith(SOURCE_PREFIX):
         if owner_host is not None and owner_host.node_repl_companions is not None:

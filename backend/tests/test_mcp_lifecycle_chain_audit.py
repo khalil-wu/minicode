@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,3 +55,30 @@ async def test_close_consumes_a_cancelled_sdk_lifecycle_without_cancelling_its_c
     client._lifecycle_task = task
     assert await client.close()
     assert client._lifecycle_task is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_environment_binding_keeps_original_cancelled_outcome(tmp_path):
+    from backend.mcp.manager import MCPServerConfig, MCPServerManager, ServerStatus
+
+    entered = asyncio.Event()
+
+    async def bind_server(config):
+        entered.set()
+        await asyncio.Event().wait()
+
+    manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path,
+        environment_runtime=SimpleNamespace(bind_server=bind_server), runtime_configs=())
+    task = asyncio.create_task(manager.start_server(MCPServerConfig("binding-cancel", command="not-launched")))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        state = manager._servers["binding-cancel"]
+        assert state.client is None and state.status is ServerStatus.OFFLINE
+        assert not state.tools and not manager.pending_requests() and not manager._cleanup_reaper_tasks
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.stop_all()

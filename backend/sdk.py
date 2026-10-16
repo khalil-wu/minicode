@@ -156,6 +156,7 @@ class SDKSession:
         self._thread_environments = None
         self._inherited_turn_environments = None
         self._user_shell = None
+        self.node_repl_companions = None
 
     async def aclose(self) -> None:
         self._closed = True
@@ -174,6 +175,8 @@ class SDKSession:
         }:
             await asyncio.wait(pending)
         await self._commands.shutdown()
+        if self.node_repl_companions is not None:
+            await self.node_repl_companions.aclose()
         if self._thread_environments is not None:
             await self._thread_environments.aclose()
         if self._inherited_turn_environments is not None:
@@ -234,6 +237,7 @@ class SDKSession:
             run_context.inherited_turn_environments = self._inherited_turn_environments
             self._inherited_turn_environments = None
             run_context.retain_thread_environments = True
+            run_context.node_repl_owner = self
             if run_context.cancel_event is None:
                 run_context.cancel_event = asyncio.Event()
             self._active_run_context = run_context
@@ -374,6 +378,7 @@ async def query(
     artifact_store: ArtifactStore | None = None,
     permission_checker: PermissionChecker | None = None,
     permission_context: PermissionContext | None = None,
+    approval_handler: Callable[[str], Any] | None = None,
     tools: Iterable[BaseTool] | None = None,
     config: AppConfig | None = None,
     agent_settings: AgentSettings | None = None,
@@ -453,6 +458,7 @@ async def query(
             artifact_store=artifact_store,
             permission_checker=permission_checker,
             permission_context=permission_context,
+            approval_handler=approval_handler,
             tools=tools,
             config=config,
             agent_settings=agent_settings,
@@ -490,6 +496,7 @@ async def _query_unclaimed(
     artifact_store: ArtifactStore | None = None,
     permission_checker: PermissionChecker | None = None,
     permission_context: PermissionContext | None = None,
+    approval_handler: Callable[[str], Any] | None = None,
     tools: Iterable[BaseTool] | None = None,
     config: AppConfig | None = None,
     agent_settings: AgentSettings | None = None,
@@ -605,6 +612,7 @@ async def _query_unclaimed(
             tool_registry=tool_registry,
             artifact_store=artifact_store,
             permission_checker=permission_checker,
+            approval_handler=approval_handler,
             agent_settings=agent_settings,
             token_budget=token_budget,
             context_builder=context_builder,

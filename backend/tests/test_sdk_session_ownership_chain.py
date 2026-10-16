@@ -136,3 +136,84 @@ async def test_close_suspended_stream_does_not_cancel_its_consumer(sdk_owner):
         assert asyncio.current_task().cancelling() == 0
     with pytest.raises(RuntimeError, match="closed"):
         session.fork()
+
+
+@pytest.mark.asyncio
+async def test_sdk_node_kernel_persists_between_prompts_and_closes_before_environment(sdk_owner, monkeypatch, request):
+    import json
+    import shutil
+    from backend.permissions.context import PermissionContext
+    from backend.environments import EnvironmentManager
+    from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("requires the actual installed Node runtime")
+    monkeypatch.setenv("MINICODE_EDITOR_NODE", node)
+    workspace, runtime, artifacts, config = sdk_owner
+    backend = LocalExecutionEnvironmentBackend()
+    environments = EnvironmentManager(workspace.parent / "sdk-node-environments", local_backend=backend)
+
+    class PromptModel(ToolModel):
+        invoked = False
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            if not self.invoked:
+                self.invoked = True
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
+                    ToolCallEvent(id="sdk-node-" + str(len(messages)), name="mcp__node_repl__js", arguments=self.arguments)])
+            else:
+                yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Node observation complete.", phase="final_answer")
+            yield StreamEvent(type=StreamEventType.DONE)
+
+    run = RunContext(agent_runtime=runtime)
+    approvals = []
+
+    async def approve(call_id):
+        marker = workspace / ("first-executed" if not approvals else "second-executed")
+        assert not marker.exists()
+        approvals.append(call_id)
+        return {"action": "approve"}
+
+    session = create_session(session_id="persistent-sdk-node", workspace_root=workspace, config=config,
+        llm=PromptModel("node", {"code": "const fs=await import('node:fs');const sdkSaved=41;fs.writeFileSync('first-executed','41');nodeRepl.write(sdkSaved)"}),
+        artifact_store=artifacts, tool_registry=create_tool_registry(), run_context=run,
+        environment_manager=environments, permission_context=PermissionContext(mode="bypass"), approval_handler=approve)
+    try:
+        first = [event async for event in session.query("Remember the SDK value")]
+        result, = [event for event in first if event.type == "tool_result"]
+        assert result.data["summary"].splitlines()[-1] == "41"
+        assert len(approvals) == 1 and (workspace / "first-executed").read_text() == "41"
+        companion = session.node_repl_companions
+        assert run.node_repl_owner is session and companion is not None
+        client = companion.instances[companion.active_key].client
+        original = client.process_handle
+        pid = original.process.pid
+        assert client.connected and original.accepted and not original.closed and not original.released
+        second = [event async for event in session.query("Read the same SDK value", llm=PromptModel("node", {"code": "fs.writeFileSync('second-executed',String(sdkSaved+1));nodeRepl.write(sdkSaved+1)"}))]
+        result, = [event for event in second if event.type == "tool_result"]
+        assert result.data["summary"].splitlines()[-1] == "42"
+        assert len(approvals) == 2 and (workspace / "second-executed").read_text() == "42"
+        assert session.node_repl_companions is companion and client.process_handle is original
+        assert original.process.pid == pid and client.connected and len(backend.process.processes) == 1
+        thread = session._thread_environments
+        close_environment = thread.aclose
+        order = []
+
+        async def close_original_environment():
+            assert original.closed and original.released and client.thread_lease.released
+            assert not backend.process.processes
+            order.append("environment_after_original_node_ack")
+            await close_environment()
+
+        monkeypatch.setattr(thread, "aclose", close_original_environment)
+        await session.aclose()
+        assert order == ["environment_after_original_node_ack"]
+        assert not companion.instances and not client.connected
+        request.node.user_properties.append(("actual_sdk_node_owner", json.dumps({
+            "pid": pid, "same_process_between_prompts": True, "bindings_preserved": True,
+            "closed_ack_before_environment": True, "original_thread_lease_released": client.thread_lease.released,
+            "approval_count": len(approvals), "execution_markers_absent_before_approval": True})))
+    finally:
+        await session.aclose()
+        await environments.close()

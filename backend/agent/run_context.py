@@ -73,6 +73,7 @@ class RunContext:
     retain_thread_environments: bool = False
     user_shell: dict[str, str] = field(default_factory=default_user_shell)
     environment_thread_runtime: ConversationThreadRuntime | None = None
+    node_repl_owner: Any | None = None
     initial_turn_environments: TurnEnvironmentSnapshot | None = None
     turn_environments: TurnEnvironmentSnapshot | None = None
     context_builder: ContextBuilder | None = None

@@ -110,6 +110,8 @@ async def test_real_sdk_cleanup_fence_waits_for_source_and_original_capabilities
         assert any(event.type == "tool_result" and "timed out" in event.data["summary"] for event in events)
         context = tool.context
         assert context is not None
+        assert context.run_context.node_repl_owner is session
+        assert session.node_repl_companions is not None
         source = tool.source_task
         assert source is not None and not source.done()
         original_tool_owner = context.cleanup_tasks_by_call[context.tool_call_id]
@@ -164,6 +166,9 @@ async def test_real_sdk_cleanup_fence_waits_for_source_and_original_capabilities
             assert not original_retirement["close_entered"].is_set() and not original_capability_attachment.lease.released
             await assert_competing_query_is_fenced()
 
+        closing_session = asyncio.create_task(session.aclose())
+        await asyncio.sleep(0)
+        assert not closing_session.done()
         release_source.set()
         await asyncio.wait_for(source_finished.wait(), 2)
         settled = await asyncio.wait_for(asyncio.gather(original_tool_owner, return_exceptions=True), 2)
@@ -178,12 +183,14 @@ async def test_real_sdk_cleanup_fence_waits_for_source_and_original_capabilities
         assert len(captured) == 1 and captured[0] is tool.original_capabilities
         assert not original_capability_attachment.lease.released
         assert not original_retirement["task"].done() and not capabilities_closed.is_set()
+        assert not closing_session.done()
         assert guards.owns(claim)
         await assert_competing_query_is_fenced()
 
         release_capabilities.set()
         await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in capability_owners)), 2)
         await asyncio.gather(*tuple(session._lifecycle_cleanup_waiters))
+        await asyncio.wait_for(closing_session, 2)
         await asyncio.sleep(0)
         assert capabilities_closed.is_set() and original_capability_attachment.lease.released
         assert original_capability_snapshot._resources.close_task.done()

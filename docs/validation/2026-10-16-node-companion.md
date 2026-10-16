@@ -35,3 +35,13 @@ Root 随后显式提供同一个 installed Source，补跑此前因未指定 Sou
 官方 Node 22 源码、下载 SHA、诊断变体和正式修复分开保存在 `output/node-runtime-followup-20261016/NODE22-RESET.md`。`node22-after.xml` **20 passed / 1 native skip**；`node24-regressions.xml` **53 passed / 1 native skip**。实际 Node 22.23.3、系统 24.5.0、Electron 24.18.1 均核实 Frame 已启用，并覆盖 active reset、timeout/cancel 和晚输出的原 request metadata。两批有重叠，不相加；Windows 实测不替代修复后的 Linux CI。
 
 桌面参考 `mcp-tool-activity-label` 的 `Sa` 会优先使用 `js` 参数中的 `title`，清除首尾空白、合并空白并限制 80 个字符。MiniCode 此前总先显示 `server.js`，现在主/子过程和工具详情共用该标题合同，其余工具保持实际身份，原参数和输出仍保留。实际 DOM 与相关四文件 **80/80**，含六项新增标题边界；Source SHA、函数原文和范围限制见同目录 `js-title-evidence.json`。这不是新一轮真实 Node→Electron WS 实机验收。
+
+## SDK 会话持有与实际审批入口
+
+CI 四项 cleanup owner 失败揭示真实寿命问题：SDK 保留会话环境，但每次 prompt 的临时 `AgentSession` 曾持有 Node，导致 prompt 结束就销毁内核，并为已有 borrowers 额外挂关闭任务。现在由实际 `SDKSession` 持有 Node，`RunContext` 显式传递该 owner；WS 仍归原 conversation thread。SDK 关闭先等原 borrowers，关闭原 Node 并取得 ACK，再释放环境，没有放宽原四项精确 task-set 断言。
+
+真实 SDK 验收另发现公开 `query` 入口没有传递审批回调。已补 `approval_handler` → `_query_unclaimed` → `AgentSession`；两次真实 prompt 均经回调允许后执行，不用 Never 绕过 MCP 审批。原 PID 24960、原 owner/handle 和绑定从 41 到 42 保持一致；两次 marker 在审批前均不存在，实际进程关闭及 lease ACK 先于环境关闭，原始属性为 JUnit `actual_sdk_node_owner`。
+
+`output/ci-ee80a807-followup-20261016/focused-03.xml` **75/75**，`sdk-api-04.xml` **14/14**，均无跳过。首批新增用例因缺审批通道失败、旧 Never 尝试和最终真实回调复验分开保留；两批范围不累加为全产品通过数。notes 的六项 namespace 断言按实际已注册的三个 Node 工具核对完整额外 namespace，原 private/journal/cold replay 断言保留。
+
+同批修正 MCP 在 client 尚未创建时取消启动的清理路径：没有 client 就没有待关闭资源，保留原取消，不再以 `None.close` 覆盖。observe scheduler 原 CI 的 callback 等待则曾把配置/仓库/journal 启动也算进一秒；现在以真实 `Observer.start` 为阶段起点，仍保留原 callback 和取消的一秒约束，提前失败显示原终态。没有证据证明该初始超时由 Node 引起，两者不混为同一因果。

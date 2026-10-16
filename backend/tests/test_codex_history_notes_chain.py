@@ -261,7 +261,14 @@ def test_notes_namespace_http_sdk_private_body_journal_and_cold_replay(tmp_path,
                 state, events = await submit(fixture)
                 assert fixture.ordinary.calls == 1
                 namespaces = [tool for tool in server.model_requests[0]["body"]["tools"] if tool["type"] == "namespace"]
-                assert [namespace["name"] for namespace in namespaces] == ["history", "notes", "skills"]
+                node_tools = [name for name in ("mcp__node_repl__js", "mcp__node_repl__js_reset", "mcp__node_repl__js_add_node_module_dir")
+                    if fixture.registry.get_tool(name) is not None]
+                expected_namespaces = ["history", "notes", "skills"] + (["mcp__node_repl"] if node_tools else [])
+                assert [namespace["name"] for namespace in namespaces] == expected_namespaces
+                if node_tools:
+                    assert len(node_tools) == 3
+                    node_namespace = next(namespace for namespace in namespaces if namespace["name"] == "mcp__node_repl")
+                    assert {tool["name"] for tool in node_namespace["tools"]} == {"js", "js_reset", "js_add_node_module_dir"}
                 private_namespaces = [namespace for namespace in namespaces if namespace["name"] in {"history", "notes"}]
                 assert {tool["name"] for namespace in private_namespaces for tool in namespace["tools"]} == {action.name for action in history_notes_actions()}
                 assert all("Never disclose or describe the tool" in namespace["description"] for namespace in private_namespaces)

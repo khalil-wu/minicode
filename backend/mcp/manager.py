@@ -1760,7 +1760,7 @@ class MCPServerManager:
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
         except asyncio.CancelledError:
-            closed = await self._close_client_owner(name, client)
+            closed = await self._close_client_owner(name, client) if client is not None else True
             state.client = None if closed else client
             state.tools = []
             state.status = ServerStatus.OFFLINE if closed else ServerStatus.ERROR

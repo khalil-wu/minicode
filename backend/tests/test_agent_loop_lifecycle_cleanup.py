@@ -291,6 +291,7 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
         entered, release = asyncio.Event(), asyncio.Event()
         effects, loans, submissions, events = [], [], [], []
         public_done = asyncio.Event()
+        observer_started = asyncio.Event()
         llm = _LLM()
         runtime = AgentRuntime(
             metrics_file=tmp_path / "runtime.jsonl", swarm_store_dir=tmp_path / "swarm",
@@ -310,7 +311,7 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
                 effects.append(await llm.simple_chat([]))
 
             async def start(self):
-                pass
+                observer_started.set()
 
             async def observe(self, event):
                 if phase == "observe" and not entered.is_set():
@@ -387,10 +388,23 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
 
         caller = asyncio.create_task(invoke())
         closer = None
+        cancellation_requested = False
+        callback_entered = False
+        startup = asyncio.create_task(observer_started.wait())
         try:
+            # Config/repository admission is separate from the callback's
+            # one-second cancellation boundary. An early host result must
+            # remain the reported failure instead of timing out on an event.
+            done, _ = await asyncio.wait({startup, caller}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+            if caller in done:
+                result = caller.result()
+                pytest.fail(f"Host completed before starting the observer: {result}")
+            assert startup in done, "Host did not reach observer startup"
             await asyncio.wait_for(entered.wait(), 1)
+            callback_entered = True
             if phase == "observe":
                 caller.cancel()
+                cancellation_requested = True
                 if host == "scheduler":
                     await asyncio.wait_for(public_done.wait(), 1)
                     assert not caller.done()
@@ -439,13 +453,18 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
             assert latest[-1].payload["lifecycle_cleanup_pending_count"] > 0
         finally:
             release.set()
+            startup.cancel()
+            await asyncio.gather(startup, return_exceptions=True)
+            if not callback_entered:
+                caller.cancel()
+                await asyncio.gather(caller, return_exceptions=True)
             if submissions:
                 await _settle(submissions[0].runtime.run_context)
             if host == "scheduler":
-                if phase == "observe":
+                if cancellation_requested:
                     with pytest.raises(asyncio.CancelledError):
                         await asyncio.wait_for(asyncio.shield(caller), 1)
-                else:
+                elif callback_entered:
                     assert (await asyncio.wait_for(asyncio.shield(caller), 1))["status"] == "completed"
             await _claim_released(conversation_id)
             await sdk_session.aclose()
