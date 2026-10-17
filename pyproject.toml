@@ -13,7 +13,6 @@ dependencies = [
   "uvicorn[standard]>=0.32,<1.0",
   "anthropic>=0.42,<1.0",
   "mcp[cli]>=1.27.1,<2.0",
-  "av>=17.1,<18.0",
   "Pillow>=11,<13",
   "pydantic>=2.0,<3.0",
   "jsonschema>=4.23,<5.0",
@@ -64,6 +63,7 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 "backend.tools" = ["*.json", "source_search_resources/*"]
 "backend.memory" = ["templates/*.md"]
 "backend.mcp" = ["*.js", "*.mjs"]
+"backend.tests" = ["fixtures/source_media/*"]
 
 [project.optional-dependencies]
 dev = [

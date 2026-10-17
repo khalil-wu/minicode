@@ -29,6 +29,14 @@ class CommandScope:
 _execution_command_scope: ContextVar[tuple[str, CommandScope] | None] = ContextVar("execution_command_scope", default=None)
 
 
+def _same_workspace(left: str, right: str) -> bool:
+    if left.startswith("file:") or right.startswith("file:"):
+        from backend.workspace.executor_paths import ExecutorPath
+
+        return left.startswith("file:") and right.startswith("file:") and ExecutorPath.parse(left) == ExecutorPath.parse(right)
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+
+
 @contextmanager
 def bind_execution_command_scope(session_id: str, scope: CommandScope) -> Iterator[None]:
     """Bind a server-resolved execution target without changing the reader."""
@@ -46,6 +54,7 @@ def resolve_command_scope(
     require_conversation: bool = True,
     require_workspace: bool = False,
     workspace_keys: tuple[str, ...] = ("execution_cwd", "workspace_root", "workspace"),
+    allow_executor_uri: bool = False,
 ) -> CommandScope:
     """Resolve a MiniCode-style explicit command owner and reject stale owners."""
 
@@ -63,7 +72,7 @@ def resolve_command_scope(
             raise ValueError("Command conversation does not match its execution owner")
         for key in workspace_keys:
             requested_root = str(data.get(key) or "").strip()
-            if requested_root and (not scope.workspace_root or Path(requested_root).expanduser().resolve() != Path(scope.workspace_root).resolve()):
+            if requested_root and (not scope.workspace_root or not _same_workspace(requested_root, scope.workspace_root)):
                 raise ValueError("Command workspace does not match its execution owner")
         if require_workspace and not scope.workspace_root:
             raise ValueError("Open a workspace before running this command")
@@ -96,6 +105,20 @@ def resolve_command_scope(
         or getattr(conversation, "workspace_root", "")
         or ""
     ).strip()
+    if bound_workspace.startswith("file:") or allow_executor_uri and requested_workspace.startswith("file:"):
+        from backend.workspace.executor_paths import ExecutorPath
+
+        if not bound_workspace:
+            raise ValueError("No workspace is bound to this command owner")
+        if bound_workspace.startswith("file:") and requested_workspace and not _same_workspace(requested_workspace, bound_workspace):
+            raise ValueError("Command workspace does not match the conversation workspace")
+        # URI owners are compared in the accepted executor namespace. In the
+        # native display-path case the asynchronous consumer must also match
+        # this URI against its captured attachment before doing any I/O.
+        workspace_root = ExecutorPath.parse(requested_workspace or bound_workspace).uri
+        return CommandScope(conversation_id, workspace_root, str(
+            data.get("request_id") or data.get("requestId") or data.get("client_command_id") or ""
+        ).strip())
     resolve_requested = session.resolve_requested_workspace
     current_workspace = session.session_lifecycle.current_workspace_root
     session_workspace = session.session_lifecycle.workspace_root

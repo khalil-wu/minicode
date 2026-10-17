@@ -151,6 +151,18 @@ def test_workspace_is_optional_for_inventory_but_cannot_be_supplied_as_an_unboun
         resolve_command_scope(session, {"workspace_root": str(tmp_path)}, require_workspace=True)
 
 
+@pytest.mark.parametrize("uri", ["file:///home/user/repo", "file:///C:/executor/repo", "file://server/share/repo"])
+def test_uri_workspace_scope_never_resolves_in_controller_namespace(uri, monkeypatch):
+    session = _session(None, uri)
+    def native_resolve(_requested):
+        raise AssertionError("An executor URI must not enter native workspace resolution")
+    session.resolve_requested_workspace = native_resolve
+    scope = resolve_command_scope(session, {"workspace_root": uri, "request_id": "uri-owner"}, require_workspace=True)
+    assert scope.workspace_root == uri and scope.request_id == "uri-owner"
+    with pytest.raises(ValueError, match="conversation workspace"):
+        resolve_command_scope(session, {"workspace_root": uri + "/other"}, require_workspace=True)
+
+
 def test_mounted_workspace_reaches_terminal_execution_and_preview_config(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "selected"
     nested = workspace / "nested"

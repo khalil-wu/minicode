@@ -5,10 +5,10 @@
   "target": "x86_64-pc-windows-msvc",
   "files": {
     "LICENSE.openai-codex": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
-    "minicode-network.exe": "f14c6d27630f3791bee6e50578e1eee8506bf0e75ad8f971c407287d7402b9fc",
+    "minicode-network.exe": "f544fccea426d4c5f3462a6f3236dca0146272477a93bd67c69a947d3fe06143",
     "NOTICE.openai-codex": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
-    "source-manifest.json": "c1180c18e04cf0513c33eb805022accefa37d83a9152b32d8054b0ac65ebbf63",
-    "THIRD_PARTY_NOTICES.txt": "024a26d1bcd8659fb03171fe84cdcf8b804c24ec7efc6ab55629834046ec864a"
+    "source-manifest.json": "92d36ed9b61acfc9b22b2ccfdbae883fa5d799b1a6cf5fff692e9e68efe9a222",
+    "THIRD_PARTY_NOTICES.txt": "6d0715b150b54fabd68bf615534f70d2c6fc6f6b62dde61d38dc2bf70080ce39"
   },
   "managed_network_ready_protocol": 1
 }

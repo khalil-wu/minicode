@@ -1,4 +1,5 @@
 use anyhow::Result;
+use anyhow::Context;
 use anyhow::bail;
 use codex_windows_sandbox::WindowsSandboxProvisioningSettings;
 use codex_windows_sandbox::run_elevated_provisioning_setup;
@@ -13,13 +14,16 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[cfg(test)]
 use codex_windows_sandbox::{OwnerIdentity, sandbox_dir, sandbox_bin_dir, sandbox_secrets_dir};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::path::PathBuf;
 #[cfg(test)]
 use windows_sys::core::GUID;
 #[cfg(test)]
@@ -28,6 +32,11 @@ mod tests;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, request] = args.as_slice()
+        && flag == "--launch-restricted-windows-sandbox"
+    {
+        return run_restricted_sandbox(request);
+    }
     if args.first().is_some_and(|arg| arg == "--run-as-pty") {
         return run_pty(&args[1..]);
     }
@@ -114,6 +123,44 @@ fn main() -> Result<()> {
              sandbox cleanup --elevated --current-user --codex-home PATH"
         ),
     }
+}
+
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestrictedSandboxRequest {
+    codex_home: PathBuf,
+    command_cwd: AbsolutePathBuf,
+    workspace_roots: Vec<AbsolutePathBuf>,
+    env: HashMap<String, String>,
+    permission_profile: PermissionProfile,
+    argv: Vec<String>,
+    tty: bool,
+}
+
+fn run_restricted_sandbox(payload: &str) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let request: RestrictedSandboxRequest = serde_json::from_str(payload)?;
+    bind_windows_sandbox_owner(&request.codex_home, &current_setup_user()?)?;
+    // Source creates the private desktop with the real restricted-token
+    // capability ACL. This process owns its cache until the wrapper exits.
+    let mut args = codex_windows_sandbox::create_windows_sandbox_command_args_for_permission_profile(
+        request.argv, &request.command_cwd, &request.workspace_roots, &request.env,
+        &request.permission_profile, WindowsSandboxLevel::RestrictedToken, false, None,
+        codex_windows_sandbox::WindowsSandboxProxySettingsMode::Reconcile,
+        None, false, None, &[], &[], &request.codex_home,
+    )?;
+    if request.tty {
+        let separator = args.iter().position(|arg| arg == "--")
+            .context("Source sandbox wrapper argv has no command separator")?;
+        args.insert(separator, "--tty".into());
+    }
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args(args).env_clear().envs(request.env)
+        .stdin(std::process::Stdio::inherit()).stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit()).creation_flags(0x08000000).status()?;
+    std::process::exit(status.code().context("Source sandbox wrapper exited without a status")?);
 }
 
 fn run_pty(args: &[String]) -> Result<()> {

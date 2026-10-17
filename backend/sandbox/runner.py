@@ -1311,18 +1311,13 @@ class SandboxRunner:
             if runtime is None:
                 raise SandboxUnavailableError(reason)
             effective_cwd = Path(cwd or self._policy.policy_cwd or Path.cwd()).resolve()
-            wrapped = [str(runtime.executable), "--run-as-windows-sandbox", "--codex-home", str(runtime.home),
-                "--command-cwd", str(effective_cwd), "--permission-profile",
-                json.dumps(_permission_profile(resolved, effective_cwd), ensure_ascii=False),
-                "--env-json", json.dumps(self._build_env(), ensure_ascii=False),
-                "--windows-sandbox-level", "restricted-token"]
-            for root in self._policy.workspace_roots:
-                wrapped.extend(("--workspace-root", str(root)))
-            if tty:
-                wrapped.append("--tty")
-            wrapped.append("--")
-            wrapped.extend(argv if argv is not None else ["cmd.exe", "/c", host_command or command])
-            return wrapped
+            request = {"codexHome": str(runtime.home), "commandCwd": str(effective_cwd),
+                "workspaceRoots": [str(root) for root in self._policy.workspace_roots],
+                "permissionProfile": _permission_profile(resolved, effective_cwd),
+                "env": self._build_env(), "tty": tty,
+                "argv": list(argv) if argv is not None else ["cmd.exe", "/c", host_command or command]}
+            return [str(runtime.executable), "--launch-restricted-windows-sandbox",
+                json.dumps(request, ensure_ascii=False)]
 
         if capability.backend == "bubblewrap":
             ready_path = self._prepare_bubblewrap_mount_targets(resolved)

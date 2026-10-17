@@ -7,6 +7,15 @@ network-denial formatter. Executor permission profiles use Source
 `codex_file_system::ExecPermissionProfile` so URI paths retain their executor
 path convention.
 
+The same process transport also exposes two independent media meters:
+`media/audioTokens({audioUrl}) -> {tokens}` calls the pinned Source audio
+estimator; `media/originalImageBytes({imageUrl}) -> {bytes}` uses the exact
+private history-estimator ranges checked by the builder (`bytes` may be null).
+They use Source's Symphonia and image crates, with no FFmpeg/PyAV dependency.
+These calls do not create a network execution or change policy, routing or
+lease ownership. Python can use the existing synchronous JSON invocation;
+there is no separate media service or persistent process.
+
 Build with `desktop/scripts/prepare-network-runtime.py`, an explicit Rust 1.95.0
 Cargo executable, the pinned Source checkout, an isolated build directory and
 an output directory. The output contains the executable, Source provenance,

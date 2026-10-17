@@ -128,10 +128,21 @@ def code_mode_model_output(items: list[dict[str, Any]], *, status: str, wall_tim
     return [{"type": "input_text", "text": f"{status}\nWall time {rounded_time:.1f} seconds\nOutput:\n"}, *items]
 
 
+def _decode_data_url(url: str) -> tuple[str, bytes] | None:
+    if not url.startswith("data:") or "," not in url:
+        return None
+    metadata, payload = url[5:].split(",", 1)
+    parts = metadata.split(";")
+    if not any(part.lower() == "base64" for part in parts[1:]):
+        return None
+    try:
+        return parts[0].lower(), base64.b64decode(payload, validate=True)
+    except binascii.Error:
+        return None
+
+
 def selected_media(output: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     """Playable artifacts use actual data bytes; the native body retains the URL."""
-    from backend.mcp.result_projection import _decode_data_url
-
     media = []
     for item in output:
         if item["kind"] != kind:

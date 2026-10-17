@@ -620,16 +620,16 @@ def test_git_diff_commands_reject_workspace_outside_session(monkeypatch, tmp_pat
     outside.mkdir()
     calls: list[str] = []
 
-    async def fake_get_working_tree_diff(workspace_root: str):
+    async def fake_get_working_tree_diff(workspace_root: str, *, service=None):
         calls.append(workspace_root)
         from backend.diff.git_integration import StructuredDiff
 
         return StructuredDiff()
 
-    async def fake_get_untracked_files(_workspace: str):
+    async def fake_get_untracked_files(_workspace: str, *, service=None):
         return []
 
-    async def fake_is_git_worktree(_workspace: str):
+    async def fake_is_git_worktree(_workspace: str, *, service=None):
         return True
 
     monkeypatch.setattr("backend.diff.git_integration.is_git_worktree", fake_is_git_worktree)
@@ -667,7 +667,7 @@ def test_git_stage_commands_reject_absolute_or_parent_paths(monkeypatch, tmp_pat
     workspace.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_stage_file(workspace_root: str, path: str) -> bool:
+    async def fake_stage_file(workspace_root: str, path: str, *, service=None) -> bool:
         calls.append((workspace_root, path))
         return True
 
@@ -708,7 +708,7 @@ def test_git_revert_command_rejects_absolute_or_parent_paths(monkeypatch, tmp_pa
     workspace.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_revert_file(workspace_root: str, path: str) -> bool:
+    async def fake_revert_file(workspace_root: str, path: str, *, service=None) -> bool:
         calls.append((workspace_root, path))
         return True
 
@@ -751,11 +751,11 @@ def test_git_stage_all_commands_reject_workspace_outside_session(monkeypatch, tm
     outside.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_stage_all(workspace_root: str) -> bool:
+    async def fake_stage_all(workspace_root: str, *, service=None) -> bool:
         calls.append(("stage", workspace_root))
         return True
 
-    async def fake_unstage_all(workspace_root: str) -> bool:
+    async def fake_unstage_all(workspace_root: str, *, service=None) -> bool:
         calls.append(("unstage", workspace_root))
         return True
 

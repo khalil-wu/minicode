@@ -1,14 +1,28 @@
 """Source CallToolResult model body; display/log text is a separate projection."""
 from __future__ import annotations
 
-import base64
-import binascii
-import io
+from collections import OrderedDict
+import hashlib
 import json
 import math
-from typing import Any
+from threading import Lock
+from typing import Any, cast
 
-import av
+from backend.network.native import NativeNetworkRuntime
+
+
+class _MediaEstimate:
+    def __init__(self):
+        self.initialization_lock = Lock()
+        self.initialized = False
+        self.value: int | None = None
+
+
+# Source keeps 32 SHA-1 entries and initializes each entry outside the LRU lock.
+_audio_estimates: OrderedDict[bytes, _MediaEstimate] = OrderedDict()
+_image_estimates: OrderedDict[bytes, _MediaEstimate] = OrderedDict()
+_audio_estimate_lock = Lock()
+_image_estimate_lock = Lock()
 
 
 def mcp_model_output(result: dict[str, Any]) -> str | list[dict[str, Any]]:
@@ -83,42 +97,38 @@ def _truncate_text(text: str, mode: str, limit: int) -> str:
     return f"{left}…{omitted} {'tokens' if mode == 'tokens' else 'chars'} truncated…{right}"
 
 
-def _decode_data_url(url: str) -> tuple[str, bytes] | None:
-    # Source estimates URL bytes when native media cannot be decoded.
-    if not url.startswith("data:") or "," not in url:
-        return None
-    metadata, payload = url[5:].split(",", 1)
-    parts = metadata.split(";")
-    if not any(part.lower() == "base64" for part in parts[1:]):
-        return None
-    try:
-        return parts[0].lower(), base64.b64decode(payload, validate=True)
-    except binascii.Error:
-        return None
-
-
 def estimate_audio_tokens(url: str) -> int:
-    decoded = _decode_data_url(url)
-    if decoded is None or decoded[0] not in {
-        "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave", "audio/mpeg", "audio/mp3",
-        "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/webm", "audio/ogg",
-    }:
-        return _approx_tokens(url)
-    try:
-        with av.open(io.BytesIO(decoded[1])) as media:
-            streams = media.streams.audio
-            if not streams:
-                return _approx_tokens(url)
-            stream = streams[0]
-            if stream.duration is not None:
-                seconds = float(stream.duration * stream.time_base)
-            elif media.duration is not None:
-                seconds = media.duration / av.time_base
-            else:
-                seconds = sum(frame.samples / frame.sample_rate for frame in media.decode(stream))
-            return math.ceil(seconds * 10.0)
-    except (av.FFmpegError, ValueError):
-        return _approx_tokens(url)
+    key = hashlib.sha1(url.encode("utf-8")).digest()
+    with _audio_estimate_lock:
+        entry = _audio_estimates.get(key)
+        if entry is None:
+            entry = _MediaEstimate()
+            _audio_estimates[key] = entry
+        _audio_estimates.move_to_end(key)
+        if len(_audio_estimates) > 32:
+            _audio_estimates.popitem(last=False)
+    with entry.initialization_lock:
+        if not entry.initialized:
+            entry.value = NativeNetworkRuntime().invoke_sync("media/audioTokens", {"audioUrl": url})["tokens"]
+            entry.initialized = True
+        return cast(int, entry.value)
+
+
+def estimate_original_image_bytes(url: str) -> int | None:
+    key = hashlib.sha1(url.encode("utf-8")).digest()
+    with _image_estimate_lock:
+        entry = _image_estimates.get(key)
+        if entry is None:
+            entry = _MediaEstimate()
+            _image_estimates[key] = entry
+        _image_estimates.move_to_end(key)
+        if len(_image_estimates) > 32:
+            _image_estimates.popitem(last=False)
+    with entry.initialization_lock:
+        if not entry.initialized:
+            entry.value = NativeNetworkRuntime().invoke_sync("media/originalImageBytes", {"imageUrl": url})["bytes"]
+            entry.initialized = True
+        return entry.value
 
 
 def mcp_output_visible_bytes(output: str | list[dict[str, Any]]) -> int:
@@ -134,17 +144,8 @@ def mcp_output_visible_bytes(output: str | list[dict[str, Any]]) -> int:
         elif kind == "encrypted_content":
             total += (len(item["encrypted_content"].encode("utf-8")) * 9 + 15) // 16
         elif kind == "input_image":
-            size = 7373
-            if item.get("detail") == "original":
-                decoded = _decode_data_url(item["image_url"])
-                if decoded is not None:
-                    try:
-                        with av.open(io.BytesIO(decoded[1])) as media:
-                            frame = next(media.decode(video=0))
-                            size = min(((frame.width + 31) // 32) * ((frame.height + 31) // 32), 10000) * 4
-                    except (av.FFmpegError, ValueError, StopIteration):
-                        pass
-            total += size
+            size = estimate_original_image_bytes(item["image_url"]) if item.get("detail") == "original" else None
+            total += 7373 if size is None else size
     return total
 
 

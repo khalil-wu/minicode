@@ -7,7 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 codex-windows-sandbox = { path = "../windows-sandbox-rs" }
+codex-protocol = { path = "../protocol" }
+codex-utils-absolute-path = { path = "../utils/absolute-path" }
 codex-utils-pty = { path = "../utils/pty" }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 

@@ -18,6 +18,20 @@ BRIDGE = ROOT / "desktop/native-network"
 SOURCE_COMMIT = "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
 
 
+def original_image_source(history: bytes) -> bytes:
+    """Keep the private Source estimator's two exact ranges as a narrow include."""
+    ranges = (
+        (b"const ORIGINAL_IMAGE_PATCH_SIZE:", b"\nfn estimate_response_item_model_visible_bytes"),
+        (b"fn parse_base64_image_data_url(", b"\n/// Inline image estimate"),
+    )
+    sections = []
+    for first, after in ranges:
+        start = history.index(first)
+        end = history.index(after, start)
+        sections.append(history[start:end])
+    return b"\n".join(sections)
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -104,8 +118,9 @@ def main():
         manifest.write_text(text.replace("members = [", 'members = [\n    "minicode-network",', 1), encoding="utf-8")
     lock = workspace / "Cargo.lock"
     lock_text = lock.read_text(encoding="utf-8")
-    dependencies = ("anyhow", "codex-config", "codex-execpolicy", "codex-file-system", "codex-network-proxy", "codex-protocol",
-            "codex-utils-path-uri", "codex-windows-sandbox", "serde", "serde_json", "tokio", "tracing", "tracing-subscriber")
+    dependencies = ("anyhow", "base64 0.22.1", "codex-config", "codex-execpolicy", "codex-file-system", "codex-network-proxy", "codex-protocol",
+            "codex-utils-audio", "codex-utils-cache", "codex-utils-path-uri", "codex-utils-string", "codex-windows-sandbox", "image",
+            "serde", "serde_json", "tokio", "tracing", "tracing-subscriber")
     if sys.platform == "linux":
         dependencies = tuple(sorted((*dependencies, "codex-linux-sandbox")))
     lock_text = re.sub(r'\n\[\[package\]\]\nname = "minicode-network"\n.*?(?=\n\[\[package\]\]|\Z)', '', lock_text, flags=re.S)
@@ -114,7 +129,10 @@ def main():
     if lock.read_text(encoding="utf-8") != lock_text:
         lock.write_text(lock_text, encoding="utf-8")
     pinned_files = ("core/src/config/network_proxy_spec.rs", "core/src/network_policy_decision.rs",
-        "file-system/src/lib.rs", "file-system/src/exec_permission_profile_serde.rs")
+        "file-system/src/lib.rs", "file-system/src/exec_permission_profile_serde.rs",
+        "utils/audio/src/lib.rs", "utils/audio/Cargo.toml", "utils/image/Cargo.toml",
+        "utils/cache/src/lib.rs", "utils/string/src/truncate.rs",
+        "core/src/context_manager/history.rs")
     if sys.platform == "linux":
         pinned_files += ("linux-sandbox/src/linux_run_main.rs", "linux-sandbox/src/proxy_routing.rs",
             "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/landlock.rs")
@@ -123,6 +141,9 @@ def main():
             cwd=checkout, environment=environment, capture=True).stdout
         if (workspace / relative).read_bytes() != original:
             raise RuntimeError(f"{relative} differs from the pinned Source object")
+    original_image = original_image_source((workspace / "core/src/context_manager/history.rs").read_bytes())
+    if (project / "src/source_original_image.rs").read_bytes() != original_image:
+        raise RuntimeError("The original-image estimator differs from its exact pinned Source ranges")
     run([str(cargo), "build", "--release", "--locked", "-p", "minicode-network", "-j", "2"],
         cwd=workspace, environment=environment)
     binary = workspace / "target/release" / ("minicode-network.exe" if sys.platform == "win32" else "minicode-network")
@@ -168,6 +189,14 @@ def main():
     source_manifest = {"source": "https://github.com/openai/codex", "source_commit": SOURCE_COMMIT,
         "rust_toolchain": "1.95.0", "target": target,
         "source_files": {relative: digest(workspace / relative) for relative in pinned_files},
+        "source_derivations": {"src/source_original_image.rs": {
+            "upstream": "core/src/context_manager/history.rs",
+            "sha256": hashlib.sha256(original_image).hexdigest(),
+            "ranges": [
+                ["const ORIGINAL_IMAGE_PATCH_SIZE:", "fn estimate_response_item_model_visible_bytes"],
+                ["fn parse_base64_image_data_url(", "/// Inline image estimate"],
+            ],
+        }},
         "cargo_lock_sha256": digest(lock),
         "build_script_sha256": script_hash,
         "bridge_files": {str(path.relative_to(project)).replace("\\", "/"): digest(path)

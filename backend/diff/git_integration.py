@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
@@ -115,7 +117,8 @@ def _parse_diff_output(output: str) -> StructuredDiff:
 
 async def _run_git(workspace_root: str, *args: str) -> str:
     proc = await spawn_exec(
-        "git", *args,
+        "git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
+        "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--literal-pathspecs", *args,
         cwd=workspace_root,
         env=sanitized_git_env(workspace_root),
         stdin=asyncio.subprocess.DEVNULL,
@@ -157,13 +160,66 @@ async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None 
 _GIT_DIFF_SAFETY_FLAGS = ("--no-textconv", "--no-ext-diff")
 
 
+async def _read_git(workspace_root: str, *args: str, service=None) -> str:
+    if service is None:
+        return await _run_git(workspace_root, *args)
+    result = await _run_ui_git(service, args)
+    if result.returncode != 0:
+        raise GitCommandError(args, result.returncode, result.stderr.decode("utf-8", errors="replace"))
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+async def _run_ui_git(service, args):
+    """Source UI Git uses the captured host's standalone process capability.
+
+    Desktop worker $ -> H1 -> main vL -> process/spawn does not inherit the
+    model's permission profile. This fixed UI path never retries under another
+    scope, host, or environment; model Git tools keep executor_git.py unchanged.
+    """
+    from backend.sandbox.policy import PermissionProfile
+    from backend.workspace.executor_git import executor_git_environment
+
+    policy, overrides = executor_git_environment(service)
+    env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
+        "exclude": list(policy.exclude), "set": dict(policy.set_values), "includeOnly": list(policy.include_only)}
+    host_scope = replace(service.scope, permission_profile=PermissionProfile.disabled())
+    hooks = "NUL" if service.cwd.convention == "windows" else "/dev/null"
+    return await service.run(["git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
+        "-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false", "--literal-pathspecs", *args],
+        timeout=15, env_policy=env_policy, env=overrides, permission_scope=host_scope)
+
+
+async def _diff_filter_flags(workspace_root: str, *, service=None) -> list[str]:
+    # Source tui/get_git_diff.rs disables configured clean/process drivers as
+    # well as external diff/textconv: simply reading a diff must not run them.
+    try:
+        keys = await _read_git(workspace_root, "config", "--null", "--name-only", "--get-regexp",
+            r"^filter\..*\.(clean|process)$", service=service)
+    except GitCommandError as error:
+        if error.exit_code != 1:
+            raise
+        keys = ""
+    drivers = sorted({key.rsplit(".", 1)[0] for key in keys.split("\0") if key})
+    return [value for driver in drivers for option in ("clean=", "process=", "required=false")
+            for value in ("-c", f"{driver}.{option}")]
+
+
+async def _write_git(workspace_root: str, *args: str, service=None) -> bool:
+    if service is None:
+        return await _run_git_ok(workspace_root, *args)
+    result = await _run_ui_git(service, args)
+    if result.returncode != 0:
+        raise GitCommandError(args, result.returncode, result.stderr.decode("utf-8", errors="replace"))
+    return True
+
+
 def is_not_git_repository(exit_code: int | None, stderr: str) -> bool:
     return exit_code == 128 and stderr.startswith("fatal: not a git repository (or any")
 
 
-async def is_git_worktree(workspace_root: str) -> bool:
+async def is_git_worktree(workspace_root: str, *, service=None) -> bool:
     try:
-        result = await _run_git(workspace_root, "rev-parse", "--is-inside-work-tree")
+        result = await _read_git(workspace_root, "rev-parse", "--is-inside-work-tree", service=service)
     except GitCommandError as exc:
         if is_not_git_repository(exc.exit_code, exc.stderr):
             return False
@@ -171,52 +227,101 @@ async def is_git_worktree(workspace_root: str) -> bool:
     return result.strip() == "true"
 
 
-async def get_working_tree_diff(workspace_root: str) -> StructuredDiff:
+async def get_working_tree_diff(workspace_root: str, *, service=None) -> StructuredDiff:
     # Combined conflict diffs suppress patches when --raw is present. Compare
     # unresolved files with the index's stage 2 to retain their working content.
-    raw = await _run_git(
-        workspace_root, "diff", "--ours", "--relative", "--raw", "-z", "--patch", "--no-color",
-        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", "."
+    flags = await _diff_filter_flags(workspace_root, service=service)
+    raw = await _read_git(
+        workspace_root, *flags, "diff", "--ours", "--relative", "--raw", "-z", "--patch", "--no-color",
+        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
     return _parse_diff_output(raw)
 
 
-async def get_staged_diff(workspace_root: str) -> StructuredDiff:
-    raw = await _run_git(
-        workspace_root, "diff", "--cached", "--relative", "--raw", "-z", "--patch", "--no-color",
-        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", "."
+async def get_staged_diff(workspace_root: str, *, service=None) -> StructuredDiff:
+    flags = await _diff_filter_flags(workspace_root, service=service)
+    raw = await _read_git(
+        workspace_root, *flags, "diff", "--cached", "--relative", "--raw", "-z", "--patch", "--no-color",
+        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
     return _parse_diff_output(raw)
 
 
-async def get_untracked_files(workspace_root: str) -> list[str]:
-    raw = await _run_git(workspace_root, "ls-files", "--others", "--exclude-standard", "-z")
+async def get_untracked_files(workspace_root: str, *, service=None) -> list[str]:
+    raw = await _read_git(workspace_root, "ls-files", "--others", "--exclude-standard", "-z", service=service)
     return [path for path in raw.split("\0") if path]
 
 
-async def stage_file(workspace_root: str, path: str) -> bool:
-    return await _run_git_ok(workspace_root, "add", "--", path)
+async def stage_file(workspace_root: str, path: str, *, service=None) -> bool:
+    if service is not None:
+        service.resolve_workspace_path(path)
+    return await _write_git(workspace_root, "add", "--", path, service=service)
 
 
-async def unstage_file(workspace_root: str, path: str) -> bool:
-    return await _run_git_ok(workspace_root, "reset", "--", path)
+async def unstage_file(workspace_root: str, path: str, *, service=None) -> bool:
+    if service is not None:
+        service.resolve_workspace_path(path)
+    return await _write_git(workspace_root, "reset", "--", path, service=service)
 
 
-async def stage_all(workspace_root: str) -> bool:
-    return await _run_git_ok(workspace_root, "add", "--all", "--", ".")
+async def stage_all(workspace_root: str, *, service=None) -> bool:
+    return await _write_git(workspace_root, "add", "--all", "--", ".", service=service)
 
 
-async def unstage_all(workspace_root: str) -> bool:
-    return await _run_git_ok(workspace_root, "reset", "--", ".")
+async def unstage_all(workspace_root: str, *, service=None) -> bool:
+    return await _write_git(workspace_root, "reset", "--", ".", service=service)
 
 
-async def revert_file(workspace_root: str, path: str) -> bool:
-    return await _run_git_ok(workspace_root, "restore", "--worktree", "--", path)
+async def revert_file(workspace_root: str, path: str, *, service=None) -> bool:
+    if service is not None:
+        service.resolve_workspace_path(path)
+    return await _write_git(workspace_root, "restore", "--worktree", "--", path,
+        service=service)
 
 
-async def revert_patch(workspace_root: str, patch: str) -> bool:
+async def revert_patch(workspace_root: str, patch: str, *, service=None) -> bool:
     """Undo the displayed edit while Git checks its context and preserves other edits."""
-    return await _run_git_ok(
-        workspace_root, "apply", "--reverse", "--whitespace=nowarn", "-",
-        input_data=patch.encode("utf-8"),
-    )
+    try:
+        prefix = (await _read_git(workspace_root, "rev-parse", "--show-prefix", service=service)).removesuffix("\n")
+    except GitCommandError as error:
+        if not is_not_git_repository(error.exit_code, error.stderr):
+            raise
+        prefix = ""
+    directory = (f"--directory={prefix}",) if prefix else ()
+    if service is None:
+        return await _run_git_ok(
+            workspace_root, "apply", "--reverse", "--whitespace=nowarn", *directory, "-",
+            input_data=patch.encode("utf-8"),
+        )
+    # Source process/write has no close-stdin operation. Keep this transport
+    # adaptation entirely on the captured host, with one workspace path.
+    temporary_directory = service.cwd.joinpath(f".minicode-undo-{uuid4().hex}")
+    temporary = temporary_directory.joinpath("displayed.patch")
+    async def write_patch():
+        await service.filesystem.create_directory(temporary_directory.uri,
+            sandbox=None, follow_symlinks=False)
+        await service.filesystem.write_file(temporary.uri, patch.encode("utf-8"),
+            sandbox=None, follow_symlinks=False)
+    write = asyncio.create_task(write_patch())
+    error = None
+    try:
+        await asyncio.shield(write)
+        return await _write_git(workspace_root, "apply", "--reverse", "--whitespace=nowarn", *directory, temporary.native,
+            service=service)
+    except BaseException as caught:
+        error = caught
+        raise
+    finally:
+        # A cancelled RPC may still be writing. Finish that original request
+        # before deleting, and never look up a replacement environment.
+        await asyncio.gather(write, return_exceptions=True)
+        try:
+            await service.filesystem.remove(temporary.uri, sandbox=None, force=True, follow_symlinks=False)
+            await service.filesystem.remove(temporary_directory.uri, sandbox=None, force=True, follow_symlinks=False)
+        except Exception as cleanup:
+            if error is None:
+                cleanup.cleanup_pending = True
+                cleanup.cleanup_reason = f"Could not remove {temporary_directory.uri}: {cleanup}"
+                raise
+            error.cleanup_pending = True
+            error.cleanup_reason = f"Could not remove {temporary_directory.uri}: {cleanup}"

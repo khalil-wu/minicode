@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWriteExt, Stdout};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
+pub mod media;
+
 // prepare-network-runtime.py verifies this exact Source file before compilation.
 #[path = "../../core/src/config/network_proxy_spec.rs"]
 mod network_proxy_spec;
@@ -201,6 +203,14 @@ pub type Executions = Arc<AsyncMutex<HashMap<String, Execution>>>;
 pub async fn handle(method: &str, params: Value, peer: Arc<Peer>, executions: Executions) -> Result<Value> {
     match method {
         "identity" => Ok(json!({"identity":"minicode-network","protocol":1,"sourceCommit":SOURCE_COMMIT})),
+        "media/audioTokens" => {
+            let request: media::AudioTokensRequest = serde_json::from_value(params)?;
+            Ok(json!({"tokens":media::audio_tokens(&request.audio_url)}))
+        }
+        "media/originalImageBytes" => {
+            let request: media::OriginalImageBytesRequest = serde_json::from_value(params)?;
+            Ok(json!({"bytes":media::original_image_bytes(&request.image_url)}))
+        }
         "network/normalizeHost" => Ok(json!({"host":codex_network_proxy::normalize_host(
             params["host"].as_str().context("network host is not a string")?)})),
         "network/deniedMessage" => {

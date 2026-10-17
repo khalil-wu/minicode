@@ -6,12 +6,17 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 codex-config = { path = "../config" }
 codex-execpolicy = { path = "../execpolicy" }
 codex-file-system = { path = "../file-system" }
 codex-network-proxy = { path = "../network-proxy" }
 codex-protocol = { path = "../protocol" }
+codex-utils-audio = { path = "../utils/audio" }
+codex-utils-cache = { path = "../utils/cache" }
 codex-utils-path-uri = { path = "../utils/path-uri" }
+codex-utils-string = { path = "../utils/string" }
+image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -20,3 +25,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
 codex-windows-sandbox = { path = "../windows-sandbox-rs" }
+
+[[test]]
+name = "media_meter"
+path = "src/media.rs"

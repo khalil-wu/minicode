@@ -11,3 +11,6 @@
 # Packaged native resources are a byte-addressed bundle: runtime.json hashes
 # include the producer's exact license/notice/manifest bytes on every host.
 /backend/permissions/resources/execpolicy/x86_64-pc-windows-msvc/* -text
+
+# Preserve the upstream license wording and whitespace in generated notices.
+/backend/network/resources/**/THIRD_PARTY_NOTICES.txt whitespace=-blank-at-eol

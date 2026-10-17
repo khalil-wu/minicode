@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = "")
+param([string]$OutputDirectory = "", [string]$TargetDirectory = "")
 $ErrorActionPreference = "Stop"
 $version = "0.158.0-alpha.2.1"
 $archiveHash = "e0a5e3ba9421f3f3f46836974d0396bbd8782721b4913b614ff0267911e0a3ee"
@@ -77,7 +77,8 @@ if ($LASTEXITCODE -ne 0) { throw "Could not apply MiniCode owner namespace" }
 
 $cargo = Get-Command cargo.exe -ErrorAction Stop
 $previousTarget = $env:CARGO_TARGET_DIR
-$env:CARGO_TARGET_DIR = Join-Path $buildRoot "target"
+$env:CARGO_TARGET_DIR = if ($TargetDirectory) { [IO.Path]::GetFullPath($TargetDirectory) } else { Join-Path $buildRoot "target" }
+$releaseDir = Join-Path $env:CARGO_TARGET_DIR "release"
 Push-Location (Join-Path $sourceRoot "codex-rs")
 try {
     & $cargo.Source build --offline --release -p minicode-sandbox-launcher -p codex-windows-sandbox --bin minicode-sandbox-launcher --bin codex-command-runner --bin codex-windows-sandbox-setup
@@ -87,7 +88,6 @@ try {
     $env:CARGO_TARGET_DIR = $previousTarget
 }
 
-$releaseDir = Join-Path $buildRoot "target\release"
 $outputs = @{
     "codex.exe" = "minicode-sandbox-launcher.exe"
     "codex-command-runner.exe" = "codex-command-runner.exe"

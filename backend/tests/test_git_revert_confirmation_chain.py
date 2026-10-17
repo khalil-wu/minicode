@@ -17,7 +17,7 @@ async def test_git_revert_requires_the_actual_confirmed_boolean(monkeypatch, tmp
         send_event=AsyncMock(), emit_command_result=AsyncMock())
     assert await diff.handle_diff_git_revert_file(session, {"path": "fixture.txt", "confirmed": confirmed})
     if confirmed is True:
-        revert.assert_awaited_once_with(str(tmp_path), "fixture.txt")
+        revert.assert_awaited_once_with(str(tmp_path), "fixture.txt", service=None)
         session.emit_command_result.assert_awaited_once()
     else:
         revert.assert_not_awaited()

@@ -4,7 +4,10 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import pytest
 
@@ -14,6 +17,7 @@ from backend.sandbox.policy import (
     FileSystemSandboxEntry,
     FileSystemSandboxPolicy,
     FileSystemSpecialPath,
+    NetworkSandboxPolicy,
     PermissionProfile,
     SandboxPolicy,
 )
@@ -23,6 +27,46 @@ from backend.sandbox import windows_native
 
 _SID = "S-1-5-21-1-2-3-1000"
 _INSPECT = windows_native.inspect_runtime_owner
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires the actual Windows restricted-token runtime")
+@pytest.mark.asyncio
+async def test_restricted_runner_keeps_source_desktop_alive_and_preserves_write_boundary(monkeypatch):
+    import tempfile
+
+    executable = Path(__file__).resolve().parents[1] / "desktop/windows-sandbox-runtime/codex.exe"
+    if not executable.is_file():
+        pytest.skip("Bundled Windows sandbox runtime has not been built")
+    arena = Path(os.environ.get("MINICODE_SANDBOX_TEST_ROOT", "C:/minicode-sbx-test"))
+    arena.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="restricted-launcher-", dir=arena) as directory:
+        root = Path(directory)
+        workspace, home = root / "workspace", root / "home"
+        workspace.mkdir()
+        home.mkdir()
+        # Restricted-token needs no provisioned accounts. Only runtime discovery
+        # is supplied; the runner, native Source launcher and OS boundary are real.
+        monkeypatch.setattr(windows_native, "discover_runtime", lambda: (
+            SimpleNamespace(executable=executable, home=home), ""))
+        profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+            FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+            FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
+        ]), network=NetworkSandboxPolicy.ENABLED)
+        runner = SandboxRunner(SandboxPolicy(workspace_root=workspace, permission_profile=profile,
+            windows_sandbox_selection="restricted-token", timeout=30))
+        assert runner.capability(cwd=workspace).backend == "windows-restricted-token"
+        async def run(command):
+            argv = ["cmd.exe", "/d", "/c", command]
+            return await runner.run(subprocess.list2cmdline(argv), cwd=workspace, argv=argv)
+        allowed = await run("echo allowed> inside.txt")
+        assert allowed.exit_code == 0, allowed.stderr
+        assert (workspace / "inside.txt").read_text().strip() == "allowed"
+        outside = root / "outside.txt"
+        denied = await run(f'echo blocked> "{outside}"')
+        assert denied.exit_code != 0 and not outside.exists()
+        exited = await run("exit /b 7")
+        assert exited.exit_code == 7
+        assert await runner.cleanup()
 
 
 def test_native_profile_encodes_the_effective_exact_path_grant(tmp_path):
