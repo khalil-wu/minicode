@@ -60,6 +60,8 @@ class MCPEnvironmentRuntime:
         self.local_cwd = local_cwd
         self.borrowed = {}
         self.node_repl_companions = None
+        self.cua_repl_companions = None
+        self.cua_repl_config = None
         self._app_borrowers = 0
         self._app_close_requested = False
         self._close_lock = asyncio.Lock()
@@ -261,6 +263,7 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
     from backend.mcp.environment_discovery import discover_environment_http, selected_plugin_configs
     from backend.mcp.manager import MCPServerManager
     from backend.mcp.node_repl import SOURCE_PREFIX as NODE_COMPANION_SOURCE
+    from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_COMPANION_SOURCE, is_configured_cua
     from backend.skills.environment_catalog import ExecutorCapabilityRoot, ExecutorSkillCatalog, discover_executor_roots
     from backend.skills.manager import SkillManager
 
@@ -328,13 +331,13 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             environment_runtime=runtime, runtime_configs=(),
             startup_policy="LazyWhenCached" if is_subagent else "Eager",
             cached_catalog=tuple(entry for entry in source.catalog_snapshot()
-                if not entry[0].source.startswith(NODE_COMPANION_SOURCE)) if source is not None else ())
+                if not entry[0].source.startswith((NODE_COMPANION_SOURCE, CUA_COMPANION_SOURCE))) if source is not None else ())
         prepared.mcp_manager = manager
         prepared.owns_mcp_manager = True
         # Dynamic kernels are admitted only after this step captures its
         # model/network scope and receiving owner; they are not host config.
         configs = {config.name: deepcopy(config) for config in source.load_config()
-            if not config.source.startswith(NODE_COMPANION_SOURCE)} if source is not None else {}
+            if not config.source.startswith((NODE_COMPANION_SOURCE, CUA_COMPANION_SOURCE))} if source is not None else {}
         warnings = [*resolution_warnings, *catalog.warnings]
         plugins, disabled_roots = selected_plugin_configs(manager, discoveries,
             enabled=feature_flags.enabled("plugins", True), disabled_plugin_ids=disabled_plugin_ids, warnings=warnings)
@@ -362,6 +365,12 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             policy = load_mcp_policy(managed_settings_dir=source._managed_settings_dir, config_stack=stack)
             configs = {config.name: config for config in manager._apply_mcp_policies(list(configs.values()), policy=policy)}
         manager._runtime_configs = tuple(configs.values())
+        cua_configs = [config for config in configs.values() if is_configured_cua(config)]
+        if len(cua_configs) > 1:
+            raise ValueError("A receiving thread must select exactly one CUA computer runtime")
+        if cua_configs:
+            runtime.cua_repl_config = cua_configs[0]
+            manager._runtime_configs = tuple(config for config in configs.values() if config is not cua_configs[0])
         await manager.start_all()
         prepared.warnings = tuple(warnings)
         return prepared

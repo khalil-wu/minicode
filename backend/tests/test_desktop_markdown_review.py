@@ -65,6 +65,15 @@ def test_base_branch_resolves_real_merge_base_and_cold_read_keeps_it_pinned(repo
         prepare_code_review(repo, "base-branch", "missing")
 
 
+def test_review_options_does_not_invent_main_when_only_another_actual_branch_exists(repo: Path) -> None:
+    git(repo, "branch", "-m", "actual-feature")
+    options = code_review_options(repo)
+    assert options["currentBranch"] == "actual-feature"
+    assert options["branches"] == []
+    assert options["defaultBaseBranch"] is None
+    assert options["comparisonStatus"] == "expected" and options["reason"] == "default_branch_unavailable"
+
+
 def test_builtin_slash_prepares_same_full_prompt_and_real_scope(repo: Path) -> None:
     emitted = []
     async def emit(command, message, **kwargs):

@@ -27,6 +27,7 @@ from backend.sandbox import windows_native
 
 _SID = "S-1-5-21-1-2-3-1000"
 _INSPECT = windows_native.inspect_runtime_owner
+_CURRENT_USER_SID = windows_native._current_user_sid
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Requires the actual Windows restricted-token runtime")
@@ -43,11 +44,11 @@ async def test_restricted_runner_keeps_source_desktop_alive_and_preserves_write_
         root = Path(directory)
         workspace, home = root / "workspace", root / "home"
         workspace.mkdir()
-        home.mkdir()
-        # Restricted-token needs no provisioned accounts. Only runtime discovery
-        # is supplied; the runner, native Source launcher and OS boundary are real.
-        monkeypatch.setattr(windows_native, "discover_runtime", lambda: (
-            SimpleNamespace(executable=executable, home=home), ""))
+        # Use the actual helper/home/SID discovery without elevated account setup.
+        monkeypatch.setenv(windows_native._RUNNER_ENV, str(executable))
+        monkeypatch.setenv(windows_native._HOME_ENV, str(home))
+        monkeypatch.setattr(windows_native, "inspect_runtime_owner", _INSPECT)
+        monkeypatch.setattr(windows_native, "_current_user_sid", _CURRENT_USER_SID)
         profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
             FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
             FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
@@ -67,6 +68,8 @@ async def test_restricted_runner_keeps_source_desktop_alive_and_preserves_write_
         exited = await run("exit /b 7")
         assert exited.exit_code == 7
         assert await runner.cleanup()
+        assert not (home / ".sandbox-secrets/sandbox_users.json").exists()
+        assert not (home / ".sandbox/setup_marker.json").exists()
 
 
 def test_native_profile_encodes_the_effective_exact_path_grant(tmp_path):
@@ -242,6 +245,90 @@ def test_packaged_resource_runtime_uses_minicode_state_home(tmp_path, monkeypatc
     assert runtime.executable == executable.resolve()
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_restricted_discovery_initializes_real_home_without_elevated_receipts(tmp_path, monkeypatch, configured):
+    state = tmp_path / "state"
+    home = tmp_path / "configured-home" if configured else state / "windows-sandbox"
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    monkeypatch.setattr(windows_native, "DATA_ROOT", state)
+    monkeypatch.setattr(windows_native, "_candidate_executables", lambda: iter([executable]))
+    if configured:
+        monkeypatch.setenv(windows_native._HOME_ENV, str(home))
+    else:
+        monkeypatch.delenv(windows_native._HOME_ENV, raising=False)
+    observed_homes = []
+
+    def inspect(executable, selected_home):
+        assert selected_home.is_dir()
+        observed_homes.append(selected_home)
+        return _identity(selected_home)
+
+    monkeypatch.setattr(windows_native, "inspect_runtime_owner", inspect)
+    runtime, reason = windows_native.discover_restricted_runtime()
+    assert reason == "" and runtime is not None
+    assert observed_homes == [home.resolve()]
+    assert runtime.home == home.resolve() and runtime.executable == executable.resolve()
+    assert runtime.owner_id == _identity(home)["owner_id"] and runtime.user_sid == _SID
+    assert list(home.iterdir()) == []
+    elevated, reason = windows_native.discover_runtime()
+    assert elevated is None and "native sandbox account state is unavailable" in reason
+    assert list(home.iterdir()) == []
+
+
+def test_restricted_discovery_does_not_create_home_without_selected_helper(tmp_path, monkeypatch):
+    home = tmp_path / "not-created"
+    monkeypatch.setenv(windows_native._HOME_ENV, str(home))
+    monkeypatch.setattr(windows_native, "_candidate_executables", lambda: iter([tmp_path / "missing.exe"]))
+    monkeypatch.setattr(windows_native, "inspect_runtime_owner", lambda *_: pytest.fail("No helper is selected"))
+    runtime, reason = windows_native.discover_restricted_runtime()
+    assert runtime is None and "compatible Codex Windows sandbox runtime" in reason
+    assert not home.exists()
+
+
+def test_restricted_runner_uses_identity_readiness_for_capability_and_launch(tmp_path, monkeypatch):
+    import backend.sandbox.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "sys", SimpleNamespace(platform="win32"))
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    workspace.mkdir()
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    monkeypatch.setenv(windows_native._HOME_ENV, str(home))
+    monkeypatch.setattr(windows_native, "_candidate_executables", lambda: iter([executable]))
+    monkeypatch.setattr(windows_native, "discover_runtime", lambda: pytest.fail("Restricted mode must not inspect elevated accounts"))
+    profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath.path(workspace), FileSystemAccessMode.WRITE),
+    ]), network=NetworkSandboxPolicy.ENABLED)
+    runner = SandboxRunner(SandboxPolicy(workspace_root=workspace, permission_profile=profile,
+        windows_sandbox_selection="restricted-token"))
+    argv = ["cmd.exe", "/d", "/c", "exit", "/b", "7"]
+    wrapped, capability = runner.prepare_command("unused", cwd=workspace, argv=argv)
+    assert capability.available and capability.backend == "windows-restricted-token"
+    assert wrapped[:2] == [str(executable.resolve()), "--launch-restricted-windows-sandbox"]
+    request = json.loads(wrapped[2])
+    assert request["codexHome"] == str(home.resolve()) and request["argv"] == argv
+    assert request["commandCwd"] == str(workspace.resolve())
+    assert not (home / ".sandbox-secrets").exists() and not (home / ".sandbox").exists()
+
+
+def test_restricted_deny_read_refusal_precedes_home_or_account_readiness(tmp_path, monkeypatch):
+    import backend.sandbox.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(windows_native, "discover_restricted_runtime", lambda: pytest.fail("Read restrictions are unsupported before discovery"))
+    secret = tmp_path / "private.txt"
+    profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+        FileSystemSandboxEntry(FileSystemPath.path(secret), FileSystemAccessMode.DENY),
+    ]), network=NetworkSandboxPolicy.ENABLED)
+    capability = SandboxRunner(SandboxPolicy(workspace_root=tmp_path, permission_profile=profile,
+        windows_sandbox_selection="restricted-token")).capability(cwd=tmp_path)
+    assert not capability.available and capability.backend == "windows-restricted-token"
+    assert "cannot enforce filesystem read restrictions" in capability.reason
+
+
 @pytest.mark.parametrize("structured", [False, True])
 def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch, structured):
     workspace = tmp_path / "workspace"
@@ -356,13 +443,14 @@ def test_discovery_validates_current_sid_home_and_exact_group(tmp_path, monkeypa
     ("home", "C:/different-home"), ("group", "MiniCodeSandboxUsers"),
     ("offline_username", "MiniCodeSbxOffline"), ("online_username", "MiniCodeSbxOnline"),
 ])
-def test_discovery_rejects_foreign_runtime_receipt(tmp_path, monkeypatch, field, value):
+@pytest.mark.parametrize("discovery", ["discover_runtime", "discover_restricted_runtime"])
+def test_discovery_rejects_foreign_runtime_receipt(tmp_path, monkeypatch, field, value, discovery):
     home, executable = _home(tmp_path)
     owner = {**_identity(home), field: value}
     monkeypatch.setenv("MINICODE_WINDOWS_SANDBOX_HOME", str(home))
     monkeypatch.setattr(windows_native, "_candidate_executables", lambda: iter([executable]))
     monkeypatch.setattr(windows_native, "inspect_runtime_owner", lambda *_: owner)
-    runtime, reason = windows_native.discover_runtime()
+    runtime, reason = getattr(windows_native, discovery)()
     assert runtime is None
     assert "current Windows SID and canonical home" in reason
 

@@ -200,6 +200,7 @@ ServerEventType = Literal[
     "diff.git_stage_all",
     "diff.git_unstage_all",
     "diff.git_revert_file",
+    "diff.git_revert_all",
 ]
 
 
@@ -332,8 +333,11 @@ ClientCommandType = Literal[
     "diff.git_stage_all",
     "diff.git_unstage_all",
     "diff.git_revert_file",
+    "diff.git_revert_all",
     # MCP / Environment / Git status
     "diff.git_revert_patch",
+    "diff.git_file_contents",
+    "diff.git_review_options",
     "mcp.list",
     "mcp.inventory.list",
     "mcp.inventory.cancel",

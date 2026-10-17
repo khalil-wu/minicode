@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 import pytest
@@ -620,7 +621,7 @@ def test_git_diff_commands_reject_workspace_outside_session(monkeypatch, tmp_pat
     outside.mkdir()
     calls: list[str] = []
 
-    async def fake_get_working_tree_diff(workspace_root: str, *, service=None):
+    async def fake_get_working_tree_diff(workspace_root: str, *, service=None, hide_whitespace=False):
         calls.append(workspace_root)
         from backend.diff.git_integration import StructuredDiff
 
@@ -635,6 +636,8 @@ def test_git_diff_commands_reject_workspace_outside_session(monkeypatch, tmp_pat
     monkeypatch.setattr("backend.diff.git_integration.is_git_worktree", fake_is_git_worktree)
     monkeypatch.setattr("backend.diff.git_integration.get_working_tree_diff", fake_get_working_tree_diff)
     monkeypatch.setattr("backend.diff.git_integration.get_untracked_files", fake_get_untracked_files)
+    monkeypatch.setattr("backend.diff.review.repository_state", AsyncMock(return_value="scope-fixture"))
+    monkeypatch.setattr("backend.diff.review.prepare_snapshot", AsyncMock())
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
     monkeypatch.setattr("backend.ws.session_lifecycle.SessionLifecycle.current_workspace_root", lambda self: workspace)
 
@@ -667,11 +670,12 @@ def test_git_stage_commands_reject_absolute_or_parent_paths(monkeypatch, tmp_pat
     workspace.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_stage_file(workspace_root: str, path: str, *, service=None) -> bool:
-        calls.append((workspace_root, path))
-        return True
+    async def fake_stage_file(session, conversation_id, snapshot, workspace_root, service, *, action, paths):
+        calls.append((workspace_root, paths[0]))
+        return {"ok": True, "status": "success"}
 
-    monkeypatch.setattr("backend.diff.git_integration.stage_file", fake_stage_file)
+    monkeypatch.setattr("backend.diff.review.apply_action", fake_stage_file)
+    monkeypatch.setattr("backend.diff.review.current_snapshot", lambda *args: object())
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
     monkeypatch.setattr("backend.ws.session_lifecycle.SessionLifecycle.current_workspace_root", lambda self: workspace)
 
@@ -685,9 +689,11 @@ def test_git_stage_commands_reject_absolute_or_parent_paths(monkeypatch, tmp_pat
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        await handle_diff_git_stage_file(session, {"path": str(tmp_path / "outside.txt")})
-        await handle_diff_git_stage_file(session, {"path": "../outside.txt"})
-        await handle_diff_git_stage_file(session, {"path": "src/app.py"})
+        session.active_conversation_id = session.conversation_repo.create_conversation(workspace_root=str(workspace)).id
+        fields = {"source": "unstaged", "snapshot_generation": "displayed-generation"}
+        await handle_diff_git_stage_file(session, {"path": str(tmp_path / "outside.txt"), **fields})
+        await handle_diff_git_stage_file(session, {"path": "../outside.txt", **fields})
+        await handle_diff_git_stage_file(session, {"path": "src/app.py", **fields})
         return session.ws.sent
 
     sent = asyncio.run(scenario())
@@ -708,11 +714,12 @@ def test_git_revert_command_rejects_absolute_or_parent_paths(monkeypatch, tmp_pa
     workspace.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_revert_file(workspace_root: str, path: str, *, service=None) -> bool:
-        calls.append((workspace_root, path))
-        return True
+    async def fake_revert_file(session, conversation_id, snapshot, workspace_root, service, *, action, paths):
+        calls.append((workspace_root, paths[0]))
+        return {"ok": True, "status": "success"}
 
-    monkeypatch.setattr("backend.diff.git_integration.revert_file", fake_revert_file)
+    monkeypatch.setattr("backend.diff.review.apply_action", fake_revert_file)
+    monkeypatch.setattr("backend.diff.review.current_snapshot", lambda *args: object())
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
     monkeypatch.setattr("backend.ws.session_lifecycle.SessionLifecycle.current_workspace_root", lambda self: workspace)
 
@@ -726,9 +733,11 @@ def test_git_revert_command_rejects_absolute_or_parent_paths(monkeypatch, tmp_pa
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        await handle_diff_git_revert_file(session, {"path": str(tmp_path / "outside.txt")})
-        await handle_diff_git_revert_file(session, {"path": "../outside.txt"})
-        await handle_diff_git_revert_file(session, {"path": "src/app.py", "confirmed": True})
+        session.active_conversation_id = session.conversation_repo.create_conversation(workspace_root=str(workspace)).id
+        fields = {"source": "unstaged", "snapshot_generation": "displayed-generation"}
+        await handle_diff_git_revert_file(session, {"path": str(tmp_path / "outside.txt"), **fields})
+        await handle_diff_git_revert_file(session, {"path": "../outside.txt", **fields})
+        await handle_diff_git_revert_file(session, {"path": "src/app.py", "confirmed": True, **fields})
         return session.ws.sent
 
     sent = asyncio.run(scenario())
@@ -751,16 +760,12 @@ def test_git_stage_all_commands_reject_workspace_outside_session(monkeypatch, tm
     outside.mkdir()
     calls: list[tuple[str, str]] = []
 
-    async def fake_stage_all(workspace_root: str, *, service=None) -> bool:
-        calls.append(("stage", workspace_root))
-        return True
+    async def fake_stage_all(session, conversation_id, snapshot, workspace_root, service, *, action, paths):
+        calls.append((action, workspace_root))
+        return {"ok": True, "status": "success"}
 
-    async def fake_unstage_all(workspace_root: str, *, service=None) -> bool:
-        calls.append(("unstage", workspace_root))
-        return True
-
-    monkeypatch.setattr("backend.diff.git_integration.stage_all", fake_stage_all)
-    monkeypatch.setattr("backend.diff.git_integration.unstage_all", fake_unstage_all)
+    monkeypatch.setattr("backend.diff.review.apply_action", fake_stage_all)
+    monkeypatch.setattr("backend.diff.review.current_snapshot", lambda *args: object())
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
     monkeypatch.setattr("backend.ws.session_lifecycle.SessionLifecycle.current_workspace_root", lambda self: workspace)
 
@@ -774,10 +779,13 @@ def test_git_stage_all_commands_reject_workspace_outside_session(monkeypatch, tm
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        await handle_diff_git_stage_all(session, {"workspace": str(outside)})
-        await handle_diff_git_unstage_all(session, {"workspace": str(outside)})
-        await handle_diff_git_stage_all(session, {})
-        await handle_diff_git_unstage_all(session, {})
+        session.active_conversation_id = session.conversation_repo.create_conversation(workspace_root=str(workspace)).id
+        stage = {"source": "unstaged", "snapshot_generation": "displayed-generation"}
+        unstage = {"source": "staged", "snapshot_generation": "displayed-generation"}
+        await handle_diff_git_stage_all(session, {"workspace": str(outside), **stage})
+        await handle_diff_git_unstage_all(session, {"workspace": str(outside), **unstage})
+        await handle_diff_git_stage_all(session, stage)
+        await handle_diff_git_unstage_all(session, unstage)
         return session.ws.sent
 
     sent = asyncio.run(scenario())

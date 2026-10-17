@@ -555,6 +555,11 @@ class MCPServerManager:
 
     def load_config(self) -> list[MCPServerConfig]:
         if self._runtime_configs is not None:
+            if self.environment_runtime is None:
+                # A host configuration catalog has no receiving attachment.
+                # Static CUA configs are registered offline by start_server;
+                # their actual builtin admission still requires the runtime.
+                return list(self._runtime_configs)
             return [self.environment_runtime.apply_authority(config) for config in self._runtime_configs]
         workspace_root = self.workspace_root
         from backend.config import load_config_layer_stack
@@ -1148,6 +1153,8 @@ class MCPServerManager:
             await self._start_all_unlocked()
 
     async def _start_all_unlocked(self) -> None:
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
+
         configs = self.load_config()
         local = [config for config in configs if config.transport == "stdio"]
         remote = [config for config in configs if config.transport != "stdio"]
@@ -1159,6 +1166,7 @@ class MCPServerManager:
             config.name
             for config in configs
             if config.required
+            and not (is_configured_cua(config) and not config.source.startswith(CUA_SOURCE))
             and config.auto_start
             and _config_can_connect(config)
             and (
@@ -1249,6 +1257,13 @@ class MCPServerManager:
         interactive_oauth: bool = False,
         force: bool = False,
     ) -> None:
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
+
+        if is_configured_cua(config) and not config.source.startswith(CUA_SOURCE):
+            # Computer control belongs to the receiving thread's captured
+            # environment. Merely loading host MCP settings must not start it.
+            await self.register_config(config)
+            return
         if not _config_can_connect(config):
             await self.register_config(config)
             return
@@ -1909,6 +1924,16 @@ class MCPServerManager:
             self._schedule_tool_refresh(config.name, client)
 
         from backend.mcp.node_repl import SOURCE_PREFIX
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE
+
+        if config.source.startswith((CUA_SOURCE, SOURCE_PREFIX)) and self.environment_runtime is None:
+            raise ValueError("Builtin MCP companion requires a captured receiving environment")
+        if config.source.startswith(CUA_SOURCE):
+            client, view = self.environment_runtime.cua_repl_companions.client_for(config,
+                on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
+            client._elicitation_handler = self._elicitation_handler
+            self._node_companion_views[config.name] = view
+            return client
 
         if config.source.startswith(SOURCE_PREFIX):
             client, view = self.environment_runtime.node_repl_companions.client_for(config,

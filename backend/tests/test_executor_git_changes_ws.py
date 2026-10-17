@@ -33,6 +33,17 @@ async def request(server, command, *, expected=None, **fields):
                 return item
 
 
+async def review_action(server, command, *, source=None, snapshot=None, expected="command.result", **fields):
+    source = source or ("staged" if "unstage" in command else "unstaged")
+    if snapshot is None:
+        scope = {key: fields[key] for key in ("conversation_id", "workspace_root", "execution_cwd", "cwd_uri", "workspace", "environment_id") if key in fields}
+        snapshot = await request(server, "diff.git_staged" if source == "staged" else "diff.git_working_tree",
+            source=source, **scope)
+        assert snapshot["type"] != "command.result", snapshot
+    return await request(server, command, expected=expected, source=source,
+        snapshot_generation=snapshot["snapshot_generation"], **fields)
+
+
 async def seed(server):
     root = server.host.workspace
     for name in ("tracked.txt", "报告 文档.txt", "wild[1].txt", "wild1.txt", "rename 元.txt"):
@@ -61,7 +72,7 @@ async def test_ws_changes_working_staged_untracked_and_all_actions_keep_original
     await seed(server)
     root = server.host.workspace
     (root / "tracked.txt").write_bytes(b"staged target\n")
-    staged = await request(server, "diff.git_stage_file", expected="command.result", path="tracked.txt")
+    staged = await review_action(server, "diff.git_stage_file", path="tracked.txt")
     assert staged["level"] == "success", staged
     assert_owner(server, staged)
     (root / "tracked.txt").write_bytes(b"working target\n")
@@ -79,15 +90,15 @@ async def test_ws_changes_working_staged_untracked_and_all_actions_keep_original
     assert "+staged target" in index["files"][0]["patch"] and "working target" not in index["files"][0]["patch"]
     for command, fields in (("diff.git_unstage_file", {"path": "tracked.txt"}),
             ("diff.git_stage_all", {}), ("diff.git_unstage_all", {})):
-        result = await request(server, command, expected="command.result", **fields)
+        result = await review_action(server, command, **fields)
         assert result["level"] == "success", json.dumps(result, ensure_ascii=False)
         assert_owner(server, result)
         index = await request(server, "diff.git_staged")
         assert len(index["files"]) == (3 if command == "diff.git_stage_all" else 0), index
-    denied = await request(server, "diff.git_revert_file", path="tracked.txt")
+    denied = await review_action(server, "diff.git_revert_file", path="tracked.txt")
     assert denied["level"] == "error" and "confirmed=true" in denied["message"]
     assert (root / "tracked.txt").read_bytes() == b"working target\n"
-    reverted = await request(server, "diff.git_revert_file", expected="command.result", path="tracked.txt", confirmed=True)
+    reverted = await review_action(server, "diff.git_revert_file", path="tracked.txt", confirmed=True)
     assert reverted["level"] == "success", reverted
     assert_owner(server, reverted)
     assert (root / "tracked.txt").read_bytes() == b"before\n"
@@ -136,14 +147,15 @@ async def test_ws_changes_uri_owner_non_git_and_real_errors_never_read_controlle
     assert_owner(server, empty)
     await seed(server)
     (server.host.workspace / "tracked.txt").write_bytes(b"executor only\n")
+    snapshot = await request(server, "diff.git_working_tree")
     original = server.host.environments.primary().environment.process.start
     starts = []
     async def refused(argv, cwd, **kwargs):
         starts.append((argv, cwd))
         raise ExecutorDisconnected("owned executor disconnected; do not retry controller")
     monkeypatch.setattr(server.host.environments.primary().environment.process, "start", refused)
-    for command in ("diff.git_working_tree", "diff.git_staged", "diff.git_stage_file"):
-        result = await request(server, command, path="tracked.txt")
+    for command in ("diff.git_stage_file", "diff.git_working_tree", "diff.git_staged"):
+        result = await request(server, command, path="tracked.txt", source="unstaged", snapshot_generation=snapshot["snapshot_generation"])
         assert result["type"] == "command.result" and result["level"] == "error", result
         assert "owned executor disconnected" in result["message"]
         assert_owner(server, result)
@@ -248,7 +260,7 @@ async def test_ws_user_git_uses_standalone_host_and_does_not_change_model_permis
     for command, fields in (("diff.git_stage_file", {"path": "tracked.txt"}),
             ("diff.git_unstage_file", {"path": "tracked.txt"}), ("diff.git_stage_all", {}),
             ("diff.git_unstage_all", {})):
-        result = await request(server, command, expected="command.result", **fields)
+        result = await review_action(server, command, **fields)
         assert result["level"] == "success", json.dumps(result, ensure_ascii=False)
     diff = await request(server, "diff.git_working_tree")
     assert diff["type"] == "diff.git_working_tree", diff
@@ -258,11 +270,11 @@ async def test_ws_user_git_uses_standalone_host_and_does_not_change_model_permis
     assert (root / "tracked.txt").read_bytes() == b"before\n"
     assert (root / "报告 文档.txt").read_bytes() == b"before\n"
     (root / "tracked.txt").write_bytes(b"restore confirmed target\n")
-    restored = await request(server, "diff.git_revert_file", expected="command.result", path="tracked.txt", confirmed=True)
+    restored = await review_action(server, "diff.git_revert_file", path="tracked.txt", confirmed=True)
     assert restored["level"] == "success", json.dumps(restored, ensure_ascii=False)
     assert (root / "tracked.txt").read_bytes() == b"before\n"
     (root / "wild1.txt").write_bytes(b"user Git action is independent of model permissions\n")
-    restored = await request(server, "diff.git_revert_file", expected="command.result", path="wild1.txt", confirmed=True)
+    restored = await review_action(server, "diff.git_revert_file", path="wild1.txt", confirmed=True)
     assert restored["level"] == "success", json.dumps(restored, ensure_ascii=False)
     assert (root / "wild1.txt").read_bytes() == b"before\n"
     from backend.workspace.executor_git import run_executor_git

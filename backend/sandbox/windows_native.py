@@ -103,8 +103,7 @@ def pty_command(argv: list[str], *, cwd: str | Path | None, control_handles: tup
 def discover_runtime() -> tuple[WindowsNativeRuntime | None, str]:
     if sys.platform != "win32":
         return None, "the native Windows sandbox is Windows-only"
-    configured_home = str(os.environ.get(_HOME_ENV) or "").strip()
-    home = (Path(configured_home).expanduser() if configured_home else DATA_ROOT / "windows-sandbox").resolve()
+    home = _runtime_home()
     secret_file = home / ".sandbox-secrets" / "sandbox_users.json"
     try:
         secrets_payload = json.loads(secret_file.read_text(encoding="utf-8"))
@@ -138,6 +137,38 @@ def discover_runtime() -> tuple[WindowsNativeRuntime | None, str]:
     )
     if executable is None:
         return None, f"set {_RUNNER_ENV} to a compatible Codex Windows sandbox runtime"
+    runtime, reason = _inspect_current_runtime(executable, home)
+    if runtime is None:
+        return None, reason
+    if (
+        saved_owner != runtime.owner_id or marker.get("owner_id") != runtime.owner_id
+        or secrets_payload.get("version") != 6 or marker.get("version") != 6
+        or (offline, online) != (runtime.offline_username, runtime.online_username)
+    ):
+        return None, "native sandbox credential/marker receipt belongs to a different owner or version"
+    return runtime, ""
+
+
+def discover_restricted_runtime() -> tuple[WindowsNativeRuntime | None, str]:
+    """Current-token commands need helper/home identity, not elevated accounts."""
+    if sys.platform != "win32":
+        return None, "the native Windows sandbox is Windows-only"
+    executable = next((candidate.resolve() for candidate in _candidate_executables() if candidate.is_file()), None)
+    if executable is None:
+        return None, f"set {_RUNNER_ENV} to a compatible Codex Windows sandbox runtime"
+    home = _runtime_home()
+    # The existing native owner ABI canonicalizes an existing application home.
+    # Source creates capability state at launch; this does not create setup receipts.
+    home.mkdir(parents=True, exist_ok=True)
+    return _inspect_current_runtime(executable, home)
+
+
+def _runtime_home() -> Path:
+    configured_home = str(os.environ.get(_HOME_ENV) or "").strip()
+    return (Path(configured_home).expanduser() if configured_home else DATA_ROOT / "windows-sandbox").resolve()
+
+
+def _inspect_current_runtime(executable: Path, home: Path) -> tuple[WindowsNativeRuntime | None, str]:
     try:
         identity = inspect_runtime_owner(executable, home)
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -159,13 +190,7 @@ def discover_runtime() -> tuple[WindowsNativeRuntime | None, str]:
         or identity["group"] != group
     ):
         return None, "native sandbox runtime owner does not match the current Windows SID and canonical home"
-    if (
-        saved_owner != owner_id or marker.get("owner_id") != owner_id
-        or secrets_payload.get("version") != 6 or marker.get("version") != 6
-        or (offline, online) != expected_accounts
-    ):
-        return None, "native sandbox credential/marker receipt belongs to a different owner or version"
-    return WindowsNativeRuntime(executable, home, offline, online, owner_id, sid, group), ""
+    return WindowsNativeRuntime(executable, home, *expected_accounts, owner_id, sid, group), ""
 
 
 def inspect_runtime_owner(executable: Path, home: Path) -> dict[str, Any]:

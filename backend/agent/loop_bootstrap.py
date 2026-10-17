@@ -606,6 +606,9 @@ async def bootstrap_agent_loop(
         from backend.mcp.node_repl import register_node_companion
 
         await register_node_companion(run_context, request.tool_registry, agent_session, execution=run_context.model_execution)
+        from backend.mcp.cua_repl import register_cua_companion
+
+        await register_cua_companion(run_context, agent_session, execution=run_context.model_execution)
     context.bind_tool_context(tool_context)
     from backend.agent.model_activation import admit_model_activation
 

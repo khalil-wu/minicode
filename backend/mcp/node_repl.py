@@ -39,7 +39,7 @@ class NodeReplMCPClient(MCPClient):
         self.network = network
         self._thread_closing = False
         self.process_handle = None
-        super().__init__("node_repl", command=config.command, args=config.args,
+        super().__init__(config.name, command=config.command, args=config.args,
             transport=MCPTransport.STDIO, env=config.env,
             on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
 
@@ -125,6 +125,9 @@ class NodeCompanionView:
 
 
 class NodeReplCompanions:
+    source_prefix = SOURCE_PREFIX
+    client_type = NodeReplMCPClient
+
     def __init__(self):
         self.instances: dict[str, _Companion] = {}
         self.active_key = None
@@ -163,7 +166,7 @@ class NodeReplCompanions:
 
     async def retire(self, config=None):
         async with self.lock:
-            key = config.source.removeprefix(SOURCE_PREFIX) if config is not None else self.active_key
+            key = config.source.removeprefix(self.source_prefix) if config is not None else self.active_key
             if key is None:
                 return
             companion = self.instances[key]
@@ -173,9 +176,9 @@ class NodeReplCompanions:
                 await self._close(companion)
 
     def client_for(self, config, *, on_disconnect, on_tools_changed):
-        companion = self.instances[config.source.removeprefix(SOURCE_PREFIX)]
+        companion = self.instances[config.source.removeprefix(self.source_prefix)]
         if companion.client is None:
-            companion.client = NodeReplMCPClient(config, companion.attachment, companion.network,
+            companion.client = self.client_type(config, companion.attachment, companion.network,
                 on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
         else:
             companion.client._on_disconnect = on_disconnect

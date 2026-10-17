@@ -104,10 +104,12 @@ def git_session(tmp_path):
 
 @pytest.mark.asyncio
 async def test_git_action_settles_waiting_caller_after_scoped_diff_event(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.diff.git_integration.stage_file", AsyncMock(return_value=True))
+    monkeypatch.setattr("backend.diff.review.current_snapshot", lambda *args: object())
+    monkeypatch.setattr("backend.diff.review.apply_action", AsyncMock(return_value={"ok": True, "status": "success", "applied_targets": ["staged"]}))
     session = git_session(tmp_path)
     await diff.handle_diff_git_stage_file(session, {
         "path": "file.txt", "conversation_id": "owner", "client_command_id": "stage-one",
+        "source": "unstaged", "snapshot_generation": "displayed-generation",
     })
     assert [event.type for event in session.events] == ["diff.git_stage_file", "command.result"]
     event, result = session.events
@@ -117,14 +119,17 @@ async def test_git_action_settles_waiting_caller_after_scoped_diff_event(tmp_pat
     assert result.data["data"] == {
         "ok": True, "conversation_id": "owner", "workspace_root": str(tmp_path),
         "execution_cwd": str(tmp_path), "request_id": "stage-one",
+        "status": "success", "applied_targets": ["staged"], "source": "unstaged", "snapshot_generation": "displayed-generation",
     }
 
 
 @pytest.mark.asyncio
 async def test_git_action_failure_is_a_single_failed_completion(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.diff.git_integration.stage_file", AsyncMock(side_effect=RuntimeError("index.lock exists")))
+    monkeypatch.setattr("backend.diff.review.current_snapshot", lambda *args: object())
+    monkeypatch.setattr("backend.diff.review.apply_action", AsyncMock(side_effect=RuntimeError("index.lock exists")))
     session = git_session(tmp_path)
-    await diff.handle_diff_git_stage_file(session, {"path": "file.txt", "conversation_id": "owner"})
+    await diff.handle_diff_git_stage_file(session, {"path": "file.txt", "conversation_id": "owner",
+        "source": "unstaged", "snapshot_generation": "displayed-generation"})
     assert len(session.events) == 1
     assert session.events[0].type == "command.result"
     assert session.events[0].data["level"] == "error"

@@ -540,7 +540,7 @@ async def test_configured_same_name_override_retires_original_builtin_after_its_
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "win32", reason="actual Windows native sandbox account rejection")
-async def test_native_account_rejected_node_start_closes_original_handle_and_thread(tmp_path, monkeypatch):
+async def test_elevated_account_rejected_node_start_closes_original_handle_and_thread(tmp_path, monkeypatch):
     from backend.sandbox.policy import FileSystemSandboxPolicy, FileSystemSandboxEntry, FileSystemPath, FileSystemSpecialPath, FileSystemAccessMode, NetworkSandboxPolicy
     from backend.sandbox import windows_native
 
@@ -550,7 +550,7 @@ async def test_native_account_rejected_node_start_closes_original_handle_and_thr
         FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
         FileSystemSandboxEntry(FileSystemPath("path", tmp_path.as_uri()), FileSystemAccessMode.WRITE),
     ]), network=NetworkSandboxPolicy.RESTRICTED)
-    config = EnvironmentConfig(profile, (tmp_path.as_uri(),), windows_sandbox_type="windowsRestrictedToken", windows_sandbox_level="restricted-token")
+    config = EnvironmentConfig(profile, (tmp_path.as_uri(),), windows_sandbox_type="windowsRestrictedToken", windows_sandbox_level="elevated")
     backend = LocalExecutionEnvironmentBackend()
     environments = EnvironmentManager(tmp_path, local_backend=backend)
     async def resolve(selection, config, environment, info):
@@ -580,6 +580,51 @@ async def test_native_account_rejected_node_start_closes_original_handle_and_thr
         await snapshot.aclose()
         await thread.aclose()
         await environments.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="actual Windows restricted-token Node startup")
+async def test_restricted_node_starts_without_elevated_accounts_and_keeps_original_kernel(monkeypatch):
+    import os
+    import tempfile
+    from backend.sandbox import windows_native
+    from backend.sandbox.policy import FileSystemSandboxPolicy, FileSystemSandboxEntry, FileSystemPath, FileSystemSpecialPath, FileSystemAccessMode, NetworkSandboxPolicy
+
+    executable = Path(__file__).resolve().parents[2] / "desktop/windows-sandbox-runtime/codex.exe"
+    if not executable.is_file():
+        pytest.skip("Bundled Windows sandbox runtime has not been built")
+    arena = Path(os.environ.get("MINICODE_SANDBOX_TEST_ROOT", "C:/minicode-sbx-test"))
+    arena.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="node-readiness-", dir=arena) as directory:
+        root = Path(directory)
+        workspace, home = root / "workspace", root / "home"
+        workspace.mkdir()
+        monkeypatch.setenv(windows_native._RUNNER_ENV, str(executable))
+        monkeypatch.setenv(windows_native._HOME_ENV, str(home))
+        monkeypatch.setattr(windows_native, "discover_runtime", lambda: pytest.fail("Node restricted-token must not require elevated setup"))
+        profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+            FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+            # Ready environment profiles already use the executor URI domain;
+            # only the selected local backend converts this to a native path.
+            FileSystemSandboxEntry(FileSystemPath("path", workspace.as_uri()), FileSystemAccessMode.WRITE),
+        ]), network=NetworkSandboxPolicy.RESTRICTED)
+        config = EnvironmentConfig(profile, (workspace.as_uri(),), windows_sandbox_type="windowsRestrictedToken", windows_sandbox_level="restricted-token")
+        async with companion(workspace, environment_config=config) as fixture:
+            handle = fixture.client.process_handle
+            assert handle.accepted and handle.sandbox_backend == "windows-restricted-token"
+            pid = handle.process.pid
+            first = await fixture.client.call_tool("js", {"code": "const fs=await import('node:fs/promises');const saved=41;await fs.writeFile('inside.txt','allowed');nodeRepl.write(saved)"})
+            assert not first.is_error and body(first) == "41", body(first)
+            assert (workspace / "inside.txt").read_text() == "allowed"
+            second = await fixture.client.call_tool("js", {"code": "nodeRepl.write(saved+1)"})
+            assert not second.is_error and body(second) == "42", body(second)
+            assert fixture.client.process_handle is handle and handle.process.pid == pid
+            outside = root / "outside.txt"
+            denied = await fixture.client.call_tool("js", {"code": f"await fs.writeFile({json.dumps(str(outside))},'blocked')"})
+            assert denied.is_error and not outside.exists()
+        assert handle.closed and not fixture.backend.process.processes
+        assert not (home / ".sandbox-secrets/sandbox_users.json").exists()
+        assert not (home / ".sandbox/setup_marker.json").exists()
 
 
 @pytest.mark.asyncio

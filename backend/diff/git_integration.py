@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -31,6 +32,13 @@ class FileDiff:
     additions: int = 0
     deletions: int = 0
     is_binary: bool = False
+    old_path: str | None = None
+    status: str = "M"
+    old_mode: str = "000000"
+    new_mode: str = "000000"
+    old_oid: str | None = None
+    new_oid: str | None = None
+    revision: str = ""
 
 
 @dataclass
@@ -43,9 +51,10 @@ class StructuredDiff:
 
 _DIFF_HEADER_RE = re.compile(r"^diff --(?:git|cc|combined) .+$", re.MULTILINE)
 _BINARY_RE = re.compile(r"^Binary files", re.MULTILINE)
+_INDEX_RE = re.compile(r"^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: [0-9]{6})?$", re.MULTILINE)
 
 
-def _parse_diff_output(output: str) -> StructuredDiff:
+def _parse_diff_output(output: str, *, hide_whitespace: bool = False) -> StructuredDiff:
     if not output:
         return StructuredDiff()
 
@@ -53,16 +62,35 @@ def _parse_diff_output(output: str) -> StructuredDiff:
     # from the NUL-delimited records, not quoted, human-readable diff headers.
     metadata, _, raw = output.partition("\0\0")
     records = iter(metadata.rstrip("\0").split("\0"))
-    changes: dict[str, str] = {}
+    changes: dict[str, dict] = {}
+    stats: dict[tuple[str, str | None], tuple[int, int, bool]] = {}
     unmerged: set[str] = set()
     for record in records:
-        status = record.split()[-1][0]
-        path = next(records)
-        if status in {"R", "C"}:
+        if record.startswith(":"):
+            old_mode, new_mode, old_oid, new_oid, code = record[1:].split()
+            status = code[0]
             path = next(records)
-        if status == "U":
-            unmerged.add(path)
-        changes[path] = status
+            old_path = path if status in {"R", "C"} else None
+            if old_path is not None:
+                path = next(records)
+            if status == "U":
+                unmerged.add(path)
+            changes[path] = {"status": status, "old_path": old_path, "old_mode": old_mode,
+                "new_mode": new_mode, "old_oid": None if set(old_oid) == {"0"} else old_oid,
+                "new_oid": None if set(new_oid) == {"0"} else new_oid}
+        else:
+            added, deleted, path = record.split("\t", 2)
+            old_path = next(records) if not path else None
+            if not path:
+                path = next(records)
+            binary = added == "-" or deleted == "-"
+            stats[(path, old_path)] = (0 if binary else int(added), 0 if binary else int(deleted), binary)
+
+    if hide_whitespace:
+        # Source worker $4 keeps A/U records and otherwise uses the filtered
+        # numstat set. Raw alone still lists whitespace-only modifications.
+        changes = {path: info for path, info in changes.items() if path in unmerged
+            or info["status"] == "A" or (path, info["old_path"]) in stats}
 
     # An unmerged record has no patch of its own. --ours may follow it with
     # a normal modification record; type changes have two patches (old/new).
@@ -72,8 +100,8 @@ def _parse_diff_output(output: str) -> StructuredDiff:
         patch_text = patch_text.replace(marker, "")
     patch_paths = [
         path
-        for path, status in changes.items()
-        for _ in range(2 if status == "T" else int(status != "U"))
+        for path, info in changes.items()
+        for _ in range(2 if info["status"] == "T" else int(info["status"] != "U"))
     ]
     headers = list(_DIFF_HEADER_RE.finditer(patch_text))
     for i, (path, match) in enumerate(zip(patch_paths, headers, strict=True)):
@@ -82,6 +110,7 @@ def _parse_diff_output(output: str) -> StructuredDiff:
 
     files: list[FileDiff] = []
     for path in changes:
+        info = changes[path]
         chunk = patches[path]
         is_binary = bool(_BINARY_RE.search(chunk))
         additions = 0
@@ -102,12 +131,21 @@ def _parse_diff_output(output: str) -> StructuredDiff:
                 elif in_hunk and line.startswith("-"):
                     deletions += 1
 
+        numbers = stats.get((path, info["old_path"]))
+        if numbers is not None:
+            additions, deletions, is_binary = numbers
+        indexes = _INDEX_RE.findall(chunk)
+        if info["new_mode"] != "000000" and info["new_oid"] is None:
+            info["new_oid"] = indexes[-1][1] if indexes else info["old_oid"]
+        if path in unmerged:
+            info["status"] = "U"
         files.append(FileDiff(
             path=path,
             patch=chunk,
             additions=additions,
             deletions=deletions,
             is_binary=is_binary,
+            **info,
         ))
 
     total_add = sum(f.additions for f in files)
@@ -115,24 +153,31 @@ def _parse_diff_output(output: str) -> StructuredDiff:
     return StructuredDiff(files=files, total_additions=total_add, total_deletions=total_del, raw=raw)
 
 
-async def _run_git(workspace_root: str, *args: str) -> str:
+async def _run_git_result(workspace_root: str, *args: str, env_overrides=None, timeout=15):
     proc = await spawn_exec(
         "git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
         "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--literal-pathspecs", *args,
         cwd=workspace_root,
-        env=sanitized_git_env(workspace_root),
+        env={**sanitized_git_env(workspace_root), "LC_MESSAGES": "C", "LANGUAGE": "C",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", **(env_overrides or {})},
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await communicate(proc, timeout=15)
-    if proc.returncode != 0:
+    stdout, stderr = await communicate(proc, timeout=timeout)
+    import subprocess
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+async def _run_git(workspace_root: str, *args: str) -> str:
+    result = await _run_git_result(workspace_root, *args)
+    if result.returncode != 0:
         raise GitCommandError(
             args,
-            proc.returncode,
-            stderr.decode("utf-8", errors="replace"),
+            result.returncode,
+            result.stderr.decode("utf-8", errors="replace"),
         )
-    return stdout.decode("utf-8", errors="replace")
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None = None) -> bool:
@@ -157,19 +202,20 @@ async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None 
 # MiniCode gitDiff.ts / get_git_diff.rs disable external diff drivers and
 # textconv filters: a repo-configured diff driver is arbitrary code execution
 # triggered by reading a diff.
-_GIT_DIFF_SAFETY_FLAGS = ("--no-textconv", "--no-ext-diff")
+_GIT_DIFF_SAFETY_FLAGS = ("--no-textconv", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/")
+_GIT_DIFF_CONFIG_FLAGS = ("-c", "diff.mnemonicPrefix=false", "-c", "diff.noprefix=false", "-c", "core.quotePath=false")
 
 
-async def _read_git(workspace_root: str, *args: str, service=None) -> str:
-    if service is None:
+async def _read_git(workspace_root: str, *args: str, service=None, allowed_exit_codes=(0,)) -> str:
+    if service is None and allowed_exit_codes == (0,):
         return await _run_git(workspace_root, *args)
-    result = await _run_ui_git(service, args)
-    if result.returncode != 0:
+    result = await (_run_ui_git(service, args) if service is not None else _run_git_result(workspace_root, *args))
+    if result.returncode not in allowed_exit_codes:
         raise GitCommandError(args, result.returncode, result.stderr.decode("utf-8", errors="replace"))
     return result.stdout.decode("utf-8", errors="replace")
 
 
-async def _run_ui_git(service, args):
+async def _run_ui_git(service, args, *, env=None, output_limit=20 * 1024 * 1024, timeout=15):
     """Source UI Git uses the captured host's standalone process capability.
 
     Desktop worker $ -> H1 -> main vL -> process/spawn does not inherit the
@@ -180,13 +226,14 @@ async def _run_ui_git(service, args):
     from backend.workspace.executor_git import executor_git_environment
 
     policy, overrides = executor_git_environment(service)
+    overrides.update({"LC_MESSAGES": "C", "LANGUAGE": "C", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", **(env or {})})
     env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
         "exclude": list(policy.exclude), "set": dict(policy.set_values), "includeOnly": list(policy.include_only)}
     host_scope = replace(service.scope, permission_profile=PermissionProfile.disabled())
     hooks = "NUL" if service.cwd.convention == "windows" else "/dev/null"
     return await service.run(["git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
         "-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false", "--literal-pathspecs", *args],
-        timeout=15, env_policy=env_policy, env=overrides, permission_scope=host_scope)
+        timeout=timeout, output_limit=output_limit, env_policy=env_policy, env=overrides, permission_scope=host_scope)
 
 
 async def _diff_filter_flags(workspace_root: str, *, service=None) -> list[str]:
@@ -227,24 +274,130 @@ async def is_git_worktree(workspace_root: str, *, service=None) -> bool:
     return result.strip() == "true"
 
 
-async def get_working_tree_diff(workspace_root: str, *, service=None) -> StructuredDiff:
+async def get_working_tree_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False) -> StructuredDiff:
     # Combined conflict diffs suppress patches when --raw is present. Compare
     # unresolved files with the index's stage 2 to retain their working content.
     flags = await _diff_filter_flags(workspace_root, service=service)
     raw = await _read_git(
-        workspace_root, *flags, "diff", "--ours", "--relative", "--raw", "-z", "--patch", "--no-color",
+        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--ours", "--relative", "--raw", "--no-abbrev", "--numstat", "-z",
+        "--patch", "--full-index", *(["--binary"] if binary else []), "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
         "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
-    return _parse_diff_output(raw)
+    return _parse_diff_output(raw, hide_whitespace=hide_whitespace)
 
 
-async def get_staged_diff(workspace_root: str, *, service=None) -> StructuredDiff:
+async def get_staged_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False) -> StructuredDiff:
     flags = await _diff_filter_flags(workspace_root, service=service)
     raw = await _read_git(
-        workspace_root, *flags, "diff", "--cached", "--relative", "--raw", "-z", "--patch", "--no-color",
+        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--cached", "--relative", "--raw", "--no-abbrev", "--numstat", "-z",
+        "--patch", "--full-index", *(["--binary"] if binary else []), "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
         "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
-    return _parse_diff_output(raw)
+    return _parse_diff_output(raw, hide_whitespace=hide_whitespace)
+
+
+async def get_uncommitted_diff(workspace_root: str, *, service=None, hide_whitespace=False) -> StructuredDiff:
+    # Source L4/I4 compares this source with HEAD (or its empty tree before
+    # the first commit), independently from the index->disk unstaged source.
+    head = await _read_git(workspace_root, "rev-parse", "--verify", "--quiet", "HEAD",
+        service=service, allowed_exit_codes=(0, 1))
+    baseline = "HEAD" if head.strip() else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    return await get_comparison_diff(workspace_root, [baseline], service=service,
+        hide_whitespace=hide_whitespace, worktree=True, include_unmerged=True)
+
+
+async def get_comparison_diff(workspace_root: str, comparison: list[str], *, service=None,
+                              hide_whitespace=False, worktree=False, include_unmerged=False) -> StructuredDiff:
+    baseline = comparison[0]
+    flags = await _diff_filter_flags(workspace_root, service=service)
+    common = [*_GIT_DIFF_CONFIG_FLAGS, *flags, "diff"]
+    options = ["--relative", "--raw", "--no-abbrev", "--numstat", "-z", "--patch", "--full-index",
+        "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
+        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS]
+    raw = await _read_git(workspace_root, *common, *comparison, *options, "--", ".", service=service)
+    result = _parse_diff_output(raw, hide_whitespace=hide_whitespace)
+
+    # Source fOe/Z4 retains an actual staged rename even when a complete
+    # rewrite falls below Git's automatic HEAD->disk rename threshold. It
+    # recomputes the original blob against the new worktree path, rather than
+    # adding a staged patch to an unstaged patch.
+    changed = {file.path: file for file in result.files if file.old_path is None}
+    if worktree and changed:
+        staged = await _read_git(workspace_root, *common, "--cached", "--relative", "--find-renames",
+            "--name-status", "-z", "--no-color", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service)
+        records = iter(staged.rstrip("\0").split("\0") if staged else ())
+        renames = []
+        for code in records:
+            old_path = next(records)
+            if code[0] in {"R", "C"}:
+                new_path = next(records)
+                if code[0] == "R" and old_path in changed and new_path in changed:
+                    renames.append((old_path, new_path))
+        for old_path, new_path in renames:
+            old, new = changed[old_path], changed[new_path]
+            compared = _parse_diff_output(await _read_git(workspace_root, *common, *options,
+                f"{baseline}:{old_path}", new_path, service=service, allowed_exit_codes=(0, 1)),
+                hide_whitespace=hide_whitespace)
+            replacement = replace(new, old_path=old_path, status="R", old_mode=old.old_mode, old_oid=old.old_oid,
+                patch=_rename_patch(compared.raw, old_path, new_path), additions=compared.total_additions,
+                deletions=compared.total_deletions, is_binary=any(file.is_binary for file in compared.files))
+            result.files = [replacement if file is new else file for file in result.files if file is not old or old.status != "D"]
+
+    # Source R4/Y4 keeps real unmerged paths even when their current content
+    # happens to equal HEAD, so a net-empty patch must not hide a conflict.
+    unmerged = await _read_git(workspace_root, "ls-files", "--unmerged", "-z", service=service) if include_unmerged else ""
+    conflict_paths = {entry.split("\t", 1)[1] for entry in unmerged.split("\0") if entry}
+    by_path = {file.path: file for file in result.files}
+    for path in sorted(conflict_paths):
+        if path in by_path:
+            by_path[path].status = "U"
+        else:
+            result.files.append(FileDiff(path=path, patch=f"* Unmerged path {path}\n", status="U"))
+    result.total_additions = sum(file.additions for file in result.files)
+    result.total_deletions = sum(file.deletions for file in result.files)
+    return result
+
+
+def _rename_patch(patch: str, old_path: str, new_path: str) -> str:
+    old, new = _quote_patch_path(f"a/{old_path}"), _quote_patch_path(f"b/{new_path}")
+    renamed = f"rename from {_quote_patch_path(old_path)}\nrename to {_quote_patch_path(new_path)}"
+    header = f"diff --git {old} {new}"
+    if not patch:
+        return f"{header}\nsimilarity index 100%\n{renamed}\n"
+    patch = _DIFF_HEADER_RE.sub(lambda _: f"{header}\nsimilarity index 0%\n{renamed}", patch, count=1)
+    patch = re.sub(r"^--- .*$", lambda _: f"--- {old}", patch, count=1, flags=re.MULTILINE)
+    return re.sub(r"^\+\+\+ .*$", lambda _: f"+++ {new}", patch, count=1, flags=re.MULTILINE)
+
+
+async def get_untracked_file_diffs(workspace_root: str, paths: list[str], *, service=None, binary=False) -> list[FileDiff]:
+    flags = await _diff_filter_flags(workspace_root, service=service)
+    files = []
+    for path in paths:
+        # ls-files --others emits a trailing slash for an embedded repository.
+        # Source O4/qDe represents that repository's HEAD as one gitlink; a
+        # no-index directory diff would instead expose all of its child files.
+        if path.endswith("/"):
+            oid = (await _read_git(workspace_root, "-C", path, "rev-parse", "--verify", "HEAD^{commit}",
+                service=service)).strip()
+            old_path, new_path = _quote_patch_path(f"a/{path}"), _quote_patch_path(f"b/{path}")
+            patch = (f"diff --git {old_path} {new_path}\nnew file mode 160000\n"
+                f"index 0000000..{oid[:7]}\n--- /dev/null\n+++ {new_path}\n"
+                f"@@ -0,0 +1 @@\n+Subproject commit {oid}\n")
+            files.append(FileDiff(path=path, patch=patch, additions=1, status="A", new_mode="160000", new_oid=oid))
+            continue
+        raw = await _read_git(workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--no-index", "--raw", "--no-abbrev",
+            "--numstat", "-z", "--patch", "--full-index", *(["--binary"] if binary else []), "--no-color", *_GIT_DIFF_SAFETY_FLAGS,
+            "--", "/dev/null", path, service=service, allowed_exit_codes=(0, 1))
+        files.extend(_parse_diff_output(raw).files)
+    return files
+
+
+def _quote_patch_path(path: str) -> str:
+    # Source E4 quotes only these Git header/path characters.
+    if not any(character in path for character in ('\\', '"', '\n', '\r', '\t')):
+        return path
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return f'"{escaped}"'
 
 
 async def get_untracked_files(workspace_root: str, *, service=None) -> list[str]:
@@ -288,11 +441,46 @@ async def revert_patch(workspace_root: str, patch: str, *, service=None) -> bool
             raise
         prefix = ""
     directory = (f"--directory={prefix}",) if prefix else ()
+    async with _patch_argument(patch, service) as (argument, input_data):
+        args = ("apply", "--reverse", "--whitespace=nowarn", *directory, argument)
+        if service is None:
+            return await _run_git_ok(workspace_root, *args, input_data=input_data)
+        return await _write_git(workspace_root, *args, service=service)
+
+
+async def apply_review_patch(workspace_root: str, patch: str, *, action: str, source: str, service=None) -> dict:
+    """Source's atomic apply targets; one captured patch transport per action."""
+    prefix = (await _read_git(workspace_root, "rev-parse", "--show-prefix", service=service)).removesuffix("\n")
+    directory = (f"--directory={prefix}",) if prefix else ()
+    steps = (("staged", False),) if action == "stage" else (("staged", True),) if action == "unstage" else (
+        (("staged", True), ("unstaged", True)) if source == "staged" else (("unstaged", True),))
+    applied = 0
+    try:
+        async with _patch_argument(patch, service) as (argument, input_data):
+            for target, reverse in steps:
+                args = ("apply", *(["--reverse"] if reverse else []), "--binary",
+                    *(["--cached"] if target == "staged" else []), *directory, argument)
+                if service is None:
+                    await _run_git_ok(workspace_root, *args, input_data=input_data)
+                else:
+                    await _write_git(workspace_root, *args, service=service)
+                applied += 1
+    except GitCommandError as error:
+        return {"status": "partial-success" if applied else "error", "ok": False,
+            "message": str(error), "exit_code": error.exit_code, "stderr": error.stderr,
+            "applied_targets": [target for target, _ in steps[:applied]],
+            **({"cleanup_pending": True, "cleanup_reason": error.cleanup_reason} if getattr(error, "cleanup_pending", False) else {})}
+    except BaseException as error:
+        error.applied_targets = [target for target, _ in steps[:applied]]
+        raise
+    return {"status": "success", "ok": True, "applied_targets": [target for target, _ in steps]}
+
+
+@asynccontextmanager
+async def _patch_argument(patch: str, service):
     if service is None:
-        return await _run_git_ok(
-            workspace_root, "apply", "--reverse", "--whitespace=nowarn", *directory, "-",
-            input_data=patch.encode("utf-8"),
-        )
+        yield "-", patch.encode("utf-8")
+        return
     # Source process/write has no close-stdin operation. Keep this transport
     # adaptation entirely on the captured host, with one workspace path.
     temporary_directory = service.cwd.joinpath(f".minicode-undo-{uuid4().hex}")
@@ -306,8 +494,7 @@ async def revert_patch(workspace_root: str, patch: str, *, service=None) -> bool
     error = None
     try:
         await asyncio.shield(write)
-        return await _write_git(workspace_root, "apply", "--reverse", "--whitespace=nowarn", *directory, temporary.native,
-            service=service)
+        yield temporary.native, None
     except BaseException as caught:
         error = caught
         raise

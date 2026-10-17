@@ -521,9 +521,9 @@ class SandboxRunner:
             if selection == "restricted-token" and not resolved.full_disk_read:
                 return SandboxCapability(False, "windows-restricted-token", False, False,
                     reason="windows unelevated restricted-token sandbox cannot enforce filesystem read restrictions directly")
-            from backend.sandbox.windows_native import discover_runtime
+            from backend.sandbox.windows_native import discover_restricted_runtime, discover_runtime
 
-            runtime, reason = discover_runtime()
+            runtime, reason = (discover_restricted_runtime() if selection == "restricted-token" else discover_runtime())
             if runtime is None:
                 return SandboxCapability(False, f"windows-{selection}", False, False, reason=reason)
             if selection == "restricted-token":
@@ -1304,10 +1304,10 @@ class SandboxRunner:
                 argv=list(argv) if argv is not None else ["sh", "-c", command])
 
         if capability.backend == "windows-restricted-token":
-            from backend.sandbox.windows_native import discover_runtime, _permission_profile
+            from backend.sandbox.windows_native import discover_restricted_runtime, _permission_profile
             import json
 
-            runtime, reason = discover_runtime()
+            runtime, reason = discover_restricted_runtime()
             if runtime is None:
                 raise SandboxUnavailableError(reason)
             effective_cwd = Path(cwd or self._policy.policy_cwd or Path.cwd()).resolve()

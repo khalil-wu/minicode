@@ -163,6 +163,9 @@ class TurnIterationRuntime:
             from backend.mcp.node_repl import register_node_companion
 
             await register_node_companion(run_context, self.base_tool_registry, self.agent_session, execution=snapshot)
+            from backend.mcp.cua_repl import register_cua_companion
+
+            await register_cua_companion(run_context, self.agent_session, execution=snapshot)
         model_events: list[AgentEvent] = []
         if snapshot is not None and self.context._llm is not snapshot.llm:
             target_budget = snapshot.config.token_budget

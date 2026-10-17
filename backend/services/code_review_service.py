@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 import subprocess
 from typing import Any
 
@@ -48,16 +49,81 @@ def _uncommitted_diff(git_root: Path) -> str:
 
 
 def code_review_options(cwd: Path) -> dict[str, Any]:
-    git_root = Path(_git(cwd, "rev-parse", "--show-toplevel"))
-    current = _git(cwd, "branch", "--show-current")
-    branches = _git(cwd, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads", "refs/remotes").splitlines()
-    default_ref = run_ui_git_metadata(cwd, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
-    if default_ref.returncode not in {0, 1}:
-        default_ref.check_returncode()
-    default = default_ref.stdout.strip().removeprefix("refs/remotes/") if default_ref.returncode == 0 else "main"
-    targets = list(dict.fromkeys([default, *branches]))
-    return {"cwd": str(cwd), "gitRoot": str(git_root), "currentBranch": current or "HEAD",
-            "branches": [branch for branch in targets if branch != current and not branch.endswith("/HEAD")]}
+    return asyncio.run(code_review_options_on_executor(str(cwd), None))
+
+
+async def _review_location(cwd, service):
+    from backend.diff.git_integration import _read_git
+
+    git_root = (await _read_git(cwd, "rev-parse", "--show-toplevel", service=service)).strip()
+    if service is None:
+        return str(Path(cwd)), str(Path(git_root))
+    root = service.resolve(git_root)
+    remote = service.context.turn_environment.is_remote
+    return (service.cwd.uri, root.uri) if remote else (service.cwd.native, root.native)
+
+
+async def code_review_options_on_executor(cwd, service) -> dict[str, Any]:
+    from backend.diff.comparison import review_options
+
+    directory, git_root = await _review_location(cwd, service)
+    options = await review_options(cwd, service)
+    default = options["default_base_branch"]
+    targets = list(dict.fromkeys([*([default] if default else []), *options["branches"]]))
+    return {"cwd": directory, "gitRoot": git_root, "currentBranch": options["current_branch"] or "HEAD",
+        "branches": [branch for branch in targets if branch != options["current_branch"]],
+        "defaultBaseBranch": default, "comparisonStatus": options["comparison_status"], "reason": options["reason"]}
+
+
+async def prepare_code_review_on_executor(cwd, service, mode, base_branch="", merge_base_sha="", request_message=""):
+    directory, git_root = await _review_location(cwd, service)
+    if service is None:
+        return await _prepare_repository_review(directory, git_root, None, mode, base_branch, merge_base_sha, request_message)
+    from backend.workspace.executor_editor import ExecutorEditorService
+
+    # Source prepares repository-relative review patches. Keep the original
+    # captured execution attachment/lease while selecting its real Git root;
+    # the caller's cwd remains the public review scope's cwd.
+    async with ExecutorEditorService(service.context, editor_root=service.resolve(git_root),
+            application_config=service.application_config) as repository:
+        return await _prepare_repository_review(directory, git_root, repository, mode, base_branch, merge_base_sha, request_message)
+
+
+async def _prepare_repository_review(directory, git_root, service, mode, base_branch, merge_base_sha, request_message):
+    from backend.diff.comparison import branch_comparison
+    from backend.diff.git_integration import (get_comparison_diff, get_uncommitted_diff, get_untracked_files,
+        get_untracked_file_diffs, _read_git)
+
+    scope = {"mode": mode, "cwd": directory, "gitRoot": git_root}
+    if mode == "uncommitted":
+        result = await get_uncommitted_diff(git_root, service=service)
+        untracked = await get_untracked_files(git_root, service=service)
+        additions = await get_untracked_file_diffs(git_root, untracked, service=service)
+        paths = set(untracked)
+        patch = "".join(file.patch for file in result.files if file.path not in paths or file.status == "U")
+        patch += "".join(file.patch for file in additions)
+        instructions, request = _UNCOMMITTED, "Please review my uncommitted changes"
+    elif mode == "base-branch":
+        if not base_branch.strip():
+            raise ValueError("Select a base branch for code review.")
+        comparison = await branch_comparison(git_root, service, base_branch=base_branch, merge_base_sha=merge_base_sha or None)
+        sha = comparison["merge_base_sha"]
+        scope.update(baseBranch=base_branch, mergeBaseSha=sha)
+        result = await get_comparison_diff(git_root, [sha], service=service, worktree=True)
+        untracked = await get_untracked_files(git_root, service=service)
+        additions = await get_untracked_file_diffs(git_root, untracked, service=service)
+        paths = set(untracked)
+        patch = "".join(file.patch for file in result.files if file.path not in paths or file.status == "U")
+        patch += "".join(file.patch for file in additions)
+        instructions = _BASE_BRANCH.format(baseBranch=base_branch, mergeBaseSha=sha)
+        source_branch = (await _read_git(git_root, "symbolic-ref", "--quiet", "--short", "HEAD",
+            service=service, allowed_exit_codes=(0, 1))).strip() or "HEAD"
+        request = f"Please review changes on {source_branch} against {base_branch}"
+    else:
+        raise ValueError("Code review target must be uncommitted or base-branch.")
+    request = request_message or request
+    prompt = "\n".join(["## Code review guidelines:", _GUIDELINES.read_text(encoding="utf-8").strip(), instructions, "## My request:", request])
+    return {"scope": scope, "prompt": prompt, "requestMessage": request, "diff": patch}
 
 
 def normalize_code_review_scope(raw: Any) -> dict[str, Any]:

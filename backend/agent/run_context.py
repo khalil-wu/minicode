@@ -62,6 +62,7 @@ class RunContext:
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     environment_capabilities: PreparedEnvironmentCapabilities | None = None
     environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
+    cua_repl_turn: Any | None = None
     environment_host_mcp_manager: Any | None = None
     environment_host_skill_manager: Any | None = None
     environment_host_captured: bool = False
@@ -177,6 +178,11 @@ class RunContext:
         if self.environment_capabilities is not None:
             self.environment_retirement_tasks.add(self.environment_capabilities.retire(self))
             self.environment_capabilities = None
+        if self.cua_repl_turn is not None:
+            original = self.cua_repl_turn
+            self.cua_repl_turn = None
+            consumers = tuple(self.environment_retirement_tasks)
+            self.environment_retirement_tasks.add(asyncio.create_task(original.finish_after(consumers), name="cua-turn-ended"))
         if self.environment_retirement_tasks:
             tasks = tuple(self.environment_retirement_tasks)
             pending_tools = any(not task.done() for task in self.lifecycle_cleanup_tasks)

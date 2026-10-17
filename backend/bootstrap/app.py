@@ -770,7 +770,13 @@ class AppBootstrap:
         permission = permission_provider() if permission_provider is not None else session.permission_context_for_conversation(
             session.conversation_repo.get_conversation(owner["conversation_id"]), source="mcp.elicitation")
         policy = ApprovalPolicy.from_context(permission)
-        if not policy.permits("mcp_elicitations"):
+        meta = params.get("_meta", {})
+        computer_use_approval = (params.get("mode", "form") == "form"
+            and meta.get("codex_approval_kind") == "mcp_tool_call"
+            and meta.get("connector_id") == "computer-use")
+        # Native app access is an explicit Computer Use approval, transported
+        # over elicitation/create. Its empty schema is not a preapproved form.
+        if not computer_use_approval and not policy.permits("mcp_elicitations"):
             from backend.sandbox.policy import SandboxEnforcement
 
             # Source accepts an empty form under Never only for a published
@@ -807,10 +813,12 @@ class AppBootstrap:
             return {"action": "cancel"}
 
         try:
-            schema = (
-                ElicitationFormSchema.model_validate(params.get("schema")).model_dump(by_alias=True, exclude_none=True)
-                if mode == "form" else {}
-            )
+            if mode != "form":
+                schema = {}
+            elif computer_use_approval:
+                schema = params["schema"]
+            else:
+                schema = ElicitationFormSchema.model_validate(params.get("schema")).model_dump(by_alias=True, exclude_none=True)
         except ValidationError as exc:
             logger.warning("MCP server %s sent an invalid form schema", server_name, exc_info=True)
             return await reject_form(
