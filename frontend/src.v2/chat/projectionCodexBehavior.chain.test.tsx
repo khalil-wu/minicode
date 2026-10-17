@@ -79,12 +79,10 @@ describe("Codex item, output and reading projection", () => {
     const first = render(<ChatTurn turn={turn} conversationId="owner" isTranscriptMode />);
     fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
     fireEvent.click(screen.getByRole("button", { name: "展开 a.ts 的修改" }));
-    expect(screen.getByText("new-a")).toBeTruthy();
-    expect(screen.queryByText("new-b")).toBeNull();
+    expect(Array.from(first.container.querySelectorAll(".inline-diff-line-added .inline-diff-text"), line => line.textContent)).toEqual(["new-a"]);
     first.unmount();
-    render(<ChatTurn turn={turn} conversationId="owner" isTranscriptMode />);
-    expect(screen.getByText("new-a")).toBeTruthy();
-    expect(screen.queryByText("new-b")).toBeNull();
+    const second = render(<ChatTurn turn={turn} conversationId="owner" isTranscriptMode />);
+    expect(Array.from(second.container.querySelectorAll(".inline-diff-line-added .inline-diff-text"), line => line.textContent)).toEqual(["new-a"]);
   });
 
   it("places a quote above the separate text bubble", () => {

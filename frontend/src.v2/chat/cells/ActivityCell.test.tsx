@@ -409,7 +409,7 @@ describe("ActivityCell", () => {
     expect(screen.getByText("fuzzy-match.ts").getAttribute("title")).toMatch(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/);
     expect(screen.getAllByText(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/)).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: /展开 .*fuzzy-match\.ts 的修改/ }));
-    expect(screen.getByText("new value")).toBeTruthy();
+    expect(container.querySelector(".inline-diff-line-added .inline-diff-text")?.textContent).toBe("new value");
     expect(screen.queryByText("其余上下文已折叠")).toBeNull();
   });
 
