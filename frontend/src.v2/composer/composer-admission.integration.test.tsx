@@ -18,6 +18,9 @@ import { SideChatPanel } from "../panels/SideChatPanel";
 import { buildContextNativeAttachments } from "./contextPayload";
 import type { ClientCommand, CommandResultEvent, ServerEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
+import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
+import { clearDiffCommentScope, getDiffCommentScope, readDiffCommentState, setDiffComments } from "../lib/diff-comment-storage";
+import { hydrateMessages } from "../chat/transcriptHydration";
 
 const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], accepted: true, toast: vi.fn() }));
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", { configurable: true,
@@ -89,6 +92,7 @@ beforeEach(async () => {
   await waitComposerDraftRecovery();
   vi.stubGlobal("File", NativeFile);
   wire.commands = []; wire.accepted = true; wire.toast.mockClear(); resetPendingUserMessagesForTests();
+  clearDiffCommentScope("main"); clearDiffCommentScope("other"); clearDiffCommentScope(getDiffCommentScope(null, root));
   window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: "main", workingDirectory: root,
     conversations: [{ id: "main", title: "owned", workspaceRoot: root }], messages: [], conversationMessages: {},
@@ -116,6 +120,94 @@ afterEach(async () => {
 });
 
 describe("actual composer durable admission boundary", () => {
+  const comment: DiffComment = { type: "comment", content: [{ content_type: "text", text: "保留这个真实范围\n再改这里" }],
+    position: { path: "src/app.ts", side: "right", line: 103, start_line: 100 },
+    localDiffHunk: "@@ -50,2 +100,4 @@\n-old\n+new", localWorkspaceRoot: root };
+  const secondComment: DiffComment = { ...comment, position: { path: "src/other.ts", side: "left", line: 7 },
+    content: [{ content_type: "text", text: "发送期间新写的评论" }] };
+
+  it("previews a single count pill without modifying input, and removes only the comment context", async () => {
+    useAppStore.setState({ draft: "原输入不改" }); setDiffComments("main", [comment]);
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "查看 1 条评论" }));
+    expect(screen.getByRole("region", { name: "Diff 评论预览" }).textContent).toContain("100-103");
+    expect(screen.getByText("src/app.ts")).toBeTruthy();
+    expect(useAppStore.getState().draft).toBe("原输入不改");
+    fireEvent.click(screen.getByRole("button", { name: "移除所有 Diff 评论" }));
+    expect(readDiffCommentState("main").comments).toEqual([]);
+    expect(useAppStore.getState().draft).toBe("原输入不改");
+    expect(wire.commands).toEqual([]);
+    act(() => setDiffComments("main", [comment]));
+    expect(screen.queryByRole("region", { name: "Diff 评论预览" })).toBeNull();
+  });
+
+  it.each(["idle", "queue", "steer"] as const)("sends comments-only through normal %s input and restores exact durable metadata", async mode => {
+    useAppStore.setState({ draft: "", isStreaming: mode !== "idle", followUpBehavior: mode === "steer" ? "steer" : "queue",
+      messages: mode === "idle" ? [] : [{ id: "running", role: "assistant", content: "running", artifacts: [], timestamp: 1, isStreaming: true }] });
+    setDiffComments("main", [comment]);
+    render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(command.content).toBe(formatDiffCommentsPrompt("", [comment]));
+    expect(command.display_content).toBe("");
+    expect(command.context_refs).toEqual([{ kind: "diff_comment", name: "src/app.ts", path: "src/app.ts", comment }]);
+    if (mode !== "idle") expect(command.streaming_behavior).toBe(mode === "steer" ? "steer" : "follow_up");
+    expect(readDiffCommentState("main").comments).toEqual([comment]);
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      command_type: "user_message" } as ServerEvent));
+    expect(readDiffCommentState("main").comments).toEqual([]);
+    await act(async () => handleCommandResultEvent(receipt(command, mode === "idle" ? { admitted: true } : { queued: true, admitted: false })));
+    const restored = hydrateMessages([{ id: command.user_message_id, role: "user", content: command.content,
+      display_content: command.display_content, context_refs: JSON.parse(JSON.stringify(command.context_refs)) }])[0];
+    expect(restored.content).toBe(""); expect(restored.backendContent).toBe(command.content);
+    expect(restored.contextRefs).toEqual(command.context_refs);
+    expect(readDiffCommentState("main").comments).toEqual([]);
+  });
+
+  it.each(["untouched", "new-comment", "typed-then-cleared"] as const)("restores a rejected submitted draft only while its claim is %s", async edit => {
+    useAppStore.setState({ draft: "原始问题" }); setDiffComments("main", [comment]);
+    render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      command_type: "user_message" } as ServerEvent));
+    expect(useAppStore.getState().draft).toBe("");
+    if (edit === "new-comment") act(() => setDiffComments("main", [secondComment]));
+    if (edit === "typed-then-cleared") act(() => { useAppStore.getState().setDraft("用户新写后撤销的输入"); useAppStore.getState().setDraft(""); });
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: false }, "error")));
+    await waitFor(() => expect(useAppStore.getState().draft).toBe(edit === "untouched" ? "原始问题" : ""));
+    expect(readDiffCommentState("main").comments).toEqual(edit === "untouched" ? [comment] : edit === "new-comment" ? [secondComment] : []);
+  });
+
+  it("keeps comments when preparation fails before local receipt and does not dispatch", async () => {
+    useAppStore.setState({ draft: "尚未接收" }); setDiffComments("main", [comment]);
+    vi.mocked(buildContextNativeAttachments).mockRejectedValueOnce(new Error("actual context preparation rejection"));
+    render(<Composer />); submit();
+    await waitFor(() => expect(wire.toast).toHaveBeenCalledWith("actual context preparation rejection", "error", 4500));
+    expect(wire.commands).toEqual([]); expect(useAppStore.getState().draft).toBe("尚未接收");
+    expect(readDiffCommentState("main").comments).toEqual([comment]);
+  });
+
+  it("restores a rejected cleared input to its hidden owner while preserving the active chat's newer draft", async () => {
+    useAppStore.setState({ draft: "main original", conversations: [
+      { id: "main", title: "main", workspaceRoot: root }, { id: "other", title: "other", workspaceRoot: root },
+    ] }); setDiffComments("main", [comment]);
+    render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      command_type: "user_message" } as ServerEvent));
+    act(() => {
+      useAppStore.getState().applyConversationSwitched({ conversationId: "other" });
+      useAppStore.getState().setDraft("other new input"); setDiffComments("other", [secondComment]);
+    });
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: false }, "error")));
+    expect(useAppStore.getState().draft).toBe("other new input");
+    expect(readDiffCommentState("other").comments).toEqual([secondComment]);
+    expect(useAppStore.getState().conversationWorkbenchStates.main.draft).toBe("main original");
+    expect(readDiffCommentState("main").comments).toEqual([comment]);
+  });
+
   it.each(["enter", "cmdIfMultiline", "mod-enter"] as const)("sends Source's opposite running follow-up from the actual main composer for %s without changing global preferences", async shortcut => {
     const running = { id: "running-answer", role: "assistant" as const, content: "running", timestamp: 1, artifacts: [], isStreaming: true };
     useAppStore.setState({ messages: [running], isStreaming: true, draft: "authored follow-up\nsecond line", sendShortcut: shortcut, followUpBehavior: "queue" });

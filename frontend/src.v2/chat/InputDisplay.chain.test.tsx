@@ -10,6 +10,8 @@ import { handleSessionEvent } from "./sessionEvents";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { UserMessageCell } from "./cells/UserMessageCell";
 import { AssistantMarkdownCell } from "./cells/AssistantMarkdownCell";
+import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
+import { clearDiffCommentScope, readDiffCommentState } from "../lib/diff-comment-storage";
 
 const mocks = vi.hoisted(() => ({ send: vi.fn(() => true), receipt: vi.fn(), toast: vi.fn() }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "input-session", send: mocks.send }) }));
@@ -54,6 +56,7 @@ const synced = (session: Record<string, unknown>) => handleSessionEvent({
 beforeEach(() => {
   vi.clearAllMocks();
   resetPendingUserMessagesForTests();
+  clearDiffCommentScope("A");
   mocks.receipt.mockResolvedValue(receipt());
   useAppStore.setState({ ...initial, appMode: "chat", conversationId: "A", workingDirectory: "C:/A",
     conversations: [{ id: "A", title: "A", updatedAt: "", workspaceRoot: "C:/A" }],
@@ -66,6 +69,30 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("user input, model context and durable display", () => {
+  it("round trips ordinary Diff comments into a readonly count preview and restores them separately on recall", async () => {
+    const comment: DiffComment = { type: "comment", content: [{ content_type: "text", text: "只改这个旧行范围" }],
+      position: { path: "src/app.ts", side: "left", line: 103, start_line: 100 },
+      localWorkspaceRoot: "C:/A", localDiffHunk: "@@ -100,4 +90,2 @@\n-old\n+new" };
+    const commentRef = { kind: "diff_comment" as const, name: "app.ts", path: comment.position.path, comment };
+    const prompt = formatDiffCommentsPrompt(input, [comment]);
+    expect(sendChatMessage({ displayContent: input, backendContent: prompt, contextRefs: [commentRef], conversationId: "A" })).toBe(true);
+    const command = mocks.send.mock.calls.find(([value]) => value.type === "user_message")![0] as UserMessageCommand;
+    expect(command.content).toBe(prompt);
+    const [restored] = hydrateMessages([{ id: command.user_message_id, role: "user", content: command.content,
+      display_content: command.display_content, context_refs: JSON.parse(JSON.stringify(command.context_refs)) }]);
+    useAppStore.setState({ messages: [restored], conversationMessages: { A: [restored] } });
+    const turn = projectMessagesToTurns([restored], false)[0];
+    render(<UserMessageCell cell={turn.userCell!} conversationId="A" isTranscriptMode />);
+    fireEvent.click(screen.getByRole("button", { name: "查看 1 条评论" }));
+    expect(screen.getByRole("region", { name: "Diff 评论预览" }).textContent).toContain("100-103");
+    expect(screen.getByText("L")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "移除所有 Diff 评论" })).toBeNull();
+    expect(screen.queryByText(prompt)).toBeNull();
+    expect(await useAppStore.getState().recallMessage(restored.id)).toBe(true);
+    expect(useAppStore.getState().draft).toBe(input);
+    expect(useAppStore.getState().selectedMentions).toEqual([]);
+    expect(readDiffCommentState("A").comments).toEqual([comment]);
+  });
   it("sends the exact display/ref/quote envelope while preserving assembled model input", () => {
     expect(sendChatMessage({ displayContent: input, backendContent: modelInput, conversationId: "A",
       contextRefs: refs, quotedMessage: quote, attachments: [attachment] })).toBe(true);

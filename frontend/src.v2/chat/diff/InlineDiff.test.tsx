@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InlineDiff } from "./InlineDiff";
 import { TranscriptReadingContext } from "../transcriptReadingState";
@@ -105,7 +105,7 @@ describe("InlineDiff", () => {
     expect(vi.mocked(useColorizedLines).mock.calls.map(([, language]) => language)).toEqual(["typescript", "python"]);
     expect(files[0].querySelectorAll(".mock-syntax-token")).toHaveLength(3);
     expect(files[1].querySelector(".inline-diff-line-added .inline-diff-number")?.textContent).toBe("5");
-    expect(within(files[1] as HTMLElement).getByText("value = 1")).toBeTruthy();
+    expect(files[1].querySelector(".inline-diff-line-added .inline-diff-text")?.textContent).toBe("value = 1");
   });
 
   it("uses the owning file path to colorize a hunk-only tool patch", () => {
@@ -124,5 +124,51 @@ describe("InlineDiff", () => {
     render(view);
     expect(screen.getByRole("button", { name: "收起 2 行未修改内容" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("first")).toBeTruthy();
+  });
+
+  it("combines changed words with existing syntax tokens without changing source text", () => {
+    const { container } = render(<InlineDiff patch={"@@ -10 +20 @@\n-const answer = old;\n+const answer = new;"} filePath="answer.ts" />);
+    const before = container.querySelector(".inline-diff-line-removed .inline-diff-text")!;
+    const after = container.querySelector(".inline-diff-line-added .inline-diff-text")!;
+    expect(before.textContent).toBe("const answer = old;");
+    expect(after.textContent).toBe("const answer = new;");
+    expect([...before.querySelectorAll("[data-diff-span]")].map(node => node.textContent)).toEqual(["old"]);
+    expect([...after.querySelectorAll("[data-diff-span]")].map(node => node.textContent)).toEqual(["new"]);
+    expect(before.querySelector(".mock-syntax-token")).toBeTruthy();
+    expect(after.querySelector(".mock-syntax-token")).toBeTruthy();
+  });
+
+  it("keeps pure changes in separate files from becoming a fictional paired word diff", () => {
+    const { container } = render(<InlineDiff patch={[
+      "diff --git a/old.ts b/old.ts", "--- a/old.ts", "+++ /dev/null", "@@ -1 +0,0 @@", "-const old = 1;",
+      "diff --git a/new.ts b/new.ts", "--- /dev/null", "+++ b/new.ts", "@@ -0,0 +1 @@", "+const new = 2;",
+    ].join("\n")} />);
+    expect(container.querySelectorAll(".inline-diff-file")).toHaveLength(2);
+    expect(container.querySelectorAll("[data-diff-span]")).toHaveLength(0);
+  });
+
+  it("uses escaped text and word decorations while syntax is pending", () => {
+    vi.mocked(useColorizedLines).mockReturnValueOnce(null);
+    const { container } = render(<InlineDiff patch={'@@ -1 +1 @@\n-<img title="old">\n+<img title="new">'} filePath="snippet.html" />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector(".inline-diff-line-added .inline-diff-text")?.textContent).toBe('<img title="new">');
+    expect([...container.querySelectorAll("[data-diff-span]")].map(node => node.textContent)).toEqual(["old", "new"]);
+  });
+
+  it("requests plain rendering and omits word spans above 2000 changed rows", () => {
+    const patch = ["@@ -1,1000 +1,1001 @@", ...Array.from({ length: 1000 }, () => "-old"), ...Array.from({ length: 1001 }, () => "+new")].join("\n");
+    const { container } = render(<InlineDiff patch={patch} filePath="large.ts" />);
+    expect(vi.mocked(useColorizedLines)).toHaveBeenLastCalledWith([], "typescript");
+    expect(container.querySelectorAll(".inline-diff-line")).toHaveLength(2001);
+    expect(container.querySelectorAll("[data-diff-span]")).toHaveLength(0);
+    expect(container.querySelector(".mock-syntax-token")).toBeNull();
+    expect(container.querySelector(".inline-diff-text")?.textContent).toBe("old");
+  });
+
+  it("distinguishes an actual plaintext language from a temporarily pending highlighter", () => {
+    vi.mocked(useColorizedLines).mockReturnValueOnce(null);
+    const patch = ["@@ -1,1001 +1,1001 @@", ...Array.from({ length: 1000 }, () => " stable"), "-old", "+new"].join("\n");
+    const { container } = render(<InlineDiff patch={patch} filePath="plain.txt" />);
+    expect([...container.querySelectorAll("[data-diff-span]")].map(node => node.textContent)).toEqual(["old", "new"]);
   });
 });

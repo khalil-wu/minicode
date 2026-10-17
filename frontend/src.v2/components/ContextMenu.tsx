@@ -18,6 +18,7 @@ export interface ContextMenuItem {
   submenu?: ContextMenuItem[];
   tooltip?: string;
   checked?: boolean;
+  checkType?: "radio" | "checkbox";
 }
 
 interface ContextMenuProps {
@@ -187,7 +188,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
             key={i}
             type="button"
             tabIndex={-1}
-            role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+            role={item.checked === undefined ? "menuitem" : item.checkType === "checkbox" ? "menuitemcheckbox" : "menuitemradio"}
             aria-checked={item.checked}
             data-menu-index={i}
             aria-disabled={item.disabled || undefined}

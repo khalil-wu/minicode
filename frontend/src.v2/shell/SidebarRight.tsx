@@ -21,6 +21,7 @@ import {
 } from "../lib/icons";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
+import { draftWindowOwnerId } from "../stores/draft-window-owner";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { rightPanelDefaultWidth, rightPanelMaximumWidth, rightPanelWidthFromRatio } from "./right-panel-width";
 import type { RightStackTab } from "../stores/types";
@@ -575,7 +576,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="diff" />}>
                 <SafeBoundary fallback={<PanelErrorFallback panelName={tr("变更")} />}>
-                  <LazyDiffPanel />
+                  <LazyDiffPanel readerOwnerId={`changes:${draftWindowOwnerId()}`} />
                 </SafeBoundary>
               </Suspense>
             </ChunkErrorBoundary>

@@ -1,5 +1,7 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
+2026-10-17 最新施工批已补 HTML 词内高亮、普通会话评论、真实位置与隐藏阅读草稿归属，见[Diff 评论与词内投影](2026-10-17-diff-comments-word-projection.md)。本批最终 CI/安装另留证；下列 `4826a0c1` / r16 是此前已完成验收的检查点，不用于证明这次新实现。Source “变更”菜单的完整文件加载、富预览、隐藏空白/导入等仍未全部接入。自有实机日志再次复现的 Windows `node_repl` 沙箱初始化前置错误也继续保留，未按通过处理。
+
 2026-10-17 最新实现为 `4826a0c12f856e17d6806f22807c6668b3e28b14`，[完整 CI 39005641653](https://github.com/khalil-wu/minicode/actions/runs/39005641653) **8/8 成功**：前端 4415 passed，backend 6997 passed / 118 skipped，根目录后端 1768 passed / 51 skipped。Windows 后端候选 r16 独立新安装 **112/112**，0 failed/error/skipped，启动错误为空。前端为 `assets/index-C9rIzayf.js`（index SHA256 `4e2bedf3caaf5f3dbe919c9b52b2a51314134ac52e830c375bc2e1c80ce8f622`）。窗口配色、Diff 各颜色来源、工作区 Git 错误和 agent 邮箱/原工作树完整交接的修改、实机范围及本地曾有的失败/挂起均见[本批交接记录](2026-10-17-window-diff-mailbox.md)。CI 与候选验收不代表全产品等价；下列旧提交、r15/r13 等均保留为历史。
 
 2026-10-17 上一批验收：实现冻结 `19058aef` 的[完整 CI 38932478631](https://github.com/khalil-wu/minicode/actions/runs/38932478631)已 8/8 成功；前端 4393 passed，backend 6956 passed / 111 skipped。当时 Windows backend 候选为 r15，基础 41、媒体 7、目录 6 三组在独立新安装分别通过，Source peer 与 CI 跳过项分开记。当时前端为下文 Wz 构建。详情及实际目录修复、冷重启草稿保留见[最终目录与安装交付](2026-10-17-source-directory-depth.md)；下面 8dfff051 / r13 是更早专项检查点的历史验证。

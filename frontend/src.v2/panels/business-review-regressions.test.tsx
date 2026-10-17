@@ -82,9 +82,9 @@ describe("business diff and editor ownership", () => {
       fileDecisions: {}, lineComments: [],
     } as any });
     render(<DiffPanel />);
-    const line = screen.getAllByRole("button", { name: /评论 Diff 第/ })[0];
-    fireEvent.keyDown(line, { key: "Enter" });
-    const input = screen.getByRole("textbox", { name: /评论 Diff 第/ });
+    const line = screen.getAllByRole("button", { name: /评论 [LR]/ })[0];
+    fireEvent.click(line, { detail: 0 });
+    const input = screen.getByRole("textbox", { name: /评论 [LR]/ });
     fireEvent.change(input, { target: { value: "中文评论" } });
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
     expect(useAppStore.getState().diffReview?.lineComments).toHaveLength(0);

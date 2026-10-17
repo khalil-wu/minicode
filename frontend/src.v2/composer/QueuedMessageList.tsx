@@ -78,7 +78,9 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
     >
       {queued.map((message, index) => {
         const attachmentNames = (message.attachmentRefs ?? []).map((attachment) => attachment.name).filter(Boolean);
-        const label = message.content.trim() || attachmentNames.join(", ") || "Attachment";
+        const commentCount = message.contextRefs?.filter(ref => ref.kind === "diff_comment").length ?? 0;
+        const commentLabel = commentCount === 1 ? tr("1 条评论") : tr("{count} 条评论", { count: commentCount });
+        const label = message.content.trim() || attachmentNames.join(", ") || (commentCount ? commentLabel : "Attachment");
         const displayNumber = (message.queuePosition ?? index + 1) + 1;
         return (
           <div className="queued-message-row" key={message.id}>

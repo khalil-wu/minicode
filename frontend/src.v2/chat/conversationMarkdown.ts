@@ -83,6 +83,7 @@ function contextRefMarkdown(ref: MessageContextRef): string {
     case "skill": return `- skill: ${ref.name}${ref.path ? ` (${ref.path})` : ""}${ref.description ? `\n\n${ref.description}` : ""}`;
     case "plugin": return `- plugin: ${ref.name} (${ref.configName})\n  ${ref.path}${ref.description ? `\n\n${ref.description}` : ""}`;
     case "browser_annotation": return `- browser_annotation: ${ref.url}${ref.selector ? ` ${ref.selector}` : ""}\n\n${ref.note}`;
+    case "diff_comment": return `- Diff comment: ${ref.path}\n\n${ref.comment.content.map(item => item.text).join("\n")}`;
   }
 }
 

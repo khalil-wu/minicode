@@ -90,11 +90,30 @@ def input_packet(display="fix the input"):
     }
 
 
+def with_diff_comment(packet):
+    comment = {
+        "type": "comment", "content": [{"content_type": "text", "text": "修改这段真实行范围\n保留原注释"}],
+        "position": {"path": "src/app.py", "side": "right", "line": 103, "start_line": 100},
+        "localWorkspaceRoot": "C:/owned-comment-workspace", "localDiffHunk": "@@ -50,2 +100,4 @@\n-old\n+new",
+    }
+    return {**packet, "content": (
+        "\n# Diff comments:\n\n## User Comment 1\nFile: src/app.py\n"
+        "Workspace: C:/owned-comment-workspace\nSide: R\nLines: 100-103\n"
+        "Diff hunk:\n```diff\n@@ -50,2 +100,4 @@\n-old\n+new\n```\n"
+        "Comment:\n修改这段真实行范围\n保留原注释\n\n## My request:\n" + packet["content"] + "\n"
+    ), "context_refs": [*packet["context_refs"], {
+        "kind": "diff_comment", "name": "src/app.py", "path": "src/app.py", "comment": comment,
+    }]}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("display", ["fix the input", ""])
-async def test_real_ws_turn_persists_original_input_without_changing_provider_content(tmp_path, monkeypatch, display):
+@pytest.mark.parametrize("diff_comments", [False, True])
+async def test_real_ws_turn_persists_original_input_without_changing_provider_content(tmp_path, monkeypatch, display, diff_comments):
     session, conversation, adapter = session_for(tmp_path, monkeypatch)
     packet = input_packet(display)
+    if diff_comments:
+        packet = with_diff_comment(packet)
     try:
         await asyncio.wait_for(session._run_agent(packet["content"], conversation_id=conversation.id,
             metadata={**normalize_user_input_metadata(packet), "user_message_id": packet["user_message_id"],
@@ -178,7 +197,7 @@ async def test_consumed_steer_admission_uses_its_original_presentation(tmp_path,
             yield StreamEvent(type=StreamEventType.DONE, finish_reason="completed", usage=UsageInfo())
 
     monkeypatch.setattr(adapter, "stream_chat", stream)
-    packet = {**input_packet("steer source display"), "conversation_id": conversation.id,
+    packet = {**with_diff_comment(input_packet("steer source display")), "conversation_id": conversation.id,
         "streaming_behavior": "steer", "user_message_id": "steer-user", "assistant_message_id": "steer-assistant"}
     run = asyncio.create_task(session._run_agent("initial provider prompt", conversation_id=conversation.id,
         metadata={"display_content": "initial display", "context_refs": [],

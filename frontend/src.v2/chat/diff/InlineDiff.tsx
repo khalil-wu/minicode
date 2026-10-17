@@ -7,7 +7,11 @@ import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { useTranscriptReadingPreference } from "../transcriptReadingState";
 import { useDiffPalette } from "../../lib/use-diff-palette";
 import { diffPaletteStyle } from "../../lib/diff-palette";
+import { buildDiffWordDecorations } from "./diff-word-spans";
+import { decorateDiffLineHtml } from "./decorated-diff-syntax";
+import { useWordDiffsPreference } from "./word-diff-preference";
 import "./InlineDiff.css";
+import "./diff-word-spans.css";
 
 type DiffLine = {
   text: string;
@@ -20,6 +24,7 @@ type DiffLine = {
 
 type DiffFile = { path: string; lines: DiffLine[] };
 type DiffPart = { kind: "line"; line: DiffLine } | { kind: "context"; lines: DiffLine[] };
+const NO_COLORIZED_LINES: DiffLine[] = [];
 
 function parseFiles(patch: string, filePath: string | undefined): DiffFile[] {
   const files: UnifiedDiffLine[][] = [];
@@ -121,19 +126,26 @@ function ContextSection({ lines, colorized, readingKey }: { lines: DiffLine[]; c
 
 function FileDiff({ file, contextLines, readingKey }: { file: DiffFile; contextLines?: number; readingKey: string }) {
   const { t: tr } = useI18n();
-  const colorized = useColorizedLines(file.lines, guessLanguageFromPath(file.path));
+  const [wordDiffsEnabled] = useWordDiffsPreference();
+  const changedLineCount = useMemo(() => file.lines.filter(line => line.kind === "add" || line.kind === "del").length, [file.lines]);
+  const language = guessLanguageFromPath(file.path);
+  const colorized = useColorizedLines(changedLineCount > 2000 ? NO_COLORIZED_LINES : file.lines, language);
+  const decorated = useMemo(() => {
+    const { spansByLine } = buildDiffWordDecorations(file.lines, { wordDiffsEnabled, changedLineCount, forcePlainText: colorized === null && language !== "plaintext" });
+    return file.lines.map((line, index) => decorateDiffLineHtml(line.text, colorized?.[index], spansByLine[index]));
+  }, [file.lines, changedLineCount, colorized, language, wordDiffsEnabled]);
   const parts = useMemo(() => foldContext(file.lines, contextLines), [file.lines, contextLines]);
   return <div className="inline-diff-file" data-file-path={file.path}>
     {parts.map(part => {
       if (part.kind === "context") {
         const first = part.lines[0];
-        return <ContextSection key={`context:${first.index}`} lines={part.lines} colorized={colorized}
+        return <ContextSection key={`context:${first.index}`} lines={part.lines} colorized={decorated}
           readingKey={`${readingKey}:context:${first.oldLine ?? first.index}:${first.newLine ?? first.index}:${part.lines.length}`} />;
       }
       const line = part.line;
       if (line.kind === "hunk") return line.omittedContext ? <div key={line.index} className="inline-diff-context-gap">{line.omittedContext.toLocaleString()} {tr("行未修改")}</div> : null;
       if (line.kind === "meta") return null;
-      return <DiffRow key={line.index} line={line} html={colorized?.[line.index]} />;
+      return <DiffRow key={line.index} line={line} html={decorated[line.index]} />;
     })}
   </div>;
 }

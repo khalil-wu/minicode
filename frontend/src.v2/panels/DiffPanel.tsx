@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, CheckCircle, CheckCircle2, ChevronDown, Columns2, ExternalLink, FileDiff, GitBranch, GitCompare, MessageCircle, Minus, Plus, RefreshCw, RotateCcw, Rows3, X, XCircle } from "lucide-react";
+import { ArrowLeft, Check, CheckCircle, CheckCircle2, ChevronDown, Columns2, ExternalLink, FileDiff, GitBranch, GitCompare, MessageCircle, Minus, MoreHorizontal, Plus, RefreshCw, RotateCcw, Rows3, X, XCircle } from "../lib/icons";
 import {
   commandResultSucceeded,
   sendClientCommand,
@@ -13,12 +13,18 @@ import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { useColorizedLines, extractFilePathFromDiff, guessLanguageFromPath } from "../lib/monaco-colorize";
 import { buildReviewHistory, type HistoryDiffTurn } from "../lib/review-history";
 import { EmptyState } from "../components/EmptyState";
-import { Button } from "../components/Button";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { returnToBrowserPage } from "../chat/openWebInBrowser";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { openWorkspaceSourceFile as openDiffSourceFile } from "../workspace/openWorkspaceFolder";
-import { parseUnifiedDiffLines } from "../lib/unified-diff";
+import { parsePositionedDiff as parseUnifiedDiff, type DiffLine, type DiffLineLocation } from "../lib/diff-comment-lines";
+import { DiffReaderOwnerContext, useDiffAnnotations, type DiffAnnotations } from "./DiffAnnotations";
+import { clearDiffReaderDrafts } from "../lib/diff-comment-storage";
+import { buildDiffWordDecorations, type DiffWordSpan } from "../chat/diff/diff-word-spans";
+import { decorateDiffLineHtml } from "../chat/diff/decorated-diff-syntax";
+import { useWordDiffsPreference } from "../chat/diff/word-diff-preference";
+import { ContextMenu } from "../components/ContextMenu";
+import "../chat/diff/diff-word-spans.css";
 import { pushToast } from "../overlays/ToastContainer";
 import { loadMessageTurnDiff } from "../chat/loadMessageTurnDiff";
 import "./DiffPanel.css";
@@ -33,63 +39,12 @@ import { diffPaletteStyle } from "../lib/diff-palette";
 type DiffViewMode = "unified" | "split";
 type ChangeScope = "review" | "history" | "git";
 const HISTORY_PREVIEW_LINE_LIMIT = 180;
-const INLINE_COLORIZE_LINE_LIMIT = 900;
+const NO_COLORIZED_LINES: DiffLine[] = [];
 const REVIEW_FILE_INITIAL_LIMIT = 96;
 const REVIEW_FILE_INCREMENT = 96;
 const GIT_PREVIEW_LINE_LIMIT = 600;
 const GIT_FILE_INITIAL_LIMIT = 48;
 const GIT_FILE_INCREMENT = 48;
-
-interface DiffLine {
-  kind: "context" | "add" | "del" | "hunk" | "meta";
-  text: string;
-  oldLine?: number;
-  newLine?: number;
-  lineIndex?: number;
-  oldGap?: number;
-  newGap?: number;
-}
-
-const parseUnifiedDiff = (raw: string): DiffLine[] => {
-  let oldLine: number | undefined;
-  let newLine: number | undefined;
-  let lineIndex = 0;
-  return parseUnifiedDiffLines(raw).map(({ kind, text }) => {
-    let oldGap: number | undefined;
-    let newGap: number | undefined;
-    if (kind === "meta") {
-      oldLine = undefined;
-      newLine = undefined;
-    } else if (kind === "hunk") {
-      const range = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
-      oldGap = range ? Number(range[1]) - (oldLine ?? 1) : undefined;
-      newGap = range ? Number(range[2]) - (newLine ?? 1) : undefined;
-      oldLine = range ? Number(range[1]) : undefined;
-      newLine = range ? Number(range[2]) : undefined;
-    }
-    const line: DiffLine = {
-      kind: kind === "marker" ? "meta" : kind,
-      text: kind === "add" || kind === "del" || (kind === "context" && text.startsWith(" "))
-        ? text.slice(1) : text,
-    };
-    if (kind === "hunk") {
-      line.oldLine = oldLine;
-      line.newLine = newLine;
-      line.oldGap = oldGap;
-      line.newGap = newGap;
-    }
-    if (kind === "context" || kind === "add" || kind === "del") line.lineIndex = lineIndex++;
-    if (kind === "context" || kind === "del") {
-      line.oldLine = oldLine;
-      if (oldLine !== undefined) oldLine++;
-    }
-    if (kind === "context" || kind === "add") {
-      line.newLine = newLine;
-      if (newLine !== undefined) newLine++;
-    }
-    return line;
-  });
-};
 
 const visibleDiffLines = (lines: DiffLine[]): DiffLine[] =>
   lines.filter((line) => line.kind !== "meta");
@@ -145,7 +100,10 @@ const respond = async (requestId: string, approved: boolean) => {
   }
 };
 
-export const DiffPanel = () => {
+export const DiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {}) => {
+  const localReaderId = useId();
+  const readerId = readerOwnerId ?? localReaderId;
+  useEffect(() => () => { if (readerOwnerId === undefined) clearDiffReaderDrafts(readerId); }, [readerOwnerId, readerId]);
   const { t: tr } = useI18n();
   const { palette, variant } = useDiffPalette();
   const messages = useAppStore((s) => s.messages);
@@ -162,6 +120,9 @@ export const DiffPanel = () => {
   const scopeMenuRef = useRef<HTMLDivElement | null>(null);
   const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>("unified");
   const [historyTurnId, setHistoryTurnId] = useState<string | null>(null);
+  const [optionsMenuOpen, setOptionsMenuOpen] = useState(false);
+  const optionsButton = useRef<HTMLButtonElement>(null);
+  const [wordDiffsEnabled, setWordDiffsEnabled] = useWordDiffsPreference();
 
   useEffect(() => {
     if (diffReview) { setActiveScope("review"); if (diffReview.codeReview) setDiffViewMode("split"); }
@@ -233,6 +194,7 @@ export const DiffPanel = () => {
   }, [scopeMenuOpen]);
 
   return (
+    <DiffReaderOwnerContext.Provider value={readerId}>
     <div className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
       <div className="mc-diff-toolbar flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
         {diffReview?.previewReturnTarget
@@ -287,6 +249,15 @@ export const DiffPanel = () => {
           <span className="mc-diff-total-counts"><span>+{totals.plus}</span><span>-{totals.minus}</span></span>
         </div>
         <span className="flex-1" />
+          <button ref={optionsButton} type="button" aria-label={tr("“变更”选项")} title={tr("“变更”选项")}
+            aria-haspopup="menu" aria-expanded={optionsMenuOpen} className="mc-diff-icon-action" style={iconButtonStyle}
+            onClick={() => { setScopeMenuOpen(false); setOptionsMenuOpen(open => !open); }}><MoreHorizontal size={16} /></button>
+          {optionsMenuOpen && <ContextMenu ariaLabel={tr("“变更”选项")} anchor={optionsButton.current!} returnFocusTo={optionsButton.current!}
+            position={{ x: 0, y: 0 }} onClose={() => setOptionsMenuOpen(false)}
+            items={[{ label: tr("词级差异"), checked: wordDiffsEnabled, checkType: "checkbox",
+              icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" aria-hidden="true">
+                <rect x="3" y="1.5" width="10" height="13" rx="2" /><path d="M5.5 5h5M8 2.5v5M5.5 11h5" /></svg>,
+              onClick: () => setWordDiffsEnabled(!wordDiffsEnabled) }]} />}
           <button
             onClick={() => setDiffViewMode(diffViewMode === "unified" ? "split" : "unified")}
             title={diffViewMode === "unified" ? tr("切换为分栏视图") : tr("切换为行内视图")}
@@ -303,6 +274,7 @@ export const DiffPanel = () => {
         {visibleScope === "git" && <GitChangesTab viewMode={diffViewMode} />}
       </div>
     </div>
+    </DiffReaderOwnerContext.Provider>
   );
 };
 
@@ -320,41 +292,53 @@ interface DiffLineCommentData {
 
 interface DiffBodyProps {
   lines: DiffLine[];
+  annotationSourceKey: string;
   language?: string;
   viewMode?: DiffViewMode;
   comments?: DiffLineCommentData[];
-  onLineClick?: (lineIndex: number) => void;
   filePath?: string;
   workspaceRoot?: string;
-  activeCommentLine?: number | null;
-  onCommentSubmit?: (lineIndex: number, text: string) => void;
-  onCommentCancel?: () => void;
+  conversationId?: string | null;
+  annotationMode?: "conversation" | "approval";
+  commentsEnabled?: boolean;
+  approvalComments?: import("../stores/types").DiffLineComment[];
   rawPatch?: string;
   previewLineLimit?: number;
   inline?: boolean;
 }
 
 interface DiffReadingProps extends DiffBodyProps {
-  commentDraft: string;
-  onCommentDraftChange: (text: string) => void;
+  annotations: DiffAnnotations;
+  wordSpans: DiffWordSpan[][];
+  colorized: string[] | null;
   hiddenLineCount?: number;
   onShowFull?: () => void;
 }
 
-const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick, filePath, workspaceRoot, activeCommentLine, onCommentSubmit, onCommentCancel, rawPatch, previewLineLimit, inline = false }: DiffBodyProps) => {
+const DiffBody = ({ lines, annotationSourceKey, language, viewMode = "unified", comments, filePath, workspaceRoot, conversationId, annotationMode, commentsEnabled = true, approvalComments, rawPatch, previewLineLimit, inline = false }: DiffBodyProps) => {
   const [showFullPreview, setShowFullPreview] = useState(false);
-  const [commentDraft, setCommentDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const readingAnchor = useRef<{ index: string; offset: number } | null>(null);
   const selectedRange = useRef<{ start: string; startOffset: number; end: string; endOffset: number } | null>(null);
   const projectedLines = useMemo(() => visibleDiffLines(lines), [lines]);
+  const [wordDiffsEnabled] = useWordDiffsPreference();
+  const lang = language ?? guessLanguageFromPath(filePath ?? extractFilePathFromDiff(lines));
+  const changedLineCount = useMemo(() => projectedLines.filter(line => line.kind === "add" || line.kind === "del").length, [projectedLines]);
+  const colorized = useColorizedLines(changedLineCount > 2000 ? NO_COLORIZED_LINES : projectedLines, lang);
+  const forcePlainText = lang !== "plaintext" && colorized === null;
+  const words = useMemo(() => buildDiffWordDecorations(projectedLines, { forcePlainText, wordDiffsEnabled }), [projectedLines, forcePlainText, wordDiffsEnabled]);
+  const annotations = useDiffAnnotations({ lines: projectedLines, rawPatch: rawPatch ?? "", filePath: filePath ?? "", workspaceRoot, conversationId,
+    enabled: Boolean(annotationMode && filePath && commentsEnabled), sourceKey: annotationSourceKey,
+    approvalComments: annotationMode === "approval" ? approvalComments ?? [] : undefined,
+    onApprovalSave: comment => useAppStore.getState().addDiffLineComment(comment),
+    onApprovalRemove: position => useAppStore.getState().removeDiffLineComment(position),
+  });
   useEffect(() => {
     setShowFullPreview(false);
     readingAnchor.current = null;
     selectedRange.current = null;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [filePath, rawPatch, previewLineLimit]);
-  useEffect(() => { setCommentDraft(""); }, [filePath, activeCommentLine]);
   useEffect(() => {
     const rememberSelection = () => {
       const selection = window.getSelection();
@@ -386,7 +370,7 @@ const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick
       if (row) surface.scrollTop += row.getBoundingClientRect().top - surface.getBoundingClientRect().top - anchor.offset;
     }
     const selection = selectedRange.current;
-    if (!selection || activeCommentLine != null) return;
+    if (!selection) return;
     const endpoint = (key: string, offset: number) => {
       const alternateKey = key.replace(/:(old|new)$/, (_, side: string) => side === "old" ? ":new" : ":old");
       const element = surface.querySelector<HTMLElement>(`[data-diff-text="${key}"]`) ?? surface.querySelector<HTMLElement>(`[data-diff-text="${alternateKey}"]`);
@@ -415,7 +399,8 @@ const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick
     ? projectedLines.slice(0, previewLineLimit)
     : projectedLines;
   const hiddenLineCount = projectedLines.length - visibleLines.length;
-  const props: DiffReadingProps = { lines: visibleLines, language, comments, onLineClick, filePath, workspaceRoot, activeCommentLine, onCommentSubmit, onCommentCancel, commentDraft, onCommentDraftChange: setCommentDraft, hiddenLineCount, onShowFull: () => setShowFullPreview(true), inline };
+  const props: DiffReadingProps = { lines: visibleLines, annotationSourceKey, language, comments, filePath, workspaceRoot, annotations, wordSpans: words.spansByLine,
+    colorized, hiddenLineCount, onShowFull: () => setShowFullPreview(true), inline };
   return <div ref={scrollRef} className={`mc-diff-reading-surface flex-1 min-h-0 overflow-auto${inline ? " mc-diff-reading-inline" : ""}`} onScroll={() => {
     const surface = scrollRef.current!;
     const top = surface.getBoundingClientRect().top;
@@ -426,11 +411,8 @@ const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick
   </div>;
 };
 
-const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, workspaceRoot, activeCommentLine, onCommentSubmit, onCommentCancel, commentDraft, onCommentDraftChange, hiddenLineCount = 0, onShowFull, inline }: DiffReadingProps) => {
-  const { t: tr } = useI18n();
+const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, hiddenLineCount = 0, onShowFull, inline }: DiffReadingProps) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const lang = language ?? guessLanguageFromPath(filePath ?? extractFilePathFromDiff(lines));
-  const colorized = useColorizedLines(lines.length <= INLINE_COLORIZE_LINE_LIMIT ? lines : [], lang);
   const commentMap = useMemo(() => {
     if (!comments) return new Map<number, DiffLineCommentData>();
     const map = new Map<number, DiffLineCommentData>();
@@ -447,19 +429,11 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
         const i = line.lineIndex!;
         return (
         <div key={i} data-diff-index={i}>
-          <div className="mc-diff-code-row" data-diff-kind={line.kind} style={{ background: bgForKind(line.kind) }}>
-          <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={inline ? line.kind === "del" ? "old" : "new" : undefined} /></div>
+          <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-selected={lineLocations(line).some(annotations.selected) || undefined}
+            onPointerEnter={() => { const location = lineLocations(line).at(-1); if (location) annotations.enter(location); }} style={{ background: bgForKind(line.kind) }}>
+          <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} annotations={annotations} side={inline ? line.kind === "del" ? "old" : "new" : undefined} /></div>
           <div
             className="mc-diff-code-content px-2.5 whitespace-pre-wrap break-words relative"
-            role={onLineClick ? "button" : undefined}
-            tabIndex={onLineClick ? 0 : undefined}
-            aria-label={onLineClick ? tr("评论 Diff 第 {v0} 行", { v0: i + 1 }) : undefined}
-            onKeyDown={onLineClick ? (event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onLineClick(i);
-              }
-            } : undefined}
             style={{
               borderLeft:
                 line.kind === "add"
@@ -468,22 +442,13 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
                     ? "2px solid var(--diff-removed-foreground)"
                     : "2px solid transparent",
               color: !colorized?.[colorIndex] ? colorForKind(line.kind) : undefined,
-              cursor: (line.kind === "add" || line.kind === "del" || line.kind === "context") && onLineClick ? "pointer" : undefined,
-            }}
-            onClick={() => {
-              if (onLineClick && (line.kind === "add" || line.kind === "del" || line.kind === "context")) {
-                onLineClick(i);
-              }
             }}
           >
             <span className="mc-diff-code-sign select-none" aria-hidden="true" style={{ color: line.kind === "add" ? "var(--diff-added-foreground)" : line.kind === "del" ? "var(--diff-removed-foreground)" : colorForKind(line.kind) }}>
               {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
             </span>
-            {colorized?.[colorIndex] ? (
-              <span data-diff-text={`${i}:${line.newLine === undefined ? "old" : "new"}`} dangerouslySetInnerHTML={{ __html: colorized[colorIndex] }} />
-            ) : (
-              <span data-diff-text={`${i}:${line.newLine === undefined ? "old" : "new"}`}>{line.text}</span>
-            )}
+            <span data-diff-text={`${i}:${line.newLine === undefined ? "old" : "new"}`}
+              dangerouslySetInnerHTML={{ __html: decorateDiffLineHtml(line.text, colorized?.[colorIndex], wordSpans[colorIndex]) }} />
             {commentMap.has(i) && (
               <span className="ml-2 inline align-middle" style={{ color: "var(--accent-primary)", fontSize: "var(--text-xs)" }} title={commentMap.get(i)!.content}>
                 <MessageCircle size={14} style={{ display: "inline", verticalAlign: "middle" }} />
@@ -496,9 +461,7 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
               {commentMap.get(i)!.models ? commentMap.get(i)!.models!.map((comment, index) => <CodeReviewCommentCard key={index} comment={comment} filePath={filePath} workspaceRoot={workspaceRoot} />) : commentMap.get(i)!.content}
             </div>
           )}
-          {activeCommentLine === i && onCommentSubmit && (
-            <InlineCommentInput lineIndex={i} onSubmit={onCommentSubmit} onCancel={onCommentCancel} text={commentDraft} onTextChange={onCommentDraftChange} />
-          )}
+          {annotations.render(lineLocations(line))}
         </div>
       ); })}
       {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} onShowFull={onShowFull} />}
@@ -528,13 +491,23 @@ const DiffHunkDivider = ({ line, inline }: { line: DiffLine; inline?: boolean })
   </div>;
 };
 
-const DiffLineGutter = ({ line, filePath, workspaceRoot, side }: { line: DiffLine; filePath?: string; workspaceRoot?: string; side?: "old" | "new" }) => {
+const lineLocations = (line: DiffLine): DiffLineLocation[] => [
+  ...(line.oldLine !== undefined ? [{ side: "left" as const, line: line.oldLine }] : []),
+  ...(line.newLine !== undefined ? [{ side: "right" as const, line: line.newLine }] : []),
+];
+
+const DiffLineGutter = ({ line, filePath, workspaceRoot, side, annotations }: { line: DiffLine; filePath?: string; workspaceRoot?: string; side?: "old" | "new"; annotations: DiffAnnotations }) => {
   const { t: tr } = useI18n();
   if (line.oldLine === undefined && line.newLine === undefined) return null;
   return (
     <span className="mc-diff-line-gutter" data-side={side ?? "both"}>
-      {side !== "new" && <span title={tr("原文件行号")}>{line.oldLine ?? ""}</span>}
-      {side !== "old" && (filePath && workspaceRoot !== "" && line.newLine !== undefined ? (
+      {side !== "new" && <span className="mc-diff-gutter-side" onPointerEnter={() => { if (line.oldLine !== undefined) annotations.enter({ side: "left", line: line.oldLine }); }}>
+        {line.oldLine !== undefined && annotations.utility({ side: "left", line: line.oldLine })}
+        <span title={tr("原文件行号")}>{line.oldLine ?? ""}</span>
+      </span>}
+      {side !== "old" && <span className="mc-diff-gutter-side" onPointerEnter={() => { if (line.newLine !== undefined) annotations.enter({ side: "right", line: line.newLine }); }}>
+        {line.newLine !== undefined && annotations.utility({ side: "right", line: line.newLine })}
+        {filePath && workspaceRoot !== "" && line.newLine !== undefined ? (
         <button
           type="button"
           title={workspaceRoot && !workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory) ? tr("在来源工作区打开") : tr("跳到当前代码")}
@@ -543,36 +516,14 @@ const DiffLineGutter = ({ line, filePath, workspaceRoot, side }: { line: DiffLin
         >
           {line.newLine}
         </button>
-      ) : <span title={tr("当前文件行号")}>{line.newLine ?? ""}</span>)}
+      ) : <span title={tr("当前文件行号")}>{line.newLine ?? ""}</span>}
+      </span>}
     </span>
   );
 };
 
-const InlineCommentInput = ({ lineIndex, onSubmit, onCancel, text, onTextChange }: { lineIndex: number; onSubmit: (lineIndex: number, text: string) => void; onCancel?: () => void; text: string; onTextChange: (text: string) => void }) => {
-  const { t: tr } = useI18n();
-  return (
-    <div className="flex items-center gap-1.5 py-1.5 px-2.5 pl-3.5" style={{ borderLeft: "3px solid var(--accent-primary)", background: "color-mix(in oklch, var(--accent-primary) 5%, var(--surface-base))" }}>
-      <input
-        type="text"
-        aria-label={tr("评论 Diff 第 {v0} 行", { v0: lineIndex + 1 })}
-        placeholder={tr("评论第 {v0} 行...", { v0: lineIndex + 1 })}
-        value={text}
-        onChange={(e) => onTextChange(e.target.value)}
-        onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === "Enter" && text.trim()) { e.preventDefault(); onSubmit(lineIndex, text.trim()); } if (e.key === "Escape") onCancel?.(); }}
-        className="flex-1 px-2 py-1 outline-none"
-        style={{ border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", fontSize: "var(--text-xs)", background: "var(--surface-base)", color: "var(--text-primary)" }}
-        autoFocus
-      />
-      <Button variant="primary" size="sm" onClick={() => { if (text.trim()) onSubmit(lineIndex, text.trim()); }}>{tr("添加")}</Button>
-      <Button variant="ghost" size="sm" onClick={onCancel}>{tr("取消")}</Button>
-    </div>
-  );
-};
-
-const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, workspaceRoot, activeCommentLine, onCommentSubmit, onCommentCancel, commentDraft, onCommentDraftChange, hiddenLineCount = 0, onShowFull }: DiffReadingProps) => {
+const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, hiddenLineCount = 0, onShowFull }: DiffReadingProps) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const lang = language ?? guessLanguageFromPath(filePath ?? extractFilePathFromDiff(lines));
-  const colorized = useColorizedLines(lines.length <= INLINE_COLORIZE_LINE_LIMIT ? lines : [], lang);
   const rows = useMemo(() => {
     const result: SplitRow[] = [];
     let i = 0;
@@ -620,13 +571,12 @@ const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, works
   }, [comments, filePath, workingDirectory]);
 
   const colorizedMap = useMemo(() => {
-    if (!colorized) return null;
     const map = new Map<DiffLine, string>();
     lines.forEach((line, i) => {
-      if (colorized[i]) map.set(line, colorized[i]);
+      map.set(line, decorateDiffLineHtml(line.text, colorized?.[i], wordSpans[i]));
     });
     return map;
-  }, [colorized, lines]);
+  }, [colorized, lines, wordSpans]);
 
   return (
     <div className="mc-diff-code-body">
@@ -638,16 +588,17 @@ const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, works
         return (
           <div key={i}>
             <div className="grid grid-cols-2">
-              <SplitRowPair row={row} colorizedMap={colorizedMap} onLineClick={onLineClick} filePath={filePath} workspaceRoot={workspaceRoot} />
+              <SplitRowPair row={row} colorizedMap={colorizedMap} annotations={annotations} filePath={filePath} workspaceRoot={workspaceRoot} />
             </div>
             {commentLineIndices.map((lineIdx) => lineIdx != null && commentMap.has(lineIdx) && (
               <div key={lineIdx} className="py-1 px-2.5 pl-3.5" style={{ background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base))", borderLeft: "3px solid var(--accent-primary)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>
                 {commentMap.get(lineIdx)!.models ? commentMap.get(lineIdx)!.models!.map((comment, index) => <CodeReviewCommentCard key={index} comment={comment} filePath={filePath} workspaceRoot={workspaceRoot} />) : commentMap.get(lineIdx)!.content}
               </div>
             ))}
-            {activeCommentLine != null && (activeCommentLine === row.leftIndex || activeCommentLine === row.rightIndex) && onCommentSubmit && (
-              <InlineCommentInput key={activeCommentLine} lineIndex={activeCommentLine} onSubmit={onCommentSubmit} onCancel={onCommentCancel} text={commentDraft} onTextChange={onCommentDraftChange} />
-            )}
+            {annotations.render([
+              ...(row.left?.oldLine !== undefined ? [{ side: "left" as const, line: row.left.oldLine }] : []),
+              ...(row.right?.newLine !== undefined ? [{ side: "right" as const, line: row.right.newLine }] : []),
+            ])}
           </div>
         );
       })}
@@ -678,8 +629,7 @@ const DiffTruncationNotice = ({ hiddenLineCount, onShowFull }: { hiddenLineCount
 );
 };
 
-const SplitRowPair = ({ row, colorizedMap, onLineClick, filePath, workspaceRoot }: { row: SplitRow; colorizedMap: Map<DiffLine, string> | null; onLineClick?: (lineIndex: number) => void; filePath?: string; workspaceRoot?: string }) => {
-  const { t: tr } = useI18n();
+const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot }: { row: SplitRow; colorizedMap: Map<DiffLine, string>; annotations: DiffAnnotations; filePath?: string; workspaceRoot?: string }) => {
   const renderCell = (line: DiffLine | null, side: "left" | "right", lineIndex?: number) => {
     if (!line) {
       return <div className="mc-diff-empty-code-cell px-2" style={{ background: "var(--surface-soft)" }} />;
@@ -697,23 +647,15 @@ const SplitRowPair = ({ row, colorizedMap, onLineClick, filePath, workspaceRoot 
         ? "var(--diff-added-background)"
         : "transparent";
     const html = colorizedMap?.get(line);
-    const clickable = onLineClick && lineIndex != null && (line.kind === "add" || line.kind === "del" || line.kind === "context");
+    const lineNumber = side === "left" ? line.oldLine : line.newLine;
+    const location = lineNumber === undefined ? undefined : { side, line: lineNumber };
     return (
-      <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-index={lineIndex} style={{ background: bg }}>
-      <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={side === "left" ? "old" : "new"} /></div>
+      <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-index={lineIndex}
+        data-diff-selected={location && annotations.selected(location) || undefined}
+        onPointerEnter={() => { if (location) annotations.enter(location); }} style={{ background: bg }}>
+      <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} annotations={annotations} side={side === "left" ? "old" : "new"} /></div>
       <div
         className="mc-diff-code-content px-2 whitespace-pre-wrap break-words"
-        role={clickable ? "button" : undefined}
-        tabIndex={clickable ? 0 : undefined}
-        aria-label={clickable ? tr("评论 Diff 第 {v0} 行", { v0: lineIndex + 1 }) : undefined}
-        onKeyDown={clickable ? (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onLineClick(lineIndex);
-          }
-        } : undefined}
-        style={{ cursor: clickable ? "pointer" : undefined }}
-        onClick={clickable ? () => onLineClick(lineIndex) : undefined}
       >
         {html ? (
           <span data-diff-text={`${lineIndex}:${side === "left" ? "old" : "new"}`} dangerouslySetInnerHTML={{ __html: html }} />
@@ -959,7 +901,8 @@ const ReadOnlyReviewFile = ({ file, review, viewMode, open, onToggle }: {
     {unplaced.map((comment, index) => <div key={index} className="code-review-comment" data-code-review-comment data-code-review-file={file.path} data-code-review-line={comment.end}>
       <MarkdownRenderer content={`${comment.title}\n\n${comment.body}`} workspaceRoot={review.workspaceRoot} conversationId={review.conversationId} />
     </div>)}
-    {file.patch ? <DiffBody lines={lines} comments={[...attached.values()]} viewMode={viewMode} rawPatch={file.patch} filePath={file.path} workspaceRoot={review.workspaceRoot} inline />
+    {file.patch ? <DiffBody lines={lines} annotationSourceKey={`review:${review.requestId}:${file.path}`} comments={[...attached.values()]} viewMode={viewMode} rawPatch={file.patch} filePath={file.path} workspaceRoot={review.workspaceRoot}
+      conversationId={review.conversationId} annotationMode="conversation" inline />
       : <div className="mc-diff-file-loading">{review.codeReview ? tr("该文件未出现在本次比较中。") : review.workspaceRoot === "" ? tr("这份记录没有保存该文件的差异。") : tr("正在加载文件差异...")}</div>}
   </DiffFileSection>;
 };
@@ -979,24 +922,18 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
 
   if (diffReview.mode === "view" || diffReview.status === "viewing") return <ReadOnlyReviewTab key={diffReview.requestId} review={diffReview} viewMode={viewMode} />;
 
-  return <ActiveReviewTab diffReview={diffReview} viewMode={viewMode} />;
+  return <ActiveReviewTab key={diffReview.requestId} diffReview={diffReview} viewMode={viewMode} />;
 };
 
 const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState; viewMode: DiffViewMode }) => {
   const { t: tr } = useI18n();
-  const [commentLineIndex, setCommentLineIndex] = useState<number | null>(null);
   const [visibleFileLimit, setVisibleFileLimit] = useState(REVIEW_FILE_INITIAL_LIMIT);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const conversationId = useAppStore((s) => s.conversationId);
 
   useEffect(() => {
     setVisibleFileLimit(REVIEW_FILE_INITIAL_LIMIT);
-    setCommentLineIndex(null);
   }, [diffReview.requestId]);
-
-  useEffect(() => {
-    setCommentLineIndex(null);
-  }, [diffReview.selectedPath]);
 
   const selectedFile = useMemo(
     () => diffReview.files.find((file) =>
@@ -1030,9 +967,6 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
     [diffReview.files, visibleFileLimit],
   );
   const hiddenFileCount = Math.max(0, diffReview.files.length - visibleFiles.length);
-  const handleLineClick = (lineIndex: number) => {
-    setCommentLineIndex(commentLineIndex === lineIndex ? null : lineIndex);
-  };
 
 
   return (
@@ -1172,22 +1106,15 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
         ) : (
           <DiffBody
             lines={parsed}
+            annotationSourceKey={`approval:${diffReview.requestId}:${diffReview.selectedPath ?? ""}`}
             viewMode={viewMode}
             rawPatch={diff}
-            comments={comments}
-            onLineClick={isReadOnly ? undefined : handleLineClick}
+            approvalComments={comments}
+            annotationMode="approval"
+            commentsEnabled={!isSubmitted}
+            conversationId={diffReview.conversationId}
             filePath={diffReview.selectedPath}
             workspaceRoot={diffReview.workspaceRoot}
-            activeCommentLine={commentLineIndex}
-            onCommentSubmit={isReadOnly ? undefined : (lineIndex, text) => {
-              useAppStore.getState().addDiffLineComment({
-                filePath: diffReview.selectedPath ?? diffReview.files[0]?.path ?? "diff",
-                lineIndex,
-                content: text,
-              });
-              setCommentLineIndex(null);
-            }}
-            onCommentCancel={isReadOnly ? undefined : () => setCommentLineIndex(null)}
           />
         )}
       </main>
@@ -1261,7 +1188,7 @@ const HistoryFileDiff = ({ file, turnNumber, viewMode, open, onToggle }: {
       aria-label={tr("在编辑器中打开 {v0}", { v0: file.path })} onClick={() => useAppStore.getState().openEditorFile(file.path, file.path.split(/[/\\]/).pop(), { exact: true })}><ExternalLink size={14} /></button>}>
     {revisions.map((revision, index) => <div key={revision.id}>
       {revisions.length > 1 && <div className="mc-diff-revision-label">{tr("第") + " "}{index + 1} {tr("次编辑")}</div>}
-      <DiffBody lines={revision.lines} viewMode={viewMode} rawPatch={revision.diff} inline
+      <DiffBody lines={revision.lines} annotationSourceKey={`history:${revision.id}:${file.path}`} viewMode={viewMode} rawPatch={revision.diff} annotationMode="conversation" inline
         previewLineLimit={HISTORY_PREVIEW_LINE_LIMIT} filePath={file.path || undefined} />
     </div>)}
   </DiffFileSection>;
@@ -1496,7 +1423,7 @@ const GitFileDiff = ({ file, section, viewMode, open, onToggle, actions }: {
         onClick={() => useAppStore.getState().openEditorFile(file.path, file.path.split(/[/\\]/).pop(), { exact: true })}><ExternalLink size={14} /></button>
       {actions}
     </>}>
-    {file.patch ? <DiffBody lines={lines} viewMode={viewMode} rawPatch={file.patch} filePath={file.path}
+    {file.patch ? <DiffBody lines={lines} annotationSourceKey={`git:${section}:${file.path}`} viewMode={viewMode} rawPatch={file.patch} filePath={file.path} annotationMode="conversation"
       previewLineLimit={GIT_PREVIEW_LINE_LIMIT} inline />
       : <div className="mc-diff-file-loading">{section === "untracked" ? tr("此文件尚未加入 Git；可打开文件查看，或暂存后审阅。") : tr("所选暂存范围没有差异。")}</div>}
   </DiffFileSection>;

@@ -39,7 +39,7 @@ def normalize_user_input_metadata(data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("context_refs must be a list")
         for ref in refs:
             if not isinstance(ref, dict) or not isinstance(ref.get("kind"), str) or ref["kind"] not in {
-                "file", "folder", "url", "skill", "plugin", "browser_annotation",
+                "file", "folder", "url", "skill", "plugin", "browser_annotation", "diff_comment",
             }:
                 raise ValueError("Each context reference must have a supported kind")
             if not isinstance(ref.get("name"), str) or ("path" in ref and not isinstance(ref["path"], str)):

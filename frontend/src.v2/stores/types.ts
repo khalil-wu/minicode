@@ -275,8 +275,10 @@ export interface DiffReviewState {
 
 export interface DiffLineComment {
   filePath: string;
-  lineIndex: number;
+  position: import("../lib/diff-comments").DiffCommentPosition;
   content: string;
+  localDiffHunk?: string;
+  localWorkspaceRoot?: string;
 }
 
 export interface ConversationWorkbenchState {
@@ -512,7 +514,7 @@ export interface UISlice {
   setDiffReviewSelectedPath: (path: string | undefined) => void;
   setDiffFileDecision: (path: string, decision: "approved" | "rejected") => void;
   addDiffLineComment: (comment: DiffLineComment) => void;
-  removeDiffLineComment: (filePath: string, lineIndex: number) => void;
+  removeDiffLineComment: (position: import("../lib/diff-comments").DiffCommentPosition) => void;
   submitDiffReviewWithComments: () => Promise<void>;
   submitPartialApproval: () => Promise<void>;
   setPreviewArtifact: (artifact: ArtifactContentState | null) => void;
@@ -875,7 +877,14 @@ export interface BrowserAnnotationContextRef {
   viewportHeight?: number;
 }
 
-export type MessageContextRef = FileContextRef | SkillContextRef | PluginContextRef | BrowserAnnotationContextRef;
+export interface DiffCommentContextRef {
+  kind: "diff_comment";
+  name: string;
+  path: string;
+  comment: import("../lib/diff-comments").DiffComment;
+}
+
+export type MessageContextRef = FileContextRef | SkillContextRef | PluginContextRef | BrowserAnnotationContextRef | DiffCommentContextRef;
 
 export interface MessageAttachmentRef {
   id: string;

@@ -10,6 +10,7 @@ import type {
   MessageAttachmentRef,
   ProgressContentBlock,
   SkillContextRef,
+  DiffCommentContextRef,
 } from "./types";
 import { canonicalWorkspacePath } from "../lib/workspace-display";
 import { workspaceRootsEqual } from "../lib/workspace-path";
@@ -61,6 +62,7 @@ import { isTransientProviderReasoning } from "../lib/provider-reasoning";
 import { composerWorkspaceKey } from "./composer-drafts";
 import { emptyConversationWorkbenchState } from "./ui-slice";
 import { rememberSentCommandProjection } from "../protocol/command-projection";
+import { getDiffCommentScope, readDiffCommentState, restoreSubmittedDiffComments, transferDiffComments } from "../lib/diff-comment-storage";
 
 function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -424,9 +426,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           return currentIndex;
         })();
     const currentRecalled = current.messages[currentTurnStart] ?? currentTarget;
+    const commentScopeAtRequest = getDiffCommentScope(current.conversationId, current.workingDirectory);
     const composerAtRequest = JSON.stringify([
       current.draft, current.attachments.map((attachment) => attachment.id),
       current.selectedMentions, current.selectedSkills, current.quotedMessage,
+      readDiffCommentState(commentScopeAtRequest).comments,
     ]);
     const conversationId = current.conversationId || "";
     if (conversationId && currentRecalled.id) {
@@ -460,7 +464,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const nextMessages = turnStart >= 0 ? s.messages.slice(0, turnStart) : s.messages;
       const contextRefs = recalled.contextRefs ?? currentTarget.contextRefs ?? [];
       const mentionRefs = contextRefs.filter(
-        (ref): ref is Exclude<MessageContextRef, SkillContextRef> => ref.kind !== "skill",
+        (ref): ref is Exclude<MessageContextRef, SkillContextRef | DiffCommentContextRef> => ref.kind !== "skill" && ref.kind !== "diff_comment",
       );
       const skillRefs: SkillContextRef[] = contextRefs.filter((ref): ref is SkillContextRef => ref.kind === "skill");
       const attachmentRefs = recalled.attachmentRefs ?? currentTarget.attachmentRefs ?? [];
@@ -508,6 +512,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       keptNewInput = composerAtRequest !== JSON.stringify([
         s.draft, s.attachments.map((attachment) => attachment.id),
         s.selectedMentions, s.selectedSkills, s.quotedMessage,
+        readDiffCommentState(commentScopeAtRequest).comments,
       ]);
       restored = true;
       return {
@@ -538,6 +543,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...cacheMessagesForConversation(s, s.conversationId, nextMessages, nextStreaming),
       };
     });
+    if (restored && !keptNewInput) restoreSubmittedDiffComments(commentScopeAtRequest,
+      (currentRecalled.contextRefs ?? currentTarget.contextRefs ?? []).flatMap(ref => ref.kind === "diff_comment" ? [ref.comment] : []));
     if (restored && keptNewInput) pushToast("消息已撤回；编辑框中的新内容已保留。", "info", 4000);
     if (restored && conversationId) {
       sendClientCommand({
@@ -646,6 +653,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const adoption = get().pendingComposerConversationAdoption;
     if (adoption?.conversationId === id && !currentConversationId
       && workspaceRootsEqual(adoption.workspaceRoot, get().workingDirectory)) {
+      transferDiffComments(getDiffCommentScope(null, adoption.workspaceRoot), getDiffCommentScope(id, adoption.workspaceRoot));
       set((state) => {
         const workspaceKey = composerWorkspaceKey(adoption.workspaceRoot);
         const draft = state.workspaceComposerDrafts[workspaceKey];

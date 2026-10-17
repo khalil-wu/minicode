@@ -337,7 +337,8 @@ const sendConfirmedChatMessage = ({
     pushToast(switchReason, "warning");
     return false;
   }
-  const contentForBackend = (backendContent ?? displayContent ?? "").trim();
+  const submittedContent = backendContent ?? displayContent ?? "";
+  const contentForBackend = contextRefs.some(ref => ref.kind === "diff_comment") ? submittedContent : submittedContent.trim();
   const contentForDisplay = (displayContent ?? backendContent ?? "").trim();
   if (!contentForBackend && attachments.length === 0) return false;
 

@@ -1,0 +1,15 @@
+.inline-diff [data-diff-span],
+.mc-diff-code-body [data-diff-span] {
+  box-decoration-break: clone;
+  border-radius: 3px;
+}
+
+.inline-diff-line-added [data-diff-span],
+[data-diff-kind="add"] [data-diff-span] {
+  background-color: var(--diff-added-word-background);
+}
+
+.inline-diff-line-removed [data-diff-span],
+[data-diff-kind="del"] [data-diff-span] {
+  background-color: var(--diff-removed-word-background);
+}

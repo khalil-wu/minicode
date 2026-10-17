@@ -765,6 +765,10 @@ export const normalizeMessageContextRefs = (value: unknown): MessageContextRef[]
     const kind = String(item.kind ?? "").trim();
     const name = String(item.name ?? "").trim();
     const path = String(item.path ?? "").trim();
+    if (kind === "diff_comment" && name && path && item.comment && typeof item.comment === "object") {
+      refs.push({ kind, name, path, comment: item.comment as import("../lib/diff-comments").DiffComment });
+      return refs;
+    }
     if ((kind === "file" || kind === "folder" || kind === "url") && name && path) {
       const range = item.range as { startLineNumber?: number; startColumn?: number; endLineNumber?: number; endColumn?: number } | undefined;
       const coordinates = range ? [range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn] : [];

@@ -9,6 +9,7 @@ import type { PanelKind, RightStackTab, WorkspaceSlice } from "../stores/types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { handleUserMessageAdmission } from "./sendChatMessage";
 import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
+import { clearDiffCommentScope } from "../lib/diff-comment-storage";
 import { cancelConversationComposerUploads } from "../composer/uploads";
 import { latestProjectionCommandIds } from "../protocol/command-projection";
 import { saveBlobFile } from "../lib/save-blob";
@@ -248,8 +249,12 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
   };
 
   handleUserMessageAdmission(ev);
+  if (ev.command === "clear" && wsOutbox.commandResultSucceeded(ev) && typeof ev.data?.conversation_id === "string") {
+    clearDiffCommentScope(ev.data.conversation_id);
+  }
   if (ev.command === "conversation.delete" && ev.data?.deleted === true && typeof ev.data.conversation_id === "string") {
     const id = ev.data.conversation_id;
+    clearDiffCommentScope(id);
     cancelConversationComposerUploads(id);
     useAppStore.setState(state => {
       const workbenches = { ...state.conversationWorkbenchStates };

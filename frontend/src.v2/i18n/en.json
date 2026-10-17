@@ -1,4 +1,9 @@
 {
+  "{count} 条评论": "{count} comments",
+  "查看 {label}": "View {label}",
+  "移除所有 Diff 评论": "Remove all diff comments",
+  "Diff 评论预览": "Diff comment preview",
+  "移除评论 {path}": "Remove comment on {path}",
   "语言": "Language",
   "再显示 {count} 个文件": "Show {count} more files",
   "再显示 {count} 个{label}": "Show {count} more {label}",
@@ -672,6 +677,8 @@
   "正在读取对话…": "Loading chat…",
   "读取更早的消息": "Load earlier messages",
   "你": "You",
+  "评论": "Comment",
+  "1 条评论": "1 comment",
   "没有匹配的任务": "No matching tasks",
   "没有已归档任务": "No archived tasks",
   "试试其他标题、项目或日期。": "Try another title, project, or date.",
@@ -2144,5 +2151,13 @@
   "{variant}强调色": "{variant} accent color",
   "{variant}背景颜色": "{variant} background color",
   "{variant}前景颜色": "{variant} foreground color",
-  "选择{color}": "Choose {color}"
+  "选择{color}": "Choose {color}",
+  "你": "You",
+  "评论 {v0}": "Comment {v0}",
+  "添加评论 · {v0}": "Add comment · {v0}",
+  "添加一条评论…": "Add a comment…",
+  "第 {line} 行的本地评论": "Local comment on line {line}",
+  "第 {startLine} 至 {endLine} 行的本地评论": "Local comment on lines {startLine} to {endLine}",
+  "“变更”选项": "Changes options",
+  "词级差异": "Word diffs"
 }

@@ -23,6 +23,7 @@ vi.hoisted(() => {
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { QueuedMessageList } from "./QueuedMessageList";
+import type { DiffCommentContextRef } from "../stores/types";
 
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true) }));
 
@@ -43,6 +44,22 @@ describe("QueuedMessageList", () => {
   });
 
   afterEach(() => cleanup());
+
+  it.each(["", "original authored request"])("summarizes real comments for queued input %j without replacing its normal steer identity", content => {
+    const refs: DiffCommentContextRef[] = ["src/one.ts", "src/two.ts"].map(path => ({
+      kind: "diff_comment", name: path, path, comment: { type: "comment", position: { path, side: "right", line: 100 },
+        content: [{ content_type: "text", text: "original scoped comment" }], localDiffHunk: "@@ -1 +100 @@\n-old\n+new" },
+    }));
+    useAppStore.setState({ messages: [{ id: "comment-user", role: "user", content, artifacts: [], timestamp: 1,
+      contextRefs: refs, queueState: "queued", queuePosition: 1, queueMessageId: "comment-assistant" }] });
+    render(<QueuedMessageList />);
+    expect(screen.getByText(content || "2 条评论")).toBeTruthy();
+    expect(screen.queryByText("Attachment")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "引导" }));
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "user_message.queue.steer", conversation_id: "conv-queue",
+      message_id: "comment-assistant", user_message_id: "comment-user" });
+    expect(useAppStore.getState().messages[0].contextRefs).toEqual(refs);
+  });
 
   it("keeps stopped inputs visible and offers explicit queue continuation", () => {
     useAppStore.setState((state) => ({

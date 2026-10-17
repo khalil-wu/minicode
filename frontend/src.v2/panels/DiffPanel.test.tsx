@@ -10,8 +10,11 @@ import { DiffPanel } from "./DiffPanel";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 import * as deferredTurnDiff from "../chat/loadMessageTurnDiff";
 import type { TurnDiffState } from "../stores/types";
+import { clearDiffCommentScope, clearDiffReaderDrafts, readDiffCommentState } from "../lib/diff-comment-storage";
+import { setWordDiffsEnabled } from "../chat/diff/word-diff-preference";
 
 vi.hoisted(() => {
+  globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as any;
   Object.defineProperty(globalThis, "matchMedia", {
     configurable: true,
     writable: true,
@@ -51,6 +54,8 @@ vi.mock("../components/MonacoDiffView", () => ({
 }));
 
 beforeEach(() => {
+  setWordDiffsEnabled(true);
+  clearDiffCommentScope("conv-diff");
   __resetOpenWebInBrowserForTests();
   useAppStore.setState({
     conversationId: "conv-diff",
@@ -265,15 +270,16 @@ describe("DiffPanel", () => {
     } });
     render(<DiffPanel />);
     expect(screen.getByText("中间省略 399 行")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "评论 Diff 第 4 行" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "评论 Diff 第 4 行" }), { target: { value: "保留这里的说明" } });
+    fireEvent.click(screen.getByRole("button", { name: "评论 R520" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R520" }), { target: { value: "保留这里的说明" } });
     fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
-    expect((screen.getByRole("textbox", { name: "评论 Diff 第 4 行" }) as HTMLInputElement).value).toBe("保留这里的说明");
+    expect((screen.getByRole("textbox", { name: "评论 R520" }) as HTMLTextAreaElement).value).toBe("保留这里的说明");
     expect(screen.getByRole("button", { name: "在编辑器中打开 src/app.ts 第 520 行" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "添加" }));
-    expect(useAppStore.getState().diffReview?.lineComments).toEqual([{ filePath: "src/app.ts", lineIndex: 3, content: "保留这里的说明" }]);
+    fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
+    expect(useAppStore.getState().diffReview?.lineComments).toEqual([expect.objectContaining({ filePath: "src/app.ts",
+      position: { path: "src/app.ts", side: "right", line: 520 }, content: "保留这里的说明" })]);
     fireEvent.click(screen.getByRole("button", { name: "切换为行内视图" }));
-    expect(screen.getByText("保留这里的说明")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "评论 R520" }) as HTMLTextAreaElement).value).toBe("保留这里的说明");
     expect(screen.getByText("中间省略 399 行")).toBeTruthy();
   });
 
@@ -281,9 +287,16 @@ describe("DiffPanel", () => {
     const patch = "diff --git a/src/app.ts b/src/app.ts\n@@ -100 +120 @@\n-old value\n+new value";
     useAppStore.setState({ diffReview: { requestId: "selection-mode", conversationId: "conv-diff", diff: patch, files: [{ path: "src/app.ts", patch }], selectedPath: "src/app.ts", status: "viewing", mode: "view", fileDecisions: {} } });
     const { container } = render(<DiffPanel />);
-    const text = document.createTreeWalker(container.querySelector('[data-diff-text="1:new"]')!, NodeFilter.SHOW_TEXT).nextNode()!;
+    const element = container.querySelector('[data-diff-text="1:new"]')!;
+    const point = (offset: number) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode()!;
+      while (offset > node.textContent!.length) { offset -= node.textContent!.length; node = walker.nextNode()!; }
+      return { node, offset };
+    };
+    const start = point(1), end = point(6);
     const range = document.createRange();
-    range.setStart(text, 1); range.setEnd(text, 6);
+    range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
     window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
     fireEvent(document, new Event("selectionchange"));
     fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
@@ -300,10 +313,10 @@ describe("DiffPanel", () => {
     render(<DiffPanel />);
     act(() => useAppStore.getState().openGitReview({ path: "src/app.ts", section: "staged", workspaceRoot: "C:\\workspace", conversationId: "conv-diff" }));
     expect(screen.getByText("base")).toBeTruthy();
-    expect(screen.queryByText("working value")).toBeNull();
+    expect([...document.querySelectorAll("[data-diff-text]")].some(node => node.textContent === "working value")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
     expect(screen.getByText("base")).toBeTruthy();
-    expect(screen.getByText("working value")).toBeTruthy();
+    expect([...document.querySelectorAll("[data-diff-text]")].some(node => node.textContent === "working value")).toBe(true);
     expect(useAppStore.getState().gitReviewRequest?.section).toBe("working");
     expect(within(screen.getByRole("region", { name: "审阅未暂存 src/app.ts" })).queryByRole("button", { name: /加入对话/ })).toBeNull();
   });
@@ -365,10 +378,10 @@ describe("DiffPanel", () => {
       selectedPath: "src/a.ts", status: "pending", mode: "approval", fileDecisions: {}, lineComments: [],
     } });
     render(<DiffPanel />);
-    fireEvent.click(screen.getByRole("button", { name: "评论 Diff 第 2 行" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "评论 Diff 第 2 行" }), { target: { value: "For file A" } });
+    fireEvent.click(screen.getByRole("button", { name: "评论 R1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R1" }), { target: { value: "For file A" } });
     fireEvent.click(screen.getByRole("button", { name: "src/b.ts" }));
-    expect(screen.queryByRole("textbox", { name: /评论 Diff/ })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: /评论 [LR]/ })).toBeNull();
     expect(useAppStore.getState().diffReview?.lineComments).toEqual([]);
   });
 
@@ -662,5 +675,204 @@ describe("DiffPanel", () => {
       }));
       expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "diff.git_revert_file", path: "src/app.ts", confirmed: true }), "diff.git_revert_file", { silent: true });
     });
+  });
+});
+
+describe("Source ordinary Diff annotations", () => {
+  const path = "src/app.ts";
+  const patch = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -100,3 +200,3 @@\n-old value\n+new value\n unchanged\n last context`;
+  const review = (workspaceRoot = "C:\\workspace") => ({ requestId: "ordinary-comments", conversationId: "conv-diff", workspaceRoot,
+    diff: patch, files: [{ path, patch }], selectedPath: path, mode: "view" as const, status: "viewing" as const, fileDecisions: {}, lineComments: [] });
+
+  it("toggles the real word-diff preference from Changes options without disturbing comment text", () => {
+    useAppStore.setState({ diffReview: review() });
+    const { container } = render(<DiffPanel />);
+    expect(container.querySelectorAll("[data-diff-span]").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "“变更”选项" }));
+    const toggle = screen.getByRole("menuitemcheckbox", { name: "词级差异" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("menu", { name: "“变更”选项" })).toBeNull();
+    expect(container.querySelectorAll("[data-diff-span]")).toHaveLength(0);
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
+    fireEvent.click(screen.getByRole("button", { name: "“变更”选项" }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "词级差异" }));
+    expect(container.querySelectorAll("[data-diff-span]").length).toBeGreaterThan(0);
+  });
+
+  it("uses gutter dragging for a real multi-line selection", () => {
+    useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "评论 R200" }), { button: 0 });
+    fireEvent.pointerEnter(screen.getByRole("button", { name: "评论 R202" }).closest(".mc-diff-gutter-side")!);
+    fireEvent.pointerUp(document);
+    const input = screen.getByRole("textbox", { name: "评论 R200–R202" });
+    fireEvent.change(input, { target: { value: "The actual selected range" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(readDiffCommentState("conv-diff").comments[0].position).toEqual({ path, side: "right", line: 202, start_line: 200 });
+  });
+
+  it.each(["review", "git", "history"])("saves real ordinary comment coordinates from the %s caller without approving a tool", entry => {
+    if (entry === "review") useAppStore.setState({ diffReview: review() });
+    else if (entry === "git") useAppStore.setState({ diffReview: null, messages: [], gitChanges: { staged: [], untracked: [], loading: false,
+      workingTree: [{ path, patch, additions: 1, deletions: 1 }] } });
+    else useAppStore.setState({ diffReview: null, messages: [
+      { id: "u", role: "user", content: "change the value", timestamp: 1 },
+      { id: "a", role: "assistant", content: "done", timestamp: 2, toolCalls: [{ id: "edit", name: "apply_patch", status: "success", args: {}, diff: { patch } }] },
+    ] as any });
+    const { container } = render(<DiffPanel />);
+    if (entry === "git") fireEvent.click(screen.getByRole("button", { name: `审阅未暂存 ${path}` }));
+    if (entry === "history") {
+      fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+      fireEvent.click(screen.getByRole("option", { name: /轮次记录 · 上一轮/ }));
+    }
+    fireEvent.click(container.querySelector('[data-diff-text="1:new"]')!);
+    expect(screen.queryByRole("textbox", { name: /评论 [LR]/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Use the actual new line" } });
+    fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
+    expect(readDiffCommentState("conv-diff").comments).toEqual([{
+      type: "comment", content: [{ content_type: "text", text: "Use the actual new line" }],
+      position: { path, side: "right", line: 200 }, localWorkspaceRoot: "C:\\workspace",
+      localDiffHunk: "@@ -100,3 +200,3 @@\r\n-old value\r\n+new value\r\n unchanged\r\n last context",
+    }]);
+    expect(sendPromptResponseCommand).not.toHaveBeenCalled();
+    expect(useAppStore.getState().diffReview?.lineComments ?? []).toHaveLength(0);
+  });
+
+  it("preserves a cross-side range and permits editing and deleting the saved comment", () => {
+    useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    fireEvent.click(screen.getByRole("button", { name: "评论 L100" }));
+    fireEvent.click(screen.getByRole("button", { name: "评论 R201" }), { shiftKey: true });
+    const input = screen.getByRole("textbox", { name: "评论 L100–R201" });
+    fireEvent.change(input, { target: { value: "A range across both sides" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(readDiffCommentState("conv-diff").comments[0].position).toEqual({ path, side: "right", line: 201, start_side: "left", start_line: 100 });
+    const saved = screen.getByRole("textbox", { name: "评论 L100–R201" });
+    fireEvent.focus(saved); fireEvent.change(saved, { target: { value: "Updated range comment" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(readDiffCommentState("conv-diff").comments[0].content[0].text).toBe("Updated range comment");
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(readDiffCommentState("conv-diff").comments).toEqual([]);
+  });
+
+  it("retains new and edited comment text across unified/split and file collapse", () => {
+    useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Original draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Original draft");
+    fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
+    fireEvent.focus(screen.getByRole("textbox", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Unsaved edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "切换为行内视图" }));
+    fireEvent.click(screen.getByRole("button", { name: path, exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: path, exact: true }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Unsaved edit");
+    expect(readDiffCommentState("conv-diff").comments[0].content[0].text).toBe("Original draft");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(readDiffCommentState("conv-diff").comments[0].content[0].text).toBe("Unsaved edit");
+  });
+
+  it("keeps same-path draft owners separate when a conversation changes workspace", () => {
+    useAppStore.setState({ diffReview: review("C:/workspace/A") }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "A pending draft" } });
+    act(() => useAppStore.setState({ diffReview: review("C:/workspace/B") }));
+    expect(screen.queryByRole("textbox", { name: "评论 R200" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "B pending draft" } });
+    act(() => useAppStore.setState({ diffReview: review("C:/workspace/A") }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("A pending draft");
+    act(() => useAppStore.setState({ diffReview: review("C:/workspace/B") }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("B pending draft");
+  });
+
+  it("releases only the unmounted reader's transient drafts and retains saved conversation comments", () => {
+    useAppStore.setState({ diffReview: review() });
+    const first = render(<DiffPanel />), second = render(<DiffPanel />);
+    fireEvent.click(within(first.container).getByRole("button", { name: "评论 R200" }));
+    fireEvent.click(within(second.container).getByRole("button", { name: "评论 R201" }));
+    expect(Object.keys(readDiffCommentState("conv-diff").drafts)).toHaveLength(2);
+    first.unmount();
+    expect(Object.keys(readDiffCommentState("conv-diff").drafts)).toHaveLength(1);
+    expect(within(second.container).getByRole("textbox", { name: "评论 R201" })).toBeTruthy();
+    fireEvent.change(within(second.container).getByRole("textbox", { name: "评论 R201" }), { target: { value: "Keep saved evidence" } });
+    fireEvent.click(within(second.container).getByRole("button", { name: "评论", exact: true }));
+    second.unmount();
+    expect(readDiffCommentState("conv-diff").comments[0].content[0].text).toBe("Keep saved evidence");
+    expect(Object.keys(readDiffCommentState("conv-diff").drafts)).toHaveLength(0);
+  });
+
+  it("makes an existing new approval draft read-only while its original request is submitted", () => {
+    useAppStore.setState({ diffReview: { ...review(), mode: "approval", status: "pending" } }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    const input = screen.getByRole("textbox", { name: "评论 R200" });
+    fireEvent.change(input, { target: { value: "Still pending" } });
+    act(() => useAppStore.setState({ diffReview: { ...useAppStore.getState().diffReview!, status: "submitted" } }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).readOnly).toBe(true);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(useAppStore.getState().diffReview?.lineComments).toEqual([]);
+    expect(screen.queryByRole("button", { name: "评论", exact: true })).toBeNull();
+  });
+
+  it("keeps an old approval draft bound to its original request when another request takes the view", () => {
+    useAppStore.setState({ diffReview: { ...review(), mode: "approval", status: "pending" } }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Only for the first request" } });
+    act(() => useAppStore.setState({ diffReview: { ...review(), requestId: "replacement-request", mode: "approval", status: "pending" } }));
+    expect(screen.queryByRole("textbox", { name: "评论 R200" })).toBeNull();
+    expect(Object.values(readDiffCommentState("conv-diff").drafts).map(draft => draft.text)).toEqual(["Only for the first request"]);
+    act(() => useAppStore.setState({ diffReview: { ...review(), mode: "approval", status: "pending" } }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Only for the first request");
+  });
+
+  it("restores unsaved comments after switching conversations and after switching Diff sources", () => {
+    clearDiffCommentScope("conv-other");
+    useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Conversation A only" } });
+    act(() => useAppStore.setState({ conversationId: "conv-other", diffReview: { ...review(), requestId: "other-review", conversationId: "conv-other" } }));
+    expect(screen.queryByRole("textbox", { name: "评论 R200" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Conversation B only" } });
+    act(() => useAppStore.setState({ conversationId: "conv-diff", diffReview: review() }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Conversation A only");
+    act(() => useAppStore.setState({ diffReview: null }));
+    expect(screen.queryByRole("textbox", { name: "评论 R200" })).toBeNull();
+    act(() => useAppStore.setState({ diffReview: review() }));
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Conversation A only");
+    expect(Object.values(readDiffCommentState("conv-other").drafts).map(draft => draft.text)).toEqual(["Conversation B only"]);
+  });
+
+  it("reconnects a reopened Changes pane to its existing window-owned in-memory draft", () => {
+    useAppStore.setState({ diffReview: review() });
+    const first = render(<DiffPanel readerOwnerId="owned-window-changes" />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Reopen this pane" } });
+    first.unmount();
+    const second = render(<DiffPanel readerOwnerId="owned-window-changes" />);
+    expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Reopen this pane");
+    second.unmount();
+    clearDiffReaderDrafts("owned-window-changes");
+    expect(Object.keys(readDiffCommentState("conv-diff").drafts)).toHaveLength(0);
+  });
+
+  it("sends approval feedback with the real deletion side and file line, preserving the approval owner", async () => {
+    vi.mocked(sendPromptResponseCommand).mockResolvedValue({ type: "command.result", level: "info", command: "control_response", message: "" });
+    useAppStore.setState({ diffReview: { ...review(), mode: "approval", status: "pending", turnId: "turn-owner" } }); render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "评论 L100" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 L100" }), { target: { value: "Keep the removed behavior" } });
+    fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /提交意见/ }));
+    await waitFor(() => expect(sendPromptResponseCommand).toHaveBeenCalledOnce());
+    const command = vi.mocked(sendPromptResponseCommand).mock.calls[0][0] as any;
+    expect(command).toMatchObject({ type: "control_response", request_id: "ordinary-comments", conversation_id: "conv-diff", turn_id: "turn-owner" });
+    expect(command.response.response).toMatchObject({ action: "reject" });
+    expect(command.response.response.feedback).toContain("File: src/app.ts\nWorkspace: C:\\workspace\nSide: L\nLines: 100\n");
+    expect(command.response.response.feedback).not.toContain("src/app.ts:1:");
+    expect(readDiffCommentState("conv-diff").comments).toEqual([]);
   });
 });

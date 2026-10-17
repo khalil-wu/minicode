@@ -139,6 +139,7 @@ export {
   Undo2,
   Upload,
   UserRoundCog,
+  UserRound,
   Wrench,
   X,
   XCircle,

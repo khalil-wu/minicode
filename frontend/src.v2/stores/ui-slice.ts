@@ -44,6 +44,7 @@ import {
 import { clampTextScale } from "../lib/text-scale";
 import { effectiveAppearanceColors, type AppearanceVariant } from "../lib/appearance-colors";
 import { defaultThemePreferences } from "../lib/appearance-themes";
+import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
 import { APPEARANCE_STORAGE_KEYS, readAppearanceStorage, readAppearanceVariant, writeAppearanceVariant, type SavedAppearanceVariant } from "../lib/appearance-storage";
 import { loadCodeTheme } from "../lib/code-themes";
 import { clamp } from "../lib/clamp";
@@ -738,21 +739,26 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   addDiffLineComment: (comment) =>
     set((s) => {
       if (!s.diffReview) return s;
+      const root = s.diffReview.workspaceRoot ?? s.workingDirectory;
+      const matches = (current: typeof comment) => diffFilePathsEqual(current.filePath, comment.filePath, root)
+        && current.position.side === comment.position.side && current.position.line === comment.position.line;
+      const existing = s.diffReview.lineComments ?? [];
       return {
         diffReview: {
           ...s.diffReview,
-          lineComments: [...(s.diffReview.lineComments ?? []), comment],
+          lineComments: existing.some(matches) ? existing.map(current => matches(current) ? comment : current) : [...existing, comment],
         },
       };
     }),
-  removeDiffLineComment: (filePath, lineIndex) =>
+  removeDiffLineComment: (position) =>
     set((s) => {
       if (!s.diffReview) return s;
       return {
         diffReview: {
           ...s.diffReview,
           lineComments: (s.diffReview.lineComments ?? []).filter(
-            (c) => !(diffFilePathsEqual(c.filePath, filePath, s.workingDirectory) && c.lineIndex === lineIndex),
+            (c) => !(diffFilePathsEqual(c.position.path, position.path, s.diffReview!.workspaceRoot ?? s.workingDirectory)
+              && c.position.side === position.side && c.position.line === position.line),
           ),
         },
       };
@@ -767,8 +773,11 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ? { ...state.diffReview, status: "submitted", error: undefined }
         : state.diffReview,
     }));
+    const feedbackComments: DiffComment[] = comments.map(comment => ({ type: "comment",
+      content: [{ content_type: "text", text: comment.content }], position: comment.position,
+      localDiffHunk: comment.localDiffHunk, localWorkspaceRoot: comment.localWorkspaceRoot }));
     const feedback = comments.length > 0
-      ? `Revise the proposed change using these review comments:\n${comments.map((c) => `- ${c.filePath}:${c.lineIndex + 1}: ${c.content}`).join("\n")}`
+      ? formatDiffCommentsPrompt("Revise the proposed change using these review comments.", feedbackComments)
       : undefined;
     const command = buildApprovalResponseCommand(
       requestId,

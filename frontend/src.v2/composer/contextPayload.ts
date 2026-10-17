@@ -128,7 +128,7 @@ export const buildContextNativeAttachments = async (
 };
 
 const contextBlockForRef = (ref: MessageContextRef): string => {
-  if (ref.kind === "skill" || ref.kind === "plugin") return "";
+  if (ref.kind === "skill" || ref.kind === "plugin" || ref.kind === "diff_comment") return "";
   if (ref.kind === "url") {
     return `URL context: ${ref.path}`;
   }

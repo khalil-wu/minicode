@@ -19,6 +19,7 @@ import { MessageQuote } from "../components/MessageQuote";
 import { contextReferenceLabel, openContextReference } from "../contextReferenceActions";
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
+import { DiffCommentAttachments } from "../../composer/DiffCommentAttachments";
 
 const COLLAPSE_CHAR_THRESHOLD = 900;
 const COLLAPSE_LINE_THRESHOLD = 14;
@@ -123,6 +124,8 @@ export function UserMessageCell({
   }, [cell.id, ownerConversationId]);
 
   const visibleContent = cell.content.trim();
+  const ordinaryRefs = cell.contextRefs?.filter(ref => ref.kind !== "diff_comment") ?? [];
+  const diffComments = cell.contextRefs?.flatMap(ref => ref.kind === "diff_comment" ? [ref.comment] : []) ?? [];
   const collapsible = Boolean(visibleContent) && (
     cell.content.length > COLLAPSE_CHAR_THRESHOLD
     || cell.content.split(/\r\n|\r|\n/).length > COLLAPSE_LINE_THRESHOLD
@@ -144,9 +147,9 @@ export function UserMessageCell({
           <span>{tr("定时任务")}</span>
         </div>
       ) : null}
-      {Boolean(cell.contextRefs?.length) && (
+      {Boolean(ordinaryRefs.length) && (
         <div className="user-cell-attachments" aria-label={tr("消息上下文")}>
-          {cell.contextRefs?.map((ref, index) => (
+          {ordinaryRefs.map((ref, index) => (
             <button type="button" key={ref.kind + ":" + ref.path + ":" + index} className="user-cell-attachment-chip"
               onClick={() => openContextReference(ref, ownerConversationId)}
               disabled={!["file", "url", "browser_annotation"].includes(ref.kind)}
@@ -158,6 +161,7 @@ export function UserMessageCell({
           ))}
         </div>
       )}
+      <DiffCommentAttachments comments={diffComments} />
       {cell.attachments && cell.attachments.length > 0 && (
         <div className={`user-cell-attachments${visibleContent ? "" : " user-cell-attachments-only"}`}>
           {cell.attachments.map((attachment, index) => {
