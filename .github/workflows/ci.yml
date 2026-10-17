@@ -9,41 +9,76 @@ on:
 permissions:
   contents: read
 
+env:
+  LINUX_NATIVE_BASELINE: linux-x64-glibc231-ubuntu20-c664f8f86ed5-v1
+
 jobs:
   native-execpolicy:
     name: Build pinned Source execution policy (Linux x64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     steps:
+      - name: Prepare the fixed Linux build baseline
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git tar xz-utils build-essential binutils
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Install the verified portable Python
+        run: bash scripts/prepare-ci-linux-python.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: ${{ env.LINUX_NATIVE_BASELINE }}
           workspaces: desktop/native-execpolicy -> target
       - name: Fetch locked execution policy dependencies
         working-directory: desktop/native-execpolicy
         run: cargo fetch --locked
       - name: Build and verify the pinned native runtime
         run: >-
-          python desktop/scripts/prepare-execpolicy-runtime.py
+          python3 desktop/scripts/prepare-execpolicy-runtime.py
           --cargo "$(rustup which --toolchain 1.95.0 cargo)"
           --output-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+      - name: Verify the actual ELF ABI and Source identity
+        run: |
+          chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
+          python3 scripts/verify-linux-native-runtime.py \
+          --runtime-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu \
+          --report-directory "$RUNNER_TEMP/execpolicy-abi"
       - uses: actions/upload-artifact@v4
         with:
           name: native-execpolicy-linux-x64
           path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-execpolicy-linux-abi-evidence
+          path: ${{ runner.temp }}/execpolicy-abi
+          if-no-files-found: ignore
 
   native-network:
     name: Build pinned Source network runtime (Linux x64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 30
     steps:
+      - name: Prepare the fixed Linux build baseline
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git tar xz-utils build-essential binutils pkg-config libssl-dev cmake clang
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -51,34 +86,103 @@ jobs:
           ref: 822e58cc3d666166c7446c5b1ea2e52f5d09594c
           path: .tmp/codex-src
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Install the verified portable Python
+        run: bash scripts/prepare-ci-linux-python.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-      - name: Install native network build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev cmake clang
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             .tmp/native-network-build/source/codex-rs/target
-          key: ${{ runner.os }}-network-822e58cc-1.95.0-${{ hashFiles('desktop/native-network/**', 'desktop/scripts/prepare-network-runtime.py') }}
-          restore-keys: ${{ runner.os }}-network-822e58cc-1.95.0-
+          key: ${{ env.LINUX_NATIVE_BASELINE }}-network-822e58cc-1.95.0-${{ hashFiles('desktop/native-network/**', 'desktop/scripts/prepare-network-runtime.py') }}
+          restore-keys: ${{ env.LINUX_NATIVE_BASELINE }}-network-822e58cc-1.95.0-
       - name: Build and verify the pinned Source network runtime
         run: >-
-          python desktop/scripts/prepare-network-runtime.py
+          python3 desktop/scripts/prepare-network-runtime.py
           --cargo "$(rustup which --toolchain 1.95.0 cargo)"
           --source-checkout .tmp/codex-src
           --build-directory .tmp/native-network-build
           --output-directory backend/network/resources/x86_64-unknown-linux-gnu
+      - name: Verify the actual ELF ABI and Source identity
+        run: |
+          chmod +x backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
+          python3 scripts/verify-linux-native-runtime.py \
+          --runtime-directory backend/network/resources/x86_64-unknown-linux-gnu \
+          --report-directory "$RUNNER_TEMP/network-abi"
       - uses: actions/upload-artifact@v4
         with:
           name: native-network-linux-x64
           path: backend/network/resources/x86_64-unknown-linux-gnu
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-network-linux-abi-evidence
+          path: ${{ runner.temp }}/network-abi
+          if-no-files-found: ignore
+
+  linux-wheel:
+    name: Linux wheel cold installation (glibc 2.31)
+    runs-on: ubuntu-24.04
+    needs: [native-execpolicy, native-network]
+    container:
+      image: ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 15
+    steps:
+      - name: Prepare the fixed Linux install baseline
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git tar binutils
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+      - uses: actions/checkout@v4
+      - name: Install the verified portable Python
+        run: bash scripts/prepare-ci-linux-python.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-execpolicy-linux-x64
+          path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-network-linux-x64
+          path: backend/network/resources/x86_64-unknown-linux-gnu
+      - name: Build a non-editable Linux wheel from the frozen backend
+        run: |
+          source="$RUNNER_TEMP/linux-wheel-source"
+          mkdir -p "$source" "$RUNNER_TEMP/linux-wheel"
+          git archive HEAD backend pyproject.toml setup.py | tar -x -C "$source" \
+            --exclude='backend/permissions/resources/execpolicy/*' --exclude='backend/network/resources/*'
+          mkdir -p "$source/backend/permissions/resources/execpolicy" "$source/backend/network/resources"
+          chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
+          cp -a backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu "$source/backend/permissions/resources/execpolicy/"
+          cp -a backend/network/resources/x86_64-unknown-linux-gnu "$source/backend/network/resources/"
+          python3 -m pip wheel --no-deps --no-cache-dir --wheel-dir "$RUNNER_TEMP/linux-wheel" "$source"
+      - name: Cold-install and execute the actual wheel
+        run: |
+          mkdir -p "$RUNNER_TEMP/linux-wheel-evidence"
+          python3 -m venv "$RUNNER_TEMP/linux-wheel-venv"
+          "$RUNNER_TEMP/linux-wheel-venv/bin/python" -m pip install --no-cache-dir "$RUNNER_TEMP/linux-wheel/"*.whl 2>&1 | tee "$RUNNER_TEMP/linux-wheel-evidence/install.log"
+          unset PYTHONPATH PYTHONHOME CARGO_HOME RUSTUP_HOME
+          export PATH="$RUNNER_TEMP/linux-wheel-venv/bin:/usr/bin:/bin"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/linux-wheel-venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/verify-linux-wheel.py" \
+            --wheel-directory "$RUNNER_TEMP/linux-wheel" --report-directory "$RUNNER_TEMP/linux-wheel-evidence" 2>&1 | tee "$RUNNER_TEMP/linux-wheel-evidence/cold-check.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minicode-linux-backend-wheel
+          path: ${{ runner.temp }}/linux-wheel/*.whl
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-wheel-install-evidence
+          path: ${{ runner.temp }}/linux-wheel-evidence
+          if-no-files-found: ignore
 
   backend:
     name: Backend protocol and tests (${{ matrix.suite }})

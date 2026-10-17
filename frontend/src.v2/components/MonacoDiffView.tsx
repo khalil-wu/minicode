@@ -15,7 +15,7 @@ const MonacoDiffEditor = lazy(async () => {
   }
   const [reactMonaco, monaco] = await Promise.all([
     import("@monaco-editor/react"),
-    import("monaco-editor/editor/editor.api.js"),
+    import("../panels/monacoRuntime"),
     loadMiniCodeEditorFeatures(),
     import("monaco-editor/languages/definitions/typescript/register.js"),
     import("monaco-editor/languages/definitions/javascript/register.js"),

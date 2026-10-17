@@ -93,6 +93,32 @@ def prepare_bridge(project: Path) -> tuple[Path, ...]:
     return tuple(inputs)
 
 
+def prepare_linux_read_metadata_adapter(checkout: Path, workspace: Path, environment) -> dict:
+    relative = "linux-sandbox/src/bwrap.rs"
+    original = run(["git", "show", f"{SOURCE_COMMIT}:codex-rs/{relative}"],
+        cwd=checkout, environment=environment, capture=True).stdout
+    imported = b"use codex_protocol::permissions::is_protected_metadata_name;"
+    included = b'include!("minicode_read_metadata_names.rs");'
+    if original.count(imported) != 1:
+        raise RuntimeError("The pinned bwrap READ metadata import is not its single expected source range")
+    adapted = original.replace(imported, included, 1)
+    helper_source = BRIDGE / "linux/read_metadata_names.rs"
+    helper_relative = "linux-sandbox/src/minicode_read_metadata_names.rs"
+    helper = helper_source.read_bytes()
+    for target, contents in ((workspace / relative, adapted), (workspace / helper_relative, helper)):
+        if not target.exists() or target.read_bytes() != contents:
+            target.write_bytes(contents)
+    return {relative: {
+        "upstream": f"{SOURCE_COMMIT}:codex-rs/{relative}",
+        "upstream_sha256": hashlib.sha256(original).hexdigest(),
+        "adapted_sha256": hashlib.sha256(adapted).hexdigest(),
+        "replacements": [{"from": imported.decode(), "to": included.decode(), "count": 1}],
+        "scope": "Existing READ mount target classification only; protocol permissions and DENY paths unchanged",
+        "helper": {"source": "desktop/native-network/linux/read_metadata_names.rs", "staged": helper_relative,
+            "sha256": hashlib.sha256(helper).hexdigest()},
+    }}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cargo", type=Path, required=True)
@@ -112,6 +138,8 @@ def main():
     workspace = source / "codex-rs"
     project = workspace / "minicode-network"
     bridge_inputs = prepare_bridge(project)
+    source_adaptations = (prepare_linux_read_metadata_adapter(checkout, workspace, environment)
+        if sys.platform == "linux" else {})
     manifest = workspace / "Cargo.toml"
     text = manifest.read_text(encoding="utf-8")
     if '    "minicode-network",' not in text:
@@ -135,7 +163,7 @@ def main():
         "core/src/context_manager/history.rs")
     if sys.platform == "linux":
         pinned_files += ("linux-sandbox/src/linux_run_main.rs", "linux-sandbox/src/proxy_routing.rs",
-            "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/landlock.rs")
+            "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/landlock.rs", "protocol/src/permissions.rs")
     for relative in pinned_files:
         original = run(["git", "show", f"{SOURCE_COMMIT}:codex-rs/{relative}"],
             cwd=checkout, environment=environment, capture=True).stdout
@@ -189,6 +217,7 @@ def main():
     source_manifest = {"source": "https://github.com/openai/codex", "source_commit": SOURCE_COMMIT,
         "rust_toolchain": "1.95.0", "target": target,
         "source_files": {relative: digest(workspace / relative) for relative in pinned_files},
+        "source_adaptations": source_adaptations,
         "source_derivations": {"src/source_original_image.rs": {
             "upstream": "core/src/context_manager/history.rs",
             "sha256": hashlib.sha256(original_image).hexdigest(),

@@ -33,7 +33,7 @@ const loadedLanguages = new Set<string>();
 
 async function getMonaco(language: string): Promise<Monaco> {
   if (!monacoLoading) {
-    monacoLoading = import("monaco-editor/editor/editor.api.js").then((monaco) => {
+    monacoLoading = import("../panels/monacoRuntime").then((monaco) => {
       monacoInstance = monaco;
       return monaco;
     });

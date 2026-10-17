@@ -37,6 +37,7 @@ let typescriptServices: typeof import("monaco-editor/languages/features/typescri
 
 export function loadMiniCodeLanguageServices(): Promise<void> {
   return languageServicesPromise ??= (async () => {
+    const monaco = await import("./monacoRuntime");
     const [typescript, , , , { StandaloneServices }, { ILanguageService }] = await Promise.all([
       import("monaco-editor/languages/features/typescript/register.js"),
       import("monaco-editor/languages/features/css/register.js"),
@@ -71,9 +72,9 @@ export function loadMiniCodeLanguageServices(): Promise<void> {
     languages.requestRichLanguageFeatures("typescript");
     languages.requestRichLanguageFeatures("javascript");
     await Promise.all([typescript.getTypeScriptWorker(), typescript.getJavaScriptWorker()]);
-    registerEditorLanguageServices(await import("monaco-editor/editor/editor.api.js"));
-    registerEditorSnippets(await import("monaco-editor/editor/editor.api.js"));
-    registerInlinePrediction(await import("monaco-editor/editor/editor.api.js"));
+    registerEditorLanguageServices(monaco);
+    registerEditorSnippets(monaco);
+    registerInlinePrediction(monaco);
   })();
 }
 

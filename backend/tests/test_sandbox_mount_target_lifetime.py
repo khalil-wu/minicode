@@ -16,7 +16,7 @@ import pytest
 
 from backend.sandbox import SandboxPolicy, SandboxRunner
 from backend.sandbox.mount_targets import BubblewrapMountTargets
-from backend.sandbox.policy import FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile
+from backend.sandbox.policy import DEFAULT_PROTECTED_METADATA_NAMES, FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile
 from backend.sandbox.runner import _bubblewrap_command
 from backend.tests.git_sandbox_policy import readable_host_git_policy
 
@@ -64,10 +64,11 @@ def test_private_masks_keep_missing_metadata_directories_and_generic_file_data(t
     assert empty.is_file() and empty.stat().st_ino == empty_inode and empty.read_bytes() == b""
 
 
-def test_generic_missing_deny_file_uses_zero_permission_bind_data(tmp_path):
+@pytest.mark.parametrize("name", ["ordinary-denied-file", ".agents", ".codex", ".aws", *DEFAULT_PROTECTED_METADATA_NAMES])
+def test_generic_missing_deny_file_uses_zero_permission_bind_data(tmp_path, name):
     root = tmp_path / "repo"
     root.mkdir()
-    denied = root / "ordinary-denied-file"
+    denied = root / name
     policy = readable_host_git_policy(SandboxPolicy(workspace_root=root, writable_roots=(root,), denied_roots=(denied,)))
     runner = SandboxRunner(policy)
     try:
@@ -83,6 +84,85 @@ def test_generic_missing_deny_file_uses_zero_permission_bind_data(tmp_path):
     finally:
         runner._cleanup_sandbox_setup_state()
     assert not denied.exists()
+
+
+CAPTURED_METADATA_NAMES = tuple(dict.fromkeys((".git", ".agents", ".codex", ".aws", *DEFAULT_PROTECTED_METADATA_NAMES)))
+
+
+def _captured_metadata_profile(root):
+    return SandboxPolicy(protect_workspace_metadata=False, permission_profile=PermissionProfile.managed(
+        FileSystemSandboxPolicy.restricted([
+            FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+            FileSystemSandboxEntry(FileSystemPath.path(root), FileSystemAccessMode.WRITE),
+            *(FileSystemSandboxEntry(FileSystemPath.path(root / name), FileSystemAccessMode.READ)
+              for name in CAPTURED_METADATA_NAMES),
+        ])))
+
+
+def test_captured_metadata_profile_does_not_add_synthetic_files_to_git_changes(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    original = root / ".mcp.json"
+    original.write_text('{"keep":"actual-user-data"}', encoding="utf-8")
+    empty = root / ".gitconfig"
+    empty.touch()
+    identities = {path: path.stat().st_ino for path in (original, empty)}
+    before = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"])
+    policy = _captured_metadata_profile(root)
+    resolved = policy.resolve(cwd=root)
+    assert all(not entry.protected_metadata_names for entry in resolved.writable_roots)
+    runner = SandboxRunner(policy)
+    try:
+        runner._prepare_bubblewrap_mount_targets(resolved)
+        for name in set(CAPTURED_METADATA_NAMES) - {".git", ".mcp.json", ".gitconfig"}:
+            assert (root / name).is_dir()
+        assert subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]) == before
+        assert original.read_text(encoding="utf-8") == '{"keep":"actual-user-data"}'
+        assert empty.is_file() and empty.stat().st_ino == identities[empty]
+    finally:
+        runner._cleanup_sandbox_setup_state()
+    assert subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]) == before
+    assert all(path.stat().st_ino == inode for path, inode in identities.items())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires a real Linux bwrap child with a captured permission profile")
+def test_real_linux_captured_profile_keeps_metadata_as_directories_until_child_exit(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    policy = _captured_metadata_profile(root)
+    runner = SandboxRunner(policy)
+    started, release = root / "started", root / "release"
+    names = list(set(CAPTURED_METADATA_NAMES) - {".git"})
+    script = """import json,pathlib,sys,time
+root=pathlib.Path(sys.argv[1])
+names=json.loads(sys.argv[2])
+assert all((root/name).is_dir() for name in names)
+(root/'started').write_text('ready')
+while not (root/'release').exists(): time.sleep(.01)
+assert all((root/name).is_dir() for name in names)
+print('CAPTURED_METADATA_DIRECTORIES_OK',flush=True)
+"""
+
+    async def scenario():
+        try:
+            process = await runner.spawn_interactive([sys.executable, "-c", script, str(root), json.dumps(names)], cwd=root)
+            async with asyncio.timeout(15):
+                while not started.exists():
+                    assert process.returncode is None, await process.stderr.read()
+                    await asyncio.sleep(.01)
+            assert all((root/name).is_dir() for name in names)
+            status = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"])
+            assert status == b"?? started\n"
+            release.write_text("complete")
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+            assert process.returncode == 0 and b"CAPTURED_METADATA_DIRECTORIES_OK" in stdout, stderr
+        finally:
+            assert await runner.cleanup()
+        assert all(not (root/name).exists() for name in names)
+
+    asyncio.run(scenario())
 
 
 def _registry_parent_denied_policy(root, targets):

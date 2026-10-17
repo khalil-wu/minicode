@@ -26,6 +26,7 @@ from backend.config import DATA_ROOT
 from backend.runtime_env import powershell_script, shell_subprocess_env
 from backend.sandbox.mount_targets import BubblewrapMountTargets
 from backend.sandbox.policy import (
+    DEFAULT_PROTECTED_METADATA_NAMES,
     FileSystemAccessMode,
     ResolvedSandboxPolicy,
     SandboxEnforcement,
@@ -1393,7 +1394,10 @@ class SandboxRunner:
     def _prepare_bubblewrap_mount_targets(self, resolved: ResolvedSandboxPolicy) -> Path | None:
         targets = BubblewrapMountTargets()
         self._bubblewrap_mount_targets = targets
-        protected_names = {name for writable in resolved.writable_roots for name in writable.protected_metadata_names}
+        # Captured permission profiles materialize metadata protection as READ
+        # entries. Source classifies these names independently of root metadata.
+        protected_names = {".git", ".agents", ".codex", ".aws", *DEFAULT_PROTECTED_METADATA_NAMES}
+        protected_names.update(name for writable in resolved.writable_roots for name in writable.protected_metadata_names)
         overrides = {}
         for path, access in _resolved_path_events(resolved):
             if access is FileSystemAccessMode.WRITE:
@@ -1405,12 +1409,12 @@ class SandboxRunner:
                 )
             if path.exists():
                 if _policy_path_is_writable(resolved, path.parent):
-                    targets.acquire(path, kind="file", protected_metadata=path.name in protected_names)
+                    targets.acquire(path, kind="file", protected_metadata=access is FileSystemAccessMode.READ and path.name in protected_names)
                 continue
             missing = _first_missing_component(path)
             if missing is None or not _policy_path_is_writable(resolved, missing.parent):
                 continue
-            protected = missing.name in protected_names
+            protected = access is FileSystemAccessMode.READ and missing.name in protected_names
             targets.acquire(missing, kind="directory" if protected else "file",
                 protected_metadata=protected)
             overrides[os.path.normcase(str(path.expanduser().absolute()))] = missing

@@ -7,11 +7,14 @@ compiled pinned runtime and the host kernel's user/network namespaces.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -25,7 +28,7 @@ import pytest
 from backend.network.native import SOURCE_COMMIT
 from backend.network.policy import NetworkExecutionPolicy
 from backend.sandbox.linux_native import command, discover_runtime, permission_profile
-from backend.sandbox.policy import (FileSystemAccessMode as Access, FileSystemPath as Selector,
+from backend.sandbox.policy import (DEFAULT_PROTECTED_METADATA_NAMES, FileSystemAccessMode as Access, FileSystemPath as Selector,
     FileSystemSandboxEntry as Entry, FileSystemSandboxPolicy as Filesystem, FileSystemSpecialPath as Special,
     PermissionProfile, SandboxPolicy)
 from backend.sandbox.runner import SandboxRunner, SandboxUnavailableError
@@ -74,6 +77,52 @@ def test_platform_build_stages_only_its_real_entrypoint_and_dependencies(platfor
     else:
         assert (project / "Cargo.toml").read_bytes() == (builder.BRIDGE / "Cargo.toml").read_bytes()
         assert "codex-linux-sandbox" not in str(manifest) and not (project / "src/linux_entry.rs").exists()
+
+
+def test_linux_read_metadata_adapter_uses_original_git_bytes_and_preserves_permission_source(tmp_path, monkeypatch):
+    script = Path(__file__).resolve().parents[2] / "desktop/scripts/prepare-network-runtime.py"
+    specification = importlib.util.spec_from_file_location("linux_read_metadata_build_contract", script)
+    builder = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(builder)
+    checkout, workspace = tmp_path / "reference", tmp_path / "isolated/codex-rs"
+    relative = "linux-sandbox/src/bwrap.rs"
+    original = (b"// Original ranges, including DENY, remain untouched.\n"
+        b"use codex_protocol::permissions::is_protected_metadata_name;\n"
+        b"fn read_name(name: &std::ffi::OsStr) -> bool { is_protected_metadata_name(name) }\n"
+        b"fn deny_target() -> &'static str { \"missing-empty-file\" }\n")
+    protocol = b'pub const PROTECTED_METADATA_PATH_NAMES: &[&str] = &[".git", ".agents", ".codex", ".aws"];\n'
+    for base in (checkout / "codex-rs", workspace):
+        (base / relative).parent.mkdir(parents=True)
+        (base / relative).write_bytes(original)
+        (base / "protocol/src").mkdir(parents=True)
+        (base / "protocol/src/permissions.rs").write_bytes(protocol)
+    subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Owned QA", "-c", "user.email=owned@example.invalid",
+        "commit", "--quiet", "-m", "Pinned fixture"], check=True)
+    commit = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"]).decode().strip()
+    monkeypatch.setattr(builder, "SOURCE_COMMIT", commit)
+    (checkout / "codex-rs" / relative).write_bytes(b"uncommitted reference edit must not be consumed or changed\n")
+    (workspace / relative).write_bytes(b"stale isolated build content\n")
+    record = builder.prepare_linux_read_metadata_adapter(checkout, workspace, dict(os.environ))[relative]
+    replacement = record["replacements"][0]
+    expected = original.replace(replacement["from"].encode(), replacement["to"].encode(), 1)
+    assert replacement == {"from": "use codex_protocol::permissions::is_protected_metadata_name;",
+        "to": 'include!("minicode_read_metadata_names.rs");', "count": 1}
+    assert (workspace / relative).read_bytes() == expected
+    assert record["upstream_sha256"] == hashlib.sha256(original).hexdigest()
+    assert record["adapted_sha256"] == hashlib.sha256(expected).hexdigest()
+    helper = (workspace / record["helper"]["staged"]).read_bytes()
+    assert helper == (builder.BRIDGE / "linux/read_metadata_names.rs").read_bytes()
+    assert record["helper"]["sha256"] == hashlib.sha256(helper).hexdigest()
+    names = re.findall(r'^    "([^"]+)",$', helper.decode(), re.M)
+    assert tuple(names) == DEFAULT_PROTECTED_METADATA_NAMES
+    assert b"codex_protocol::permissions::is_protected_metadata_name(name)" in helper
+    assert (workspace / "protocol/src/permissions.rs").read_bytes() == protocol
+    assert (checkout / "codex-rs" / relative).read_bytes() == b"uncommitted reference edit must not be consumed or changed\n"
+    (workspace / relative).write_bytes(expected + b"stale local adaptation\n")
+    assert builder.prepare_linux_read_metadata_adapter(checkout, workspace, dict(os.environ))[relative] == record
+    assert (workspace / relative).read_bytes() == expected
 
 
 def test_materialized_profile_retains_all_roots_denies_and_protected_metadata(tmp_path):
@@ -351,5 +400,126 @@ async def test_actual_linux_bridge_tree_and_original_proxy_lease_close_after_rep
         assert not any(item.is_running() and item.status()!=psutil.STATUS_ZOMBIE for item in owned)
         await borrower.aclose()
         assert process.process_id not in native.leases and not backend.processes
+    finally:
+        await backend.close(); await native.aclose()
+
+
+@LINUX_ONLY
+@pytest.mark.asyncio
+async def test_actual_linux_native_captured_metadata_read_directories_do_not_pollute_git(tmp_path, record_property):
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    original, empty = tmp_path / ".mcp.json", tmp_path / ".gitconfig"
+    original.write_text('{"keep":"actual-user-data"}', encoding="utf-8")
+    empty.touch()
+    identities = {path: path.stat().st_ino for path in (original, empty)}
+    before = subprocess.check_output(["git", "-C", str(tmp_path), "status", "--porcelain", "--untracked-files=all"])
+    scope = launch_scope(tmp_path)
+    scope["permissions"]["file_system"]["entries"].extend(
+        {"path": {"type": "path", "path": (tmp_path / name).as_uri()}, "access": "read"}
+        for name in DEFAULT_PROTECTED_METADATA_NAMES)
+    frozen_scope = deepcopy(scope)
+    missing = sorted(set(DEFAULT_PROTECTED_METADATA_NAMES) - {".git", ".mcp.json", ".gitconfig"})
+    script = """import errno,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+names=json.loads(sys.argv[2])
+assert all((root/name).is_dir() for name in names)
+assert (root/'.mcp.json').read_text() == '{"keep":"actual-user-data"}'
+assert (root/'.gitconfig').is_file() and (root/'.gitconfig').read_bytes() == b''
+blocked=[]
+for name in names:
+    try: (root/name/'blocked-child').write_text('must remain read-only')
+    except OSError as error:
+        assert error.errno in (errno.EACCES,errno.EPERM,errno.EROFS)
+        blocked.append({'name':name,'errno':error.errno})
+    else: raise AssertionError('missing READ metadata directory became writable')
+print(json.dumps({'missing_metadata_write_denials':blocked}),flush=True)
+try: (root/'.mcp.json').write_text('must not replace the protected user file')
+except OSError: pass
+else: raise AssertionError('protected READ path became writable')
+print('NATIVE_METADATA_READ_READY',flush=True)
+assert sys.stdin.readline() == 'release\\n'
+assert all((root/name).is_dir() for name in names)
+free=root/'unprotected'/'settings.json'
+free.parent.mkdir()
+free.write_text('actual-explicit-workspace-write')
+print('NATIVE_UNPROTECTED_SAME_NAME_WRITABLE',flush=True)
+"""
+    native, backend, cursor, chunks = runtime(), LocalProcessBackend(), 0, []
+    try:
+        network = await prepared_policy(native)
+        process = await backend.start([sys.executable, "-I", "-S", "-u", "-c", script, str(tmp_path), json.dumps(missing)],
+            tmp_path.as_uri(), sandbox=scope, pipe_stdin=True, managed_network_policy=network)
+        async with asyncio.timeout(20):
+            while b"NATIVE_METADATA_READ_READY" not in b"".join(chunks):
+                result = await process.read(after_seq=cursor, wait_ms=1000)
+                chunks.extend(chunk.chunk for chunk in result.chunks)
+                cursor = result.next_seq - 1
+                assert not result.closed, b"".join(chunks)
+        assert process.sandbox_backend == "linux-managed-proxy" and process.runner._bubblewrap_mount_targets is None
+        assert scope == frozen_scope
+        assert all((tmp_path / name).is_dir() for name in missing)
+        during = subprocess.check_output(["git", "-C", str(tmp_path), "status", "--porcelain", "--untracked-files=all"])
+        assert during == before
+        assert all(path.stat().st_ino == inode for path, inode in identities.items())
+        await process.write(b"release\n")
+        result = await output(process)
+        assert b"NATIVE_UNPROTECTED_SAME_NAME_WRITABLE" in result
+        await process.aclose()
+        assert all(not os.path.lexists(tmp_path / name) for name in missing)
+        assert original.read_text(encoding="utf-8") == '{"keep":"actual-user-data"}' and empty.read_bytes() == b""
+        assert all(path.stat().st_ino == inode for path, inode in identities.items())
+        assert (tmp_path / "unprotected/settings.json").read_text() == "actual-explicit-workspace-write"
+        record_property("native_metadata_git_status_during_live_child", during.decode())
+        record_property("native_metadata_child_output", result.decode())
+    finally:
+        await backend.close(); await native.aclose()
+
+
+@LINUX_ONLY
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", ["deny", "write"])
+async def test_actual_linux_native_metadata_name_keeps_deny_file_and_explicit_write(access, tmp_path, record_property):
+    target = tmp_path / "settings.local.json"
+    scope = launch_scope(tmp_path)
+    scope["permissions"]["file_system"]["entries"].append(
+        {"path": {"type": "path", "path": target.as_uri()}, "access": access})
+    frozen_scope = deepcopy(scope)
+    script = """import pathlib,stat,sys
+path=pathlib.Path(sys.argv[1])
+access=sys.argv[2]
+if access == 'deny':
+    assert stat.S_ISREG(path.lstat().st_mode)
+    try: path.write_text('must remain denied')
+    except OSError: pass
+    else: raise AssertionError('DENY metadata path became writable')
+else:
+    path.write_text('explicit-write-still-allowed')
+print('NATIVE_METADATA_ACCESS_READY',flush=True)
+assert sys.stdin.readline() == 'release\\n'
+print('NATIVE_METADATA_ACCESS_FINISHED',flush=True)
+"""
+    native, backend, cursor, chunks = runtime(), LocalProcessBackend(), 0, []
+    try:
+        process = await backend.start([sys.executable, "-I", "-S", "-u", "-c", script, str(target), access],
+            tmp_path.as_uri(), sandbox=scope, pipe_stdin=True, managed_network_policy=await prepared_policy(native))
+        async with asyncio.timeout(20):
+            while b"NATIVE_METADATA_ACCESS_READY" not in b"".join(chunks):
+                value = await process.read(after_seq=cursor, wait_ms=1000)
+                chunks.extend(chunk.chunk for chunk in value.chunks)
+                cursor = value.next_seq - 1
+                assert not value.closed, b"".join(chunks)
+        assert process.sandbox_backend == "linux-managed-proxy" and scope == frozen_scope
+        assert target.is_file()
+        assert target.read_bytes() == (b"" if access == "deny" else b"explicit-write-still-allowed")
+        await process.write(b"release\n")
+        result = await output(process)
+        assert b"NATIVE_METADATA_ACCESS_FINISHED" in result
+        await process.aclose()
+        if access == "deny":
+            assert not os.path.lexists(target)
+        else:
+            assert target.read_text() == "explicit-write-still-allowed"
+        record_property("native_metadata_access", access)
+        record_property("native_metadata_access_output", result.decode())
     finally:
         await backend.close(); await native.aclose()

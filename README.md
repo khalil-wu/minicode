@@ -11,7 +11,10 @@ MiniCode 是一个本地运行的 AI 编程助手，包含 Python 后端、React
 - Python 3.11 或更高版本
 - Node.js 20.19 或更高版本
 - npm
-- Windows、macOS 或 Linux
+- Git 2.36 或更高版本（Source 工作树协议使用 `git worktree list --porcelain -z`）
+- Windows x64 桌面端；Linux x86_64 后端/SSH 宿主要求 glibc 2.31 或更高版本（Ubuntu 20.04 为构建与安装验证基线）
+
+Linux 后端的原生组件、独立 wheel 和 SSH 安装步骤见 [Linux 后端安装](docs/linux-backend-install.md)。当前发布工作流只发布 Windows 桌面安装包；Linux wheel 由成功 CI 的 `minicode-linux-backend-wheel` artifact 提供，远端后端需要预先安装，不会随桌面更新自动安装或升级。
 
 ## 安装
 
@@ -32,7 +35,7 @@ cd ..\desktop
 npm ci
 ```
 
-macOS/Linux：
+Linux 源码开发（先按上述安装文档准备同平台 native resources）：
 
 ```bash
 source .venv/bin/activate
@@ -49,7 +52,7 @@ Windows 可直接运行：
 start.bat
 ```
 
-macOS/Linux 可运行：
+Linux 可运行：
 
 ```bash
 bash start.sh

@@ -46,7 +46,7 @@ export function offsetRange(before: string, edit: WorkspaceOffsetEdit) {
 /** One explicit edit command for search replacements and language-service fixes. */
 export async function applyWorkspaceBufferEdits(workspaceRoot: string, files: WorkspaceBufferEdit[], label: string): Promise<void> {
   const [monaco, { StandaloneServices }, { IBulkEditService }, { withNativeModelUndoGroup }] = await Promise.all([
-    import("monaco-editor/editor/editor.api.js"),
+    import("./monacoRuntime"),
     import("monaco-editor/editor/standalone/browser/standaloneServices.js"),
     import("monaco-editor/editor/browser/services/bulkEditService.js"),
     import("./nativeModelUndoGroup"),

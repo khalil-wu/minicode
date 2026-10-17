@@ -176,7 +176,7 @@ vi.mock("monaco-editor", () => ({
   languages: {},
 }));
 
-vi.mock("monaco-editor/editor/editor.api.js", async () => {
+vi.mock("./monacoRuntime", async () => {
   const { URI } = await import("monaco-editor/base/common/uri.js");
   return { editor: { getModel: () => null }, languages: {}, Uri: URI, KeyMod: { Alt: 512 }, KeyCode: { Backslash: 88 } };
 });

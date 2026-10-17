@@ -98,7 +98,7 @@ export function useWorkspaceProblems(workspaceRoot: string, visible: boolean) {
     setState({ phase: 'loading', items: [], issues: [] })
     const initialize = async () => {
       configureMiniCodeMonacoWorkers()
-      const [monaco] = await Promise.all([import('monaco-editor/editor/editor.api.js'), loadMiniCodeLanguageServices(),
+      const [monaco] = await Promise.all([import('./monacoRuntime'), loadMiniCodeLanguageServices(),
         import('monaco-editor/languages/definitions/typescript/register.js'), import('monaco-editor/languages/definitions/javascript/register.js')])
       if (cancelled) return
       monacoRef.current = monaco

@@ -7,7 +7,7 @@ import { useAppStore } from "../stores";
 const themeTokens = readFileSync("src.v2/styles/tokens.css", "utf8");
 
 const native = vi.hoisted(() => ({ colorize: vi.fn(), defineTheme: vi.fn(), setTheme: vi.fn() }));
-vi.mock("monaco-editor/editor/editor.api.js", () => ({ editor: native }));
+vi.mock("../panels/monacoRuntime", () => ({ editor: native }));
 vi.mock("monaco-editor/languages/definitions/typescript/register.js", () => ({}));
 vi.mock("../panels/monacoTheme", () => ({
   defineMiniCodeMonacoTheme: native.defineTheme,

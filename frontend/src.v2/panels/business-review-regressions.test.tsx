@@ -25,7 +25,7 @@ vi.mock("../lib/file-icons", () => ({ fileIcon: () => null, fileGlyphColor: () =
 vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => null, fsReadFileInfo: vi.fn(), fsSearchFiles: vi.fn(), revealPath: vi.fn() }));
 vi.mock("../protocol/workspace", () => ({ compareWriteWorkspaceFile: seams.write, readWorkspaceFile: vi.fn(), searchWorkspaceFiles: vi.fn() }));
 vi.mock("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
-vi.mock("monaco-editor/editor/editor.api.js", () => ({}));
+vi.mock("./monacoRuntime", () => ({}));
 vi.mock("@monaco-editor/react", () => ({ default: () => <div>Editor</div>, loader: { config: vi.fn() } }));
 // These ownership tests replace the editor surface. Keep its native language
 // bootstrap at that same boundary; native registrations have their own suite.
