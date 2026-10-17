@@ -1,8 +1,8 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
-2026-10-17 后续窗口与 Diff 修复见[本批交接记录](2026-10-17-window-diff-mailbox.md)。前端构建已推进到 `assets/index-C9rIzayf.js`（index SHA256 `4e2bedf3caaf5f3dbe919c9b52b2a51314134ac52e830c375bc2e1c80ce8f622`）：真实窗口配色同步/迁移、Diff 各颜色来源及工作区错误消费者均有独立构建身份和实机记录。本地前端完整运行 4414 passed/1 failed，修正显示与存储耦合后受影响 27/27；下列 19058aef/r15/8项 CI 是上一批历史验收，不用于证明这次新增实现。最新提交、CI 与安装候选以本批交付后续记录为准。
+2026-10-17 最新实现为 `4826a0c12f856e17d6806f22807c6668b3e28b14`，[完整 CI 39005641653](https://github.com/khalil-wu/minicode/actions/runs/39005641653) **8/8 成功**：前端 4415 passed，backend 6997 passed / 118 skipped，根目录后端 1768 passed / 51 skipped。Windows 后端候选 r16 独立新安装 **112/112**，0 failed/error/skipped，启动错误为空。前端为 `assets/index-C9rIzayf.js`（index SHA256 `4e2bedf3caaf5f3dbe919c9b52b2a51314134ac52e830c375bc2e1c80ce8f622`）。窗口配色、Diff 各颜色来源、工作区 Git 错误和 agent 邮箱/原工作树完整交接的修改、实机范围及本地曾有的失败/挂起均见[本批交接记录](2026-10-17-window-diff-mailbox.md)。CI 与候选验收不代表全产品等价；下列旧提交、r15/r13 等均保留为历史。
 
-2026-10-17 后续验收：当前实现冻结 `19058aef` 的[完整 CI 38932478631](https://github.com/khalil-wu/minicode/actions/runs/38932478631)已 8/8 成功；前端 4393 passed，backend 6956 passed / 111 skipped。最新 Windows backend 候选为 r15，基础 41、媒体 7、目录 6 三组在独立新安装分别通过，Source peer 与 CI 跳过项分开记。当前前端仍为下文 Wz 构建。详情及实际目录修复、冷重启草稿保留见[最终目录与安装交付](2026-10-17-source-directory-depth.md)；下面 8dfff051 / r13 是此前专项检查点的历史验证。
+2026-10-17 上一批验收：实现冻结 `19058aef` 的[完整 CI 38932478631](https://github.com/khalil-wu/minicode/actions/runs/38932478631)已 8/8 成功；前端 4393 passed，backend 6956 passed / 111 skipped。当时 Windows backend 候选为 r15，基础 41、媒体 7、目录 6 三组在独立新安装分别通过，Source peer 与 CI 跳过项分开记。当时前端为下文 Wz 构建。详情及实际目录修复、冷重启草稿保留见[最终目录与安装交付](2026-10-17-source-directory-depth.md)；下面 8dfff051 / r13 是更早专项检查点的历史验证。
 
 核对日期：2026-10-16。后端依据为 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`；界面依据为已提取的实际 Codex 桌面资源和已有截图。最新实现检查点 `8dfff051` 的[完整 CI 38920283863](https://github.com/khalil-wu/minicode/actions/runs/38920283863)八项全部成功，backend 6946 passed / 108 skipped，frontend 4350 tests，desktop smoke 6/6。r13 后端候选另独立安装 41/41、startup ERROR=[]，原 host/内核修复及实际桌面投影均有各自证据。旧 `ee80a807`、r12 启动错误及 `0c10889e` Desktop 失败保留为历史，r12 仍暂停交付。CI 证明各自范围的合同与回归结果，不是全产品等价证明。本页不提供推测完成率。
 

@@ -35,6 +35,24 @@
 
 Git 的独立 fresh-profile Electron 验证使用原 Wz 构建，实际 status/worktree/delivery HTTP 200、staged/unstaged 展开及工作树正确，草稿和 confirm 保留，未创建沙箱账号。它不证明最终错误解析器。所有本批自建窗口与服务已退出，普通用户窗口未重启。
 
+实现已冻结并推送为 `4826a0c12f856e17d6806f22807c6668b3e28b14`。该提交的[完整 GitHub CI 39005641653](https://github.com/khalil-wu/minicode/actions/runs/39005641653) **8/8 作业成功**，两个 pinned Source 原生构建、前端构建和两项预算检查全部通过，CI 前端入口也为 `index-C9rIzayf.js`。实际测试结果如下，各范围独立记录，不合并成产品完成率：
+
+| 范围 | 通过 | 跳过 |
+| --- | ---: | ---: |
+| 前端单元与链路，374 文件 | 4415 | 0 |
+| backend 完整套件 | 6997 | 118 |
+| 根目录后端完整套件 | 1768 | 51 |
+| Windows harness 与进程合同 | 362 | 15 |
+| Desktop 单元 | 161 | 9 |
+| Desktop Electron 冒烟 | 6 | 0 |
+| Electron Playwright | 1 | 0 |
+
+上述测试失败、错误均为 0。Linux CI 中的 Windows 专属合同、未指定自有 Source peer、可选文档依赖等跳过理由完整保留在 `output/ci-window-mailbox-20261017/ci-receipt.json`，跳过不计通过。该前端完整 CI 包含本地 4414/1 后修复的显示/存储调用链；不需要把原本地失败或分段结果重写成完整通过。
+
+Windows 后端候选 r16 从这一提交重新构建，并在独立临时安装实际通过 **112/112**：基础冷启动 41、MCP 媒体 7、目录 6、Git 12、消息与原工作树生命周期 46，失败、错误和跳过均为 0，启动健康检查 `errors=[]`。1,274 个冻结输入与 1,253 个 backend 包成员通过源码、wheel 和安装字节核对；模块实际来源位于新安装，明确包括 `backend.agent.worktree`。169 处 checkout 差异仅为 CRLF，非换行内容差异和未提交输入均为 0。
+
+r16 wheel 为 `minicode-0.2.0-py3-none-win_amd64.whl`，16,119,603 字节，SHA256 `2dde048872868745a04b721b9692219fe9428ceae7dee532f6e7169ee896cbb2`。Git 与目录组实际使用新安装的外部 Source peer `896a0166b774037a/codex.exe`，版本 `0.163.0-alpha.10.2`，SHA256 `f6dbf48cb70f62649c645f26c87dc9bf84cc36986202dfad8e12fb5b8ca70312`；它与固定源码 checkout `822e58cc` 分别记录。Source 使用自有 stdio 连接，不代表外机 HTTP、Linux 安装、原生 ACL 或全桌面安装程序已经验收。测试依赖只安装到新候选的 QA 目录。SDK 原进程和 fork 已退出，普通用户窗口、服务和生产 runtime 未改动。
+
 本地完整证据：
 
 - `output/appearance-multiwindow-20261017/report.md`：配置迁移、异步竞争、分组测试及构建日志。
@@ -44,7 +62,9 @@ Git 的独立 fresh-profile Electron 验证使用原 Wz 构建，实际 status/w
 - `output/git-readonly-sandbox-audit-20261017/REPORT.md`：Source/local HTTP、原权限与沙箱错误边界。
 - `output/playwright/git-fresh-profile-20261017/REPORT.md`：独立 Git 界面与服务退出证据。
 - `output/harness-followup-20261017/mailbox-final-review.md` / `mailbox-final-receipt.json`：普通与工作树消息交接、原始失败、最终门控和实现 hash。
-- `output/harness-followup-20261017/global-guard-probe-3836a5ac/receipt.json`：按原路径清理期间独立 recipient 仍可真实收消息。
+- `output/harness-followup-20261017/global-guard-probe-60a41623/receipt.json`：绑定最终 runtime/store hash，按原路径清理期间独立 recipient 仍可真实收消息；旧探针另保留。
+- `output/source-executor-remote-final-wheel-r16-20261017/REPORT.md` / `installed-scope-receipt.json` / `delivery-receipt.json`：本次新构建、独立安装、112 项实际结果、包身份和来源/字节核对。
+- `output/ci-window-mailbox-20261017/ci-receipt.md` / `ci-receipt.json`：实现提交完整 8 项 CI、全部原始 job 日志及两组 backend JUnit 证据。
 
 首次类型错误、QA 定位错误、错误的测试预期和未完成的诊断均保留在各自目录，不重写为通过。
 
