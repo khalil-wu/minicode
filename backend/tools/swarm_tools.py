@@ -125,7 +125,6 @@ async def _notify_assignee(
             team_name=str(getattr(task, "team_name", "") or getattr(record, "team_name", "") or ""),
             task_id=str(task.task_id),
             sender_mailbox_epoch=_actor_mailbox_epoch(context),
-            recipient_mailbox_epoch=int(record.mailbox_epoch or 0),
         )
     except ValueError:
         return
@@ -303,6 +302,8 @@ class SendMessageTool(_AgentCoordinationTool):
                 resolved_target = control.resolve_persisted_message_target(recipient)
             if resolved_target is not None:
                 recipient = resolved_target.subagent_id
+                if runtime.get_subagent(recipient) is None:
+                    runtime.restore_authorized_subagent_mailbox_target(resolved_target.record)
             else:
                 # A known-but-out-of-scope record must never be reclassified as
                 # an unknown pre-registration id.  That would turn a failed
@@ -336,44 +337,20 @@ class SendMessageTool(_AgentCoordinationTool):
             recipient_record is not None
             and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
         )
-        if recipient_ended and self.delivery_mode == "trigger_turn":
+        resume_now = recipient_ended and runtime.subagent_execution_is_finished(recipient)
+        if recipient_record is not None and self.delivery_mode == "trigger_turn":
             registry = context.tool_registry if context is not None else None
             if registry is None and context is not None and isinstance(context.metadata, dict):
                 registry = context.metadata.pop("_tool_registry", None)
                 context.tool_registry = registry
             task_tool = registry.get_tool("task") if registry is not None and hasattr(registry, "get_tool") else None
-            resume = getattr(task_tool, "resume_background_subtask", None)
-            if not callable(resume):
+            bind = getattr(task_tool, "bind_mailbox_resumer", None)
+            if not callable(bind) and recipient_ended:
                 return self._error_result(
                     f"Recipient {recipient} is stopped and its TaskTool resume runtime is unavailable."
                 )
-            try:
-                await resume(subagent_id=recipient, prompt=message, context=context)
-            except Exception as exc:
-                return self._error_result(
-                    f"Recipient {recipient} could not be resumed: {exc}"
-                )
-            prior_status = recipient_record.status if recipient_record is not None else "unknown"
-            return ToolResult(
-                content=(
-                    f"Agent {recipient} was stopped ({prior_status}); "
-                    "resumed it in the background with the message and preserved transcript."
-                ),
-                display_summary=summary or f"Resumed {recipient}",
-                result_kind="subagent",
-                status="running",
-                runtime_metadata={
-                    "delivery": "resumed",
-                    "sender": sender,
-                    "recipient": recipient,
-                    "prior_status": str(prior_status or ""),
-                },
-            )
-        recipient_epoch = (
-            int(recipient_record.mailbox_epoch or 0)
-            if recipient_record is not None and not recipient_ended
-            else None
-        )
+            if callable(bind) and resume_now:
+                bind(recipient, context, new_session=True)
         try:
             # A teammate's lifecycle gate matches on the message's team. When
             # the caller addressed a named teammate (``name@team``) and did not
@@ -393,7 +370,6 @@ class SendMessageTool(_AgentCoordinationTool):
                 task_id=str(args.get("task_id") or "").strip(),
                 summary=summary,
                 sender_mailbox_epoch=_actor_mailbox_epoch(context),
-                recipient_mailbox_epoch=recipient_epoch,
                 delivery_mode=self.delivery_mode,
             )
         except ValueError as exc:
@@ -404,6 +380,21 @@ class SendMessageTool(_AgentCoordinationTool):
             subagent_id=recipient if recipient != "parent" else sender,
             event={"type": "message", "message": payload},
         )
+
+        if resume_now and self.delivery_mode == "trigger_turn":
+            start_error = await runtime.start_subagent_mailbox_turn(recipient)
+            if start_error:
+                return self._error_result(f"Recipient {recipient} could not be resumed: {start_error}")
+            if start_error is not None:
+                return ToolResult(
+                    content=(f"Agent {recipient} was stopped ({recipient_record.status}); "
+                        "resumed it in the background with the message and preserved transcript."),
+                    display_summary=summary or f"Resumed {recipient}",
+                    result_kind="subagent", status="running",
+                    runtime_metadata={"delivery": "resumed", "sender": sender,
+                        "recipient": recipient, "prior_status": recipient_record.status,
+                        "message_id": record.message_id},
+                )
 
         if recipient == "parent":
             delivery = "parent"

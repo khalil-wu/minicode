@@ -25,6 +25,25 @@ def executor_git_environment(service, *, index_file=None):
         set_values=environment), overrides
 
 
+async def run_executor_git_metadata(service, args, *, cwd=None, timeout=5):
+    """Fixed app-owned metadata queries on the original accepted executor.
+
+    Source git-utils runs metadata as host reads when reads are unrestricted.
+    A real read restriction keeps the original enforcing scope. Model Git
+    tools and Git mutations use run_executor_git instead of this capability.
+    """
+    policy, overrides = executor_git_environment(service)
+    env_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
+        "exclude": list(policy.exclude), "set": dict(policy.set_values), "includeOnly": list(policy.include_only)}
+    metadata_scope = (replace(service.scope, permission_profile=PermissionProfile.disabled())
+        if service.scope.has_full_disk_read_access() else service.scope)
+    hooks_path = "NUL" if service.cwd.convention == "windows" else "/dev/null"
+    argv = ["git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
+        "-c", f"core.hooksPath={hooks_path}", "-c", "core.fsmonitor=false", "--literal-pathspecs", *args]
+    return await service.run(argv, cwd=cwd, timeout=timeout, env_policy=env_policy,
+        env=overrides, permission_scope=metadata_scope)
+
+
 async def registered_worktree_metadata(service, cwd, gitdir, common):
     """Source git-utils worktree/trust ownership, through the original executor FS."""
     async def canonical(path):

@@ -16,11 +16,15 @@ from backend.agent.environment_selection import bind_tool_execution_environment,
 from backend.agent.environment_selection import TurnEnvironmentRequest, TurnEnvironmentSelection
 from backend.sandbox.policy import (FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry,
     FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile, SandboxEnforcement)
+from backend.sandbox.runner import SandboxUnavailableError
 from backend.tests.test_executor_tool_admission import executor_host
+from backend.tools.git_tools import GitStatusTool
+from backend.workspace.executor_editor import ExecutorEditorService
+from backend.workspace.executor_git import run_executor_git, run_executor_git_metadata
 from backend.workspace.executor_service import ExecutorWorkspaceService
 
 
-pytestmark = pytest.mark.parametrize("executor_host", ["local"], indirect=True)
+pytestmark = pytest.mark.parametrize("executor_host", ["local", "source"], indirect=True)
 
 
 @pytest_asyncio.fixture
@@ -68,6 +72,12 @@ async def test_confirm_nonrepository_metadata_does_not_require_a_command_sandbox
     snapshot = await build_environment_git_status(context)
     record_testsuite_property("actual_snapshot", snapshot)
     assert snapshot == ""
+    async with ExecutorEditorService(context) as service:
+        for operation in ("status", "diff", "worktree"):
+            result = await service.git(operation)
+            assert result["is_git_repo"] is False
+            assert result["environment_id"] == original_scope.environment_id
+            assert result["path_uri"] == original_scope.cwd_uri
     assert context.permission.mode == "confirm"
     assert context.permission.environment_scope is original_scope
     assert original_scope.permission_profile.enforcement is SandboxEnforcement.MANAGED
@@ -93,21 +103,36 @@ async def test_actual_repository_metadata_disables_repository_fsmonitor_and_hook
     (root / "fsmonitor-ran").unlink()
     if (root / "hooks-ran").exists():
         (root / "hooks-ran").unlink()
-    starts = []
+    starts, processes = [], []
     original_start = context.turn_environment.environment.process.start
     async def observed_start(argv, cwd, **kwargs):
         starts.append((argv, cwd, kwargs["sandbox"]))
-        return await original_start(argv, cwd, **kwargs)
+        process = await original_start(argv, cwd, **kwargs)
+        processes.append(process)
+        return process
     monkeypatch.setattr(context.turn_environment.environment.process, "start", observed_start)
+    def no_account(*_args, **_kwargs):
+        raise AssertionError("App-owned metadata must not acquire a command sandbox account")
+    monkeypatch.setattr("backend.sandbox.windows_native.discover_runtime", no_account)
     original_scope = context.permission.environment_scope
     snapshot = await build_environment_git_status(context)
     assert "untracked.txt" in snapshot
-    assert len(starts) == 6
+    async with ExecutorEditorService(context) as service:
+        status = await service.git("status")
+        assert "untracked.txt" in status["untracked"]
+        diff = await service.git("diff", file="untracked.txt")
+        assert "+actual selected executor" in diff["diff"]
+        inventory = await service.git("worktree")
+        assert inventory["current_path"] == (root.as_uri() if host.kind == "source" else str(root))
+        for result in (status, diff, inventory):
+            assert result["environment_id"] == original_scope.environment_id
+            assert result["path_uri"] == original_scope.cwd_uri
     null = "NUL" if original_scope.platform_os == "windows" else "/dev/null"
     for argv, cwd, sandbox in starts:
         assert argv[:8] == ["git", "--no-optional-locks", "-c", "safe.bareRepository=explicit", "-c", f"core.hooksPath={null}", "-c", "core.fsmonitor=false"]
         assert cwd == original_scope.cwd_uri
         assert sandbox is None
+    assert processes and all(process.closed and process.released for process in processes)
     assert not (root / "fsmonitor-ran").exists() and not (root / "hooks-ran").exists()
     assert context.permission.environment_scope is original_scope
     assert context.permission.mode == "confirm"
@@ -123,10 +148,31 @@ async def test_denied_read_metadata_retains_original_enforcing_scope(git_metadat
     context = replace(context, permission=replace(context.permission, environment_scope=scope))
     seen = []
     async def run(service, argv, **kwargs):
-        assert kwargs["timeout"] == 5
         seen.append(kwargs["permission_scope"])
         return subprocess.CompletedProcess(argv, 128, b"", b"not a git repository")
     monkeypatch.setattr(ExecutorWorkspaceService, "run", run)
     assert await build_environment_git_status(context) == ""
-    assert seen == [scope] and seen[0] is scope
+    async with ExecutorWorkspaceService(context) as service:
+        assert (await run_executor_git_metadata(service, ["rev-parse", "--show-toplevel"])).returncode == 128
+    assert len(seen) == 2 and all(actual is scope for actual in seen)
     assert context.permission.environment_scope is scope
+
+
+@pytest.mark.asyncio
+async def test_model_git_and_metadata_writes_keep_the_managed_command_boundary(git_metadata_context, monkeypatch):
+    host, context = git_metadata_context
+    seen = []
+    async def unavailable(service, argv, **kwargs):
+        scope = kwargs["permission_scope"]
+        assert scope.permission_profile.enforcement is SandboxEnforcement.MANAGED
+        assert scope.process_sandbox_context() is not None
+        seen.append(argv)
+        raise SandboxUnavailableError("original command sandbox unavailable")
+    monkeypatch.setattr(ExecutorWorkspaceService, "run", unavailable)
+    with pytest.raises(SandboxUnavailableError, match="original command sandbox unavailable"):
+        await GitStatusTool().execute({}, context)
+    async with ExecutorWorkspaceService(context) as service:
+        with pytest.raises(SandboxUnavailableError, match="original command sandbox unavailable"):
+            await run_executor_git(service, ["git", "commit", "-m", "must remain sandboxed"], write_metadata=True)
+    assert len(seen) == 2
+    assert context.permission.environment_scope.permission_profile.enforcement is SandboxEnforcement.MANAGED

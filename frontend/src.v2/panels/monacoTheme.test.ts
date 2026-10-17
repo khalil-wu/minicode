@@ -34,6 +34,25 @@ const applyThemeTokens = (theme: "light" | "dark") => {
 afterEach(() => document.documentElement.removeAttribute("style"));
 
 describe("MiniCode native code syntax", () => {
+  it("uses Source line, gutter and word colors on the shared active theme while preserving editor background and dirty models", async () => {
+    applyThemeTokens("dark");
+    const colors = { surface: "#345678", ink: "#abcdef", accent: "#2468ac" };
+    const model = Monaco.editor.createModel("unsaved diff source", "plaintext", Monaco.Uri.parse("inmemory://diff-palette/model.txt"));
+    const version = model.getVersionId();
+    try {
+      applyAppearanceColors("dark", { light: null, dark: colors }, { light: null, dark: { codeThemeId: "github", ...defaultThemePreferences("dark"),
+        semanticColors: { diffAdded: "#40c977", diffRemoved: "#fa423e", skill: "#ad7bf9" } } });
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+      const theme = StandaloneServices.get(IStandaloneThemeService).getColorTheme();
+      expect(theme.getColor("diffEditor.insertedLineBackground")!.toString()).toBe("#1c3129");
+      expect(theme.getColor("diffEditorGutter.insertedLineBackground")!.toString()).toBe("#132017");
+      expect(theme.getColor("diffEditor.insertedTextBackground")!.rgba.a).toBeCloseTo(.2, 2);
+      expect(theme.getColor("editor.background")!.toString()).not.toBe(colors.surface);
+      expect(model.getValue()).toBe("unsaved diff source");
+      expect(model.getVersionId()).toBe(version);
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
+  });
   it("switches actual TextMate providers on the existing dirty model, then restores native providers", async () => {
     applyThemeTokens("dark");
     const model = Monaco.editor.createModel('// 注释\nconst message = "hello";', "javascript", Monaco.Uri.parse("inmemory://appearance/textmate.js"));

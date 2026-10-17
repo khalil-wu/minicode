@@ -1183,6 +1183,19 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     runtime._registry.discard(resumed_run.run_id, kind="run")
     assert runtime.get_subagent(subagent_id) is None
 
+    queued_after_eviction = await SendMessageTool().execute(
+        {"recipient": subagent_id, "message": "Retain this evicted queued detail until its real next turn."},
+        context=parent_context,
+    )
+    assert not queued_after_eviction.is_error
+    assert runtime.get_subagent(subagent_id).mailbox_epoch == resumed_epoch
+    assert len(llm.calls) == 2
+    restored_mail = runtime.list_swarm_messages(participant_id=subagent_id, conversation_id="conversation-1")
+    restored_queued = next(message for message in restored_mail
+        if message.message_id == queued_after_eviction.runtime_metadata["message_id"])
+    assert restored_queued.recipient_mailbox_epoch == resumed_epoch + 1
+    assert restored_queued.delivery_mode == "queue_only"
+
     resumed_from_transcript = await FollowupTaskTool().execute(
         {
             "target": subagent_id,
@@ -1206,7 +1219,8 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     assert len(llm.calls) == 3
     assert "initial child result" in llm.calls[2]
     assert "resumed child result" in llm.calls[2]
-    assert llm.calls[2][-1].endswith("Finally check the checkpoint recovery path.")
+    assert sum("Finally check the checkpoint recovery path." in message for message in llm.calls[2]) == 1
+    assert sum("Retain this evicted queued detail until its real next turn." in message for message in llm.calls[2]) == 1
 
 
 async def _test_task_tool_emits_prompt_cache_fork_diagnostic_from_real_child_loop(tmp_path):

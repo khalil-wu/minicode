@@ -413,8 +413,9 @@ export const errorMessageFromResponseText = (text: string, fallback: string): st
       return detail.map((item) => {
         if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg);
         return String(item);
-      }).join("; ");
+      }).filter(Boolean).join("; ") || fallback;
     }
+    if (detail && typeof detail === "object" && "message" in detail) return String(detail.message);
     if (detail != null) return String(detail);
   }
   return trimmed;

@@ -140,6 +140,8 @@ export function MonacoDiffView({
   const appearanceThemes = useAppStore((state) => state.appearanceThemes);
   const codeTextScale = useAppStore((state) => state.codeTextScale);
   useLayoutEffect(() => {
+    // The shared theme owns both TextMate colors and the distinct Diff line /
+    // word palette, so another editor cannot reset these keys behind this view.
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
   }, [theme, appearanceColors, appearanceThemes]);
 

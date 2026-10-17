@@ -4,6 +4,8 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
 from backend.agent.context import ContextBuilder
@@ -235,16 +237,21 @@ async def _test_mailbox_messages_are_scoped_to_the_target_incarnation(tmp_path) 
     )
 
     resumed_prompts: list[str] = []
+    execution_finished = []
 
     class ResumeTaskTool:
-        async def resume_background_subtask(self, *, subagent_id, prompt, context):
-            resumed_prompts.append(prompt)
-            runtime.start_subagent(
-                subagent_id=subagent_id,
-                parent_run_id="parent-run",
-                agent_type="reviewer",
-            )
-            return subagent_id
+        def bind_mailbox_resumer(self, subagent_id, context, *, new_session=False):
+            # Double only execution admission; routing, claims and ACK remain real.
+            async def resume(claims):
+                resumed_prompts.extend(claim.message.content for claim in claims)
+                runtime.start_subagent(subagent_id=subagent_id, parent_run_id="parent-run", agent_type="reviewer")
+                finished, started = (asyncio.get_running_loop().create_future() for _ in range(2))
+                execution_finished.append(finished)
+                runtime.register_subagent_execution(subagent_id, finished, started)
+                assert runtime.ack_swarm_message_claims(claims) == len(claims)
+                started.set_result(None)
+
+            runtime.bind_subagent_mailbox_resumer(subagent_id, resume, new_session=new_session)
 
     class Registry:
         def get_tool(self, name):
@@ -268,7 +275,15 @@ async def _test_mailbox_messages_are_scoped_to_the_target_incarnation(tmp_path) 
         conversation_id="conversation-1",
         mailbox_epoch=second.mailbox_epoch,
     )
-    assert current == []
+    assert [message.message_id for message in current] == [resumed_result.runtime_metadata["message_id"]]
+    assert [message.content for message in current] == ["resume with this instruction"]
+    assert runtime.claim_swarm_messages(participant_id="subagent-reused", mailbox_epoch=second.mailbox_epoch,
+        conversation_id="conversation-1") == []
+    runtime.complete_subagent(second.subagent_id, "completed", **_subagent_fence(runtime, second.subagent_id))
+    scheduler = runtime._subagent_mailbox_turns[second.subagent_id][0]
+    execution_finished[0].set_result(None)
+    await scheduler
+    runtime.close(release_lease=True)
 
 
 def test_subagent_mailbox_injection_seals_stale_epoch_and_advances_highwater(tmp_path) -> None:
@@ -946,3 +961,94 @@ def test_leader_broadcast_reaches_every_running_teammate_and_summary_is_kept(tmp
         ) == []
 
     asyncio.run(scenario())
+
+
+def test_answer_handoff_transfers_only_unconsumed_mail_and_one_broadcast_recipient(tmp_path) -> None:
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+    workers = [runtime.start_subagent(subagent_id=f"worker-{index}", parent_run_id="parent-run",
+        agent_type="general-purpose") for index in range(2)]
+    worker = workers[0]
+    consumed = runtime.send_swarm_message(sender_id="parent-run", recipient_id=worker.subagent_id,
+        content="already consumed", conversation_id="conversation-1")
+    claims = runtime.claim_swarm_messages(participant_id=worker.subagent_id,
+        mailbox_epoch=worker.mailbox_epoch, conversation_id="conversation-1")
+    assert runtime.ack_swarm_message_claims(claims) == 1
+    queued = runtime.send_swarm_message(sender_id="parent-run", recipient_id=worker.subagent_id,
+        content="next task", conversation_id="conversation-1")
+    broadcast = runtime.send_swarm_message(sender_id="parent-run", recipient_id="*",
+        content="shared detail", conversation_id="conversation-1", delivery_mode="queue_only")
+    runtime.close_subagent_mailbox(worker.subagent_id, agent_path=worker.agent_path,
+        mailbox_epoch=worker.mailbox_epoch)
+    assert runtime.claim_swarm_messages(participant_id=worker.subagent_id, mailbox_epoch=1) == []
+    current = runtime.claim_swarm_messages(participant_id=worker.subagent_id, mailbox_epoch=2)
+    assert [claim.message.message_id for claim in current] == [queued.message_id, broadcast.message_id]
+    other = runtime.claim_swarm_messages(participant_id=workers[1].subagent_id, mailbox_epoch=1)
+    assert [claim.message.message_id for claim in other] == [broadcast.message_id]
+    history = {message.message_id: message for message in runtime.list_swarm_messages(participant_id=worker.subagent_id)}
+    assert history[consumed.message_id].recipient_mailbox_epoch == 1
+    assert history[queued.message_id].recipient_mailbox_epoch == 2
+    assert history[broadcast.message_id].recipient_mailbox_epochs == {worker.subagent_id: 2, workers[1].subagent_id: 1}
+
+
+def test_worktree_retirement_admission_is_atomic_for_broadcast_and_direct_store_writer(tmp_path):
+    from backend.agent.swarm_store import FileSwarmStore
+
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    try:
+        runtime.start_run(run_id="parent", conversation_id="conversation")
+        workers = [runtime.start_subagent(subagent_id=f"worker-{index}", parent_run_id="parent",
+            agent_type="general-purpose", resume_config={"isolation": "worktree", "worktree_path": f"private/worktree-{index}"})
+            for index in range(2)]
+        for index, worker in enumerate(workers):
+            runtime.register_subagent_cleanup_resource(worker.subagent_id, resource_kind="worktree",
+                resource_id=f"private/worktree-{index}", metadata={"branch": f"branch-{index}", "head_commit": "original-head"})
+        retired = workers[1]
+        runtime.close_subagent_mailbox(retired.subagent_id, agent_path=retired.agent_path, mailbox_epoch=1)
+        assert not runtime.begin_subagent_worktree_retirement(retired.subagent_id,
+            agent_path=retired.agent_path, mailbox_epoch=1, resource_id="private/worktree-1")
+        with pytest.raises(ValueError, match="isolated workspace is being retired"):
+            runtime.send_swarm_message(sender_id="parent", recipient_id="*", content="all or nothing",
+                conversation_id="conversation")
+        assert runtime.list_swarm_messages(conversation_id="conversation") == []
+        other_connection = FileSwarmStore(runtime._swarm_store.root)
+        with pytest.raises(ValueError, match="isolated workspace is being retired"):
+            other_connection.append_message({"sender_id": "parent", "recipient_id": retired.subagent_id,
+                "content": "independent writer", "conversation_id": "conversation"}, require_worktree_admission=True)
+        assert runtime.list_swarm_messages(conversation_id="conversation") == []
+    finally:
+        runtime.close(release_lease=True)
+
+
+def test_pending_worktree_continuation_is_recovered_outside_terminal_history_limit(tmp_path):
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    try:
+        runtime.start_run(run_id="parent", conversation_id="conversation")
+        held = runtime.start_subagent(subagent_id="held", parent_run_id="parent", agent_type="general-purpose",
+            resume_config={"isolation": "worktree", "worktree_path": "private/held"})
+        runtime.register_subagent_cleanup_resource("held", resource_kind="worktree", resource_id="private/held",
+            metadata={"branch": "held-branch", "head_commit": "held-head"})
+        accepted = runtime.send_swarm_message(sender_id="parent", recipient_id="held", content="retained queued task",
+            conversation_id="conversation", delivery_mode="queue_only")
+        runtime.close_subagent_mailbox("held", agent_path=held.agent_path, mailbox_epoch=1)
+        assert runtime.begin_subagent_worktree_retirement("held", agent_path=held.agent_path, mailbox_epoch=1,
+            resource_id="private/held")
+        runtime.complete_subagent("held", "completed", agent_path=held.agent_path, mailbox_epoch=1)
+        for index in range(2):
+            newer = runtime.start_subagent(subagent_id=f"newer-{index}", parent_run_id="parent", agent_type="general-purpose")
+            assert runtime.complete_subagent(newer.subagent_id, "completed",
+                agent_path=newer.agent_path, mailbox_epoch=newer.mailbox_epoch) is not None
+        restored = runtime._swarm_store.recover_runtime_state(interrupted_at=1, summary="restored",
+            active_owner_tokens={runtime._runtime_owner_token},
+            current_instance_id=runtime._runtime_instance_id, current_process_id=runtime._runtime_process_id,
+            current_process_start_identity=runtime._runtime_process_start_identity,
+            current_owner_token=runtime._runtime_owner_token, hydration_limit=1)
+        identities = {record["subagent_id"] for record in restored["subagents"]}
+        assert "held" in identities and len(identities) == 2
+        saved = next(record for record in restored["subagents"] if record["subagent_id"] == "held")
+        resource, = saved["cleanup_resources"]
+        assert resource["metadata"]["continuation"]["message_ids"] == [accepted.message_id]
+        assert runtime._reconcile_subagent_worktrees(runtime.get_subagent("held"))
+        assert runtime.get_subagent("held").cleanup_resources == saved["cleanup_resources"]
+    finally:
+        runtime.close(release_lease=True)

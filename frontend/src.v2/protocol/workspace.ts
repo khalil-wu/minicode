@@ -1,6 +1,5 @@
 import { appendWorkspaceOwner, workspaceRequestPath, type WorkspaceRequestOwner } from "./workspace-owner";
-import { ApiError, apiBase, authHeaders, fetchWithTimeout } from "./api";
-import { safeJsonParse } from "../lib/safe-parse";
+import { ApiError, apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "./api";
 
 export interface WorkspaceFileResponse {
   session_id?: string; conversation_id?: string; environment_id?: string; path_uri?: string; read_only?: boolean;
@@ -262,23 +261,7 @@ export const listWorkspaceTree = async (
 const errorMessageFromWorkspaceResponse = async (response: Response): Promise<string> => {
   const fallback = `Workspace request failed (${response.status} ${response.statusText || "error"}).`;
   const text = await response.text().catch(() => "");
-  const trimmed = text.trim();
-  if (!trimmed) return fallback;
-  const payload = safeJsonParse<unknown>(trimmed, null);
-  if (payload && typeof payload === "object") {
-    const detail = (payload as { detail?: unknown; message?: unknown; error?: unknown }).detail
-      ?? (payload as { message?: unknown }).message
-      ?? (payload as { error?: unknown }).error;
-    if (Array.isArray(detail)) {
-      const messages = detail.map((item) => {
-        if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg);
-        return String(item);
-      }).filter(Boolean);
-      return messages.join("; ") || fallback;
-    }
-    if (detail != null) return String(detail);
-  }
-  return trimmed || fallback;
+  return errorMessageFromResponseText(text, fallback);
 };
 
 const normalizeWorkspaceTree = (payload: unknown, fallbackPath: string): WorkspaceTreeNode | null => {

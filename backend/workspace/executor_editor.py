@@ -271,13 +271,13 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             complete=not issues, issues=issues, **self.identity())
 
     async def git(self, operation, *, path="", file=""):
-        from backend.workspace.executor_git import run_executor_git
+        from backend.workspace.executor_git import run_executor_git_metadata
         from backend.services.workspace_api_service import parse_workspace_git_status
         from backend.permissions.review import generate_unified_diff
 
         root = await self.allowed(path or ".")
         async def run(*args, allowed=(0,)):
-            result = await run_executor_git(self, ["git", "--literal-pathspecs", *args], cwd=root)
+            result = await run_executor_git_metadata(self, args, cwd=root, timeout=30)
             if result.returncode not in allowed:
                 raise HTTPException(422, result.stderr.decode("utf-8", errors="replace").strip())
             return result

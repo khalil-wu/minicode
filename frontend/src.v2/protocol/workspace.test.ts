@@ -67,6 +67,23 @@ describe("listWorkspaceTree", () => {
 });
 
 describe("workspace request errors", () => {
+  it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff", "searchWorkspaceFiles", "readWorkspaceFile"] as const)(
+    "%s preserves the typed sandbox error's original message",
+    async (operation) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: {
+        code: "sandbox_unavailable", message: "Original executor sandbox is unavailable", environment_id: "accepted-peer",
+      } }), { status: 503, statusText: "Service Unavailable" })));
+      const workspace = await loadWorkspace();
+      await expect(workspace[operation]("C:\\repo", "file.txt")).rejects.toThrow("Original executor sandbox is unavailable");
+    },
+  );
+
+  it("retains the HTTP diagnostic when the validation error list is empty", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"detail":[]}', { status: 422 })));
+    const { fetchWorkspaceGitStatus } = await loadWorkspace();
+    await expect(fetchWorkspaceGitStatus("C:\\repo")).rejects.toThrow("Workspace request failed (422 error).");
+  });
+
   it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff"] as const)(
     "%s preserves a normal non-Git folder response",
     async (operation) => {

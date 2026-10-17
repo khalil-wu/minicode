@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import logging
 from xml.sax.saxutils import escape, quoteattr
 
@@ -192,29 +192,14 @@ async def load_environment_project_instructions(snapshot, *, project_root_marker
 
 async def build_environment_git_status(context) -> str:
     from backend.agent.prompting import _format_git_status_context
-    from backend.tools.git_support import _GIT_REPOSITORY_ENV, _is_git_repository_env
+    from backend.workspace.executor_git import run_executor_git_metadata
     from backend.workspace.executor_service import ExecutorWorkspaceService
-    from backend.sandbox.policy import PermissionProfile
 
     async with ExecutorWorkspaceService(context) as service:
-        # git-utils/info.rs runs its fixed metadata queries as host reads.
-        # A real denied-read scope still needs its original enforcing sandbox.
-        metadata_scope = (replace(service.scope, permission_profile=PermissionProfile.disabled())
-            if service.scope.has_full_disk_read_access() else service.scope)
-        hooks_path = "NUL" if service.cwd.convention == "windows" else "/dev/null"
-        git_prefix = ["git", "--no-optional-locks", "-c", "safe.bareRepository=explicit",
-            "-c", f"core.hooksPath={hooks_path}", "-c", "core.fsmonitor=false"]
-        policy = service.config.shell_environment_policy
-        environment_policy = {"inherit": policy.inherit, "ignoreDefaultExcludes": policy.ignore_default_excludes,
-            "exclude": [*policy.exclude, *_GIT_REPOSITORY_ENV, "GIT_CONFIG", "GIT_CONFIG_*"],
-            "includeOnly": list(policy.include_only),
-            "set": {key: value for key, value in policy.set_values.items() if not _is_git_repository_env(key)}}
-
         async def git(*args):
             from backend.async_cleanup import retain_cleanup_task
 
-            operation = asyncio.create_task(service.run([*git_prefix, *args], timeout=5,
-                env_policy=environment_policy, permission_scope=metadata_scope))
+            operation = asyncio.create_task(run_executor_git_metadata(service, args))
             retain_cleanup_task(operation, context.pending_cleanup_tasks)
             if context.run_context.retain_model is not None:
                 context.run_context.retain_model(context.llm, operation)

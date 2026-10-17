@@ -15,6 +15,19 @@ const loadApi = async (env: Record<string, string | boolean | undefined> = {}) =
   return import("./api");
 };
 
+describe("API error payloads", () => {
+  it("preserves the reason from typed workspace failures and existing error formats", async () => {
+    const { errorMessageFromResponseText } = await import("./api");
+    expect(errorMessageFromResponseText(JSON.stringify({ detail: {
+      code: "sandbox_unavailable", message: "Restricted executor is unavailable", environment_id: "remote-owned",
+    } }), "Service Unavailable")).toBe("Restricted executor is unavailable");
+    expect(errorMessageFromResponseText('{"detail":"Original executor refusal"}', "fallback")).toBe("Original executor refusal");
+    expect(errorMessageFromResponseText('{"detail":[{"msg":"Missing root"},{"msg":"Invalid path"}]}', "fallback")).toBe("Missing root; Invalid path");
+    expect(errorMessageFromResponseText("Plain error", "fallback")).toBe("Plain error");
+    expect(errorMessageFromResponseText(" ", "fallback")).toBe("fallback");
+  });
+});
+
 describe("api base URLs", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

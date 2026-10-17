@@ -27,6 +27,8 @@ import { prepareCodeReview } from "../protocol/code-review";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import "./CodeReviewComments.css";
 import type { CodeReviewComment } from "../lib/code-comment";
+import { useDiffPalette } from "../lib/use-diff-palette";
+import { diffPaletteStyle } from "../lib/diff-palette";
 
 type DiffViewMode = "unified" | "split";
 type ChangeScope = "review" | "history" | "git";
@@ -95,15 +97,15 @@ const visibleDiffLines = (lines: DiffLine[]): DiffLine[] =>
 const colorForKind = (kind: DiffLine["kind"]): string => {
   switch (kind) {
     case "add":
-      return "var(--diff-added-foreground)";
+      return "var(--diff-view-foreground)";
     case "del":
-      return "var(--diff-removed-foreground)";
+      return "var(--diff-view-foreground)";
     case "hunk":
       return "var(--accent-primary)";
     case "meta":
       return "var(--text-muted)";
     default:
-      return "var(--editor-foreground)";
+      return "var(--diff-view-foreground)";
   }
 };
 
@@ -145,6 +147,7 @@ const respond = async (requestId: string, approved: boolean) => {
 
 export const DiffPanel = () => {
   const { t: tr } = useI18n();
+  const { palette, variant } = useDiffPalette();
   const messages = useAppStore((s) => s.messages);
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
@@ -230,7 +233,7 @@ export const DiffPanel = () => {
   }, [scopeMenuOpen]);
 
   return (
-    <div className="mc-diff-panel h-full flex flex-col min-h-0">
+    <div className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
       <div className="mc-diff-toolbar flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
         {diffReview?.previewReturnTarget
           && diffReview.conversationId === conversationId
@@ -444,8 +447,8 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
         const i = line.lineIndex!;
         return (
         <div key={i} data-diff-index={i}>
-          <div className="mc-diff-code-row" style={{ background: bgForKind(line.kind) }}>
-          <DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={inline ? line.kind === "del" ? "old" : "new" : undefined} />
+          <div className="mc-diff-code-row" data-diff-kind={line.kind} style={{ background: bgForKind(line.kind) }}>
+          <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={inline ? line.kind === "del" ? "old" : "new" : undefined} /></div>
           <div
             className="mc-diff-code-content px-2.5 whitespace-pre-wrap break-words relative"
             role={onLineClick ? "button" : undefined}
@@ -458,7 +461,6 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
               }
             } : undefined}
             style={{
-              background: bgForKind(line.kind),
               borderLeft:
                 line.kind === "add"
                   ? "2px solid var(--diff-added-foreground)"
@@ -474,7 +476,7 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, wor
               }
             }}
           >
-            <span className="mc-diff-code-sign select-none" aria-hidden="true" style={{ color: colorForKind(line.kind) }}>
+            <span className="mc-diff-code-sign select-none" aria-hidden="true" style={{ color: line.kind === "add" ? "var(--diff-added-foreground)" : line.kind === "del" ? "var(--diff-removed-foreground)" : colorForKind(line.kind) }}>
               {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
             </span>
             {colorized?.[colorIndex] ? (
@@ -697,8 +699,8 @@ const SplitRowPair = ({ row, colorizedMap, onLineClick, filePath, workspaceRoot 
     const html = colorizedMap?.get(line);
     const clickable = onLineClick && lineIndex != null && (line.kind === "add" || line.kind === "del" || line.kind === "context");
     return (
-      <div className="mc-diff-code-row" data-diff-index={lineIndex} style={{ background: bg }}>
-      <DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={side === "left" ? "old" : "new"} />
+      <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-index={lineIndex} style={{ background: bg }}>
+      <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} side={side === "left" ? "old" : "new"} /></div>
       <div
         className="mc-diff-code-content px-2 whitespace-pre-wrap break-words"
         role={clickable ? "button" : undefined}
@@ -710,7 +712,7 @@ const SplitRowPair = ({ row, colorizedMap, onLineClick, filePath, workspaceRoot 
             onLineClick(lineIndex);
           }
         } : undefined}
-        style={{ background: bg, cursor: clickable ? "pointer" : undefined }}
+        style={{ cursor: clickable ? "pointer" : undefined }}
         onClick={clickable ? () => onLineClick(lineIndex) : undefined}
       >
         {html ? (
@@ -797,7 +799,7 @@ const fileDecisionBtnStyle: React.CSSProperties = {
 const diffToolbarStyle: React.CSSProperties = {
   minHeight: 34,
   borderBottom: "1px solid var(--border-subtle)",
-  background: "var(--editor-background)",
+  background: "var(--diff-view-background)",
 };
 
 const scopeTriggerStyle: React.CSSProperties = {

@@ -8,12 +8,13 @@ export const semanticThemeColorsSchema = z.object({
   diffRemoved: hexColor,
   skill: hexColor,
 });
-const selectionSchema = z.object({
+export const appearanceThemeSelectionSchema = z.object({
   codeThemeId: z.custom<CodeThemeId>(value => CODE_THEME_CATALOG.some(theme => theme.id === value)),
   contrast: z.number().int().min(0).max(100),
   opaqueWindows: z.boolean(),
   semanticColors: semanticThemeColorsSchema,
 });
+const selectionSchema = appearanceThemeSelectionSchema;
 export type AppearanceThemeSelection = z.infer<typeof selectionSchema>;
 export type AppearanceThemes = Record<AppearanceVariant, AppearanceThemeSelection | null>;
 export const emptyAppearanceThemes = (): AppearanceThemes => ({ light: null, dark: null });

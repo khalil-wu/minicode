@@ -11,8 +11,9 @@ import type {
   ResolvedTheme,
 } from "./types";
 import { clamp } from "../lib/clamp";
-import { applyAppearanceColors, parseAppearanceColors } from "../lib/appearance-colors";
-import { parseAppearanceThemes } from "../lib/appearance-themes";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { emptyAppearanceThemes } from "../lib/appearance-themes";
+import { APPEARANCE_STORAGE_KEYS, readAppearanceStorage } from "../lib/appearance-storage";
 import { rightPanelDefaultWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
 import { clampTextScale } from "../lib/text-scale";
 import { safeJsonParse } from "../lib/safe-parse";
@@ -35,9 +36,12 @@ import {
 // ── LocalStorage keys ──────────────────────────────────────────────
 
 export const LS = {
-  theme: "minicode.theme",
-  appearanceColors: "minicode.appearance.colors",
-  appearanceThemes: "minicode.appearance.themes",
+  theme: APPEARANCE_STORAGE_KEYS.mode,
+  // Retained names identify the authored settings migrated by appearance-storage.
+  appearanceColors: APPEARANCE_STORAGE_KEYS.legacyColors,
+  appearanceThemes: APPEARANCE_STORAGE_KEYS.legacyThemes,
+  appearanceLight: APPEARANCE_STORAGE_KEYS.light,
+  appearanceDark: APPEARANCE_STORAGE_KEYS.dark,
   textScale: "minicode.textScale",
   codeTextScale: "minicode.codeTextScale",
   reducedMotion: "minicode.reducedMotion",
@@ -117,11 +121,17 @@ export const resolveTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
   return resolved;
 };
 
-export const applyTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
+// Store-only tools run without a renderer. Persistence belongs to the window.
+export const initialAppearanceState = () => typeof window === "undefined"
+  ? { appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() }
+  : readAppearanceStorage();
+
+// Painting consumes renderer state; persistence initialization stays with its owner.
+export const applyTheme = (mode: UISlice["themeMode"], appearance?: ReturnType<typeof readAppearanceStorage>): ResolvedTheme => {
   const resolved = resolveTheme(mode);
   if (typeof document !== "undefined") {
     document.documentElement.setAttribute("data-theme", resolved);
-    applyAppearanceColors(resolved, initialAppearanceColors(), initialAppearanceThemes());
+    if (appearance) applyAppearanceColors(resolved, appearance.appearanceColors, appearance.appearanceThemes);
   }
   return resolved;
 };
@@ -149,8 +159,8 @@ export const initialTheme = (): UISlice["themeMode"] => {
   return "system";
 };
 
-export const initialAppearanceColors = () => parseAppearanceColors(readLS(LS.appearanceColors));
-export const initialAppearanceThemes = () => parseAppearanceThemes(readLS(LS.appearanceThemes));
+export const initialAppearanceColors = () => initialAppearanceState().appearanceColors;
+export const initialAppearanceThemes = () => initialAppearanceState().appearanceThemes;
 
 export const initialTextScale = (): number => {
   const v = parseFloat(readLS(LS.textScale) ?? "");

@@ -5,6 +5,8 @@ import { guessLanguageFromPath, useColorizedLines } from "../../lib/monaco-color
 import { extractFilePathFromDiff, parseUnifiedDiffLines, type UnifiedDiffLine } from "../../lib/unified-diff";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { useDiffPalette } from "../../lib/use-diff-palette";
+import { diffPaletteStyle } from "../../lib/diff-palette";
 import "./InlineDiff.css";
 
 type DiffLine = {
@@ -138,8 +140,9 @@ function FileDiff({ file, contextLines, readingKey }: { file: DiffFile; contextL
 
 export function InlineDiff({ patch, contextLines, filePath, readingKey = "inline-diff" }: { patch: string; contextLines?: number; filePath?: string; readingKey?: string }) {
   const { t: tr } = useI18n();
+  const { palette, variant } = useDiffPalette();
   const files = useMemo(() => parseFiles(patch, filePath), [patch, filePath]);
-  return <div className="inline-diff" role="region" aria-label={tr("文件修改差异")}>
+  return <div className="inline-diff" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)} role="region" aria-label={tr("文件修改差异")}>
     {files.map((file, index) => <div key={`${index}:${file.path}`}>
       {files.length > 1 && file.path && <div className="inline-diff-file-title">{tr("文件：")}{file.path}</div>}
       <FileDiff file={file} contextLines={contextLines} readingKey={`${readingKey}:file:${index}:${file.path}`} />

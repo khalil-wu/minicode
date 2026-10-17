@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 import json
 import socket
 import os
@@ -189,6 +190,86 @@ async def test_http_index_git_and_stale_owner_do_not_read_the_controller(editor_
         assert missing_manager.status_code == 503 and "No usable execution environment" in missing_manager.text, missing_manager.text
     finally:
         server.session.environment_manager = original_manager
+    assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
+
+
+@pytest.mark.parametrize("denied_read", [False, True])
+@pytest.mark.asyncio
+async def test_confirm_http_git_metadata_keeps_accepted_executor_and_real_read_restrictions(editor_server, denied_read, monkeypatch):
+    from backend.sandbox.policy import (FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry,
+        FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile)
+    server = editor_server
+    if denied_read and server.host.environments.primary().peer_info["platformOs"] != "windows":
+        pytest.skip("Exercises the Windows unelevated sandbox's real deny-read rejection")
+    async with capture_workspace_execution(server.session, server.params["conversation_id"], environment_id=server.params["environment_id"]) as context:
+        async with ExecutorWorkspaceService(context) as service:
+            initialized = await service.run(["git", "init"])
+            assert initialized.returncode == 0, initialized.stderr
+    captured_scopes, filesystem_scopes, starts, processes = [], [], [], []
+
+    @asynccontextmanager
+    async def managed_capture(*args, **kwargs):
+        async with capture_workspace_execution(*args, **kwargs) as original:
+            entries = [
+                FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ),
+                FileSystemSandboxEntry(FileSystemPath.special(FileSystemSpecialPath.PROJECT_ROOTS), FileSystemAccessMode.WRITE),
+            ]
+            if denied_read:
+                entries.append(FileSystemSandboxEntry(FileSystemPath("path", (server.host.workspace / "private.txt").as_uri()), FileSystemAccessMode.DENY))
+            scope = replace(original.permission.environment_scope,
+                permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted(entries)))
+            captured_scopes.append(scope)
+            yield replace(original, permission=replace(original.permission, mode="confirm", environment_scope=scope))
+
+    original_start = server.host.environments.primary().environment.process.start
+    async def observed_start(argv, cwd, **kwargs):
+        starts.append((argv, cwd, kwargs["sandbox"]))
+        assert kwargs["sandbox"] is None
+        process = await original_start(argv, cwd, **kwargs)
+        processes.append(process)
+        return process
+
+    original_metadata = server.host.environments.primary().environment.filesystem.get_metadata
+    async def observed_metadata(path, **kwargs):
+        filesystem_scopes.append(kwargs["sandbox"])
+        assert kwargs["sandbox"] == captured_scopes[-1].sandbox_context()
+        return await original_metadata(path, **kwargs)
+
+    def no_account(*_args, **_kwargs):
+        raise AssertionError("Fixed full-read UI metadata must not acquire sandbox accounts")
+
+    monkeypatch.setattr("backend.services.workspace_api_service.capture_workspace_execution", managed_capture)
+    monkeypatch.setattr(server.host.environments.primary().environment.process, "start", observed_start)
+    monkeypatch.setattr(server.host.environments.primary().environment.filesystem, "get_metadata", observed_metadata)
+    monkeypatch.setattr("backend.sandbox.windows_native.discover_runtime", no_account)
+    for endpoint in ("status", "diff", "worktree"):
+        response = await server.client.get(f"/api/workspace/git/{endpoint}", params=server.params)
+        if denied_read:
+            detail = response.json()["detail"]
+            if server.host.kind == "local":
+                assert response.status_code == 503, response.text
+                assert detail["code"] == "sandbox_unavailable"
+                assert detail["environment_id"] == server.params["environment_id"]
+                assert "cannot enforce filesystem read restrictions" in detail["message"]
+            else:
+                assert response.status_code == 502, response.text
+                assert detail["executor_code"] == -32600
+                assert "refusing to run unsandboxed" in detail["message"]
+            assert not starts
+        else:
+            assert response.status_code == 200, response.text
+            assert response.json()["is_git_repo"] is True
+            assert response.json()["environment_id"] == server.params["environment_id"]
+            assert response.json()["path_uri"] == server.host.workspace.as_uri()
+            if endpoint == "status":
+                assert "same.txt" in response.json()["untracked"]
+            if endpoint == "diff":
+                assert "+actual executor" in response.json()["diff"]
+    assert filesystem_scopes
+    if not denied_read:
+        assert starts and all(cwd == server.host.workspace.as_uri() for _, cwd, _ in starts)
+    assert all(scope.has_full_disk_read_access() is not denied_read for scope in captured_scopes)
+    assert all(process.closed and process.released for process in processes)
     assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
 
 

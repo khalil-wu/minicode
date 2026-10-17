@@ -184,9 +184,10 @@ def remove_agent_worktree(worktree: AgentWorktree) -> bool:
         stderr = (result.stderr or "").strip() if result is not None else "git unavailable"
         logger.warning("Failed to remove agent worktree %s: %s", worktree.worktree_path, stderr)
         return False
-    branch_result = _git(worktree.git_root, "branch", "-D", worktree.branch)
+    temporary_branch = f"minicode/{worktree.worktree_path.name}"
+    branch_result = _git(worktree.git_root, "branch", "-D", temporary_branch)
     if branch_result is None or branch_result.returncode != 0:
-        logger.warning("Could not delete agent worktree branch %s", worktree.branch)
+        logger.warning("Could not delete agent worktree branch %s", temporary_branch)
     logger.info("Removed agent worktree %s", worktree.worktree_path)
     return True
 

@@ -1,7 +1,7 @@
 .mc-diff-panel {
   container-type: inline-size;
   container-name: mc-diff-panel;
-  background: var(--editor-background);
+  background: var(--diff-view-background);
 }
 
 .mc-diff-total-counts { display: inline-flex; gap: 6px; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
@@ -75,9 +75,15 @@
 .mc-diff-code-sign { display: inline-block; width: 1.5ch; font: inherit; }
 
 .mc-diff-reading-surface {
-  background: var(--editor-background);
-  color: var(--editor-foreground);
+  background: var(--diff-view-background);
+  color: var(--diff-view-foreground);
 }
+
+.mc-diff-gutter-cell { display: flex; flex: 0 0 auto; align-items: stretch; }
+.mc-diff-panel[data-diff-palette] [data-diff-kind="add"] > .mc-diff-gutter-cell { background: var(--diff-added-gutter-background); }
+.mc-diff-panel[data-diff-palette] [data-diff-kind="del"] > .mc-diff-gutter-cell { background: var(--diff-removed-gutter-background); }
+.mc-diff-panel[data-diff-palette] [data-diff-kind="add"] .mc-diff-line-gutter { color: var(--diff-added-foreground); }
+.mc-diff-panel[data-diff-palette] [data-diff-kind="del"] .mc-diff-line-gutter { color: var(--diff-removed-foreground); }
 
 .mc-diff-code-body {
   font-family: var(--editor-font-family);
@@ -220,7 +226,7 @@
   min-height: 34px;
   padding: 5px 12px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--editor-background);
+  background: var(--diff-view-background);
   font-size: var(--text-xs);
 }
 

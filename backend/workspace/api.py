@@ -80,6 +80,7 @@ def create_workspace_router() -> APIRouter:
     async def _request_service(request: Request):
         from backend.api import _state
         from backend.environments.errors import ExecutorError, ExecutorRpcError
+        from backend.sandbox.runner import SandboxUnavailableError
         from backend.services.workspace_api_service import capture_workspace_execution
         from backend.workspace.executor_editor import ExecutorEditorService
         from backend.workspace.executor_paths import ExecutorPath
@@ -128,6 +129,9 @@ def create_workspace_router() -> APIRouter:
                 service = ExecutorEditorService(context, application_config=session.config, editor_root=editor_root)
                 try:
                     yield service
+                except SandboxUnavailableError as error:
+                    raise HTTPException(503, {"code": "sandbox_unavailable", "message": str(error),
+                        "environment_id": context.environment_id}) from error
                 finally:
                     await service.aclose()
         except ExecutorRpcError as error:

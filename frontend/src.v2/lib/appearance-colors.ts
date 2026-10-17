@@ -8,7 +8,8 @@ export type AppearanceColorValues = Record<AppearanceColorRole, string>;
 export type AppearanceColors = Record<AppearanceVariant, AppearanceColorValues | null>;
 
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/).transform(value => value.toLowerCase());
-const colorValues = z.object({ accent: hexColor, surface: hexColor, ink: hexColor });
+export const appearanceColorValuesSchema = z.object({ accent: hexColor, surface: hexColor, ink: hexColor });
+const colorValues = appearanceColorValuesSchema;
 const savedColors = z.object({ light: colorValues.nullable(), dark: colorValues.nullable() });
 export const emptyAppearanceColors = (): AppearanceColors => ({ light: null, dark: null });
 export const parseAppearanceColors = (raw: string | null): AppearanceColors =>

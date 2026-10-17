@@ -2,6 +2,11 @@
   border-left: 2px solid transparent;
 }
 
+.inline-diff[data-diff-palette] { background: var(--diff-view-background); color: var(--diff-view-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line { color: var(--diff-view-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line-added .inline-diff-number { background: var(--diff-added-gutter-background); color: var(--diff-added-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line-removed .inline-diff-number { background: var(--diff-removed-gutter-background); color: var(--diff-removed-foreground); }
+
 .inline-diff .inline-diff-line-added {
   border-left-color: var(--diff-added-foreground);
   background: var(--diff-added-background);

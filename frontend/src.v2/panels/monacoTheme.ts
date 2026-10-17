@@ -3,6 +3,7 @@ import type { editor } from "monaco-editor";
 import type { ResolvedTheme } from "../stores/types";
 import type * as Monaco from "monaco-editor";
 import type { CodeThemeId } from "../lib/code-themes";
+import { createDiffPalette, loadDiffCodeColors, monacoDiffPaletteColors } from "../lib/diff-palette";
 
 export const miniCodeMonacoThemeName = (theme: ResolvedTheme) => `minicode-${theme}`;
 
@@ -100,12 +101,20 @@ export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name
       "diffEditorGutter.removedLineBackground": color("--diff-removed-background"),
     },
   };
+  const chrome = { accent: color("--accent-primary"), surface: color("--surface-base"), ink: color("--text-primary") };
+  const semantic = { diffAdded: color("--diff-added-foreground"), diffRemoved: color("--diff-removed-foreground") };
+  Object.assign(data.colors!, monacoDiffPaletteColors(createDiffPalette(theme,
+    { fg: color("--editor-foreground"), bg: color("--editor-background") }, chrome, semantic)));
   monaco.editor.defineTheme(miniCodeMonacoThemeName(theme), data);
   const codeThemeId = document.documentElement.dataset.codeTheme as CodeThemeId | undefined;
   // The default path remains synchronous and does not load the grammar engine.
   if (codeThemeId || textMateLoaded) {
-    return import("./monacoTextMate").then(({ applyMonacoTextMate }) => {
+    return Promise.all([import("./monacoTextMate"), codeThemeId ? loadDiffCodeColors(codeThemeId, theme) : null]).then(([{ applyMonacoTextMate }, codeColors]) => {
       if (themeRequests.get(monaco) !== revision) return;
+      if (codeColors) {
+        const palette = createDiffPalette(theme, codeColors, chrome, semantic);
+        Object.assign(data.colors!, monacoDiffPaletteColors(palette));
+      }
       textMateLoaded = true;
       return applyMonacoTextMate(monaco as typeof Monaco, theme, codeThemeId ?? null, data);
     });

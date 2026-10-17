@@ -12,7 +12,8 @@ import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
 import { applyWorkbenchPreferences } from "../lib/workbench-preferences";
-import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
+import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, initialTheme, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
+import { isAppearanceStorageKey, readAppearanceStorage } from "../lib/appearance-storage";
 import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
@@ -124,8 +125,9 @@ useAppStore.subscribe(
 );
 
 export const syncSystemTheme = () => {
-  if (useAppStore.getState().themeMode !== "system") return;
-  const resolvedTheme = applyTheme("system");
+  const state = useAppStore.getState();
+  if (state.themeMode !== "system") return;
+  const resolvedTheme = applyTheme("system", state);
   if (useAppStore.getState().resolvedTheme !== resolvedTheme) {
     useAppStore.setState({ resolvedTheme });
   }
@@ -216,6 +218,15 @@ useAppStore.subscribe(
 );
 
 if (typeof window !== "undefined") {
+  window.addEventListener("storage", event => {
+    if (event.storageArea !== localStorage || !isAppearanceStorageKey(event.key)) return;
+    // Read the complete latest snapshot rather than replaying an older event
+    // payload after multiple windows have written their separate variants.
+    const appearance = readAppearanceStorage();
+    const themeMode = initialTheme();
+    const resolvedTheme = applyTheme(themeMode, appearance);
+    useAppStore.setState({ ...appearance, themeMode, resolvedTheme });
+  });
   window.addEventListener("beforeunload", event => {
     if (!hasPendingEditorDrafts() && useAppStore.getState().composerDraftsReady && !hasPendingComposerDrafts()) return;
     const desktop = window.__MINICODE_RUNTIME__?.desktop;
@@ -228,7 +239,8 @@ if (typeof window !== "undefined") {
     });
   });
   (window as typeof window & { __zustandStore?: typeof useAppStore }).__zustandStore = useAppStore;
-  const initialResolvedTheme = applyTheme(useAppStore.getState().themeMode);
+  const initialState = useAppStore.getState();
+  const initialResolvedTheme = applyTheme(initialState.themeMode, initialState);
   if (useAppStore.getState().resolvedTheme !== initialResolvedTheme) {
     useAppStore.setState({ resolvedTheme: initialResolvedTheme });
   }

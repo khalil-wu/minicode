@@ -9,6 +9,7 @@ import time
 from contextlib import closing, contextmanager
 from hashlib import sha256
 from pathlib import Path
+from backend.atomic_io import file_mutation_locks
 from backend.agent.runtime_records import _string_list, epoch_ms
 from typing import Any, Callable, Iterator
 from uuid import uuid4
@@ -210,6 +211,10 @@ def _message_lifecycle_index(content: Any) -> tuple[str, str]:
 logger = logging.getLogger(__name__)
 
 MAILBOX_MESSAGE_LEASE_MS = 30_000
+
+
+class SubagentResourceOwnershipError(RuntimeError):
+    """A departed execution no longer owns the exact resource it would retire."""
 
 
 class FileSwarmStore:
@@ -605,7 +610,10 @@ class FileSwarmStore:
         owner_token = str(record.get("runtime_owner_token") or "").strip()
         agent_path = str(record.get("agent_path") or "").strip()
         mailbox_epoch = max(0, int(record.get("mailbox_epoch") or 0))
-        with self._write() as connection:
+        previous = self.get_subagent(subagent_id)
+        resource_paths = [Path(item["resource_id"]) for source in (record, previous or {})
+            for item in source.get("cleanup_resources", []) if item["resource_kind"] == "worktree"]
+        with file_mutation_locks(resource_paths), self._write() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO subagent_runs(
@@ -805,7 +813,12 @@ class FileSwarmStore:
         active_owner_tokens: set[str],
         hydration_limit: int = 1000,
     ) -> dict[str, list[dict[str, Any]]]:
-        with self._write() as connection:
+        with closing(self._connect()) as reader:
+            resources = [json.loads(row["payload_json"]) for row in reader.execute(
+                "SELECT payload_json FROM subagent_runs WHERE status IN ('pending', 'running') OR json_extract(payload_json, '$.cleanup_pending') = 1").fetchall()]
+        resource_paths = [Path(item["resource_id"]) for record in resources
+            for item in record.get("cleanup_resources", []) if item["resource_kind"] == "worktree"]
+        with file_mutation_locks(resource_paths), self._write() as connection:
             retained_limit = max(1, min(int(hydration_limit), 10_000))
             run_rows = [
                 *connection.execute(
@@ -879,6 +892,8 @@ class FileSwarmStore:
                     FROM subagent_runs
                     WHERE status IN ('pending', 'running')
                        OR json_extract(payload_json, '$.cleanup_pending') = 1
+                       OR EXISTS (SELECT 1 FROM json_each(payload_json, '$.cleanup_resources') resource
+                                  WHERE json_extract(resource.value, '$.state') = 'continuation')
                     ORDER BY updated_at DESC, subagent_id
                     """
                 ).fetchall(),
@@ -888,6 +903,8 @@ class FileSwarmStore:
                     FROM subagent_runs
                     WHERE status NOT IN ('pending', 'running')
                       AND json_extract(payload_json, '$.cleanup_pending') IS NOT 1
+                      AND NOT EXISTS (SELECT 1 FROM json_each(payload_json, '$.cleanup_resources') resource
+                                      WHERE json_extract(resource.value, '$.state') = 'continuation')
                     ORDER BY updated_at DESC, subagent_id
                     LIMIT ?
                     """,
@@ -995,9 +1012,23 @@ class FileSwarmStore:
             (conversation_id, max(0, int(value))),
         )
 
-    def append_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def append_message(
+        self, payload: dict[str, Any], *, require_worktree_admission: bool = False,
+    ) -> dict[str, Any]:
         conversation_id = str(payload.get("conversation_id") or "").strip()
         with self._write() as connection:
+            if require_worktree_admission:
+                recipients = (payload.get("recipient_mailbox_epochs") or {}).keys() if payload.get("recipient_id") in {"all", "*"} else [payload.get("recipient_id")]
+                for recipient_id in recipients:
+                    row = connection.execute("SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
+                        (recipient_id,)).fetchone()
+                    if row is None:
+                        continue
+                    recipient = json.loads(row["payload_json"])
+                    resource = next((item for item in recipient["cleanup_resources"]
+                        if item["resource_kind"] == "worktree" and item["state"] in {"retiring", "released"}), None)
+                    if resource is not None:
+                        raise ValueError(f"Recipient {recipient_id}'s isolated workspace is being retired or has been released.")
             message = {
                 "message_id": str(payload.get("message_id") or _new_id("msg")),
                 "sender_id": str(payload.get("sender_id") or ""),
@@ -1241,6 +1272,135 @@ class FileSwarmStore:
             return False
         target_epoch = int(message.get("recipient_mailbox_epoch") or 0)
         return target_epoch == mailbox_epoch or (target_epoch == 0 and mailbox_epoch <= 1)
+
+    def defer_subagent_mailbox(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
+        expected_owner_token: str,
+    ) -> dict[str, Any] | None:
+        """Close admission and transfer unconsumed mail in one owner-fenced write.
+
+        Content, message identity and acknowledged deliveries stay unchanged.
+        Only routing for the departing recipient moves to its next incarnation.
+        """
+        previous = self.get_subagent(subagent_id)
+        resource_paths = [Path(item["resource_id"]) for item in (previous or {}).get("cleanup_resources", [])
+            if item["resource_kind"] == "worktree"]
+        with file_mutation_locks(resource_paths), self._write() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
+                (subagent_id,),
+            ).fetchone()
+            record = json.loads(row["payload_json"]) if row else None
+            if record is None or (
+                record["runtime_owner_token"] != expected_owner_token
+                or record["agent_path"] != agent_path
+                or record["mailbox_epoch"] != mailbox_epoch
+                or record["status"] not in {"pending", "running"}
+            ):
+                return None
+            if record["resume_config"].get("mailbox_closed_epoch") == mailbox_epoch:
+                return record
+            rows = connection.execute(
+                """
+                SELECT m.message_id, m.payload_json FROM messages m
+                LEFT JOIN mailbox_deliveries d
+                  ON d.message_id = m.message_id AND d.participant_id = ? AND d.mailbox_epoch = ?
+                WHERE (m.recipient_id = ? OR m.recipient_id IN ('all', '*'))
+                  AND COALESCE(d.status, '') != 'acked'
+                """,
+                (subagent_id, mailbox_epoch, subagent_id),
+            ).fetchall()
+            for message_row in rows:
+                message = json.loads(message_row["payload_json"])
+                if not self._message_targets_incarnation(
+                    message, participant_id=subagent_id, mailbox_epoch=mailbox_epoch,
+                ):
+                    continue
+                if message["recipient_id"] in {"all", "*"}:
+                    message.setdefault("recipient_mailbox_epochs", {})[subagent_id] = mailbox_epoch + 1
+                else:
+                    message["recipient_mailbox_epoch"] = mailbox_epoch + 1
+                connection.execute("UPDATE messages SET payload_json = ? WHERE message_id = ?",
+                    (_json(message), message_row["message_id"]))
+            record["resume_config"]["mailbox_closed_epoch"] = mailbox_epoch
+            for resource in record["cleanup_resources"]:
+                if resource["resource_kind"] == "worktree" and resource["state"] == "continuation":
+                    resource["metadata"]["continuation"]["mailbox_epoch"] = mailbox_epoch + 1
+            connection.execute(
+                "UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
+                (_json(record), epoch_ms(), subagent_id),
+            )
+        return record
+
+    def begin_subagent_worktree_retirement(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
+        resource_id: str, expected_owner_token: str, lifecycle_message_kinds: frozenset[str],
+        discard_mail: bool = False,
+        acquired_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Transfer the exact workspace to accepted mail or fence its deletion."""
+        with file_mutation_locks([Path(resource_id)]), self._write() as connection:
+            row = connection.execute("SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
+                (subagent_id,)).fetchone()
+            record = json.loads(row["payload_json"]) if row else None
+            if record is None or record["runtime_owner_token"] != expected_owner_token or record["agent_path"] != agent_path or record["mailbox_epoch"] != mailbox_epoch:
+                raise SubagentResourceOwnershipError("Worktree retirement lost its subagent owner/path/epoch fence")
+            resource = next((item for item in record["cleanup_resources"]
+                if item["resource_kind"] == "worktree" and item["resource_id"] == resource_id), None)
+            if resource is None:
+                if acquired_metadata is None:
+                    raise SubagentResourceOwnershipError("Worktree retirement has no registered resource or owned acquisition")
+                resource = {"resource_kind": "worktree", "resource_id": resource_id,
+                    "state": "active", "registered_at": epoch_ms(), "metadata": dict(acquired_metadata)}
+                record["cleanup_resources"].append(resource)
+            next_epoch = mailbox_epoch + 1
+            rows = connection.execute("""
+                SELECT m.message_id, m.payload_json, m.message_kind FROM messages m
+                LEFT JOIN mailbox_deliveries d
+                  ON d.message_id = m.message_id AND d.participant_id = ? AND d.mailbox_epoch = ?
+                WHERE (m.recipient_id = ? OR m.recipient_id IN ('all', '*'))
+                  AND COALESCE(d.status, '') != 'acked'
+                ORDER BY m.seq
+            """, (subagent_id, next_epoch, subagent_id)).fetchall()
+            accepted = [item["message_id"] for item in rows
+                if item["message_kind"] not in lifecycle_message_kinds and self._message_targets_incarnation(
+                    json.loads(item["payload_json"]), participant_id=subagent_id, mailbox_epoch=next_epoch)]
+            if discard_mail:
+                accepted = []
+            resource["state"] = "continuation" if accepted else "retiring"
+            if accepted:
+                resource["receipt"] = "pending_mailbox_continuation"
+                resource["metadata"]["continuation"] = {
+                    "agent_path": agent_path, "mailbox_epoch": next_epoch, "message_ids": accepted,
+                }
+            else:
+                resource["metadata"].pop("continuation", None)
+            connection.execute("UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
+                (_json(record), epoch_ms(), subagent_id))
+        return record
+
+    def cleanup_subagent_worktree_resource(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
+        resource_id: str, expected_owner_token: str, cleanup: Callable[[], tuple[bool, str, bool]],
+    ) -> tuple[dict[str, Any], tuple[bool, str, bool]]:
+        """Hold only this resource's existing process/file lock across cleanup."""
+        with file_mutation_locks([Path(resource_id)]):
+            record = self.get_subagent(subagent_id)
+            if record is None or record["runtime_owner_token"] != expected_owner_token or record["agent_path"] != agent_path or record["mailbox_epoch"] != mailbox_epoch:
+                raise SubagentResourceOwnershipError("Physical worktree cleanup lost its subagent owner/path/epoch fence")
+            resource = next(item for item in record["cleanup_resources"]
+                if item["resource_kind"] == "worktree" and item["resource_id"] == resource_id)
+            if resource["state"] != "retiring":
+                raise SubagentResourceOwnershipError("Physical worktree cleanup does not own a retiring resource")
+            result = cleanup()
+            kept, _, had_changes = result
+            if not kept or had_changes:
+                resource.update(state="retained" if kept else "released",
+                    receipt="retained_user_changes" if kept else "removed_clean_worktree", settled_at=epoch_ms())
+            with self._write() as connection:
+                connection.execute("UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
+                    (_json(record), epoch_ms(), subagent_id))
+        return record, result
 
     def claim_messages(
         self,
@@ -1975,206 +2135,144 @@ class FileSwarmStore:
         conversation_id: str,
         *,
         allowed_active_owner_tokens: set[str] | None = None,
-        before_delete: Callable[[dict[str, list[str]]], list[dict[str, str]]] | None = None,
+        before_delete: Callable[[dict[str, Any]], list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
-        """Delete every durable swarm/runtime record owned by a conversation."""
+        """Retire owned resources outside SQLite, then delete the same owner snapshot."""
         owner = str(conversation_id or "").strip()
         empty = {"run_ids": [], "subagent_ids": [], "task_ids": [], "message_ids": [], "team_ids": []}
         if not owner:
             return empty
 
-        with self._write() as connection:
-            if allowed_active_owner_tokens is not None:
-                active_owner_tokens = {
-                    str(row["owner_token"] or "")
-                    for row in connection.execute(
-                        "SELECT owner_token FROM runtime_leases WHERE expires_at > ?",
-                    (epoch_ms(),),
-                    ).fetchall()
-                    if str(row["owner_token"] or "")
-                }
-                protected_owner_tokens = active_owner_tokens - {
-                    str(token or "").strip()
-                    for token in allowed_active_owner_tokens
-                    if str(token or "").strip()
-                }
-                if protected_owner_tokens:
-                    conversation_owner_tokens = {
-                        str(row["owner_token"] or "")
-                        for row in connection.execute(
-                            """
-                            WITH RECURSIVE owned_subagents(subagent_id) AS (
-                                SELECT subagent_id FROM subagent_runs
-                                WHERE parent_run_id IN (
-                                    SELECT run_id FROM agent_runs WHERE conversation_id = ?
-                                ) OR task_id IN (
-                                    SELECT task_id FROM tasks WHERE conversation_id = ?
-                                )
-                                UNION
-                                SELECT child.subagent_id
-                                FROM subagent_runs AS child
-                                JOIN owned_subagents AS parent
-                                  ON child.parent_run_id = parent.subagent_id
-                            )
-                            SELECT owner_token FROM agent_runs
-                            WHERE conversation_id = ? AND owner_token != ''
-                            UNION
-                            SELECT owner_token FROM subagent_runs
-                            WHERE owner_token != ''
-                              AND subagent_id IN (SELECT subagent_id FROM owned_subagents)
-                            """,
-                            (owner, owner, owner),
-                        ).fetchall()
-                        if str(row["owner_token"] or "")
-                    }
-                    if conversation_owner_tokens & protected_owner_tokens:
-                        raise RuntimeError(
-                            "conversation runtime is still owned by another live process"
-                        )
-            run_ids = [
-                str(row["run_id"])
-                for row in connection.execute(
-                    "SELECT run_id FROM agent_runs WHERE conversation_id = ?", (owner,)
-                ).fetchall()
-            ]
-            task_ids = [
-                str(row["task_id"])
-                for row in connection.execute(
-                    "SELECT task_id FROM tasks WHERE conversation_id = ?", (owner,)
-                ).fetchall()
-            ]
-            message_ids = [
-                str(row["message_id"])
-                for row in connection.execute(
-                    "SELECT message_id FROM messages WHERE conversation_id = ?", (owner,)
-                ).fetchall()
-            ]
-            team_ids = [
-                str(row["team_id"])
-                for row in connection.execute(
-                    "SELECT team_id FROM teams WHERE conversation_id = ?", (owner,)
-                ).fetchall()
-            ]
-
-            subagent_ids = [
-                str(row["subagent_id"])
-                for row in connection.execute(
-                    """
-                    WITH RECURSIVE owned_subagents(subagent_id) AS (
-                        SELECT subagent_id FROM subagent_runs
-                        WHERE parent_run_id IN (
-                            SELECT run_id FROM agent_runs WHERE conversation_id = ?
-                        ) OR task_id IN (
-                            SELECT task_id FROM tasks WHERE conversation_id = ?
-                        )
-                        UNION
-                        SELECT child.subagent_id
-                        FROM subagent_runs AS child
-                        JOIN owned_subagents AS parent
-                          ON child.parent_run_id = parent.subagent_id
+        def read_scope(connection):
+            runs = connection.execute(
+                "SELECT run_id, owner_token, payload_json FROM agent_runs WHERE conversation_id = ? ORDER BY run_id",
+                (owner,),
+            ).fetchall()
+            children = connection.execute(
+                """
+                WITH RECURSIVE owned_subagents(subagent_id) AS (
+                    SELECT subagent_id FROM subagent_runs
+                    WHERE parent_run_id IN (
+                        SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                    ) OR task_id IN (
+                        SELECT task_id FROM tasks WHERE conversation_id = ?
                     )
-                    SELECT subagent_id FROM owned_subagents
-                    """,
-                    (owner, owner),
-                ).fetchall()
-            ]
+                    UNION
+                    SELECT child.subagent_id FROM subagent_runs AS child
+                    JOIN owned_subagents AS parent ON child.parent_run_id = parent.subagent_id
+                )
+                SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
+                FROM subagent_runs WHERE subagent_id IN (SELECT subagent_id FROM owned_subagents)
+                ORDER BY subagent_id
+                """,
+                (owner, owner),
+            ).fetchall()
+            ids = {
+                "run_ids": [row["run_id"] for row in runs],
+                "subagent_ids": [row["subagent_id"] for row in children],
+            }
+            for key, table, column in (
+                ("task_ids", "tasks", "task_id"),
+                ("message_ids", "messages", "message_id"),
+                ("team_ids", "teams", "team_id"),
+            ):
+                ids[key] = [row[column] for row in connection.execute(
+                    f"SELECT {column} FROM {table} WHERE conversation_id = ? ORDER BY {column}", (owner,),
+                ).fetchall()]
+            return ids, [tuple(row) for row in runs], [tuple(row) for row in children]
 
+        def require_owner(connection, runs, children):
+            if allowed_active_owner_tokens is None:
+                return
+            protected = {
+                str(row["owner_token"]) for row in connection.execute(
+                    "SELECT owner_token FROM runtime_leases WHERE expires_at > ?", (epoch_ms(),),
+                ).fetchall()
+            } - {str(token or "").strip() for token in allowed_active_owner_tokens}
+            if protected & {str(row[1]) for row in runs + children}:
+                raise RuntimeError("conversation runtime is still owned by another live process")
+
+        with closing(self._connect()) as reader:
+            initial_ids, _initial_runs, initial_children = read_scope(reader)
+        resource_paths = [
+            Path(item["resource_id"]) for row in initial_children
+            for item in json.loads(row[4]).get("cleanup_resources", [])
+            if item["resource_kind"] == "worktree"
+        ]
+        with file_mutation_locks(resource_paths):
+            with self._write() as connection:
+                ids, runs, children = read_scope(connection)
+                require_owner(connection, runs, children)
+                if ids != initial_ids or children != initial_children:
+                    raise SubagentResourceOwnershipError(
+                        "Conversation ownership changed before resource retirement"
+                    )
+                subagent_records = []
+                if before_delete is not None:
+                    for row in children:
+                        record = json.loads(row[4])
+                        retiring = False
+                        for resource in record.get("cleanup_resources", []):
+                            if resource["resource_kind"] == "worktree" and resource["state"] == "continuation":
+                                resource["state"] = "retiring"
+                                resource["metadata"].pop("continuation", None)
+                                retiring = True
+                        if retiring:
+                            record.update(cleanup_pending=True, cleanup_reason="conversation_deleted",
+                                cleanup_requested_at=epoch_ms(), cleanup_completed_at=None)
+                            connection.execute(
+                                "UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
+                                (_json(record), epoch_ms(), record["subagent_id"]),
+                            )
+                        subagent_records.append(record)
+                frozen_scope = read_scope(connection)
+
+            # The resource lock excludes takeover of these worktrees. Other
+            # recipients keep their normal short SQLite message transactions.
             if before_delete is not None:
-                cleanup_errors = before_delete({
-                    "run_ids": run_ids, "subagent_ids": subagent_ids,
-                    "task_ids": task_ids, "message_ids": message_ids, "team_ids": team_ids,
-                })
+                cleanup_errors = before_delete({**ids, "subagent_records": subagent_records})
                 if cleanup_errors:
-                    # Keep the durable ownership index until all associated
-                    # files are removed. A later purge can retry those exact ids.
                     return {**empty, "cleanup_errors": cleanup_errors, "cleanup_pending": True}
 
-            connection.executemany(
-                "DELETE FROM lifecycle_response_fences WHERE participant_id = ?",
-                ((subagent_id,) for subagent_id in subagent_ids),
-            )
-            connection.execute(
-                """
-                WITH RECURSIVE owned_subagents(subagent_id) AS (
-                    SELECT subagent_id FROM subagent_runs
-                    WHERE parent_run_id IN (
-                        SELECT run_id FROM agent_runs WHERE conversation_id = ?
-                    ) OR task_id IN (
-                        SELECT task_id FROM tasks WHERE conversation_id = ?
+            with self._write() as connection:
+                current_scope = read_scope(connection)
+                require_owner(connection, current_scope[1], current_scope[2])
+                if current_scope != frozen_scope:
+                    raise SubagentResourceOwnershipError(
+                        "Conversation ownership changed while its resources were retiring"
                     )
-                    UNION
-                    SELECT child.subagent_id
-                    FROM subagent_runs AS child
-                    JOIN owned_subagents AS parent
-                      ON child.parent_run_id = parent.subagent_id
+                connection.executemany(
+                    "DELETE FROM lifecycle_response_fences WHERE participant_id = ?",
+                    ((subagent_id,) for subagent_id in ids["subagent_ids"]),
                 )
-                DELETE FROM subagent_results
-                WHERE subagent_id IN (SELECT subagent_id FROM owned_subagents)
-                """,
-                (owner, owner),
-            )
-            connection.execute(
-                """
-                WITH RECURSIVE owned_subagents(subagent_id) AS (
-                    SELECT subagent_id FROM subagent_runs
-                    WHERE parent_run_id IN (
-                        SELECT run_id FROM agent_runs WHERE conversation_id = ?
-                    ) OR task_id IN (
-                        SELECT task_id FROM tasks WHERE conversation_id = ?
-                    )
-                    UNION
-                    SELECT child.subagent_id
-                    FROM subagent_runs AS child
-                    JOIN owned_subagents AS parent
-                      ON child.parent_run_id = parent.subagent_id
+                connection.executemany(
+                    "DELETE FROM subagent_results WHERE subagent_id = ?",
+                    ((subagent_id,) for subagent_id in ids["subagent_ids"]),
                 )
-                DELETE FROM subagent_runs
-                WHERE subagent_id IN (SELECT subagent_id FROM owned_subagents)
-                """,
-                (owner, owner),
-            )
-            connection.execute("DELETE FROM agent_runs WHERE conversation_id = ?", (owner,))
-            connection.execute(
-                """
-                DELETE FROM mailbox_deliveries
-                WHERE message_id IN (
-                    SELECT message_id FROM messages WHERE conversation_id = ?
+                connection.executemany(
+                    "DELETE FROM subagent_runs WHERE subagent_id = ?",
+                    ((subagent_id,) for subagent_id in ids["subagent_ids"]),
                 )
-                """,
-                (owner,),
-            )
-            connection.execute("DELETE FROM messages WHERE conversation_id = ?", (owner,))
-            connection.execute(
-                """
-                DELETE FROM task_dependencies
-                WHERE blocker_task_id IN (
-                    SELECT task_id FROM tasks WHERE conversation_id = ?
-                ) OR blocked_task_id IN (
-                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                connection.execute("DELETE FROM agent_runs WHERE conversation_id = ?", (owner,))
+                connection.execute(
+                    "DELETE FROM mailbox_deliveries WHERE message_id IN "
+                    "(SELECT message_id FROM messages WHERE conversation_id = ?)", (owner,),
                 )
-                """,
-                (owner, owner),
-            )
-            connection.execute(
-                """
-                DELETE FROM task_outputs
-                WHERE task_id IN (
-                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                connection.execute("DELETE FROM messages WHERE conversation_id = ?", (owner,))
+                connection.execute(
+                    "DELETE FROM task_dependencies WHERE blocker_task_id IN "
+                    "(SELECT task_id FROM tasks WHERE conversation_id = ?) OR blocked_task_id IN "
+                    "(SELECT task_id FROM tasks WHERE conversation_id = ?)", (owner, owner),
                 )
-                """,
-                (owner,),
-            )
-            connection.execute("DELETE FROM tasks WHERE conversation_id = ?", (owner,))
-            connection.execute("DELETE FROM teams WHERE conversation_id = ?", (owner,))
-            connection.execute("DELETE FROM scope_counters WHERE conversation_id = ?", (owner,))
+                connection.execute(
+                    "DELETE FROM task_outputs WHERE task_id IN "
+                    "(SELECT task_id FROM tasks WHERE conversation_id = ?)", (owner,),
+                )
+                connection.execute("DELETE FROM tasks WHERE conversation_id = ?", (owner,))
+                connection.execute("DELETE FROM teams WHERE conversation_id = ?", (owner,))
+                connection.execute("DELETE FROM scope_counters WHERE conversation_id = ?", (owner,))
 
-        return {
-            "run_ids": run_ids,
-            "subagent_ids": subagent_ids,
-            "task_ids": task_ids,
-            "message_ids": message_ids,
-            "team_ids": team_ids,
-        }
+        return ids
 
     def conversation_agent_ids(self, conversation_id: str) -> dict[str, list[str]]:
         """Read durable run/task/subagent ownership without mutating records."""

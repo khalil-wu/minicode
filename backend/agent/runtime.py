@@ -21,7 +21,7 @@ from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Awaitable, Callable, Iterable, Literal
 from uuid import uuid4
 
 from backend.async_cleanup import (
@@ -128,9 +128,34 @@ def _notify_subagent_activity_changed(runtime: AgentRuntime) -> None:
 
 def _purge_conversation_files(
     agent_ids: set[str], *, conversation_id: str, journal_root: Path, outbox_root: Path,
+    subagent_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Remove known agent files while their durable ownership index still exists."""
     errors: list[dict[str, str]] = []
+    from backend.agent.worktree import cleanup_agent_worktree, has_worktree_changes, resume_agent_worktree
+
+    for record in subagent_records or []:
+        for resource in record.get("cleanup_resources", []):
+            if resource["resource_kind"] != "worktree" or resource["state"] not in {"active", "retiring", "continuation"}:
+                continue
+            path = Path(resource["resource_id"])
+            if not path.exists():
+                continue
+            try:
+                metadata = resource["metadata"]
+                worktree = resume_agent_worktree(path, expected_repo_root=metadata["git_root"],
+                    expected_subagent_id=record["subagent_id"], expected_head_commit=metadata["head_commit"])
+                if worktree is None:
+                    raise RuntimeError("Conversation worktree no longer matches its durable owner")
+                had_changes = has_worktree_changes(worktree)
+                kept, _ = cleanup_agent_worktree(worktree)
+                if kept and not had_changes:
+                    raise RuntimeError("Conversation worktree cleanup did not release its clean resource")
+            except Exception as exc:
+                errors.append({"resource": "worktree", "resource_id": str(path),
+                    "error_type": type(exc).__name__, "error": str(exc)[:500]})
+    if errors:
+        return errors
     for agent_id in sorted(agent_ids):
         try:
             delete_agent_journal(agent_id, base_dir=journal_root)
@@ -336,6 +361,15 @@ class AgentRuntime:
         self._subagent_capacity_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._subagent_cancel_events: dict[str, asyncio.Event] = {}
         self._subagent_completion_events: dict[str, asyncio.Event] = {}
+        self._subagent_mailbox_lock = threading.RLock()
+        self._subagent_mailbox_shutdown = False
+        self._subagent_mailbox_suspended: set[str] = set()
+        self._subagent_execution_finished: dict[str, asyncio.Future[None]] = {}
+        self._subagent_execution_started: dict[str, asyncio.Future[None]] = {}
+        self._subagent_mailbox_resumers: dict[
+            str, tuple[asyncio.AbstractEventLoop, Callable[[list[MailboxMessageClaim]], Awaitable[None]]]
+        ] = {}
+        self._subagent_mailbox_turns: dict[str, tuple[asyncio.Task[None], asyncio.Future[str | None]]] = {}
         # One provider-neutral activity feed powers every wait and lifecycle
         # projection. Waiters receive only bounded
         # metadata (kind/ids/sequence), never mailbox contents or provider raw
@@ -541,6 +575,10 @@ class AgentRuntime:
         stop their own heartbeat thread.
         """
 
+        if release_lease:
+            self._subagent_mailbox_shutdown = True
+            for task, _ in tuple(self._subagent_mailbox_turns.values()):
+                task.get_loop().call_soon_threadsafe(task.cancel)
         stop_event = self._lease_stop_event
         thread = self._lease_thread
         if stop_event is not None:
@@ -937,6 +975,8 @@ class AgentRuntime:
             read_only=read_only,
             write_scope=write_scope or [],
             resume_config={**(existing.resume_config if promoting_pending else {}), **(resume_config or {})},
+            cleanup_resources=[dict(item) for item in existing.cleanup_resources
+                if item.get("state") == "continuation"] if existing is not None else [],
             current_activity=current_activity,
             status="pending" if pending else "running",
             accepted_at=existing.accepted_at if promoting_pending else epoch_ms(),
@@ -1157,6 +1197,152 @@ class AgentRuntime:
             status=candidate.status,
         )
         return candidate
+
+    def bind_subagent_mailbox_resumer(
+        self, subagent_id: str, resume: Callable[[list[MailboxMessageClaim]], Awaitable[None]],
+        *, new_session: bool = False,
+    ) -> None:
+        if new_session:
+            self._subagent_mailbox_suspended.discard(subagent_id)
+        self._subagent_mailbox_resumers[subagent_id] = (asyncio.get_running_loop(), resume)
+
+    def register_subagent_execution(
+        self, subagent_id: str, finished: asyncio.Future[None], started: asyncio.Future[None],
+    ) -> None:
+        self._subagent_execution_finished[subagent_id] = finished
+        self._subagent_execution_started[subagent_id] = started
+
+    def subagent_execution_is_finished(self, subagent_id: str) -> bool:
+        finished = self._subagent_execution_finished.get(subagent_id)
+        return finished is None or finished.done()
+
+    async def wait_for_subagent_execution(self, subagent_id: str) -> None:
+        finished = self._subagent_execution_finished.get(subagent_id)
+        if finished is not None:
+            await asyncio.shield(finished)
+
+    def close_subagent_mailbox(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
+    ) -> None:
+        # send_swarm_message runs on worker threads. Routing and the terminal
+        # admission boundary must decide the recipient epoch under one lock.
+        with self._subagent_mailbox_lock:
+            if not self._refresh_runtime_lease():
+                raise RuntimeError("Runtime lease was lost before closing a subagent mailbox")
+            record = self._swarm_store.defer_subagent_mailbox(
+                subagent_id, agent_path=agent_path, mailbox_epoch=mailbox_epoch,
+                expected_owner_token=self._runtime_owner_token,
+            )
+            if record is None:
+                return
+            self._subagents[subagent_id] = _subagent_from_dict(record)
+        self.wake_subagent_mailbox(subagent_id)
+
+    def wake_subagent_mailbox(self, subagent_id: str) -> None:
+        binding = self._subagent_mailbox_resumers.get(subagent_id)
+        if binding is not None and not self._subagent_mailbox_shutdown and subagent_id not in self._subagent_mailbox_suspended:
+            binding[0].call_soon_threadsafe(self.start_subagent_mailbox_turn, subagent_id)
+
+    def begin_subagent_worktree_retirement(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int, resource_id: str,
+        discard_mail: bool = False,
+        acquired_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        from backend.agent.mailbox_delivery import _STRUCTURED_PROTOCOL_TYPES
+
+        with self._subagent_mailbox_lock:
+            raw = self._swarm_store.begin_subagent_worktree_retirement(subagent_id,
+                agent_path=agent_path, mailbox_epoch=mailbox_epoch, resource_id=resource_id,
+                expected_owner_token=self._runtime_owner_token,
+                lifecycle_message_kinds=_STRUCTURED_PROTOCOL_TYPES, discard_mail=discard_mail,
+                acquired_metadata=acquired_metadata)
+            record = self._subagents[subagent_id] = _subagent_from_dict(raw)
+            resource = next(item for item in record.cleanup_resources
+                if item["resource_kind"] == "worktree" and item["resource_id"] == resource_id)
+        self.execution_journal(subagent_id).append_cleanup({**resource,
+            "completed": resource["state"] == "continuation", "pending": False})
+        return resource["state"] == "continuation"
+
+    def cleanup_subagent_worktree_resource(
+        self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
+        resource_id: str, cleanup: Callable[[], tuple[bool, str, bool]],
+    ) -> tuple[bool, str, bool]:
+        raw, result = self._swarm_store.cleanup_subagent_worktree_resource(subagent_id,
+            agent_path=agent_path, mailbox_epoch=mailbox_epoch, resource_id=resource_id,
+            expected_owner_token=self._runtime_owner_token, cleanup=cleanup)
+        self._subagents[subagent_id] = _subagent_from_dict(raw)
+        return result
+
+    def start_subagent_mailbox_turn(self, subagent_id: str) -> asyncio.Future[str | None]:
+        """Coalesce trigger mail into real turns after the original owner retires."""
+        current = self._subagent_mailbox_turns.get(subagent_id)
+        if current is not None and not current[0].done():
+            return current[1]
+        started: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        if self._subagent_mailbox_shutdown or subagent_id in self._subagent_mailbox_suspended:
+            started.set_result("Agent runtime or its execution session is closed.")
+            return started
+
+        async def run_pending_turns() -> None:
+            from backend.agent.mailbox_delivery import is_structured_protocol_message
+
+            attempted: set[str] = set()
+            while True:
+                finished = self._subagent_execution_finished.get(subagent_id)
+                if finished is not None:
+                    await asyncio.shield(finished)
+                record = self.get_subagent(subagent_id)
+                if record is None or record.status in {"pending", "running"}:
+                    return
+                parent = self.get_agent_owner_run(record.parent_run_id)
+                if record.cancel_with_parent and parent is not None and parent.status in {"cancelled", "interrupted"}:
+                    return
+                conversation_id = self._conversation_id_for_agent(subagent_id)
+                triggers = self.claim_swarm_messages(
+                    participant_id=subagent_id, mailbox_epoch=record.mailbox_epoch + 1,
+                    conversation_id=conversation_id, trigger_turn_only=True,
+                )
+                if not any(claim.message.delivery_mode == "trigger_turn"
+                    and not is_structured_protocol_message(claim.message)
+                    and claim.message.message_id not in attempted for claim in triggers):
+                    self.release_swarm_message_claims(triggers)
+                    return
+                claims = sorted(triggers + self.claim_swarm_messages(
+                    participant_id=subagent_id, mailbox_epoch=record.mailbox_epoch + 1,
+                    conversation_id=conversation_id,
+                ), key=lambda claim: claim.message.seq)
+                attempted.update(claim.message.message_id for claim in claims)
+                try:
+                    await self._subagent_mailbox_resumers[subagent_id][1](claims)
+                    execution_started = self._subagent_execution_started[subagent_id]
+                    await asyncio.wait(
+                        {execution_started, self._subagent_execution_finished[subagent_id]},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not execution_started.done():
+                        result = self._subagent_results[subagent_id]
+                        raise RuntimeError(result.error or result.content or "Subagent stopped before execution started")
+                except BaseException:
+                    self.release_swarm_message_claims(claims)
+                    raise
+                if not started.done():
+                    started.set_result("")
+
+        task = asyncio.create_task(run_pending_turns(), name=f"subagent-mailbox:{subagent_id}")
+        self._subagent_mailbox_turns[subagent_id] = (task, started)
+
+        def settled(done: asyncio.Task[None]) -> None:
+            error = "Mailbox turn scheduling was cancelled." if done.cancelled() else done.exception()
+            if not started.done():
+                started.set_result(str(error) if error else None)
+            if self._subagent_mailbox_turns.get(subagent_id, (None,))[0] is done:
+                self._subagent_mailbox_turns.pop(subagent_id)
+            if error:
+                self.write_metric("subagent_mailbox_wake_failed", {"subagent_id": subagent_id, "error": str(error)})
+                logger.error("Subagent %s mailbox turn failed: %s", subagent_id, error)
+
+        task.add_done_callback(settled)
+        return started
 
     def complete_pending_subagent(
         self, subagent_id: str, *, status: AgentRunStatus, content: str, reason: str,
@@ -1786,7 +1972,7 @@ class AgentRuntime:
         record = self._subagents.get(record.subagent_id) or record
         completed = True
         for resource in record.cleanup_resources:
-            if str(resource.get("state") or "active") != "active":
+            if str(resource.get("state") or "active") not in {"active", "retiring"}:
                 continue
             if str(resource.get("resource_kind") or "") != "worktree":
                 completed = False
@@ -1814,16 +2000,23 @@ class AgentRuntime:
                     resume_agent_worktree,
                 )
 
-                worktree = resume_agent_worktree(
-                    path,
-                    expected_repo_root=git_root,
-                    expected_subagent_id=record.subagent_id,
-                )
-                if worktree is None:
-                    completed = False
-                    continue
-                had_changes = has_worktree_changes(worktree)
-                kept, _kept_path = cleanup_agent_worktree(worktree)
+                def cleanup() -> tuple[bool, str, bool]:
+                    worktree = resume_agent_worktree(path, expected_repo_root=git_root,
+                        expected_subagent_id=record.subagent_id,
+                        expected_head_commit=str(metadata.get("head_commit") or ""))
+                    if worktree is None:
+                        raise RuntimeError("Recovered worktree no longer matches its durable resource owner")
+                    had_changes = has_worktree_changes(worktree)
+                    kept, kept_path = cleanup_agent_worktree(worktree)
+                    return kept, kept_path, had_changes
+
+                if resource["state"] == "active":
+                    self.begin_subagent_worktree_retirement(record.subagent_id,
+                        agent_path=record.agent_path, mailbox_epoch=record.mailbox_epoch,
+                        resource_id=path_text, discard_mail=True)
+                kept, _kept_path, had_changes = self.cleanup_subagent_worktree_resource(
+                    record.subagent_id, agent_path=record.agent_path, mailbox_epoch=record.mailbox_epoch,
+                    resource_id=path_text, cleanup=cleanup)
                 if kept and not had_changes:
                     completed = False
                     continue
@@ -2182,6 +2375,9 @@ class AgentRuntime:
         session = str(session_id or "").strip()
         if not session:
             return True
+        mailbox_ids = {agent_id for agent_id, record in self._subagents.items()
+            if record.session_id == session or self._subagent_session_ids.get(agent_id) == session}
+        await self._stop_subagent_mailbox_schedulers(mailbox_ids)
         owned = [
             (subagent_id, task)
             for subagent_id, task in self._subagent_tasks.items()
@@ -2222,7 +2418,19 @@ class AgentRuntime:
             if not task.done()
             and (owner := self.get_agent_owner_run(agent_id)) is not None
             and owner.conversation_id == conversation_id
-        }
+        } | {task for agent_id, (task, _) in self._subagent_mailbox_turns.items()
+            if not task.done() and self._conversation_id_for_agent(agent_id) == conversation_id}
+
+    async def _stop_subagent_mailbox_schedulers(self, agent_ids: set[str]) -> None:
+        tasks = []
+        for agent_id in agent_ids:
+            self._subagent_mailbox_suspended.add(agent_id)
+            self._subagent_mailbox_resumers.pop(agent_id, None)
+            owned = self._subagent_mailbox_turns.get(agent_id)
+            if owned is not None and not owned[0].done():
+                owned[0].cancel()
+                tasks.append(owned[0])
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop_subagent_tasks_for_conversation(
         self,
@@ -2280,6 +2488,18 @@ class AgentRuntime:
             subagent_ids = next_ids
         owned_tasks: list[tuple[str, asyncio.Task[Any]]] = []
         for subagent_id in subagent_ids:
+            record = self.get_subagent(subagent_id)
+            if record is None:
+                record = self.load_persisted_subagent(subagent_id)
+                if record is not None:
+                    self._subagents[subagent_id] = record
+            if record is not None:
+                for resource in record.cleanup_resources:
+                    if resource["resource_kind"] == "worktree" and resource["state"] == "continuation":
+                        self.begin_subagent_worktree_retirement(subagent_id, agent_path=record.agent_path,
+                            mailbox_epoch=record.mailbox_epoch, resource_id=resource["resource_id"], discard_mail=True)
+        await self._stop_subagent_mailbox_schedulers(subagent_ids)
+        for subagent_id in subagent_ids:
             task = self._subagent_tasks.get(subagent_id)
             if task is not None and not task.done():
                 owned_tasks.append((subagent_id, task))
@@ -2321,6 +2541,16 @@ class AgentRuntime:
             return None
         payload = self._swarm_store.get_subagent(clean_id)
         return _subagent_from_dict(payload) if isinstance(payload, dict) else None
+
+    def restore_authorized_subagent_mailbox_target(self, payload: dict[str, Any]) -> SubagentRunRecord:
+        """Publish one caller-authorized durable identity before routing its mail.
+
+        This restores neither history nor a running worker. The existing
+        TaskTool checkpoint path owns trigger-turn execution recovery.
+        """
+        record = _subagent_from_dict(payload)
+        self._subagents[record.subagent_id] = record
+        return record
 
     def update_subagent_resume_config(
         self,
@@ -2998,6 +3228,8 @@ class AgentRuntime:
         recipient_mailbox_epoch: int | None = None,
         delivery_mode: Literal["queue_only", "trigger_turn"] = "trigger_turn",
     ) -> SwarmMessageRecord:
+        from backend.agent.mailbox_delivery import is_structured_protocol_message
+
         sender_record = self.get_subagent(sender_id)
         sender_run = self.get_run(sender_id) if sender_record is None else None
         # The mailbox protocol has a stable virtual leader participant. Keep that
@@ -3043,52 +3275,68 @@ class AgentRuntime:
                 )
         else:
             resolved_sender_epoch = max(0, int(sender_mailbox_epoch or 0))
-        expected_recipient_epoch = (
-            max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0)) + 1
-            if recipient_record is not None and str(recipient_record.status or "") not in {"pending", "running"}
-            else max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0))
-        )
-        resolved_recipient_epoch = (
-            max(0, int(recipient_mailbox_epoch))
-            if recipient_mailbox_epoch is not None
-            else expected_recipient_epoch
-        )
-        if recipient_record is not None and resolved_recipient_epoch != expected_recipient_epoch:
-            raise ValueError(
-                f"recipient incarnation mismatch for {recipient_id}: "
-                f"received epoch {resolved_recipient_epoch}, expected epoch {expected_recipient_epoch}"
+        with self._subagent_mailbox_lock:
+            recipient_record = self.get_subagent(effective_recipient_id)
+            expected_recipient_epoch = (
+                max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0)) + 1
+                if recipient_record is not None and (
+                    str(recipient_record.status or "") not in {"pending", "running"}
+                    or recipient_record.resume_config.get("mailbox_closed_epoch") == recipient_record.mailbox_epoch
+                )
+                else max(0, int(getattr(recipient_record, "mailbox_epoch", 0) or 0))
             )
-        broadcast_epochs: dict[str, int] = {}
-        if effective_recipient_id in {"all", "*"}:
-            for participant_id, participant in self._subagents.items():
-                if str(participant.status or "") != "running":
-                    continue
-                participant_conversation = self._conversation_id_for_agent(participant_id)
-                if conversation_id and participant_conversation != conversation_id:
-                    continue
-                if team_name and str(participant.team_name or "") != str(team_name):
-                    continue
-                broadcast_epochs[participant_id] = int(participant.mailbox_epoch or 0)
-            if not broadcast_epochs:
-                raise ValueError("broadcast has no running recipients in this conversation")
-        record = _swarm_message_from_dict(
-            self._swarm_store.append_message({
-                "sender_id": sender_id,
-                "recipient_id": effective_recipient_id,
-                "content": content,
-                "conversation_id": conversation_id,
-                "team_name": team_name,
-                "task_id": task_id,
-                "summary": summary,
-                "message_id": message_id,
-                "sender_mailbox_epoch": resolved_sender_epoch,
-                "recipient_mailbox_epoch": resolved_recipient_epoch,
-                "recipient_mailbox_epochs": broadcast_epochs,
-                "delivery_mode": delivery_mode,
-            })
-        )
+            resolved_recipient_epoch = (
+                max(0, int(recipient_mailbox_epoch))
+                if recipient_mailbox_epoch is not None
+                else expected_recipient_epoch
+            )
+            if recipient_record is not None and resolved_recipient_epoch != expected_recipient_epoch:
+                raise ValueError(
+                    f"recipient incarnation mismatch for {recipient_id}: "
+                    f"received epoch {resolved_recipient_epoch}, expected epoch {expected_recipient_epoch}"
+                )
+            broadcast_epochs: dict[str, int] = {}
+            if effective_recipient_id in {"all", "*"}:
+                for participant_id, participant in self._subagents.items():
+                    if str(participant.status or "") != "running":
+                        continue
+                    participant_conversation = self._conversation_id_for_agent(participant_id)
+                    if conversation_id and participant_conversation != conversation_id:
+                        continue
+                    if team_name and str(participant.team_name or "") != str(team_name):
+                        continue
+                    broadcast_epochs[participant_id] = int(participant.mailbox_epoch or 0) + int(
+                        participant.resume_config.get("mailbox_closed_epoch") == participant.mailbox_epoch
+                    )
+                if not broadcast_epochs:
+                    raise ValueError("broadcast has no running recipients in this conversation")
+            record = _swarm_message_from_dict(
+                self._swarm_store.append_message({
+                    "sender_id": sender_id,
+                    "recipient_id": effective_recipient_id,
+                    "content": content,
+                    "conversation_id": conversation_id,
+                    "team_name": team_name,
+                    "task_id": task_id,
+                    "summary": summary,
+                    "message_id": message_id,
+                    "sender_mailbox_epoch": resolved_sender_epoch,
+                    "recipient_mailbox_epoch": resolved_recipient_epoch,
+                    "recipient_mailbox_epochs": broadcast_epochs,
+                    "delivery_mode": delivery_mode,
+                }, require_worktree_admission=not is_structured_protocol_message(SwarmMessageRecord(
+                    message_id=message_id, sender_id=sender_id, recipient_id=effective_recipient_id,
+                    content=content)))
+            )
         self._swarm_messages[record.message_id] = record
         self.write_metric("swarm_message_sent", record.to_dict())
+        if (delivery_mode == "trigger_turn" and recipient_record is not None
+                and resolved_recipient_epoch > recipient_record.mailbox_epoch):
+            self.wake_subagent_mailbox(effective_recipient_id)
+        if delivery_mode == "trigger_turn":
+            for participant_id, target_epoch in broadcast_epochs.items():
+                if target_epoch > self._subagents[participant_id].mailbox_epoch:
+                    self.wake_subagent_mailbox(participant_id)
         activity_ids = [sender_id]
         if effective_recipient_id == "parent" and virtual_parent_run_id:
             activity_ids.append(virtual_parent_run_id)
@@ -3606,6 +3854,7 @@ class AgentRuntime:
             before_delete=lambda durable: _purge_conversation_files(
                 memory_run_ids | memory_subagent_ids | set(durable["run_ids"]) | set(durable["subagent_ids"]),
                 conversation_id=owner, journal_root=self._journal_root, outbox_root=self._outbox_root,
+                subagent_records=durable["subagent_records"],
             ),
         )
         if removed.get("cleanup_pending"):
@@ -3640,6 +3889,11 @@ class AgentRuntime:
             self._subagent_owner_task_ids.pop(subagent_id, None)
             self._subagent_session_ids.pop(subagent_id, None)
             self._subagent_slot_reservations.discard(subagent_id)
+            self._subagent_mailbox_suspended.discard(subagent_id)
+            self._subagent_mailbox_resumers.pop(subagent_id, None)
+            self._subagent_mailbox_turns.pop(subagent_id, None)
+            self._subagent_execution_finished.pop(subagent_id, None)
+            self._subagent_execution_started.pop(subagent_id, None)
             self._registry.discard(subagent_id, kind="subagent")
         self._subagent_name_registry = {
             name: subagent_id
@@ -3930,6 +4184,7 @@ def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]
             set(durable["run_ids"]) | set(durable["subagent_ids"]),
             conversation_id=owner, journal_root=SWARM_DIR.parent / "sidechains",
             outbox_root=SWARM_DIR.parent / "parent_notifications",
+            subagent_records=durable["subagent_records"],
         ),
     )
     return removed

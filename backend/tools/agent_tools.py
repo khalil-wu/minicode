@@ -20,7 +20,9 @@ from typing import Any
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder
-from backend.agent.mailbox_delivery import _run_is_conversation_leader
+from backend.agent.mailbox_delivery import (
+    _run_is_conversation_leader, format_subagent_mailbox_injection, is_structured_protocol_message,
+)
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
@@ -30,7 +32,8 @@ from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.run_context import RunContext
 from backend.agent.model_execution import ModelExecutionSnapshot
-from backend.agent.runtime_records import new_run_id
+from backend.agent.runtime_records import MailboxMessageClaim, new_run_id
+from backend.agent.swarm_store import SubagentResourceOwnershipError
 from backend.agent.rollout_budget import RolloutBudget
 from backend.agent.execution_journal import (
     ExecutionJournal,
@@ -105,6 +108,14 @@ from backend.tools.toolset_runtime import restore_toolset_policy
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _SubagentExecutionRetirement:
+    finished: asyncio.Future[None]
+    started: asyncio.Future[None]
+    cleanup_error: BaseException | None = None
+    worktree_cleanup_error: BaseException | None = None
 
 from backend.tools.subagent_support import (
     MAX_PARALLEL_CONCURRENCY,
@@ -1479,16 +1490,38 @@ class TaskTool(BaseTool):
             context.run_context.retain_model(prepared_llm_resolution.llm, task)
         return subagent_id
 
+    def bind_mailbox_resumer(
+        self, subagent_id: str, context: ToolExecutionContext, *, new_session: bool = False,
+    ) -> None:
+        runtime = require_runtime_from_context(context)
+        captured_context = replace(context, metadata=dict(context.metadata))
+
+        async def resume(claims: list[MailboxMessageClaim]) -> None:
+            record = runtime.get_subagent(subagent_id)
+            resume_context = replace(captured_context, cancel_event=None) if record.detach_from_parent else captured_context
+            lifecycle = [claim for claim in claims if is_structured_protocol_message(claim.message)]
+            runtime.ack_swarm_message_claims(lifecycle)
+            model_claims = [claim for claim in claims if claim not in lifecycle]
+            await self.resume_background_subtask(
+                subagent_id=subagent_id,
+                prompt=format_subagent_mailbox_injection([claim.message for claim in model_claims]),
+                context=resume_context, mailbox_claims=model_claims,
+            )
+
+        runtime.bind_subagent_mailbox_resumer(subagent_id, resume, new_session=new_session)
+
     async def resume_background_subtask(
         self,
         *,
         subagent_id: str,
         prompt: str,
         context: ToolExecutionContext | None,
+        mailbox_claims: list[MailboxMessageClaim] | None = None,
     ) -> str:
         """Resume a stopped agent from its canonical context checkpoint."""
 
         runtime = require_runtime_from_context(context)
+        await runtime.wait_for_subagent_execution(subagent_id)
         record = runtime.get_subagent(subagent_id)
         if record is not None and record.status == "running":
             raise RuntimeError(f"Subagent {subagent_id} is already running.")
@@ -1522,6 +1555,12 @@ class TaskTool(BaseTool):
             )
 
         previous_config: dict[str, Any] = dict(record.resume_config)
+        continuation_resource = next((item for item in record.cleanup_resources
+            if item["resource_kind"] == "worktree" and item["state"] == "continuation"), None)
+        if continuation_resource is not None:
+            continuation = continuation_resource["metadata"]["continuation"]
+            if continuation["agent_path"] != record.agent_path or continuation["mailbox_epoch"] != record.mailbox_epoch + 1:
+                raise RuntimeError("Saved worktree continuation does not belong to the next agent incarnation")
         runtime_config = runtime.get_subagent_task_metadata(subagent_id) or {}
         previous_config.update(runtime_config)
 
@@ -1671,6 +1710,10 @@ class TaskTool(BaseTool):
             subagent_metadata["_source_role_requested"] = False
         if persisted_task_name:
             subagent_metadata["_task_name"] = persisted_task_name
+        if mailbox_claims:
+            subagent_metadata["_resume_mailbox_claims"] = mailbox_claims
+        if continuation_resource is not None:
+            subagent_metadata["_resume_worktree_continuation"] = continuation_resource
         llm_resolution = await self._prepare_subagent_llm_resolution(
             context=context,
             agent_type=agent_type,
@@ -1801,6 +1844,8 @@ class TaskTool(BaseTool):
 
         assert llm_resolution is not None
         effective_subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
+        loop = asyncio.get_running_loop()
+        retirement = _SubagentExecutionRetirement(loop.create_future(), loop.create_future())
         parent_metadata = self._metadata_from_context(context)
         rollout_budget = parent_metadata.get("_rollout_budget")
         reservation_id = effective_subagent_id
@@ -1860,19 +1905,26 @@ class TaskTool(BaseTool):
                 llm_resolution=llm_resolution,
                 start_acknowledged=start_acknowledged,
                 rollout_reservation_id=(reservation_id if reserved_quota > 0 else ""),
+                retirement=retirement,
             )
         finally:
             if reserved_quota > 0:
                 rollout_budget.release_reservation(reservation_id)
-            if llm_resolution.owns_llm:
-                try:
+            try:
+                if llm_resolution.owns_llm:
                     await _close_subagent_llm_resolution(llm_resolution)
-                except Exception:
-                    logger.debug(
-                        "Failed closing child LLM adapter for %s",
-                        llm_resolution.model,
-                        exc_info=True,
-                    )
+            except BaseException as exc:
+                retirement.cleanup_error = exc
+                raise
+            finally:
+                cleanup_error = retirement.cleanup_error or retirement.worktree_cleanup_error
+                if cleanup_error is not None:
+                    retirement.finished.set_exception(cleanup_error)
+                    # The future is also the next-turn ownership barrier.
+                    # Retrieve the exception even when no follow-up is queued.
+                    retirement.finished.exception()
+                else:
+                    retirement.finished.set_result(None)
 
     async def _run_single_subtask_impl(
         self,
@@ -1893,6 +1945,7 @@ class TaskTool(BaseTool):
         llm_resolution: _SubagentLLMResolution,
         start_acknowledged: asyncio.Future[str] | None = None,
         rollout_reservation_id: str = "",
+        retirement: _SubagentExecutionRetirement,
     ) -> ToolResult:
         """Run one isolated subagent loop with progress reporting.
 
@@ -2133,6 +2186,11 @@ class TaskTool(BaseTool):
             "agent_path": str(getattr(subagent_record, "agent_path", "") or ""),
             "mailbox_epoch": int(getattr(subagent_record, "mailbox_epoch", 0) or 0),
         }
+        runtime.register_subagent_execution(subagent_id, retirement.finished, retirement.started)
+        self.bind_mailbox_resumer(subagent_id, context)
+        mailbox_claims = (subagent_metadata or {}).get("_resume_mailbox_claims")
+        if mailbox_claims:
+            sub_state.prompt_context["delivered_swarm_message_claims"] = mailbox_claims
         execution_metadata = {
             "model": llm_resolution.model,
             "provider": llm_resolution.provider,
@@ -2261,6 +2319,7 @@ class TaskTool(BaseTool):
             return True
 
         agent_worktree = None
+        worktree_acquisition_unpublished = False
         parent_prompt_cache_safe_params = parent_metadata.get("prompt_cache_safe_params")
         current_turn_metadata: dict[str, Any] = {}
         summary_parts: list[str] = []
@@ -2278,52 +2337,99 @@ class TaskTool(BaseTool):
         cumulative_usage = UsageInfo(cost_usd=0.0)
 
         async def _cleanup_worktree() -> str:
-            """Remove the worktree when unchanged; return a keep-note otherwise."""
+            admission_error: BaseException | None = None
+            try:
+                runtime.close_subagent_mailbox(subagent_id, **subagent_fence)
+            except BaseException as exc:
+                admission_error = exc
+            try:
+                return await _cleanup_owned_resources()
+            finally:
+                if admission_error is not None:
+                    retirement.cleanup_error = admission_error
+                    raise admission_error
+
+        async def _cleanup_owned_resources() -> str:
+            """Retire owned services even when mailbox ownership was lost."""
             nonlocal agent_worktree
             if child_agent_session is not None:
                 manager = child_agent_session.command_manager(subagent_id)
                 command_owner = str(getattr(context, "conversation_id", "") or subagent_id)
                 commands = [manager.get_status(item["command_id"], conversation_id=command_owner)
                     for item in manager.list_commands(include_completed=True, conversation_id=command_owner)]
-                await child_agent_session.aclose()
-                pending = {task for task in child_agent_session.lifecycle_cleanup_tasks if not task.done()}
-                if pending:
-                    await asyncio.wait(pending)
-                for command in commands:
-                    if journal is not None:
-                        journal.append_cleanup({
-                            "resource_kind": "background_command", "resource_id": command.command_id,
-                            "reason": "child_session_closed", "status": command.status,
-                            "completed": not command.cleanup_pending, "pending": int(command.cleanup_pending),
-                            "pid": command.pid, "cleanup_reason": command.cleanup_reason,
-                        })
-                if any(command.cleanup_pending for command in commands):
-                    raise RuntimeError("Subagent commands still own resources after session shutdown")
+                try:
+                    await child_agent_session.aclose()
+                    pending = {task for task in child_agent_session.lifecycle_cleanup_tasks if not task.done()}
+                    if pending:
+                        await asyncio.wait(pending)
+                    for command in commands:
+                        if journal is not None:
+                            journal.append_cleanup({
+                                "resource_kind": "background_command", "resource_id": command.command_id,
+                                "reason": "child_session_closed", "status": command.status,
+                                "completed": not command.cleanup_pending, "pending": int(command.cleanup_pending),
+                                "pid": command.pid, "cleanup_reason": command.cleanup_reason,
+                            })
+                    if any(command.cleanup_pending for command in commands):
+                        raise RuntimeError("Subagent commands still own resources after session shutdown")
+                except BaseException as exc:
+                    retirement.cleanup_error = exc
+                    raise
+                retirement.cleanup_error = None
             if agent_worktree is None:
                 return ""
             from backend.agent.worktree import cleanup_agent_worktree, has_worktree_changes
 
             info, agent_worktree = agent_worktree, None
             try:
-                had_changes = await asyncio.to_thread(has_worktree_changes, info)
-                kept, kept_path = await to_thread_cancel_safe(cleanup_agent_worktree, info)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Worktree cleanup failed for %s: %s", subagent_id, exc)
-                return f"Worktree left at {info.worktree_path} (branch {info.branch}); cleanup failed."
-            if runtime is not None and (not kept or had_changes):
-                runtime.settle_subagent_cleanup_resource(
-                    subagent_id,
-                    resource_kind="worktree",
-                    resource_id=str(info.worktree_path),
-                    state="retained" if kept else "released",
-                    receipt="retained_user_changes" if kept else "removed_clean_worktree",
-                )
-            if kept:
-                return (
-                    f"The subagent worked in an isolated git worktree with changes kept at: "
-                    f"{kept_path} (branch {info.branch})."
-                )
-            return ""
+                if runtime.begin_subagent_worktree_retirement(
+                    subagent_id, resource_id=str(info.worktree_path), **subagent_fence,
+                    acquired_metadata=({"git_root": str(info.git_root), "branch": info.branch,
+                        "head_commit": info.head_commit} if worktree_acquisition_unpublished else None),
+                ):
+                    return ""
+            except BaseException as exc:
+                retirement.worktree_cleanup_error = exc
+                raise
+
+            def cleanup() -> tuple[bool, str, bool]:
+                had_changes = has_worktree_changes(info)
+                kept, kept_path = cleanup_agent_worktree(info)
+                return kept, kept_path, had_changes
+
+            try:
+                try:
+                    kept, kept_path, had_changes = await to_thread_cancel_safe(
+                        runtime.cleanup_subagent_worktree_resource, subagent_id,
+                        resource_id=str(info.worktree_path), cleanup=cleanup, **subagent_fence,
+                    )
+                except SubagentResourceOwnershipError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    retirement.worktree_cleanup_error = exc
+                    runtime._mark_subagent_cleanup(subagent_id, reason="worktree_cleanup_failed")
+                    logger.warning("Worktree cleanup failed for %s: %s", subagent_id, exc)
+                    return f"Worktree left at {info.worktree_path} (branch {info.branch}); cleanup failed."
+                if kept and not had_changes:
+                    retirement.worktree_cleanup_error = RuntimeError(
+                        f"Clean worktree cleanup did not release {info.worktree_path}"
+                    )
+                    runtime._mark_subagent_cleanup(subagent_id, reason="worktree_cleanup_failed")
+                if runtime is not None and (not kept or had_changes):
+                    runtime.settle_subagent_cleanup_resource(
+                        subagent_id, resource_kind="worktree", resource_id=str(info.worktree_path),
+                        state="retained" if kept else "released",
+                        receipt="retained_user_changes" if kept else "removed_clean_worktree",
+                    )
+                if kept:
+                    return (
+                        f"The subagent worked in an isolated git worktree with changes kept at: "
+                        f"{kept_path} (branch {info.branch})."
+                    )
+                return ""
+            except BaseException as exc:
+                retirement.worktree_cleanup_error = exc
+                raise
 
         def _current_prompt_cache_fork_diagnostic() -> dict[str, Any]:
             existing = current_turn_metadata.get("prompt_cache_fork")
@@ -2440,12 +2546,15 @@ class TaskTool(BaseTool):
             if resume_workspace_root is not None:
                 from backend.agent.worktree import resume_agent_worktree
 
+                continuation_resource = (subagent_metadata or {}).get("_resume_worktree_continuation")
+                continuation_metadata = continuation_resource["metadata"] if continuation_resource is not None else None
                 agent_worktree = await asyncio.to_thread(
                     resume_agent_worktree,
                     resume_workspace_root,
                     expected_repo_root=parent_workspace_root,
                     expected_subagent_id=subagent_id,
-                    expected_head_commit=str(subagent_record.resume_config.get("worktree_head_commit") or ""),
+                    expected_head_commit=(continuation_metadata["head_commit"] if continuation_metadata is not None
+                        else str(subagent_record.resume_config.get("worktree_head_commit") or "")),
                 )
                 if agent_worktree is None:
                     raise RuntimeError("The saved worktree could not be adopted by its subagent owner")
@@ -2475,19 +2584,17 @@ class TaskTool(BaseTool):
                     await asyncio.shield(worktree_creation)
                 finally:
                     agent_worktree, worktree_reason = await worktree_creation
-                    if agent_worktree is not None and not runtime.register_subagent_cleanup_resource(
-                        subagent_id,
-                        resource_kind="worktree",
-                        resource_id=str(agent_worktree.worktree_path),
-                        metadata={
-                            "git_root": str(agent_worktree.git_root),
-                            "branch": agent_worktree.branch,
-                            "head_commit": agent_worktree.head_commit,
-                        },
-                    ):
-                        raise RuntimeError(
-                            "Worktree ownership could not be persisted; the subagent was not started."
-                        )
+                    if agent_worktree is not None:
+                        worktree_acquisition_unpublished = True
+                        if not runtime.register_subagent_cleanup_resource(
+                            subagent_id, resource_kind="worktree", resource_id=str(agent_worktree.worktree_path),
+                            metadata={"git_root": str(agent_worktree.git_root), "branch": agent_worktree.branch,
+                                "head_commit": agent_worktree.head_commit},
+                        ):
+                            raise RuntimeError(
+                                "Worktree ownership could not be persisted; the subagent was not started."
+                            )
+                        worktree_acquisition_unpublished = False
                 if agent_worktree is None:
                     logger.warning(
                         "Worktree isolation failed for %s: %s", subagent_id, worktree_reason
@@ -3321,6 +3428,7 @@ class TaskTool(BaseTool):
                     )
                     if subagent_record is None:
                         raise RuntimeError("Subagent execution start lost its owned incarnation.")
+                    retirement.started.set_result(None)
                     if emit_event is not None:
                         start_event = AgentEvent.subagent_start(
                             subagent_id=subagent_id, parent_id=parent_id, role=agent_type,
@@ -4167,6 +4275,8 @@ class TaskTool(BaseTool):
                 status=result_status,
                 artifact_id=result_artifact_id or None,
             )
+        except SubagentResourceOwnershipError:
+            raise
         except asyncio.CancelledError:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             task_runtime_metadata = (
@@ -4179,10 +4289,14 @@ class TaskTool(BaseTool):
             ).strip()[:128]
             record = None
             retained = "".join(summary_parts).strip()
-            with suppress(Exception):
+            try:
                 worktree_note = await _cleanup_worktree()
                 if worktree_note:
                     logger.info("Subagent %s cleanup: %s", subagent_id, worktree_note)
+            except SubagentResourceOwnershipError:
+                raise
+            except Exception:
+                logger.warning("Subagent %s cancellation cleanup did not finish", subagent_id, exc_info=True)
             if runtime is not None:
                 result_record = runtime.store_subagent_result(
                     subagent_id,
@@ -4254,10 +4368,14 @@ class TaskTool(BaseTool):
                     f"Error: {type(exc).__name__}: {exc}"
                 )
             failure_status = "partial" if has_partial_output else "failed"
-            with suppress(Exception):
+            try:
                 worktree_note = await _cleanup_worktree()
                 if worktree_note:
                     error_content += f"\n{worktree_note}"
+            except SubagentResourceOwnershipError:
+                raise
+            except Exception:
+                logger.warning("Subagent %s failure cleanup did not finish", subagent_id, exc_info=True)
             record = None
             if runtime is not None:
                 result_record = runtime.store_subagent_result(

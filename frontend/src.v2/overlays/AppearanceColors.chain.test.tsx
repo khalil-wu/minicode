@@ -35,7 +35,7 @@ it("leaves default colors and typography alone, commits complete hex and restore
   const background = screen.getByRole("textbox", { name: "浅色背景颜色" });
   fireEvent.change(background, { target: { value: "#ab" } });
   expect((background as HTMLInputElement).value).toBe("#AB");
-  expect(localStorage.getItem(LS.appearanceColors)).toBeNull();
+  expect(localStorage.getItem(LS.appearanceLight)).toBeNull();
   expect(getComputedStyle(document.documentElement).getPropertyValue("--surface-base")).toBe(original);
   fireEvent.blur(background);
   expect((background as HTMLInputElement).value).toBe("#FFFFFF");
