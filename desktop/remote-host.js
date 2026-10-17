@@ -15,17 +15,38 @@ const CHUNK_BYTES = 64 * 1024;
 const exec = promisify(execFile);
 const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
 
+function remoteLoginShellCommand(command) {
+  const payload = 'PATH="${MINICODE_INSTALL_DIR:-$HOME/.local/bin}:$PATH"; export PATH; ' + command;
+  const execute = 'exec /bin/sh -c "$MINICODE_REMOTE_PAYLOAD"';
+  const csh = ['set loginsh=1', 'if ( -r /etc/csh.login ) source /etc/csh.login',
+    'if ( -r ~/.login ) source ~/.login', execute].join('; ');
+  const script = [
+    'if [ -z "$SHELL" ] || [ ! -x "$SHELL" ]; then echo "MiniCode remote SSH requires SHELL to point to an executable login shell" >&2; exit 127; fi;',
+    'MINICODE_REMOTE_PAYLOAD="$1"; export MINICODE_REMOTE_PAYLOAD;',
+    'case "${SHELL##*/}" in',
+    `csh|tcsh) exec "$SHELL" -i -c ${quote(csh)} ;;`,
+    `nu) exec "$SHELL" -l -i -c ${quote('exec /bin/sh -c $env.MINICODE_REMOTE_PAYLOAD')} ;;`,
+    `*) exec "$SHELL" -l -i -c ${quote(execute)} ;;`,
+    'esac',
+  ].join(' ');
+  return `sh -c ${quote(script)} sh ${quote(payload)}`;
+}
+
+function sshCommand(connection, command) {
+  const args = ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=12", "-o", "ExitOnForwardFailure=yes"];
+  if (connection.sshPort != null) args.push("-p", String(connection.sshPort));
+  if (connection.identity) args.push("-i", connection.identity);
+  args.push("--", connection.sshHost, remoteLoginShellCommand(command));
+  return ["ssh", args];
+}
+
 function transportCommand(connection, desktopId, marker) {
   const remote = ["minicode-host", "proxy", "--desktop-id", desktopId, "--marker", marker];
   if (connection.kind === "wsl") {
     return ["wsl.exe", ["--distribution", connection.distribution, "--exec", ...remote]];
   }
   if (connection.kind !== "ssh") throw new Error("Unknown desktop connection kind");
-  const args = ["-T", "-o", "ExitOnForwardFailure=yes"];
-  if (connection.sshPort != null) args.push("-p", String(connection.sshPort));
-  if (connection.identity) args.push("-i", connection.identity);
-  args.push("--", connection.sshHost, remote.map(quote).join(" "));
-  return ["ssh", args];
+  return sshCommand(connection, `exec ${remote.map(quote).join(" ")}`);
 }
 
 class RemoteHost extends EventEmitter {
@@ -47,6 +68,19 @@ class RemoteHost extends EventEmitter {
 
   async connect() {
     this.status = "connecting";
+    if (this.connection.kind === "ssh") {
+      try {
+        const lookup = await this.runSshCommand("if command -v minicode-host >/dev/null 2>&1; then exit 0; fi; exit 86", "MiniCode host lookup");
+        if (lookup.code === 86) throw new Error("No `minicode-host` found in the remote login shell PATH. Install MiniCode on the remote machine before connecting.");
+        if (lookup.code !== 0) throw new Error(`SSH MiniCode host lookup exited (${lookup.signal || lookup.code}): ${lookup.stderr || lookup.stdout}`);
+        const version = await this.runSshCommand("minicode-host --version", "MiniCode host version check");
+        if (version.code !== 0) throw new Error(`SSH MiniCode host version check exited (${version.signal || version.code}): ${version.stderr || version.stdout}`);
+        this.installedVersion = version.stdout;
+      } catch (error) {
+        await this.close(error);
+        throw error;
+      }
+    }
     const marker = crypto.randomBytes(32);
     const [program, args] = transportCommand(this.connection, this.desktopId, marker.toString("hex"));
     this.process = this.spawnTransport(program, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
@@ -97,6 +131,28 @@ class RemoteHost extends EventEmitter {
       this.emit("status", this.status);
       return this;
     } finally { clearTimeout(timeout); }
+  }
+
+  runSshCommand(command, operation) {
+    const [program, args] = sshCommand(this.connection, command);
+    const child = this.spawnTransport(program, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    this.process = child;
+    return new Promise((resolve, reject) => {
+      let stdout = "", stderr = "";
+      const timeout = setTimeout(() => {
+        child.kill();
+        reject(new Error(`SSH ${operation} timed out after 60 seconds: ${stderr.trim()}`));
+      }, 60_000);
+      child.stdout.on("data", chunk => { stdout = (stdout + chunk.toString("utf8")).slice(-16_384); });
+      child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString("utf8")).slice(-16_384); });
+      child.once("error", error => { clearTimeout(timeout); reject(error); });
+      child.once("close", (code, signal) => {
+        clearTimeout(timeout);
+        if (this.closed) reject(new Error(`SSH ${operation} was disconnected`));
+        else resolve({ code, signal, stdout: stdout.trim(), stderr: stderr.trim() });
+      });
+      child.stdin.end();
+    });
   }
 
   send(frame) {
