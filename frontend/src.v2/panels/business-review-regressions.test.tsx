@@ -6,18 +6,23 @@ import { useAppStore } from "../stores";
 import { DiffPanel } from "./DiffPanel";
 import { EditorPanel } from "./EditorPanel";
 import { useAgentEditReview } from "./useAgentEditReview";
+import { clearGitReviewSelection } from "../chat/diff/git-review-selection";
 
 const seams = vi.hoisted(() => ({ send: vi.fn(), awaitSend: vi.fn(), confirm: vi.fn(), toast: vi.fn(), write: vi.fn() }));
-vi.mock("../protocol/ws-outbox", () => ({
+vi.mock("../protocol/ws-outbox", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../protocol/ws-outbox")>(),
   sendClientCommand: seams.send,
   sendClientCommandAwaitResult: seams.awaitSend, sendPromptResponseCommand: vi.fn(),
-  commandResultSucceeded: (r: any) => r?.level === "info",
 }));
+vi.mock("../chat/diff/git-review-options", () => ({ readGitReviewOptions: vi.fn(async () => ({
+  is_git_repo: true, current_branch: "feature", default_base_branch: null, branches: [],
+  merge_base_sha: null, commits: [], comparison_status: "expected", reason: "default_branch_unavailable",
+})) }));
 vi.mock("../overlays/DialogService", () => ({ showConfirm: seams.confirm }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: seams.toast }));
 vi.mock("../lib/monaco-colorize", () => ({ useColorizedLines: () => null, extractFilePathFromDiff: () => "a.txt", guessLanguageFromPath: () => "plaintext" }));
 vi.mock("../lib/file-icons", () => ({ fileIcon: () => null, fileGlyphColor: () => "inherit" }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, fsReadFileInfo: vi.fn(), fsSearchFiles: vi.fn(), revealPath: vi.fn() }));
+vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => null, fsReadFileInfo: vi.fn(), fsSearchFiles: vi.fn(), revealPath: vi.fn() }));
 vi.mock("../protocol/workspace", () => ({ compareWriteWorkspaceFile: seams.write, readWorkspaceFile: vi.fn(), searchWorkspaceFiles: vi.fn() }));
 vi.mock("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/editor/editor.api.js", () => ({}));
@@ -44,11 +49,16 @@ const patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@
 const original = useAppStore.getState();
 beforeEach(() => {
   vi.clearAllMocks(); seams.send.mockReturnValue(true);
+  localStorage.clear();
+  localStorage.setItem("last-explicit-review-diff-filter", JSON.stringify("unstaged"));
+  clearGitReviewSelection("conv-A"); clearGitReviewSelection("conv-B");
   seams.awaitSend.mockResolvedValue({ type: "command.result", level: "info", message: "" });
   useAppStore.setState({
     ...original, conversationId: "conv-A", workingDirectory: "C:/audit/A", messages: [], diffReview: null,
-    gitChanges: { ...original.gitChanges, loading: false, workingTree: [{ path: "a.txt", patch, additions: 1, deletions: 1 }], staged: [], untracked: [] },
-    requestGitChanges: vi.fn(), setGitChangesLoading: vi.fn(),
+    gitChanges: { ...original.gitChanges, loading: false, workingTree: [{ path: "a.txt", patch, additions: 1, deletions: 1 }], staged: [], untracked: [],
+      comparison: { source: "unstaged", loading: false, status: "success", files: [{ path: "a.txt", patch, additions: 1, deletions: 1 }],
+        snapshot: { source: "unstaged", generation: "business-displayed-A-1", conversationId: "conv-A", workspaceRoot: "C:/audit/A", hideWhitespace: false } } },
+    requestGitChanges: vi.fn(), requestGitComparison: vi.fn(), setGitChangesLoading: vi.fn(),
     editorTabs: [], activeTabPath: null, editorOpenRequests: [], fileChanges: [],
   });
 });
@@ -72,6 +82,7 @@ describe("business diff and editor ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "放弃 a.txt 的更改" }));
     await waitFor(() => expect(seams.awaitSend).toHaveBeenCalledWith(expect.objectContaining({
       type: "diff.git_revert_file", path: "a.txt", workspace: "C:/audit/A", conversation_id: "conv-A", confirmed: true,
+      source: "unstaged", snapshot_generation: "business-displayed-A-1",
     }), "diff.git_revert_file", { silent: true }));
   });
 

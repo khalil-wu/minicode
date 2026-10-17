@@ -10,6 +10,7 @@ import { normalizeInboundServerEvent } from "../protocol/server-event-validation
 import type { ServerEvent } from "../protocol/events";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
+import { clearGitReviewSelection } from "../chat/diff/git-review-selection";
 
 const runtime = vi.hoisted(() => ({
   receive: null as ((event: unknown) => void) | null,
@@ -25,6 +26,10 @@ vi.mock("../protocol/ws-outbox", async (importOriginal) => ({
   sendClientCommandAwaitResult: vi.fn(),
 }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../chat/diff/git-review-options", () => ({ readGitReviewOptions: vi.fn(async () => ({
+  is_git_repo: true, current_branch: "feature", default_base_branch: null, branches: [],
+  merge_base_sha: null, commits: [], comparison_status: "expected", reason: "default_branch_unavailable",
+})) }));
 vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => null }));
 vi.mock("../components/MonacoDiffView", () => ({ MonacoDiffView: () => null }));
 vi.mock("../lib/monaco-colorize", () => ({
@@ -59,6 +64,9 @@ const terminalChunk = (data: string, start: number, end: number, owner = "owner"
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
+  localStorage.setItem("last-explicit-review-diff-filter", JSON.stringify("unstaged"));
+  clearGitReviewSelection("owner");
   runtime.terminal = null;
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 1; });
@@ -67,8 +75,11 @@ beforeEach(() => {
   }));
   useAppStore.setState({
     conversationId: "owner", workingDirectory: "C:/audit", messages: [], diffReview: null,
-    gitChanges: { workingTree: [{ path: "file.txt", patch: "", additions: 1, deletions: 0 }], staged: [], untracked: [], loading: false },
-    requestGitChanges: vi.fn(), terminalSnapshots: {}, activeTerminalSessionId: "term-one",
+    gitChanges: { workingTree: [{ path: "file.txt", patch: "", additions: 1, deletions: 0 }], staged: [], untracked: [], loading: false,
+      comparison: { source: "unstaged", loading: false, status: "success",
+        files: [{ path: "file.txt", patch: "", additions: 1, deletions: 0 }],
+        snapshot: { source: "unstaged", generation: "file-mode-displayed-1", conversationId: "owner", workspaceRoot: "C:/audit", hideWhitespace: false } } },
+    requestGitChanges: vi.fn(), requestGitComparison: vi.fn(), terminalSnapshots: {}, activeTerminalSessionId: "term-one",
     terminalSessions: [{ id: "term-one", conversationId: "owner", shell: "sh", cwd: "C:/audit", status: "running", terminalMode: "pipe" }],
   });
 });
@@ -86,6 +97,10 @@ describe("file mode projection chain", () => {
     expect(stage.disabled).toBe(false);
     fireEvent.click(stage);
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(2));
+    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "diff.git_stage_file", path: "file.txt", source: "unstaged", snapshot_generation: "file-mode-displayed-1",
+      conversation_id: "owner", workspace: "C:/audit",
+    }), "diff.git_stage_file", { silent: true });
   });
 
   it("only settles the loading query whose command id failed", () => {
