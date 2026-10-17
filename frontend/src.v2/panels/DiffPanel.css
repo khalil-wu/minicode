@@ -31,6 +31,7 @@
 .mc-diff-file-section-trigger .mc-diff-file-counts { font-size: var(--text-sm); }
 .mc-diff-section-path { display: flex; align-items: baseline; flex: 1; min-width: 0; white-space: nowrap; }
 .mc-diff-section-directory { min-width: 0; overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; direction: rtl; text-align: left; }
+.mc-diff-section-directory > span, .mc-diff-section-filename { direction: ltr; unicode-bidi: plaintext; }
 .mc-diff-section-filename { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .mc-diff-section-old-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); }
 .mc-diff-rename-arrow { flex-shrink: 0; padding-inline: 5px; color: var(--text-muted); }

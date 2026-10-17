@@ -907,7 +907,7 @@ const DiffFileSection = ({ path, oldPath, additions, deletions, open, onToggle, 
         {fileIcon(path, { size: 18, className: "diff-file-icon" })}
         <span className="mc-diff-section-path">
           {oldPath && <><span className="mc-diff-section-old-path" title={oldPath}>{oldPath}</span><span className="mc-diff-rename-arrow" aria-hidden="true">→</span></>}
-          {separator >= 0 && <span className="mc-diff-section-directory">{path.slice(0, separator + 1)}</span>}
+          {separator >= 0 && <span className="mc-diff-section-directory"><span>{path.slice(0, separator + 1)}</span></span>}
           <span className="mc-diff-section-filename">{path.slice(separator + 1)}</span>
         </span>
         <span className="mc-diff-file-counts">
