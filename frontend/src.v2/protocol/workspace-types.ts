@@ -45,13 +45,16 @@ export type WorkspaceServerEventType =
   | "diff.git_unstage_file"
   | "diff.git_stage_all"
   | "diff.git_unstage_all"
-  | "diff.git_revert_file";
+  | "diff.git_revert_file"
+  | "diff.git_revert_all";
 
 // ──────────────────────────────────────────────────────────────────
 // Client command type strings (workspace domain)
 // ──────────────────────────────────────────────────────────────────
 
 export type WorkspaceClientCommandType =
+  | "diff.git_file_contents"
+  | "diff.git_review_options"
   | "diff.git_revert_patch"
   | "workspace.import"
   | "workspace.switch"
@@ -73,7 +76,8 @@ export type WorkspaceClientCommandType =
   | "diff.git_unstage_file"
   | "diff.git_stage_all"
   | "diff.git_unstage_all"
-  | "diff.git_revert_file";
+  | "diff.git_revert_file"
+  | "diff.git_revert_all";
 
 // ──────────────────────────────────────────────────────────────────
 // Server event payload types
@@ -125,6 +129,13 @@ export interface GitPrStatusEvent extends WorkspaceOwnedEvent {
 
 export interface GitDiffFilePayload {
   path: string;
+  old_path?: string | null;
+  status?: "A" | "M" | "D" | "R" | "C" | "T" | "U";
+  old_mode?: string;
+  new_mode?: string;
+  old_oid?: string | null;
+  new_oid?: string | null;
+  revision?: string;
   patch: string;
   additions: number;
   deletions: number;
@@ -137,6 +148,15 @@ export interface GitDiffWorkingTreeEvent extends WorkspaceOwnedEvent {
   is_git_repo?: boolean;
   files?: GitDiffFilePayload[];
   untracked?: string[];
+  untracked_files?: GitDiffFilePayload[];
+  source?: "unstaged" | "uncommitted" | "branch" | "commit";
+  status?: "success" | "expected";
+  reason?: string | null;
+  comparison?: { base_branch?: string; merge_base_sha?: string; commit_sha?: string; parent_sha?: string };
+  hide_whitespace?: boolean;
+  snapshot_generation?: string;
+  environment_id?: string;
+  cwd_uri?: string;
   preview?: boolean;
   tool_call_id?: string;
   progress?: number;
@@ -146,7 +166,34 @@ export interface GitDiffStagedEvent extends WorkspaceOwnedEvent {
   type: "diff.git_staged";
   is_git_repo?: boolean;
   files?: GitDiffFilePayload[];
+  source?: "staged";
+  hide_whitespace?: boolean;
+  snapshot_generation?: string;
+  environment_id?: string;
+  cwd_uri?: string;
 }
+
+export interface GitDiffContentRequest {
+  path: string;
+  side: "old" | "new";
+  format: "text" | "binary" | "markdown-preview";
+}
+
+export type GitDiffContentResult = {
+  type: "success";
+  path: string;
+  side: "old" | "new";
+  source_kind: "object" | "disk" | "absent";
+  oid?: string;
+  lines?: string[];
+  data_base64?: string;
+  media_type?: string;
+} | {
+  type: "error";
+  path: string;
+  side: "old" | "new";
+  error: { type: "not-found" | "too-large" | "stale-snapshot" | "unknown"; message?: string; limit_bytes?: number };
+};
 
 export interface GitDiffActionEvent extends WorkspaceOwnedEvent {
   type:
@@ -154,8 +201,12 @@ export interface GitDiffActionEvent extends WorkspaceOwnedEvent {
     | "diff.git_unstage_file"
     | "diff.git_stage_all"
     | "diff.git_unstage_all"
-    | "diff.git_revert_file";
+    | "diff.git_revert_file"
+    | "diff.git_revert_all";
   ok?: boolean;
+  status?: "success" | "partial-success";
+  source?: "unstaged" | "staged";
+  snapshot_generation?: string;
   path?: string;
   message?: string;
 }

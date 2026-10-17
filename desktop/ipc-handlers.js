@@ -430,19 +430,23 @@ function registerIpcHandlers() {
     const resolved = assertReadablePath(target, "File open target");
     const workspaceRoot = options.workspaceRoot ? assertReadablePath(options.workspaceRoot, "File open workspace") : undefined;
     let targetId = options.targetId ?? ctx.desktopPreferences.preferredFileOpenTarget(workspaceRoot);
-    if (targetId === "minicode") return { openInEditor: true, path: resolved };
+    const persistPreferredTarget = async () => {
+      const preferredPath = assertReadablePath(options.persistPreferredTargetPath, "Preferred file open workspace");
+      ctx.desktopPreferences.setPreferredFileOpenTarget(preferredPath, targetId);
+      const snapshot = await preferencesSnapshot();
+      for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    };
+    if (targetId === "minicode") {
+      if (options.persistPreferredTargetPath) await persistPreferredTarget();
+      return { openInEditor: true, path: resolved };
+    }
     if (options.targetId == null) {
       if (fs.statSync(resolved).isDirectory()) targetId = "fileManager";
       else if (nativeFileExtensions.includes(path.extname(resolved).slice(1).toLowerCase())) targetId = "system";
     }
     const opener = ctx.desktopPreferences.fileOpenTargets().find(item => item.id === targetId);
     if (!opener) throw new Error("The selected file application is no longer installed.");
-    if (options.persistPreferredTargetPath) {
-      const preferredPath = assertReadablePath(options.persistPreferredTargetPath, "Preferred file open workspace");
-      ctx.desktopPreferences.setPreferredFileOpenTarget(preferredPath, targetId);
-      const snapshot = await preferencesSnapshot();
-      for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
-    }
+    if (options.persistPreferredTargetPath && opener.kind === "editor") await persistPreferredTarget();
     await openInTarget(opener, resolved, line, options.column);
     return { openInEditor: false, path: resolved };
   }));

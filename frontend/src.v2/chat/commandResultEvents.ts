@@ -1,4 +1,6 @@
 import { useAppStore } from "../stores";
+import { clearGitReviewSelection } from "./diff/git-review-selection";
+import { clearReviewExpansion } from "./diff/review-expansion-state";
 import type { CommandResultEvent, ServerEvent } from "../protocol/events";
 import * as wsOutbox from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
@@ -254,6 +256,8 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
   }
   if (ev.command === "conversation.delete" && ev.data?.deleted === true && typeof ev.data.conversation_id === "string") {
     const id = ev.data.conversation_id;
+    clearGitReviewSelection(id);
+    clearReviewExpansion(id);
     clearDiffCommentScope(id);
     cancelConversationComposerUploads(id);
     useAppStore.setState(state => {
@@ -293,6 +297,12 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
 
   if (commandResultStatus(ev.level) === "failed") {
     const state = useAppStore.getState();
+    const comparison = state.gitChanges.comparison;
+    if ((ev.command === "diff.git_working_tree" || ev.command === "diff.git_staged")
+      && comparison?.requestId && e.client_command_id === comparison.requestId && targetsActiveScope()
+      && !state.pendingConversationSwitchId && !state.pendingConversationCreateId) {
+      state.setGitChanges({ comparison: { ...comparison, loading: false, error: ev.message || "无法加载 Git 更改" } });
+    }
     const requestId = ev.command === "diff.git_working_tree"
       ? state.gitChanges.workingTreeRequestId
       : ev.command === "diff.git_staged" ? state.gitChanges.stagedRequestId : undefined;

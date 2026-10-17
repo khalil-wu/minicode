@@ -53,6 +53,7 @@ import { workspaceRootsEqual } from "../lib/workspace-path";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { openWebInBrowser } from "../chat/openWebInBrowser";
 import { pushToast } from "../overlays/ToastContainer";
+import { readDiffViewPreference } from "../chat/diff/diff-view-preferences";
 
 const CLOSED_OVERLAYS = {
   commandPaletteOpen: false,
@@ -1048,12 +1049,14 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
           workspaceRoot,
           workingTreeRequestId: undefined,
           stagedRequestId: undefined,
+          comparison: undefined,
         },
       }));
       return;
     }
     const workingTreeRequestId = createClientCommandId();
     const stagedRequestId = createClientCommandId();
+    const hideWhitespace = readDiffViewPreference("hideWhitespace");
     set((s) => ({
       gitChanges: {
         ...s.gitChanges,
@@ -1062,10 +1065,15 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         workspaceRoot,
         workingTreeRequestId,
         stagedRequestId,
+        ...(s.gitChanges.comparison && (s.gitChanges.comparison.source === "unstaged" || s.gitChanges.comparison.source === "staged")
+          ? { comparison: { ...s.gitChanges.comparison, loading: true, error: undefined,
+              requestId: s.gitChanges.comparison.source === "staged" ? stagedRequestId : workingTreeRequestId } } : {}),
       },
     }));
     const workingTreeSent = sendClientCommand({
       type: "diff.git_working_tree",
+      source: "unstaged",
+      hide_whitespace: hideWhitespace,
       conversation_id: conversationId,
       workspace: workspaceRoot,
       request_id: workingTreeRequestId,
@@ -1073,12 +1081,40 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }, { silent: true });
     const stagedSent = sendClientCommand({
       type: "diff.git_staged",
+      hide_whitespace: hideWhitespace,
       conversation_id: conversationId,
       workspace: workspaceRoot,
       request_id: stagedRequestId,
       client_command_id: stagedRequestId,
     }, { silent: true });
     if (!workingTreeSent || !stagedSent) get().setGitChangesLoading(false);
+    const comparison = get().gitChanges.comparison;
+    if (comparison && comparison.source !== "unstaged" && comparison.source !== "staged") get().requestGitComparison(comparison);
+  },
+  requestGitComparison: (selection) => {
+    const state = get();
+    if (state.pendingConversationSwitchId || state.pendingConversationCreateId) return;
+    const conversationId = state.conversationId;
+    const workspaceRoot = state.workingDirectory;
+    if (!conversationId || !workspaceRoot) return;
+    const requestId = createClientCommandId();
+    const current = state.gitChanges.comparison;
+    const same = current?.source === selection.source && current.baseBranch === selection.baseBranch && current.commitSha === selection.commitSha;
+    state.setGitChanges({ comparison: {
+      ...(same ? current : { files: [] }),
+      source: selection.source, baseBranch: selection.baseBranch, commitSha: selection.commitSha,
+      loading: true, error: undefined, requestId,
+    }, ...(selection.source === "unstaged" ? { workingTreeRequestId: requestId }
+      : selection.source === "staged" ? { stagedRequestId: requestId } : {}) });
+    const sent = sendClientCommand({
+      type: selection.source === "staged" ? "diff.git_staged" : "diff.git_working_tree",
+      source: selection.source,
+      base_branch: selection.baseBranch, commit_sha: selection.commitSha,
+      hide_whitespace: readDiffViewPreference("hideWhitespace"),
+      conversation_id: conversationId, workspace: workspaceRoot,
+      request_id: requestId, client_command_id: requestId,
+    }, { silent: true });
+    if (!sent) get().setGitChanges({ comparison: { ...get().gitChanges.comparison!, loading: false } });
   },
   });
 };

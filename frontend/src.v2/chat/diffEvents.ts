@@ -10,18 +10,37 @@ import type {
 import { pushToast } from "../overlays/ToastContainer";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { parseUnifiedDiffLines, unifiedDiffFilePaths } from "../lib/unified-diff";
+import type { GitDiffSnapshot } from "../stores/types";
 
 const toGitChange = (file: GitDiffFilePayload) => {
   const { oldPath, newPath } = unifiedDiffFilePaths(parseUnifiedDiffLines(file.patch));
   return {
     path: file.path,
-    ...(oldPath && newPath && oldPath !== newPath && oldPath !== "/dev/null" && newPath !== "/dev/null" ? { oldPath } : {}),
+    ...(file.old_path ? { oldPath: file.old_path }
+      : oldPath && newPath && oldPath !== newPath && oldPath !== "/dev/null" && newPath !== "/dev/null" ? { oldPath } : {}),
     patch: file.patch,
     additions: file.additions,
     deletions: file.deletions,
     isBinary: file.is_binary,
+    status: file.status,
+    oldMode: file.old_mode,
+    newMode: file.new_mode,
+    oldOid: file.old_oid,
+    newOid: file.new_oid,
+    revision: file.revision,
   };
 };
+
+const snapshotOf = (event: GitDiffWorkingTreeEvent | GitDiffStagedEvent): GitDiffSnapshot | undefined =>
+  event.snapshot_generation ? {
+    conversationId: event.conversation_id,
+    workspaceRoot: event.workspace_root,
+    environmentId: event.environment_id,
+    cwdUri: event.cwd_uri,
+    source: event.source ?? (event.type === "diff.git_staged" ? "staged" : "unstaged"),
+    generation: event.snapshot_generation,
+    hideWhitespace: event.hide_whitespace === true,
+  } : undefined;
 
 const eventTargetsCurrentWorkspace = (event: {
   conversation_id?: string;
@@ -36,6 +55,20 @@ const eventTargetsCurrentWorkspace = (event: {
     && workspaceRoot
     && workspaceRoot === normalizeWorkspaceRoot(state.workingDirectory),
   );
+};
+
+const comparisonFromEvent = (event: GitDiffWorkingTreeEvent | GitDiffStagedEvent) => {
+  const current = useAppStore.getState().gitChanges.comparison;
+  if (!current?.requestId || event.request_id !== current.requestId) return undefined;
+  const source = event.source ?? (event.type === "diff.git_staged" ? "staged" : "unstaged");
+  if (source !== current.source) return undefined;
+  const untracked = event.type === "diff.git_working_tree" ? event.untracked_files ?? [] : [];
+  const files = new Map((event.files ?? []).map(file => [file.path, toGitChange(file)]));
+  untracked.forEach(file => files.set(file.path, toGitChange(file)));
+  return { ...current, files: [...files.values()], loading: false, error: undefined, snapshot: snapshotOf(event),
+    status: event.type === "diff.git_working_tree" ? event.status : "success" as const,
+    reason: event.type === "diff.git_working_tree" ? event.reason : null,
+    comparison: event.type === "diff.git_working_tree" ? event.comparison : undefined };
 };
 
 export const handleDiffEvent = (e: ServerEvent): boolean => {
@@ -84,13 +117,21 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       const ev = e as GitDiffWorkingTreeEvent;
       if (s.pendingConversationSwitchId || s.pendingConversationCreateId) return true;
       if (!eventTargetsCurrentWorkspace(ev)) return true;
-      if (!s.gitChanges.workingTreeRequestId || ev.request_id !== s.gitChanges.workingTreeRequestId) return true;
+      const comparison = comparisonFromEvent(ev);
+      const statusRead = (ev.source === undefined || ev.source === "unstaged")
+        && Boolean(s.gitChanges.workingTreeRequestId && ev.request_id === s.gitChanges.workingTreeRequestId);
+      if (!statusRead && !comparison) return true;
       s.setGitChanges({
         isGitRepo: ev.is_git_repo,
+        ...comparison ? { comparison } : {},
+        ...statusRead ? {
         ...(ev.is_git_repo === false ? { staged: [] } : {}),
         workingTree: (ev.files ?? []).map(toGitChange),
         untracked: ev.untracked ?? [],
+        untrackedFiles: (ev.untracked_files ?? []).map(toGitChange),
+        workingTreeSnapshot: snapshotOf(ev),
         loading: false,
+        } : {},
       });
       return true;
     }
@@ -98,12 +139,18 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       const ev = e as GitDiffStagedEvent;
       if (s.pendingConversationSwitchId || s.pendingConversationCreateId) return true;
       if (!eventTargetsCurrentWorkspace(ev)) return true;
-      if (!s.gitChanges.stagedRequestId || ev.request_id !== s.gitChanges.stagedRequestId) return true;
+      const comparison = comparisonFromEvent(ev);
+      const statusRead = Boolean(s.gitChanges.stagedRequestId && ev.request_id === s.gitChanges.stagedRequestId);
+      if (!statusRead && !comparison) return true;
       s.setGitChanges({
         isGitRepo: ev.is_git_repo,
+        ...comparison ? { comparison } : {},
+        ...statusRead ? {
         ...(ev.is_git_repo === false ? { workingTree: [], untracked: [] } : {}),
         staged: (ev.files ?? []).map(toGitChange),
+        stagedSnapshot: snapshotOf(ev),
         loading: false,
+        } : {},
       });
       return true;
     }
@@ -111,10 +158,11 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
     case "diff.git_unstage_file":
     case "diff.git_stage_all":
     case "diff.git_unstage_all":
-    case "diff.git_revert_file": {
+    case "diff.git_revert_file":
+    case "diff.git_revert_all": {
       const ev = e as GitDiffActionEvent;
       if (!eventTargetsCurrentWorkspace(ev)) return true;
-      if (ev.ok !== false) {
+      if (ev.ok !== false || ev.status === "partial-success") {
         s.requestGitChanges();
       } else {
         s.setGitChangesLoading(false);

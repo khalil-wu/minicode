@@ -7,6 +7,7 @@ export interface DiffLine {
   oldLine?: number;
   newLine?: number;
   lineIndex?: number;
+  unifiedIndex?: number;
   oldGap?: number;
   newGap?: number;
   hunkIndex?: number;
@@ -65,7 +66,8 @@ export function diffCommentPosition(path: string, selection: DiffLineSelection):
 }
 
 export function diffLineAtPosition(lines: DiffLine[], location: DiffLineLocation): DiffLine | undefined {
-  return lines.find(line => line.lineIndex !== undefined && (location.side === "left" ? line.oldLine : line.newLine) === location.line);
+  return lines.find(line => (line.unifiedIndex !== undefined || line.lineIndex !== undefined)
+    && (location.side === "left" ? line.oldLine : line.newLine) === location.line);
 }
 
 /** A saved patch is partial: keep its original selected hunks without inventing omitted context. */
@@ -85,9 +87,13 @@ export function diffCommentHunk(raw: string, position: DiffCommentPosition): str
 
 export function diffSelectionContains(lines: DiffLine[], selection: DiffLineSelection | null, location: DiffLineLocation): boolean {
   if (!selection) return false;
-  const first = diffLineAtPosition(lines, selection.start)?.lineIndex;
-  const last = diffLineAtPosition(lines, selection.end)?.lineIndex;
-  const current = diffLineAtPosition(lines, location)?.lineIndex;
+  const indexOf = (location: DiffLineLocation) => {
+    const line = diffLineAtPosition(lines, location);
+    return line?.unifiedIndex ?? line?.lineIndex;
+  };
+  const first = indexOf(selection.start);
+  const last = indexOf(selection.end);
+  const current = indexOf(location);
   if (first === undefined || last === undefined || current === undefined) return false;
   if (selection.start.side === selection.end.side) return location.side === selection.end.side && location.line >= Math.min(selection.start.line, selection.end.line) && location.line <= Math.max(selection.start.line, selection.end.line);
   return current >= Math.min(first, last) && current <= Math.max(first, last);

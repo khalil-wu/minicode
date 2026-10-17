@@ -133,7 +133,10 @@ export function useDiffAnnotations({ lines, rawPatch, filePath, workspaceRoot, c
         }}
         onClose={() => { removeDiffCommentDraft(scope, draft.key); clearSelection(); }} />)}
   </>;
-  return { utility, enter, render, selected: (location: DiffLineLocation) => diffSelectionContains(lines, selection, location) };
+  return { utility, enter, render,
+    requestChanges: (location?: DiffLineLocation) => { if (location) openSelection({ start: location, end: location }); },
+    positions: [...fileComments.map(comment => comment.position), ...drafts.map(draft => draft.position)],
+    selected: (location: DiffLineLocation) => diffSelectionContains(lines, selection, location) };
 }
 
 export type DiffAnnotations = ReturnType<typeof useDiffAnnotations>;

@@ -626,7 +626,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // rejects. Keep the authority unchanged while presenting the requested
     // conversation as an empty view until its public page arrives.
     set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
-      gitChanges: { ...state.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined },
+      gitChanges: { ...state.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined, comparison: undefined },
       messageRevealTarget: state.messageRevealTarget?.conversationId === targetId ? state.messageRevealTarget : null,
     }));
     const switchCommand = { type: "conversation.switch" as const, conversation_id: targetId, client_command_id: uniqueMessageId("cmd") };
@@ -796,7 +796,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       : "";
     set((current) => ({ pendingConversationSwitchId: id, pendingConversationCreateId: id,
       pendingComposerConversationAdoption: options?.adoptDraft ? { conversationId: id, workspaceRoot: current.workingDirectory } : null,
-      gitChanges: { ...current.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined },
+      gitChanges: { ...current.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined, comparison: undefined },
     }));
     let created = false;
     try {

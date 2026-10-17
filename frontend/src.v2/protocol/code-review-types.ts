@@ -11,6 +11,9 @@ export interface CodeReviewOptions {
   gitRoot: string;
   currentBranch: string;
   branches: string[];
+  defaultBaseBranch?: string | null;
+  comparisonStatus?: "success" | "expected";
+  reason?: "default_branch_unavailable" | "merge_base_unavailable" | null;
 }
 
 export interface PreparedCodeReview {

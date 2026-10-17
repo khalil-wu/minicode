@@ -45,6 +45,7 @@ import { safeJsonParse } from "../lib/safe-parse";
 import "./InlineAgentPrompt.css";
 import { RequestUserInputCard } from "./RequestUserInputCard";
 import { McpUrlElicitationCard } from "./McpUrlElicitationCard";
+import { ComputerUseApprovalCard, isComputerUseApproval } from "./ComputerUseApprovalCard";
 import { permissionRequestDetails } from "./permissionRequest";
 
 export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string } = {}) => {
@@ -98,6 +99,8 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
         : visibleAskUser.requestUserInput ? <RequestUserInputCard key={JSON.stringify([visibleAskUser.conversationId, visibleAskUser.requestId,
             visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])}
             request={{ ...visibleAskUser, requestUserInput: visibleAskUser.requestUserInput }} />
+        : isComputerUseApproval(visibleAskUser) ? <ComputerUseApprovalCard key={JSON.stringify([visibleAskUser.conversationId,
+            visibleAskUser.requestId, visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])} request={visibleAskUser} />
         : visibleAskUser.elicitation?.mode === "url" ? <McpUrlElicitationCard key={`${visibleAskUser.conversationId}:${visibleAskUser.requestId}`}
             request={{ ...visibleAskUser, elicitation: visibleAskUser.elicitation }} />
         : <AskUserCard key={visibleAskUser.requestId} request={visibleAskUser} />)}

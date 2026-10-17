@@ -147,7 +147,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const mcpServers = useAppStore((s) => s.mcpServers);
   const runningSubagents = useMemo(() => projectAgentViews(subagents).filter((agent) => agent.status === "running").length, [subagents]);
   const mcpErrors = mcpServers.filter(mcpServerNeedsAttention).length;
-  const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
+  const gitChangeCount = gitChanges.comparison?.files.length
+    ?? new Set([...gitChanges.workingTree.map(file => file.path), ...gitChanges.staged.map(file => file.path), ...gitChanges.untracked]).size;
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     ...mcpAppEntries.filter(entry => entry.scopeId === conversationId && entry.panelOpen).map(entry => ({

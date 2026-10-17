@@ -412,6 +412,7 @@ export interface UntypedServerEvent {
     | "diff.git_stage_all"
     | "diff.git_unstage_all"
     | "diff.git_revert_file"
+    | "diff.git_revert_all"
     | "scheduler.list"
     | "scheduler.heartbeat.renderer_state.request"
     | "workspace.recent.list"
@@ -1207,9 +1208,12 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "diff.git_stage_all",
   "diff.git_unstage_all",
   "diff.git_revert_file",
+  "diff.git_revert_all",
 ]);
 
 export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<ClientCommandType>([
+  "diff.git_file_contents",
+  "diff.git_review_options",
   // Chat
   "user_message",
   "user_message.queue.cancel",
@@ -1332,6 +1336,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "diff.git_stage_all",
   "diff.git_unstage_all",
   "diff.git_revert_file",
+  "diff.git_revert_all",
   // MCP / Environment / Git status
   "diff.git_revert_patch",
   "mcp.list",

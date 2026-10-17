@@ -16,6 +16,7 @@ export interface ContextMenuItem {
   separator?: boolean;
   onClick?: () => void;
   submenu?: ContextMenuItem[];
+  submenuMaxHeight?: number;
   tooltip?: string;
   checked?: boolean;
   checkType?: "radio" | "checkbox";
@@ -88,7 +89,7 @@ const surfaceStyle: CSSProperties = {
   boxShadow: "var(--shadow-strong-overlay)", padding: "6px", outline: "none",
 };
 
-function MenuSurface({ items, position, anchor, trigger, side, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, itemFontSize }: {
+function MenuSurface({ items, position, anchor, trigger, side, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, itemFontSize, maxHeight }: {
   items: ContextMenuItem[];
   position: { x: number; y: number };
   anchor?: HTMLButtonElement;
@@ -102,6 +103,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
   id?: string;
   ariaLabel?: string;
   className?: string;
+  maxHeight?: number;
   itemFontSize?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -170,7 +172,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       role="menu"
       onKeyDown={handleKeyDown}
       aria-label={ariaLabel ?? anchor?.textContent ?? undefined}
-      style={{ ...surfaceStyle, left: adjusted.x, top: adjusted.y }}
+      style={{ ...surfaceStyle, ...(maxHeight === undefined ? {} : { maxHeight: `min(${maxHeight}px, calc(100dvh - 16px))` }), left: adjusted.x, top: adjusted.y }}
     >
       {items.map((item, i) =>
         item.separator ? (
@@ -250,6 +252,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     {submenu && items[submenu.index]?.submenu && createPortal(<MenuSurface items={items[submenu.index].submenu!} position={{ x: 0, y: 0 }} anchor={submenu.anchor}
       focusFirst={submenu.focusFirst} surfaces={surfaces} onDismiss={onDismiss} onSelect={onSelect}
       itemFontSize={itemFontSize}
+      maxHeight={items[submenu.index].submenuMaxHeight}
       onBack={() => { const button = submenu.anchor; setSubmenu(null); button.focus(); }} />, document.body)}
   </>;
 }

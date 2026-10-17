@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, CheckCircle, CheckCircle2, ChevronDown, Columns2, ExternalLink, FileDiff, GitBranch, GitCompare, MessageCircle, Minus, MoreHorizontal, Plus, RefreshCw, RotateCcw, Rows3, X, XCircle } from "../lib/icons";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckCircle, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileDiff, GitCompare, Info, MessageCircle, Minus, Plus, RotateCcw, Rows3, X, XCircle } from "../lib/icons";
 import {
   commandResultSucceeded,
   sendClientCommand,
@@ -23,6 +23,27 @@ import { clearDiffReaderDrafts } from "../lib/diff-comment-storage";
 import { buildDiffWordDecorations, type DiffWordSpan } from "../chat/diff/diff-word-spans";
 import { decorateDiffLineHtml } from "../chat/diff/decorated-diff-syntax";
 import { useWordDiffsPreference } from "../chat/diff/word-diff-preference";
+import { useDiffViewPreference } from "../chat/diff/diff-view-preferences";
+import { ChangesToolbarActions } from "../chat/diff/ChangesToolbarActions";
+import { ChangesFileJump, ChangedFilesTree, type ChangesFileEntry } from "../chat/diff/ChangesFileNavigation";
+import { readGitReviewOptions, type GitReviewOptions } from "../chat/diff/git-review-options";
+import { useGitReviewSelection } from "../chat/diff/git-review-selection";
+import { compactCommitTime } from "../chat/diff/commit-relative-time";
+import { reviewNeedsSingleFile } from "../chat/diff/review-file-layout";
+import { useReviewExpansion } from "../chat/diff/review-expansion-state";
+import { ChangesFileActions } from "../chat/diff/ChangesFileActions";
+import { ChangesBranchComparison } from "../chat/diff/ChangesBranchComparison";
+import { DiffFileContextMenu, useDiffRequestChanges } from "../chat/diff/DiffFileContextMenu";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { openPreferredFile, preferredFileTargetForWorkspace } from "../lib/open-preferred-target";
+import { runtime, type DesktopPreferences } from "../desktop/runtime";
+import { buildFullDiffContext, type FullDiffContext } from "../chat/diff/full-content-metadata";
+import { useGitDiffContents } from "../chat/diff/use-git-diff-contents";
+import { diffPreviewKind, GitDiffMediaPreview } from "../chat/diff/GitDiffMediaPreview";
+import type { GitChangeFile, GitComparisonState, GitDiffSource, GitDiffSnapshot, GitReviewSelection } from "../stores/types";
+import { filterImportOnlyDiffHunks, type DiffPresentationAnnotation } from "../chat/diff/file-diff-presentation";
+import { useDiffPresentationParser } from "../chat/diff/diff-presentation-parser";
+import { displayFullDiffContext, expandDiffContext, type ContextDirection, type ContextExpansion, type DiffContextGap } from "../chat/diff/full-context-display";
 import { ContextMenu } from "../components/ContextMenu";
 import "../chat/diff/diff-word-spans.css";
 import { pushToast } from "../overlays/ToastContainer";
@@ -36,15 +57,9 @@ import type { CodeReviewComment } from "../lib/code-comment";
 import { useDiffPalette } from "../lib/use-diff-palette";
 import { diffPaletteStyle } from "../lib/diff-palette";
 
-type DiffViewMode = "unified" | "split";
+type DiffViewMode = "unified" | "split" | "auto";
 type ChangeScope = "review" | "history" | "git";
-const HISTORY_PREVIEW_LINE_LIMIT = 180;
 const NO_COLORIZED_LINES: DiffLine[] = [];
-const REVIEW_FILE_INITIAL_LIMIT = 96;
-const REVIEW_FILE_INCREMENT = 96;
-const GIT_PREVIEW_LINE_LIMIT = 600;
-const GIT_FILE_INITIAL_LIMIT = 48;
-const GIT_FILE_INCREMENT = 48;
 
 const visibleDiffLines = (lines: DiffLine[]): DiffLine[] =>
   lines.filter((line) => line.kind !== "meta");
@@ -100,35 +115,96 @@ const respond = async (requestId: string, approved: boolean) => {
   }
 };
 
+interface ChangesNavigationState {
+  openPaths: Set<string>;
+  setFileOpen: (path: string, open: boolean) => void;
+  jump: { path: string; nonce: number } | null;
+  onActivate: (path: string) => void;
+  visiblePath?: string;
+}
+const ChangesNavigationContext = createContext<ChangesNavigationState | null>(null);
+const DiffOpenPreferencesContext = createContext<DesktopPreferences | null>(null);
+const sourceLabels = {
+  branch: "此分支", uncommitted: "未提交", unstaged: "未暂存", staged: "已暂存", commit: "提交",
+} as const;
+const patchDeletesFile = (patch: string) => /^deleted file mode |^\+\+\+ \/dev\/null/m.test(patch);
+
 export const DiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {}) => {
   const localReaderId = useId();
   const readerId = readerOwnerId ?? localReaderId;
   useEffect(() => () => { if (readerOwnerId === undefined) clearDiffReaderDrafts(readerId); }, [readerOwnerId, readerId]);
-  const { t: tr } = useI18n();
+  const { t: tr, locale } = useI18n();
   const { palette, variant } = useDiffPalette();
-  const messages = useAppStore((s) => s.messages);
-  const diffReview = useAppStore((s) => s.diffReview);
-  const gitChanges = useAppStore((s) => s.gitChanges);
-  const conversationId = useAppStore((s) => s.conversationId);
-  const turnDiff = useAppStore((s) => s.conversationId ? s.turnDiffs[s.conversationId] : undefined);
-  const gitReviewRequest = useAppStore((s) => s.gitReviewRequest);
+  const { preferences } = useDesktopPreferences();
+  const messages = useAppStore(s => s.messages);
+  const diffReview = useAppStore(s => s.diffReview);
+  const gitChanges = useAppStore(s => s.gitChanges);
+  const conversationId = useAppStore(s => s.conversationId);
+  const workspaceRoot = useAppStore(s => s.workingDirectory);
+  const pendingSwitch = useAppStore(s => s.pendingConversationSwitchId);
+  const pendingCreate = useAppStore(s => s.pendingConversationCreateId);
+  const turnDiff = useAppStore(s => s.conversationId ? s.turnDiffs[s.conversationId] : undefined);
+  const gitReviewRequest = useAppStore(s => s.gitReviewRequest);
+  const requestGitComparison = useAppStore(s => s.requestGitComparison);
   const latestReviewInput = [...messages].reverse().find(message => message.role === "user" && message.codeReview);
   const modelComments = useMemo(() => codeReviewComments(messages, diffReview?.workspaceRoot ?? ""), [messages, diffReview?.workspaceRoot]);
   const displayedReview = diffReview?.codeReview ? { ...diffReview, modelComments } : diffReview;
-  const [activeScope, setActiveScope] = useState<ChangeScope>(diffReview ? "review" : "git");
+  const [reviewSelection, setReviewSelection] = useGitReviewSelection(conversationId ?? "", workspaceRoot);
+  const selection: GitReviewSelection = { ...reviewSelection, source: reviewSelection.source === "last-turn" ? "branch" : reviewSelection.source };
+  const setSelection = (value: GitReviewSelection | ((current: GitReviewSelection) => GitReviewSelection)) =>
+    setReviewSelection(typeof value === "function" ? value(selection) : value);
+  const ownerKey = JSON.stringify([conversationId, workspaceRoot]);
+  const [scopeState, setScopeState] = useState<{ key: string; scope: ChangeScope }>();
+  const activeScope = scopeState?.key === ownerKey ? scopeState.scope : diffReview ? "review" : reviewSelection.source === "last-turn" ? "history" : "git";
+  const setActiveScope = (value: ChangeScope | ((scope: ChangeScope) => ChangeScope)) =>
+    setScopeState({ key: ownerKey, scope: typeof value === "function" ? value(activeScope) : value });
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
-  const scopeMenuRef = useRef<HTMLDivElement | null>(null);
-  const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>("unified");
-  const [historyTurnId, setHistoryTurnId] = useState<string | null>(null);
-  const [optionsMenuOpen, setOptionsMenuOpen] = useState(false);
-  const optionsButton = useRef<HTMLButtonElement>(null);
-  const [wordDiffsEnabled, setWordDiffsEnabled] = useWordDiffsPreference();
-
+  const [menuNow, setMenuNow] = useState(() => new Date());
   useEffect(() => {
-    if (diffReview) { setActiveScope("review"); if (diffReview.codeReview) setDiffViewMode("split"); }
-    else setActiveScope((scope) => scope === "review" ? "git" : scope);
-  }, [diffReview]);
-
+    if (!scopeMenuOpen) return;
+    setMenuNow(new Date());
+    const timer = window.setInterval(() => setMenuNow(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [scopeMenuOpen]);
+  const scopeButton = useRef<HTMLButtonElement>(null);
+  const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>(() => JSON.parse(localStorage.getItem("editorDiffViewMode") ?? '"auto"'));
+  useEffect(() => { localStorage.setItem("editorDiffViewMode", JSON.stringify(diffViewMode)); }, [diffViewMode]);
+  const [wrap, setWrap] = useDiffViewPreference("wrap");
+  const [filesVisible, setFilesVisible] = useDiffViewPreference("filesVisible");
+  const [hideWhitespace] = useDiffViewPreference("hideWhitespace");
+  const root = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    observer.observe(root.current!); return () => observer.disconnect();
+  }, []);
+  const [optionsState, setOptionsState] = useState<{ key: string; owner: string; data?: GitReviewOptions; error?: string }>();
+  const [refresh, setRefresh] = useState(0);
+  const optionsKey = JSON.stringify([conversationId, workspaceRoot, selection.baseBranch, refresh]);
+  const options = optionsState?.key === optionsKey ? optionsState.data : undefined;
+  const branchOptions = optionsState?.owner === ownerKey ? optionsState.data : undefined;
+  useEffect(() => {
+    if (activeScope !== "git" && !scopeMenuOpen || !conversationId || !workspaceRoot || pendingSwitch || pendingCreate) return;
+    let current = true;
+    readGitReviewOptions(conversationId, workspaceRoot, selection.baseBranch).then(data => {
+      if (current) setOptionsState({ key: optionsKey, owner: ownerKey, data });
+    }, error => { if (current) setOptionsState({ key: optionsKey, owner: ownerKey, error: error.message }); });
+    return () => { current = false; };
+  }, [optionsKey, activeScope, scopeMenuOpen, pendingSwitch, pendingCreate]);
+  useEffect(() => {
+    if (activeScope !== "git" || pendingSwitch || pendingCreate || selection.source === "commit" && !selection.commitSha) return;
+    requestGitComparison(selection);
+  }, [activeScope, selection.source, selection.baseBranch, selection.commitSha, conversationId, workspaceRoot, pendingSwitch, pendingCreate, hideWhitespace]);
+  useEffect(() => {
+    if (reviewSelection.source === "commit" && (!reviewSelection.commitSha
+      || options && !options.commits.some(commit => commit.sha === reviewSelection.commitSha))) {
+      setReviewSelection(current => ({ ...current, source: "branch", commitSha: undefined }));
+    }
+  }, [reviewSelection.source, reviewSelection.commitSha, options]);
+  useEffect(() => {
+    if (diffReview) setActiveScope("review");
+    else setActiveScope(scope => scope === "review" ? "git" : scope);
+  }, [diffReview?.requestId]);
   useEffect(() => {
     if (diffReview || !conversationId || !latestReviewInput?.codeReview) return;
     const scope = latestReviewInput.codeReview;
@@ -141,141 +217,150 @@ export const DiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {}) =>
       }); });
     return () => { active = false; };
   }, [conversationId, latestReviewInput?.id, diffReview?.requestId]);
-
-  useEffect(() => {
-    if (gitReviewRequest && workspaceRootsEqual(gitReviewRequest.workspaceRoot, useAppStore.getState().workingDirectory)
-      && gitReviewRequest.conversationId === conversationId) setActiveScope("git");
-  }, [gitReviewRequest]);
-
-  const historySources = useMemo(() => {
-    return buildReviewHistory(messages, turnDiff, conversationId ?? undefined);
-  }, [messages, turnDiff, conversationId]);
-  const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
+  const historySources = useMemo(() => buildReviewHistory(messages, turnDiff, conversationId ?? undefined), [messages, turnDiff, conversationId]);
+  const historyTurn = historySources[0];
   const visibleScope = activeScope === "review" && !diffReview ? "git" : activeScope;
-  const historyTurn = historySources.find((turn) => turn.id === historyTurnId) ?? historySources[0];
-  const scopeOptions: { value: ChangeScope; label: string; count: number; turnId?: string }[] = [
-    ...(diffReview ? [{ value: "review" as const, label: diffReview.mode === "view" || diffReview.status === "viewing" ? tr("当前修改") : tr("待审阅"), count: diffReview.files.length || 1 }] : []),
-    ...(historySources.length ? historySources.map((turn, index) => ({ value: "history" as const,
-      label: index === 0 ? tr("上一轮") : tr("第 {v0} 轮", { v0: historySources.length - index }), count: turn.files.length, turnId: turn.id,
-    })) : [{ value: "history" as const, label: tr("轮次记录"), count: 0 }]),
-    { value: "git" as const, label: tr("未提交"), count: gitChangeCount },
-  ];
-  const visibleScopeOption = scopeOptions.find((option) => option.value === visibleScope
-    && (visibleScope !== "history" || option.turnId === historyTurn?.id)) ?? scopeOptions[0];
+  const comparison = gitChanges.comparison?.source === selection.source
+    && gitChanges.comparison.baseBranch === selection.baseBranch && gitChanges.comparison.commitSha === selection.commitSha
+    ? gitChanges.comparison : undefined;
+  const files: ChangesFileEntry[] = useMemo(() => {
+    if (visibleScope === "review" && displayedReview) {
+      const reviewFiles = displayedReview.files.length ? displayedReview.files : [{ path: extractFilePathFromDiff(parseUnifiedDiff(displayedReview.diff)) || "Diff", patch: displayedReview.diff }];
+      const comments = displayedReview.modelComments ?? [];
+      return [...reviewFiles, ...comments.filter((comment, index) => !reviewFiles.some(file => diffFilePathsEqual(file.path, comment.file, displayedReview.workspaceRoot))
+        && comments.findIndex(other => diffFilePathsEqual(other.file, comment.file, displayedReview.workspaceRoot)) === index).map(comment => ({ path: comment.file }))]
+        .map(file => ({ ...file, commentCount: comments.filter(comment => diffFilePathsEqual(comment.file, file.path, displayedReview.workspaceRoot)).length }));
+    }
+    if (visibleScope === "history") return historyTurn?.files ?? [];
+    return comparison?.files ?? [];
+  }, [visibleScope, displayedReview, historyTurn, comparison]);
   const totals = useMemo(() => {
-    const files: { patch?: string | null; additions?: number; deletions?: number }[] = visibleScope === "review"
+    const entries: { patch?: string | null; additions?: number | null; deletions?: number | null }[] = visibleScope === "review"
       ? diffReview?.files.length ? diffReview.files : [{ patch: diffReview?.diff }]
-      : visibleScope === "history" ? historyTurn?.files.flatMap<{ patch?: string; additions?: number; deletions?: number }>((file) => file.revisions.length
-        ? file.revisions.map((revision) => ({ patch: revision.diff }))
-        : [{ additions: file.additions, deletions: file.deletions }]) ?? []
-      : [...gitChanges.staged, ...gitChanges.workingTree];
-    return files.reduce((sum, file) => {
+      : visibleScope === "history" ? historyTurn?.files.flatMap<{ patch?: string; additions?: number; deletions?: number }>(file => file.revisions.length
+        ? file.revisions.map(revision => ({ patch: revision.diff })) : [{ additions: file.additions, deletions: file.deletions }]) ?? []
+        : comparison?.files ?? [];
+    return entries.reduce((sum, file) => {
       const lines = parseUnifiedDiff(file.patch ?? "");
-      sum.plus += file.additions ?? lines.filter((line) => line.kind === "add").length;
-      sum.minus += file.deletions ?? lines.filter((line) => line.kind === "del").length;
+      sum.plus += file.additions ?? lines.filter(line => line.kind === "add").length;
+      sum.minus += file.deletions ?? lines.filter(line => line.kind === "del").length;
       return sum;
     }, { plus: 0, minus: 0 });
-  }, [visibleScope, diffReview, historyTurn, gitChanges.staged, gitChanges.workingTree]);
-
+  }, [visibleScope, diffReview, historyTurn, comparison]);
+  const expansion = useReviewExpansion(conversationId ?? readerId);
+  const deletedPaths = new Set(visibleScope === "git" ? comparison?.files.filter(file => file.status === "D").map(file => file.path)
+    : visibleScope === "history" ? historyTurn?.files.filter(file => patchDeletesFile(file.revisions.at(-1)?.diff ?? "")).map(file => file.path)
+      : diffReview?.files.filter(file => patchDeletesFile(file.patch ?? "")).map(file => file.path));
+  const openPaths = new Set(files.filter(file => expansion.state.overrides.get(file.path)
+    ?? (expansion.state.expanded && !deletedPaths.has(file.path))).map(file => file.path));
+  const [jump, setJump] = useState<{ path: string; nonce: number } | null>(null);
+  const activePath = expansion.state.activePath;
+  const setActivePath = expansion.setActivePath;
+  const activeFilePath = files.some(file => file.path === activePath) ? activePath : files[0]?.path;
+  const diffBytes = useMemo(() => {
+    const patches = visibleScope === "git" ? comparison?.files.map(file => file.patch ?? "") ?? []
+      : visibleScope === "history" ? historyTurn?.files.flatMap(file => file.revisions.map(revision => revision.diff)) ?? []
+        : diffReview?.files.length ? diffReview.files.map(file => file.patch ?? "") : [diffReview?.diff ?? ""];
+    return patches.reduce((sum, patch) => sum + new TextEncoder().encode(patch).length, 0);
+  }, [visibleScope, comparison, historyTurn, diffReview]);
+  const singleFile = reviewNeedsSingleFile(files.length, totals.plus + totals.minus, diffBytes);
+  const [jumpAnchor, setJumpAnchor] = useState<HTMLElement | null>(null);
+  useEffect(() => { setJumpAnchor(null); setScopeMenuOpen(false); }, [ownerKey]);
+  const scopeKey = JSON.stringify([conversationId, workspaceRoot, visibleScope,
+    visibleScope === "git" ? selection : visibleScope === "review" ? diffReview?.requestId : historyTurn?.id]);
+  useLayoutEffect(() => { setJump(null); }, [ownerKey]);
+  const jumpToFile = (path: string) => {
+    expansion.setFileOpen(path, true); setActivePath(path);
+    setJump(value => ({ path, nonce: (value?.nonce ?? 0) + 1 }));
+  };
   useEffect(() => {
-    if (!scopeMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!scopeMenuRef.current?.contains(event.target as Node)) setScopeMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setScopeMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [scopeMenuOpen]);
-
-  return (
-    <DiffReaderOwnerContext.Provider value={readerId}>
-    <div className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
+    if (diffReview?.selectedPath && visibleScope === "review") jumpToFile(diffReview.selectedPath);
+  }, [diffReview?.selectedPath, diffReview?.requestId, visibleScope]);
+  useEffect(() => {
+    if (!gitReviewRequest || !workspaceRootsEqual(gitReviewRequest.workspaceRoot, workspaceRoot) || gitReviewRequest.conversationId !== conversationId) return;
+    setSelection({ source: gitReviewRequest.section === "staged" ? "staged" : "unstaged" });
+    setActiveScope("git");
+    expansion.focusFile(gitReviewRequest.path);
+    setJump(value => ({ path: gitReviewRequest.path, nonce: (value?.nonce ?? 0) + 1 }));
+  }, [gitReviewRequest, conversationId, workspaceRoot]);
+  const chooseSource = (source: GitDiffSource | "last-turn", commitSha?: string) => {
+    setActiveScope(source === "last-turn" ? "history" : "git");
+    setReviewSelection(current => ({ source, baseBranch: current.baseBranch, commitSha: source === "commit" ? commitSha : current.commitSha }), true);
+  };
+  const label = visibleScope === "review" ? tr(diffReview?.mode === "view" ? "当前修改" : "待审阅")
+    : visibleScope === "history" ? tr("上一轮") : selection.source === "commit"
+      ? (locale === "zh-CN" ? "提交" : "Commit") : tr(sourceLabels[selection.source]);
+  const selectedCommit = visibleScope === "git" && selection.source === "commit" ? options?.commits.find(commit => commit.sha === selection.commitSha) : undefined;
+  const allExpanded = expansion.state.expanded;
+  return <DiffReaderOwnerContext.Provider value={readerId}>
+    <DiffOpenPreferencesContext.Provider value={preferences}>
+    <ChangesNavigationContext.Provider value={{ openPaths, setFileOpen: expansion.setFileOpen, jump, onActivate: setActivePath, visiblePath: singleFile ? activeFilePath ?? undefined : undefined }}>
+    <div ref={root} className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
       <div className="mc-diff-toolbar flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
-        {diffReview?.previewReturnTarget
-          && diffReview.conversationId === conversationId
-          && diffReview.previewReturnTarget.conversationId === conversationId && (
-          <button
-            type="button"
-            className="mc-diff-return-preview"
-            title={diffReview.previewReturnTarget.url}
-            onClick={() => {
-              const target = diffReview.previewReturnTarget!;
-              if (target.tab === "browser" && target.targetId && target.url) returnToBrowserPage({ conversationId: target.conversationId, targetId: target.targetId, url: target.url });
-              else useAppStore.getState().setRightStackTab(target.tab);
-            }}
-          >
-            <ArrowLeft size={14} /> {tr("返回预览")}</button>
-        )}
-        <div ref={scopeMenuRef} className="mc-diff-scope-selector relative inline-flex items-center gap-1.5 min-w-0" style={{ color: "var(--text-muted)" }}>
-          <button
-            type="button"
-            aria-label={tr("Diff 来源：{v0}{v1}", { v0: visibleScopeOption.label, v1: visibleScopeOption.count ? ` ${visibleScopeOption.count}` : "" })}
-            aria-haspopup="listbox"
-            aria-expanded={scopeMenuOpen}
-            className="mc-diff-scope-trigger"
-            onClick={() => setScopeMenuOpen((open) => !open)}
-            style={scopeTriggerStyle}
-          >
-            <span className="truncate">{visibleScopeOption.label}</span>
-            <ChevronDown size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+        {diffReview?.previewReturnTarget && diffReview.conversationId === conversationId && diffReview.previewReturnTarget.conversationId === conversationId &&
+          <button type="button" className="mc-diff-return-preview" title={diffReview.previewReturnTarget.url} onClick={() => {
+            const target = diffReview.previewReturnTarget!;
+            if (target.tab === "browser" && target.targetId && target.url) returnToBrowserPage({ conversationId: target.conversationId, targetId: target.targetId, url: target.url });
+            else useAppStore.getState().setRightStackTab(target.tab);
+          }}><ArrowLeft size={14} />{tr("返回预览")}</button>}
+        <div className="mc-diff-leading-controls">
+        <div className="mc-diff-scope-selector relative inline-flex items-center gap-1.5 min-w-0">
+          <button ref={scopeButton} type="button" className="mc-diff-scope-trigger" style={scopeTriggerStyle}
+            aria-label={tr("Diff 来源：{v0}{v1}", { v0: label, v1: files.length ? ` ${files.length}` : "" })}
+            aria-haspopup="menu" aria-expanded={scopeMenuOpen} onClick={() => setScopeMenuOpen(open => !open)}>
+            <span className="truncate">{label}</span><ChevronDown size={14} />
           </button>
-          {scopeMenuOpen && (
-            <div className="mc-dropdown-menu" role="listbox" aria-label={tr("Diff 来源")} style={scopeMenuStyle}>
-              {scopeOptions.map((option) => (
-                <button
-                  key={option.turnId ?? option.value}
-                  type="button"
-                  role="option"
-                  aria-selected={visibleScope === option.value && (option.value !== "history" || option.turnId === historyTurn?.id)}
-                  onClick={() => {
-                    setActiveScope(option.value);
-                    if (option.value === "history") setHistoryTurnId(option.turnId ?? null);
-                    setScopeMenuOpen(false);
-                  }}
-                  style={scopeOptionStyle(visibleScope === option.value && (option.value !== "history" || option.turnId === historyTurn?.id))}
-                >
-                  <span className="truncate">{option.value === "history" && option.turnId ? tr("轮次记录 · {v0}", { v0: option.label }) : option.label}</span>
-                  {option.count > 0 && <span style={scopeCountStyle}>{option.count}</span>}
-                </button>
-              ))}
-            </div>
-          )}
+          {scopeMenuOpen && <ContextMenu anchor={scopeButton.current!} returnFocusTo={scopeButton.current!} position={{ x: 0, y: 0 }}
+            ariaLabel={tr("Diff 来源")} onClose={() => setScopeMenuOpen(false)} items={[
+              ...diffReview ? [{ label: tr(diffReview.mode === "view" ? "当前修改" : "待审阅"), checked: visibleScope === "review", checkType: "radio" as const, onClick: () => setActiveScope("review") }] : [],
+              { label: tr("上一轮"), checked: visibleScope === "history", checkType: "radio", onClick: () => chooseSource("last-turn") },
+              ...(["branch", "uncommitted", "unstaged", "staged"] as const).map(source => ({ label: tr(sourceLabels[source]),
+                checked: visibleScope === "git" && selection.source === source, checkType: "radio" as const, onClick: () => chooseSource(source) })),
+              { label: locale === "zh-CN" ? "提交" : "Commits", submenuMaxHeight: 320, submenu: options?.commits.length ? options.commits.map(commit => ({
+                label: commit.subject, rightIcon: <span className="mc-diff-commit-age">{compactCommitTime(commit.committedAt, menuNow, locale)}<span>{locale === "zh-CN" ? "前" : "ago"}</span></span>, tooltip: commit.message,
+                checked: visibleScope === "git" && selection.source === "commit" && selection.commitSha === commit.sha,
+                checkType: "radio" as const, onClick: () => chooseSource("commit", commit.sha),
+              })) : optionsState?.key === optionsKey && optionsState.error ? [
+                { label: tr("无法加载提交"), disabled: true }, { label: tr("重试"), onClick: () => setRefresh(value => value + 1) },
+              ] : [{ label: options ? tr("分支上没有提交") : tr("正在加载提交…"), disabled: true }] },
+            ]} />}
           <span className="mc-diff-total-counts"><span>+{totals.plus}</span><span>-{totals.minus}</span></span>
         </div>
-        <span className="flex-1" />
-          <button ref={optionsButton} type="button" aria-label={tr("“变更”选项")} title={tr("“变更”选项")}
-            aria-haspopup="menu" aria-expanded={optionsMenuOpen} className="mc-diff-icon-action" style={iconButtonStyle}
-            onClick={() => { setScopeMenuOpen(false); setOptionsMenuOpen(open => !open); }}><MoreHorizontal size={16} /></button>
-          {optionsMenuOpen && <ContextMenu ariaLabel={tr("“变更”选项")} anchor={optionsButton.current!} returnFocusTo={optionsButton.current!}
-            position={{ x: 0, y: 0 }} onClose={() => setOptionsMenuOpen(false)}
-            items={[{ label: tr("词级差异"), checked: wordDiffsEnabled, checkType: "checkbox",
-              icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" aria-hidden="true">
-                <rect x="3" y="1.5" width="10" height="13" rx="2" /><path d="M5.5 5h5M8 2.5v5M5.5 11h5" /></svg>,
-              onClick: () => setWordDiffsEnabled(!wordDiffsEnabled) }]} />}
-          <button
-            onClick={() => setDiffViewMode(diffViewMode === "unified" ? "split" : "unified")}
-            title={diffViewMode === "unified" ? tr("切换为分栏视图") : tr("切换为行内视图")}
-            aria-label={diffViewMode === "unified" ? tr("切换为分栏视图") : tr("切换为行内视图")}
-            className="mc-diff-icon-action w-6 h-[22px]"
-            style={{ ...iconButtonStyle }}
-          >
-            {diffViewMode === "unified" ? <Columns2 size={14} /> : <Rows3 size={14} />}
-          </button>
+        {visibleScope === "git" && selection.source === "branch" && <ChangesBranchComparison currentBranch={branchOptions?.current_branch} defaultTargetBranch={branchOptions?.default_base_branch}
+          targetBranch={selection.baseBranch} branches={branchOptions?.branches} loading={!branchOptions && !(optionsState?.key === optionsKey && optionsState.error)}
+          error={optionsState?.key === optionsKey ? optionsState.error : undefined} onRetry={() => setRefresh(value => value + 1)}
+          onSelectBranch={baseBranch => setSelection(current => ({ ...current, baseBranch }))} />}
+        </div>
+        <ChangesToolbarActions width={width} mode={diffViewMode} onModeChange={setDiffViewMode} wrap={wrap} onWrapChange={setWrap}
+          allExpanded={allExpanded} onToggleAll={() => expansion.setExpanded(!allExpanded)}
+          onRefresh={visibleScope === "git" ? () => { requestGitComparison(selection); setRefresh(value => value + 1); } : undefined}
+          refreshing={visibleScope === "git" && comparison?.loading} refreshDisabled={Boolean(pendingSwitch || pendingCreate || selection.source === "commit" && !selection.commitSha)}
+          filesVisible={filesVisible} onToggleFiles={() => setFilesVisible(!filesVisible)} onJumpToFile={setJumpAnchor} jumpOpen={jumpAnchor !== null} />
       </div>
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {visibleScope === "review" && <ReviewTab diffReview={displayedReview} viewMode={diffViewMode} />}
-        {visibleScope === "history" && <HistoryTab turn={historyTurn} turnNumber={historySources.length - historySources.indexOf(historyTurn)} viewMode={diffViewMode} />}
-        {visibleScope === "git" && <GitChangesTab viewMode={diffViewMode} />}
+      {selectedCommit && <div className="mc-diff-selected-commit" aria-label={tr("选中的提交")} title={selectedCommit.message}>{selectedCommit.subject}</div>}
+      <div className="mc-changes-content flex flex-1 min-h-0 overflow-hidden">
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+          {singleFile && <div className="mc-diff-large-banner" role="note">
+            <div><Info size={16} /><span>{tr("此差异较大，每次仅显示一个文件")}</span></div>
+            <div><button type="button" aria-label={tr("上一个文件")} disabled={!activeFilePath || files.findIndex(file => file.path === activeFilePath) === 0}
+              onClick={() => jumpToFile(files[files.findIndex(file => file.path === activeFilePath) - 1].path)}><ChevronLeft size={16} /></button>
+            <button type="button" aria-label={tr("下一个文件")} disabled={!activeFilePath || files.findIndex(file => file.path === activeFilePath) === files.length - 1}
+              onClick={() => jumpToFile(files[files.findIndex(file => file.path === activeFilePath) + 1].path)}><ChevronRight size={16} /></button></div>
+          </div>}
+          <div className="flex-1 min-h-0 overflow-hidden">
+          {visibleScope === "review" && <ReviewTab diffReview={displayedReview} viewMode={diffViewMode} />}
+          {visibleScope === "history" && <HistoryTab turn={historyTurn} turnNumber={historySources.length} viewMode={diffViewMode} />}
+          {visibleScope === "git" && <GitChangesTab key={ownerKey} comparison={comparison} selection={selection} viewMode={diffViewMode} />}
+          </div>
+        </div>
+        <ChangedFilesTree open={filesVisible} entries={files} activePath={activeFilePath} parentWidth={width} onSelect={jumpToFile} onClose={() => setFilesVisible(false)} />
       </div>
+      {jumpAnchor && <ChangesFileJump anchor={jumpAnchor} entries={files} activePath={activeFilePath}
+        onSelect={path => { jumpToFile(path); setJumpAnchor(null); }} onClose={() => setJumpAnchor(null)} />}
     </div>
-    </DiffReaderOwnerContext.Provider>
-  );
+    </ChangesNavigationContext.Provider>
+    </DiffOpenPreferencesContext.Provider>
+  </DiffReaderOwnerContext.Provider>;
 };
 
 const CodeReviewCommentCard = ({ comment, filePath, workspaceRoot }: { comment: CodeReviewComment; filePath?: string; workspaceRoot?: string }) =>
@@ -303,42 +388,71 @@ interface DiffBodyProps {
   commentsEnabled?: boolean;
   approvalComments?: import("../stores/types").DiffLineComment[];
   rawPatch?: string;
-  previewLineLimit?: number;
   inline?: boolean;
+  fullContext?: FullDiffContext | null;
 }
 
 interface DiffReadingProps extends DiffBodyProps {
   annotations: DiffAnnotations;
   wordSpans: DiffWordSpan[][];
   colorized: string[] | null;
-  hiddenLineCount?: number;
-  onShowFull?: () => void;
+  contextGaps: Map<DiffLine, DiffContextGap>;
+  onExpandContext: (gap: DiffContextGap, direction: ContextDirection) => void;
 }
 
-const DiffBody = ({ lines, annotationSourceKey, language, viewMode = "unified", comments, filePath, workspaceRoot, conversationId, annotationMode, commentsEnabled = true, approvalComments, rawPatch, previewLineLimit, inline = false }: DiffBodyProps) => {
-  const [showFullPreview, setShowFullPreview] = useState(false);
+const DiffBody = ({ lines, annotationSourceKey, language, viewMode = "unified", comments, filePath, workspaceRoot, conversationId, annotationMode, commentsEnabled = true, approvalComments, rawPatch, inline = false, fullContext }: DiffBodyProps) => {
+  const [contextExpansion, setContextExpansion] = useState<ContextExpansion>({});
+  const [bodyWidth, setBodyWidth] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const readingAnchor = useRef<{ index: string; offset: number } | null>(null);
   const selectedRange = useRef<{ start: string; startOffset: number; end: string; endOffset: number } | null>(null);
-  const projectedLines = useMemo(() => visibleDiffLines(lines), [lines]);
+  const originalLines = useMemo(() => visibleDiffLines(lines), [lines]);
   const [wordDiffsEnabled] = useWordDiffsPreference();
+  const [hideImports] = useDiffViewPreference("hideImports");
+  const [wrap] = useDiffViewPreference("wrap");
+  const parser = useDiffPresentationParser(filePath ?? "", hideImports && Boolean(fullContext));
   const lang = language ?? guessLanguageFromPath(filePath ?? extractFilePathFromDiff(lines));
-  const changedLineCount = useMemo(() => projectedLines.filter(line => line.kind === "add" || line.kind === "del").length, [projectedLines]);
-  const colorized = useColorizedLines(changedLineCount > 2000 ? NO_COLORIZED_LINES : projectedLines, lang);
-  const forcePlainText = lang !== "plaintext" && colorized === null;
-  const words = useMemo(() => buildDiffWordDecorations(projectedLines, { forcePlainText, wordDiffsEnabled }), [projectedLines, forcePlainText, wordDiffsEnabled]);
-  const annotations = useDiffAnnotations({ lines: projectedLines, rawPatch: rawPatch ?? "", filePath: filePath ?? "", workspaceRoot, conversationId,
+  const annotations = useDiffAnnotations({ lines: fullContext?.lines ?? originalLines, rawPatch: rawPatch ?? "", filePath: filePath ?? "", workspaceRoot, conversationId,
     enabled: Boolean(annotationMode && filePath && commentsEnabled), sourceKey: annotationSourceKey,
     approvalComments: annotationMode === "approval" ? approvalComments ?? [] : undefined,
     onApprovalSave: comment => useAppStore.getState().addDiffLineComment(comment),
     onApprovalRemove: position => useAppStore.getState().removeDiffLineComment(position),
   });
+  useDiffRequestChanges(annotations.requestChanges);
+  const actualMode = viewMode === "auto" ? bodyWidth >= 800
+    && originalLines.some(line => line.kind === "add") && originalLines.some(line => line.kind === "del") ? "split" : "unified" : viewMode;
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setBodyWidth(entry.contentRect.width));
+    observer.observe(scrollRef.current!);
+    return () => observer.disconnect();
+  }, []);
+  const positions: DiffPresentationAnnotation[] = annotations.positions.map(position => ({
+    side: position.side === "left" ? "deletions" : "additions", lineNumber: position.line,
+  }));
+  for (const comment of comments ?? []) {
+    const line = originalLines.find(line => line.lineIndex === comment.lineIndex);
+    if (line?.newLine !== undefined) positions.push({ side: "additions", lineNumber: line.newLine });
+    else if (line?.oldLine !== undefined) positions.push({ side: "deletions", lineNumber: line.oldLine });
+  }
+  const annotationKey = positions.map(position => `${position.side}:${position.lineNumber}`).join(",");
+  const presentedContext = useMemo(() => fullContext && hideImports
+    ? filterImportOnlyDiffHunks(fullContext, filePath ?? "", parser, positions) : fullContext,
+  [fullContext, hideImports, parser, annotationKey, filePath]);
+  const displayContext = useMemo(() => presentedContext ? displayFullDiffContext(presentedContext, contextExpansion) : undefined,
+    [presentedContext, contextExpansion]);
+  const projectedLines = displayContext?.lines ?? originalLines;
+  const changedLineCount = useMemo(() => projectedLines.filter(line => line.kind === "add" || line.kind === "del").length, [projectedLines]);
+  const colorized = useColorizedLines(changedLineCount > 2000 ? NO_COLORIZED_LINES : projectedLines, lang);
+  const forcePlainText = lang !== "plaintext" && colorized === null;
+  const words = useMemo(() => buildDiffWordDecorations(projectedLines, { forcePlainText, wordDiffsEnabled,
+    unifiedLineCount: presentedContext?.unifiedLineCount, splitLineCount: presentedContext?.splitLineCount,
+  }), [projectedLines, forcePlainText, wordDiffsEnabled, presentedContext]);
+  useEffect(() => { setContextExpansion({}); }, [fullContext, hideImports]);
   useEffect(() => {
-    setShowFullPreview(false);
     readingAnchor.current = null;
     selectedRange.current = null;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
-  }, [filePath, rawPatch, previewLineLimit]);
+  }, [filePath, rawPatch]);
   useEffect(() => {
     const rememberSelection = () => {
       const selection = window.getSelection();
@@ -393,25 +507,23 @@ const DiffBody = ({ lines, annotationSourceKey, language, viewMode = "unified", 
       window.getSelection()?.removeAllRanges();
       window.getSelection()?.addRange(range);
     }
-  }, [viewMode]);
-  const shouldPreview = Boolean(previewLineLimit && projectedLines.length > previewLineLimit && !showFullPreview);
-  const visibleLines = shouldPreview && previewLineLimit
-    ? projectedLines.slice(0, previewLineLimit)
-    : projectedLines;
-  const hiddenLineCount = projectedLines.length - visibleLines.length;
-  const props: DiffReadingProps = { lines: visibleLines, annotationSourceKey, language, comments, filePath, workspaceRoot, annotations, wordSpans: words.spansByLine,
-    colorized, hiddenLineCount, onShowFull: () => setShowFullPreview(true), inline };
-  return <div ref={scrollRef} className={`mc-diff-reading-surface flex-1 min-h-0 overflow-auto${inline ? " mc-diff-reading-inline" : ""}`} onScroll={() => {
+  }, [actualMode]);
+  const props: DiffReadingProps = { lines: projectedLines, annotationSourceKey, language, comments, filePath, workspaceRoot, annotations, wordSpans: words.spansByLine,
+    colorized, inline,
+    contextGaps: displayContext?.gaps ?? new Map(),
+    onExpandContext: (gap, direction) => setContextExpansion(current => expandDiffContext(current, gap.key, direction)),
+  };
+  return <div ref={scrollRef} data-wrap={wrap || undefined} className={`mc-diff-reading-surface flex-1 min-h-0 overflow-auto${inline ? " mc-diff-reading-inline" : ""}`} onScroll={() => {
     const surface = scrollRef.current!;
     const top = surface.getBoundingClientRect().top;
     const row = [...surface.querySelectorAll<HTMLElement>("[data-diff-index]")].find((candidate) => candidate.getBoundingClientRect().bottom > top);
     if (row) readingAnchor.current = { index: row.dataset.diffIndex!, offset: row.getBoundingClientRect().top - top };
   }}>
-    {viewMode === "split" ? <SplitDiffBody {...props} /> : <UnifiedDiffBody {...props} />}
+    {actualMode === "split" ? <SplitDiffBody {...props} /> : <UnifiedDiffBody {...props} />}
   </div>;
 };
 
-const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, hiddenLineCount = 0, onShowFull, inline }: DiffReadingProps) => {
+const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, inline, contextGaps, onExpandContext }: DiffReadingProps) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const commentMap = useMemo(() => {
     if (!comments) return new Map<number, DiffLineCommentData>();
@@ -425,11 +537,15 @@ const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations
   return (
     <div className="mc-diff-code-body">
       {lines.map((line, colorIndex) => {
-        if (line.kind === "hunk") return <DiffHunkDivider key={`hunk-${colorIndex}`} line={line} inline={inline} />;
-        const i = line.lineIndex!;
+        if (line.kind === "hunk") return <DiffHunkDivider key={`hunk-${colorIndex}`} line={line} inline={inline}
+          gap={contextGaps.get(line)} onExpand={onExpandContext} />;
+        const i = line.lineIndex ?? `full:${line.unifiedIndex}`;
+        const commentIndex = line.lineIndex;
         return (
         <div key={i} data-diff-index={i}>
-          <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-selected={lineLocations(line).some(annotations.selected) || undefined}
+          <div className="mc-diff-code-row" data-diff-kind={line.kind}
+            data-diff-line-number={line.newLine ?? line.oldLine} data-diff-line-side={line.newLine !== undefined ? "right" : "left"}
+            data-diff-selected={lineLocations(line).some(annotations.selected) || undefined}
             onPointerEnter={() => { const location = lineLocations(line).at(-1); if (location) annotations.enter(location); }} style={{ background: bgForKind(line.kind) }}>
           <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} annotations={annotations} side={inline ? line.kind === "del" ? "old" : "new" : undefined} /></div>
           <div
@@ -449,22 +565,21 @@ const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations
             </span>
             <span data-diff-text={`${i}:${line.newLine === undefined ? "old" : "new"}`}
               dangerouslySetInnerHTML={{ __html: decorateDiffLineHtml(line.text, colorized?.[colorIndex], wordSpans[colorIndex]) }} />
-            {commentMap.has(i) && (
-              <span className="ml-2 inline align-middle" style={{ color: "var(--accent-primary)", fontSize: "var(--text-xs)" }} title={commentMap.get(i)!.content}>
+            {commentIndex !== undefined && commentMap.has(commentIndex) && (
+              <span className="ml-2 inline align-middle" style={{ color: "var(--accent-primary)", fontSize: "var(--text-xs)" }} title={commentMap.get(commentIndex)!.content}>
                 <MessageCircle size={14} style={{ display: "inline", verticalAlign: "middle" }} />
               </span>
             )}
           </div>
           </div>
-          {commentMap.has(i) && (
+          {commentIndex !== undefined && commentMap.has(commentIndex) && (
             <div className="py-1 px-2.5 pl-3.5" style={{ background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base))", borderLeft: "3px solid var(--accent-primary)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>
-              {commentMap.get(i)!.models ? commentMap.get(i)!.models!.map((comment, index) => <CodeReviewCommentCard key={index} comment={comment} filePath={filePath} workspaceRoot={workspaceRoot} />) : commentMap.get(i)!.content}
+              {commentMap.get(commentIndex)!.models ? commentMap.get(commentIndex)!.models!.map((comment, index) => <CodeReviewCommentCard key={index} comment={comment} filePath={filePath} workspaceRoot={workspaceRoot} />) : commentMap.get(commentIndex)!.content}
             </div>
           )}
           {annotations.render(lineLocations(line))}
         </div>
       ); })}
-      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} onShowFull={onShowFull} />}
     </div>
   );
 };
@@ -476,19 +591,29 @@ interface SplitRow {
   rightIndex?: number;
 }
 
-const DiffHunkDivider = ({ line, inline }: { line: DiffLine; inline?: boolean }) => {
+const DiffHunkDivider = ({ line, inline, gap, onExpand }: { line: DiffLine; inline?: boolean; gap?: DiffContextGap;
+  onExpand?: (gap: DiffContextGap, direction: ContextDirection) => void }) => {
   const { t: tr } = useI18n();
+  if (gap) {
+    if (gap.remaining === 0) return null;
+    const expand = (direction: ContextDirection, event: React.MouseEvent) => onExpand!(gap, event.shiftKey ? "all" : direction);
+    return <div className="mc-diff-hunk-divider mc-diff-context-divider">
+      <button type="button" className="mc-diff-context-label" onClick={event => expand("both", event)}>
+        {gap.remaining.toLocaleString()} {tr("行未修改")}
+      </button>
+      <span className="mc-diff-context-actions">
+        {gap.remaining > 20 ? <>
+          {gap.allowUp && <button type="button" aria-label={tr("向上展开 20 行")} title={tr("向上展开 20 行")} onClick={event => expand("up", event)}><ArrowUp size={14} /></button>}
+          {gap.allowDown && <button type="button" aria-label={tr("向下展开 20 行")} title={tr("向下展开 20 行")} onClick={event => expand("down", event)}><ArrowDown size={14} /></button>}
+        </> : <button type="button" aria-label={tr("展开未修改的行")} title={tr("展开未修改的行")}
+          onClick={event => expand(gap.allowUp && gap.allowDown ? "both" : gap.allowUp ? "up" : "down", event)}><Rows3 size={14} /></button>}
+        {gap.remaining > 20 && <button type="button" onClick={event => expand("all", event)}>{tr("展开全部")}</button>}
+      </span>
+    </div>;
+  }
   const omitted = Math.max(line.oldGap ?? 0, line.newGap ?? 0);
-  if (inline && omitted > 0) return <div className="mc-diff-hunk-divider"><span>{omitted.toLocaleString()} {tr("行未修改")}</span></div>;
-  return <div className="mc-diff-hunk-divider">
-    {omitted > 0 && <span>{tr("中间省略") + " "}{omitted.toLocaleString()} {tr("行")}</span>}
-    <span>{line.oldLine === 0
-      ? tr("新增内容 · 第 {v0} 行", { v0: line.newLine! })
-      : line.newLine === 0
-        ? tr("删除内容 · 原文件第 {v0} 行", { v0: line.oldLine! })
-        : tr("变更前第 {v0} 行 · 变更后第 {v1} 行", { v0: line.oldLine!, v1: line.newLine! })}</span>
-    <span className="truncate">{line.text.replace(/^@@.*?@@\s*/, "")}</span>
-  </div>;
+  if (omitted <= 0) return null;
+  return <div className="mc-diff-hunk-divider"><span>{omitted.toLocaleString()} {tr("行未修改")}</span></div>;
 };
 
 const lineLocations = (line: DiffLine): DiffLineLocation[] => [
@@ -498,12 +623,15 @@ const lineLocations = (line: DiffLine): DiffLineLocation[] => [
 
 const DiffLineGutter = ({ line, filePath, workspaceRoot, side, annotations }: { line: DiffLine; filePath?: string; workspaceRoot?: string; side?: "old" | "new"; annotations: DiffAnnotations }) => {
   const { t: tr } = useI18n();
+  const external = useExternalEditor(filePath ?? "", workspaceRoot);
   if (line.oldLine === undefined && line.newLine === undefined) return null;
   return (
     <span className="mc-diff-line-gutter" data-side={side ?? "both"}>
       {side !== "new" && <span className="mc-diff-gutter-side" onPointerEnter={() => { if (line.oldLine !== undefined) annotations.enter({ side: "left", line: line.oldLine }); }}>
         {line.oldLine !== undefined && annotations.utility({ side: "left", line: line.oldLine })}
-        <span title={tr("原文件行号")}>{line.oldLine ?? ""}</span>
+        <span title={tr("原文件行号")} onClick={event => {
+          if ((event.ctrlKey || event.metaKey) && line.oldLine !== undefined && filePath) external?.(line.oldLine);
+        }}>{line.oldLine ?? ""}</span>
       </span>}
       {side !== "old" && <span className="mc-diff-gutter-side" onPointerEnter={() => { if (line.newLine !== undefined) annotations.enter({ side: "right", line: line.newLine }); }}>
         {line.newLine !== undefined && annotations.utility({ side: "right", line: line.newLine })}
@@ -512,7 +640,10 @@ const DiffLineGutter = ({ line, filePath, workspaceRoot, side, annotations }: { 
           type="button"
           title={workspaceRoot && !workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory) ? tr("在来源工作区打开") : tr("跳到当前代码")}
           aria-label={tr("在编辑器中打开 {v0} 第 {v1} 行", { v0: filePath, v1: line.newLine })}
-          onClick={() => openDiffSourceFile(filePath, workspaceRoot, line.newLine)}
+          onClick={event => {
+            if (event.ctrlKey || event.metaKey) external?.(line.newLine!);
+            else openDiffSourceFile(filePath, workspaceRoot, line.newLine);
+          }}
         >
           {line.newLine}
         </button>
@@ -522,7 +653,7 @@ const DiffLineGutter = ({ line, filePath, workspaceRoot, side, annotations }: { 
   );
 };
 
-const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, hiddenLineCount = 0, onShowFull }: DiffReadingProps) => {
+const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, wordSpans, colorized, contextGaps, onExpandContext }: DiffReadingProps) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const rows = useMemo(() => {
     const result: SplitRow[] = [];
@@ -581,7 +712,7 @@ const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, 
   return (
     <div className="mc-diff-code-body">
       {rows.map((row, i) => {
-        if (row.left?.kind === "hunk") return <DiffHunkDivider key={i} line={row.left} />;
+        if (row.left?.kind === "hunk") return <DiffHunkDivider key={i} line={row.left} gap={contextGaps.get(row.left)} onExpand={onExpandContext} />;
         const commentLineIndices = row.leftIndex === row.rightIndex
           ? [row.leftIndex]
           : [row.leftIndex, row.rightIndex];
@@ -602,31 +733,8 @@ const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, 
           </div>
         );
       })}
-      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} onShowFull={onShowFull} />}
     </div>
   );
-};
-
-const DiffTruncationNotice = ({ hiddenLineCount, onShowFull }: { hiddenLineCount: number; onShowFull?: () => void }) => {
-  const { t: tr } = useI18n();
-  return (
-  <div
-    className="px-2.5 py-2 flex items-center gap-2"
-    style={{
-      borderTop: "1px solid var(--border-subtle)",
-      color: "var(--text-muted)",
-      fontFamily: "var(--font-ui)",
-      fontSize: "var(--text-xs)",
-      background: "var(--surface-page)",
-    }}
-  >
-    <span className="flex-1">{tr("当前为预览，另有") + " "}{hiddenLineCount.toLocaleString()} {tr("行 Diff 已隐藏。")}</span>
-    {onShowFull && (
-      <button type="button" onClick={onShowFull} style={smallActionButtonStyle}>
-        {tr("显示完整 Diff")}</button>
-    )}
-  </div>
-);
 };
 
 const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot }: { row: SplitRow; colorizedMap: Map<DiffLine, string>; annotations: DiffAnnotations; filePath?: string; workspaceRoot?: string }) => {
@@ -647,10 +755,12 @@ const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot 
         ? "var(--diff-added-background)"
         : "transparent";
     const html = colorizedMap?.get(line);
+    const readingIndex = lineIndex ?? `full:${line.unifiedIndex}`;
     const lineNumber = side === "left" ? line.oldLine : line.newLine;
     const location = lineNumber === undefined ? undefined : { side, line: lineNumber };
     return (
-      <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-index={lineIndex}
+      <div className="mc-diff-code-row" data-diff-kind={line.kind} data-diff-index={readingIndex}
+        data-diff-line-number={lineNumber} data-diff-line-side={side}
         data-diff-selected={location && annotations.selected(location) || undefined}
         onPointerEnter={() => { if (location) annotations.enter(location); }} style={{ background: bg }}>
       <div className="mc-diff-gutter-cell"><DiffLineGutter line={line} filePath={filePath} workspaceRoot={workspaceRoot} annotations={annotations} side={side === "left" ? "old" : "new"} /></div>
@@ -658,9 +768,9 @@ const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot 
         className="mc-diff-code-content px-2 whitespace-pre-wrap break-words"
       >
         {html ? (
-          <span data-diff-text={`${lineIndex}:${side === "left" ? "old" : "new"}`} dangerouslySetInnerHTML={{ __html: html }} />
+          <span data-diff-text={`${readingIndex}:${side === "left" ? "old" : "new"}`} dangerouslySetInnerHTML={{ __html: html }} />
         ) : (
-          <span data-diff-text={`${lineIndex}:${side === "left" ? "old" : "new"}`} style={{ color: colorForKind(line.kind) }}>{line.text}</span>
+          <span data-diff-text={`${readingIndex}:${side === "left" ? "old" : "new"}`} style={{ color: colorForKind(line.kind) }}>{line.text}</span>
         )}
       </div>
       </div>
@@ -716,15 +826,6 @@ const smallActionButtonStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const showMoreButtonStyle: React.CSSProperties = {
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-soft)",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
-};
-
 const fileDecisionBtnStyle: React.CSSProperties = {
   width: 22,
   height: 22,
@@ -759,66 +860,53 @@ const scopeTriggerStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const scopeMenuStyle: React.CSSProperties = {
-  position: "absolute",
-  top: "calc(100% + 5px)",
-  left: 20,
-  zIndex: "var(--z-composer)",
-  width: 210,
-  padding: 4,
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-md, 8px)",
-  background: "var(--surface-raised)",
-  boxShadow: "var(--shadow-strong, var(--shadow-md))",
+const firstChangedLine = (lines: DiffLine[], deleted = false): number =>
+  lines.find(line => deleted ? line.kind === "del" : line.kind === "add")?.[deleted ? "oldLine" : "newLine"] ?? 1;
+
+const useExternalEditor = (path: string, workspaceRoot: string | undefined) => {
+  const preferences = useContext(DiffOpenPreferencesContext);
+  const preferred = preferences && preferredFileTargetForWorkspace(preferences, workspaceRoot ?? useAppStore.getState().workingDirectory);
+  const editor = preferences?.fileOpenTargets.find(target => target.id === preferred && target.id !== "minicode" && target.kind === "editor");
+  return editor && !runtime()?.remoteHost && workspaceRoot !== ""
+    ? (line: number) => void openPreferredFile(path, workspaceRoot, line, undefined, { targetId: editor.id }) : undefined;
 };
 
-const scopeOptionStyle = (active: boolean): React.CSSProperties => ({
-  width: "100%",
-  minHeight: 28,
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "0 8px",
-  border: 0,
-  borderRadius: "var(--radius-sm, 5px)",
-  background: active ? "var(--surface-active)" : "transparent",
-  color: active ? "var(--text-primary)" : "var(--text-secondary)",
-  cursor: "pointer",
-  fontSize: "var(--text-sm)",
-  fontWeight: active ? 700 : 500,
-  textAlign: "left",
-});
-
-const scopeCountStyle: React.CSSProperties = {
-  minWidth: 16,
-  height: 16,
-  padding: "0 4px",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: 4,
-  background: "var(--surface-soft)",
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xxs)",
-  flexShrink: 0,
+const DiffHeaderActions = ({ path, workspaceRoot, lines, deleted, open, onToggle, fullReview = false }: {
+  path: string; workspaceRoot?: string; lines: DiffLine[]; deleted?: boolean; open: boolean; onToggle: () => void; fullReview?: boolean;
+}) => {
+  const external = useExternalEditor(path, workspaceRoot);
+  const line = firstChangedLine(lines, deleted);
+  return workspaceRoot === "" ? null : <ChangesFileActions path={path} open={open} onToggle={onToggle}
+    onOpen={() => openDiffSourceFile(path, workspaceRoot, line)}
+    onOpenExternal={!fullReview && external ? () => external(line) : undefined} />;
 };
 
-const DiffFileSection = ({ path, additions, deletions, open, onToggle, label = path, actions, children }: {
+const DiffFileSection = ({ path, oldPath, additions, deletions, open, onToggle, label = path, actions, children, workspaceRoot, deleted, firstLine }: {
   path: string; additions?: number; deletions?: number; open: boolean; onToggle: () => void;
+  oldPath?: string; workspaceRoot?: string; deleted?: boolean; firstLine?: number;
   label?: string; actions?: React.ReactNode; children: React.ReactNode;
 }) => {
   const contentId = useId();
+  const currentWorkspace = useAppStore(state => state.workingDirectory);
+  const preferences = useContext(DiffOpenPreferencesContext);
+  const sectionRef = useRef<HTMLElement>(null);
+  const navigation = useContext(ChangesNavigationContext);
   const contentRef = useRef<HTMLDivElement>(null);
   const [visited, setVisited] = useState(open);
   useEffect(() => { if (open) setVisited(true); }, [open]);
   useLayoutEffect(() => { contentRef.current!.inert = !open; }, [open]);
+  useLayoutEffect(() => {
+    if (navigation?.jump?.path === path) sectionRef.current!.scrollIntoView({ block: "start" });
+  }, [navigation?.jump, path]);
   const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return <section className="mc-diff-file-section" data-open={open} data-path={path} aria-label={label}>
+  return <DiffFileContextMenu path={path} workspaceRoot={workspaceRoot ?? currentWorkspace} deleted={deleted} firstChangedLine={firstLine} preferences={preferences}>
+    <section ref={sectionRef} className="mc-diff-file-section" data-open={open} data-path={path} aria-label={label}>
     <div className="mc-diff-file-section-heading">
       <button type="button" className="mc-diff-file-section-trigger" aria-label={label} title={path}
-        aria-expanded={open} aria-controls={contentId} onClick={onToggle}>
+        aria-expanded={open} aria-controls={contentId} onClick={() => { navigation?.onActivate(path); onToggle(); }}>
         {fileIcon(path, { size: 18, className: "diff-file-icon" })}
         <span className="mc-diff-section-path">
+          {oldPath && <><span className="mc-diff-section-old-path" title={oldPath}>{oldPath}</span><span className="mc-diff-rename-arrow" aria-hidden="true">→</span></>}
           {separator >= 0 && <span className="mc-diff-section-directory">{path.slice(0, separator + 1)}</span>}
           <span className="mc-diff-section-filename">{path.slice(separator + 1)}</span>
         </span>
@@ -833,13 +921,12 @@ const DiffFileSection = ({ path, additions, deletions, open, onToggle, label = p
     <div ref={contentRef} id={contentId} className="mc-diff-file-section-body" aria-hidden={!open}>
       <div className="mc-diff-file-section-content">{visited && children}</div>
     </div>
-  </section>;
+  </section></DiffFileContextMenu>;
 };
 
 const ReadOnlyReviewTab = ({ review, viewMode }: { review: DiffReviewState; viewMode: DiffViewMode }) => {
   const { t: tr } = useI18n();
   const workingDirectory = useAppStore((state) => state.workingDirectory);
-  const conversationId = useAppStore((state) => state.conversationId);
   const files: DiffReviewState["files"] = review.codeReview ? [...review.files, ...(review.modelComments ?? [])
     .filter((comment, index, comments) => !review.files.some(file => diffFilePathsEqual(file.path, comment.file, review.workspaceRoot))
       && comments.findIndex(other => diffFilePathsEqual(other.file, comment.file, review.workspaceRoot)) === index)
@@ -847,26 +934,23 @@ const ReadOnlyReviewTab = ({ review, viewMode }: { review: DiffReviewState; view
     path: extractFilePathFromDiff(parseUnifiedDiff(review.diff)) || "Diff", patch: review.diff,
   }];
   const selected = files.find((file) => diffFilePathsEqual(file.path, review.selectedPath, review.workspaceRoot ?? workingDirectory))?.path ?? files[0]?.path;
-  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(selected ? [selected] : []));
-  const [visibleFileLimit, setVisibleFileLimit] = useState(REVIEW_FILE_INITIAL_LIMIT);
-  useEffect(() => { setOpenPaths(new Set(selected ? [selected] : [])); setVisibleFileLimit(REVIEW_FILE_INITIAL_LIMIT); }, [review.requestId]);
+  const { openPaths, setFileOpen, visiblePath } = useContext(ChangesNavigationContext)!;
   useEffect(() => {
-    if (review.selectedPath && selected) setOpenPaths((current) => new Set([...current, selected]));
+    if (review.selectedPath && selected) setFileOpen(selected, true);
   }, [review.selectedPath]);
   return <div className="mc-diff-file-sections mc-diff-review-sections">
     {review.codeReview && review.error && <div className="code-review-error" role="alert">{review.error}</div>}
     {review.codeReview && !files.length && !review.error && <div className="code-review-empty">{tr("没有可显示的更改。")}</div>}
     {review.toolName === tr("工作区比较") && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{tr("工作区比较")}</div>}
     {review.truncated && <div role="note" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{tr("不完整历史Diff：保存的差异已截断，无法撤销。")}</div>}
-    {files.slice(0, visibleFileLimit).map((file) => <ReadOnlyReviewFile key={file.path}
+    {files.filter(file => visiblePath === undefined || file.path === visiblePath).map((file) => <ReadOnlyReviewFile key={file.path}
       file={file} review={review} viewMode={viewMode} open={openPaths.has(file.path)}
       onToggle={() => {
         const open = !openPaths.has(file.path);
-        setOpenPaths((current) => { const next = new Set(current); open ? next.add(file.path) : next.delete(file.path); return next; });
+        setFileOpen(file.path, open);
         if (open) useAppStore.getState().setDiffReviewSelectedPath(file.path);
       }} />)}
-    {files.length > visibleFileLimit && <button type="button" className="mc-diff-show-more" onClick={() => setVisibleFileLimit((limit) => limit + REVIEW_FILE_INCREMENT)}>
-      {tr("再显示 {count} 个文件", { count: Math.min(REVIEW_FILE_INCREMENT, files.length - visibleFileLimit) })}</button>}
+
   </div>;
 };
 
@@ -894,10 +978,10 @@ const ReadOnlyReviewFile = ({ file, review, viewMode, open, onToggle }: {
   });
   const additions = file.additions ?? lines.filter((line) => line.kind === "add").length;
   const deletions = file.deletions ?? lines.filter((line) => line.kind === "del").length;
+  const deleted = patchDeletesFile(file.patch ?? "");
   return <DiffFileSection path={file.path} additions={additions} deletions={deletions} open={open} onToggle={onToggle}
-    actions={review.workspaceRoot !== "" && <>
-      <button type="button" aria-label={review.workspaceRoot && !workspaceRootsEqual(review.workspaceRoot, useAppStore.getState().workingDirectory) ? tr("在来源工作区打开") : tr("在编辑器中打开文件")} title={review.workspaceRoot || tr("在编辑器中打开文件")} onClick={() => openDiffSourceFile(file.path, review.workspaceRoot)}><ExternalLink size={14} /></button>
-    </>}>
+    workspaceRoot={review.workspaceRoot} deleted={deleted} firstLine={firstChangedLine(lines, deleted)}
+    actions={<DiffHeaderActions path={file.path} workspaceRoot={review.workspaceRoot} lines={lines} deleted={deleted} open={open} onToggle={onToggle} fullReview={Boolean(review.codeReview)} />}>
     {unplaced.map((comment, index) => <div key={index} className="code-review-comment" data-code-review-comment data-code-review-file={file.path} data-code-review-line={comment.end}>
       <MarkdownRenderer content={`${comment.title}\n\n${comment.body}`} workspaceRoot={review.workspaceRoot} conversationId={review.conversationId} />
     </div>)}
@@ -927,13 +1011,9 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
 
 const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState; viewMode: DiffViewMode }) => {
   const { t: tr } = useI18n();
-  const [visibleFileLimit, setVisibleFileLimit] = useState(REVIEW_FILE_INITIAL_LIMIT);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const conversationId = useAppStore((s) => s.conversationId);
 
-  useEffect(() => {
-    setVisibleFileLimit(REVIEW_FILE_INITIAL_LIMIT);
-  }, [diffReview.requestId]);
 
   const selectedFile = useMemo(
     () => diffReview.files.find((file) =>
@@ -962,11 +1042,6 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
     diffFileDecisionForPath(diffReview.fileDecisions, file.path, workingDirectory),
   ).length;
   const allFilesDecided = decidedFileCount >= diffReview.files.length;
-  const visibleFiles = useMemo(
-    () => diffReview.files.slice(0, visibleFileLimit),
-    [diffReview.files, visibleFileLimit],
-  );
-  const hiddenFileCount = Math.max(0, diffReview.files.length - visibleFiles.length);
 
 
   return (
@@ -979,7 +1054,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
             <span style={{ color: "var(--text-muted)" }}>{diffReview.files.length}</span>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-            {visibleFiles.map((file) => {
+            {diffReview.files.map((file) => {
               const decision = diffFileDecisionForPath(diffReview.fileDecisions, file.path, workingDirectory);
               return (
                 <div key={file.path} className="mc-diff-file-row">
@@ -1033,22 +1108,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
                 </div>
               );
             })}
-            {hiddenFileCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setVisibleFileLimit((limit) => limit + REVIEW_FILE_INCREMENT)}
-                className="w-full mt-1 px-2 py-1.5"
-                style={{
-                  border: "1px solid var(--border-subtle)",
-                  borderRadius: "var(--radius-sm, 4px)",
-                  background: "var(--surface-soft)",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  fontSize: "var(--text-xs)",
-                }}
-              >
-                {tr("再显示 {count} 个文件", { count: Math.min(REVIEW_FILE_INCREMENT, hiddenFileCount) })}</button>
-            )}
+
           </div>
           {!isReadOnly && decidedFileCount > 0 && (
             <button
@@ -1127,35 +1187,32 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
 const HistoryTab = ({ turn, turnNumber, viewMode }: { turn?: HistoryDiffTurn; turnNumber: number; viewMode: DiffViewMode }) => {
   const { t: tr } = useI18n();
   const conversationId = useAppStore((state) => state.conversationId);
-  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(turn?.deferredDiff ? [] : turn?.files.slice(0, 1).map((file) => file.path)));
+  const { openPaths, setFileOpen, visiblePath } = useContext(ChangesNavigationContext)!;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
+  const deferredKey = JSON.stringify(turn?.deferredDiff);
+  const hasOpenFiles = openPaths.size > 0;
   useEffect(() => {
-    setOpenPaths(new Set(turn?.deferredDiff ? [] : turn?.files.slice(0, 1).map((file) => file.path)));
     setLoading(false); setError("");
     return () => { request.current?.abort(); request.current = null; };
   }, [turn?.id, conversationId]);
-  const toggleFile = async (path: string) => {
-    if (turn?.deferredDiff) {
-      if (request.current) return;
+  useEffect(() => {
+    if (turn?.deferredDiff && hasOpenFiles) {
       const pending = new AbortController();
       request.current = pending;
       setLoading(true); setError("");
-      try {
-        const loaded = await loadMessageTurnDiff(turn.deferredDiff, pending.signal);
-        if (!loaded || pending.signal.aborted) return;
-      } catch (failure) {
+      void loadMessageTurnDiff(turn.deferredDiff, pending.signal).catch(failure => {
         if (pending.signal.aborted) return;
         setError(failure instanceof Error ? failure.message : tr("无法加载历史差异"));
-        return;
-      } finally {
+      }).finally(() => {
         if (request.current === pending) { request.current = null; setLoading(false); }
-      }
-    }
-    setOpenPaths((current) => {
-      const next = new Set(current); next.has(path) ? next.delete(path) : next.add(path); return next;
-    });
+      });
+      return () => { pending.abort(); if (request.current === pending) request.current = null; };
+    } else setLoading(false);
+  }, [deferredKey, hasOpenFiles]);
+  const toggleFile = (path: string) => {
+    setFileOpen(path, !openPaths.has(path));
   };
   if (!turn) return <div className="flex-1 grid place-items-center p-4">
     <EmptyState compact icon={<GitCompare size={20} />} title={tr("暂无轮次记录")} hint={tr("完成对话后，可以按轮次查看修改。")} />
@@ -1168,7 +1225,7 @@ const HistoryTab = ({ turn, turnNumber, viewMode }: { turn?: HistoryDiffTurn; tu
     {turn.truncated && <div role="note" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{tr("不完整历史Diff：保存的差异已截断，无法撤销。")}</div>}
     {loading && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{tr("正在加载历史差异…")}</div>}
     {error && <div role="alert" style={{ color: "var(--state-danger)" }}>{error}</div>}
-    {turn.files.map((file) => <HistoryFileDiff key={`${turn.id}:${file.path}`} file={file} turnNumber={turnNumber}
+    {turn.files.filter(file => visiblePath === undefined || file.path === visiblePath).map((file) => <HistoryFileDiff key={`${turn.id}:${file.path}`} file={file} turnNumber={turnNumber}
       viewMode={viewMode} open={openPaths.has(file.path)} onToggle={() => void toggleFile(file.path)} />)}
   </div>;
 };
@@ -1184,247 +1241,143 @@ const HistoryFileDiff = ({ file, turnNumber, viewMode, open, onToggle }: {
     return sum;
   }, { plus: 0, minus: 0 });
   return <DiffFileSection path={file.path || tr("未标注文件路径")} additions={file.additions ?? totals.plus} deletions={file.deletions ?? totals.minus}
-    open={open} onToggle={onToggle} actions={file.path && <button type="button" title={tr("在编辑器中打开文件")}
-      aria-label={tr("在编辑器中打开 {v0}", { v0: file.path })} onClick={() => useAppStore.getState().openEditorFile(file.path, file.path.split(/[/\\]/).pop(), { exact: true })}><ExternalLink size={14} /></button>}>
+    firstLine={firstChangedLine(revisions.flatMap(revision => revision.lines))}
+    open={open} onToggle={onToggle} actions={file.path && <DiffHeaderActions path={file.path} lines={revisions.flatMap(revision => revision.lines)} open={open} onToggle={onToggle} />}>
     {revisions.map((revision, index) => <div key={revision.id}>
       {revisions.length > 1 && <div className="mc-diff-revision-label">{tr("第") + " "}{index + 1} {tr("次编辑")}</div>}
       <DiffBody lines={revision.lines} annotationSourceKey={`history:${revision.id}:${file.path}`} viewMode={viewMode} rawPatch={revision.diff} annotationMode="conversation" inline
-        previewLineLimit={HISTORY_PREVIEW_LINE_LIMIT} filePath={file.path || undefined} />
+        filePath={file.path || undefined} />
     </div>)}
   </DiffFileSection>;
 };
 
-const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
+const GitChangesTab = ({ viewMode, comparison, selection }: {
+  viewMode: DiffViewMode; comparison?: GitComparisonState; selection: GitReviewSelection;
+}) => {
   const { t: tr } = useI18n();
-  const gitChanges = useAppStore((s) => s.gitChanges);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const conversationId = useAppStore((s) => s.conversationId);
-  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
-  const pendingConversationCreateId = useAppStore((s) => s.pendingConversationCreateId);
-  const requestGitChanges = useAppStore((s) => s.requestGitChanges);
-  const gitReviewRequest = useAppStore((s) => s.gitReviewRequest);
-  const [pendingActions, setPendingActions] = useState<Set<string>>(() => new Set());
-  const pendingActionsRef = useRef(pendingActions);
-  pendingActionsRef.current = pendingActions;
-  const [openKeys, setOpenKeys] = useState<Set<string>>(() => new Set());
-  const [visibleGitLimits, setVisibleGitLimits] = useState({
-    staged: GIT_FILE_INITIAL_LIMIT,
-    working: GIT_FILE_INITIAL_LIMIT,
-    untracked: GIT_FILE_INITIAL_LIMIT,
-  });
-
-  useEffect(() => {
-    if (!pendingConversationSwitchId && !pendingConversationCreateId) requestGitChanges();
-  }, [requestGitChanges, workingDirectory, conversationId, pendingConversationSwitchId, pendingConversationCreateId]);
-
-  useEffect(() => { setOpenKeys(new Set()); }, [workingDirectory, conversationId]);
-
-  useEffect(() => {
-    if (gitReviewRequest && workspaceRootsEqual(gitReviewRequest.workspaceRoot, workingDirectory)
-      && gitReviewRequest.conversationId === conversationId) {
-      const paths = gitReviewRequest.section === "staged" ? gitChanges.staged.map((file) => file.path)
-        : gitReviewRequest.section === "working" ? gitChanges.workingTree.map((file) => file.path) : gitChanges.untracked;
-      const path = paths.find((path) => workspaceFilePathsEqual(path, gitReviewRequest.path, workingDirectory)) ?? gitReviewRequest.path;
-      setOpenKeys((current) => new Set([...current, `${gitReviewRequest.section}:${path}`]));
-    }
-  }, [gitReviewRequest, workingDirectory, conversationId, gitChanges.staged, gitChanges.workingTree, gitChanges.untracked]);
-
-  const selectFile = (path: string, section: "staged" | "working" | "untracked") => {
-    const key = `${section}:${path}`;
-    const open = !openKeys.has(key);
-    setOpenKeys((current) => { const next = new Set(current); open ? next.add(key) : next.delete(key); return next; });
-    if (!open) return;
-    useAppStore.getState().openGitReview({ path, section, workspaceRoot: workingDirectory, conversationId });
-  };
-
-  useEffect(() => {
-    setVisibleGitLimits({
-      staged: GIT_FILE_INITIAL_LIMIT,
-      working: GIT_FILE_INITIAL_LIMIT,
-      untracked: GIT_FILE_INITIAL_LIMIT,
-    });
-  }, [gitChanges.staged.length, gitChanges.workingTree.length, gitChanges.untracked.length]);
-
-  const visibleStaged = useMemo(
-    () => gitChanges.staged.slice(0, visibleGitLimits.staged),
-    [gitChanges.staged, visibleGitLimits.staged],
-  );
-  const visibleWorking = useMemo(
-    () => gitChanges.workingTree.slice(0, visibleGitLimits.working),
-    [gitChanges.workingTree, visibleGitLimits.working],
-  );
-  const visibleUntracked = useMemo(
-    () => gitChanges.untracked.slice(0, visibleGitLimits.untracked),
-    [gitChanges.untracked, visibleGitLimits.untracked],
-  );
-  const hiddenStagedCount = Math.max(0, gitChanges.staged.length - visibleStaged.length);
-  const hiddenWorkingCount = Math.max(0, gitChanges.workingTree.length - visibleWorking.length);
-  const hiddenUntrackedCount = Math.max(0, gitChanges.untracked.length - visibleUntracked.length);
-
-  const gitCommandScope = () => {
-    return {
-      conversation_id: String(conversationId || "").trim(),
-      workspace: workingDirectory.trim(),
-    };
-  };
-
-  const beginGitAction = async (key: string, command: Parameters<typeof sendClientCommand>[0]) => {
+  const gitChanges = useAppStore(s => s.gitChanges);
+  const workspaceRoot = useAppStore(s => s.workingDirectory);
+  const conversationId = useAppStore(s => s.conversationId);
+  const navigation = useContext(ChangesNavigationContext)!;
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const pendingActionRef = useRef<string | null>(null);
+  const files = comparison?.files ?? [];
+  const source = selection.source;
+  const snapshot = comparison?.snapshot;
+  const runAction = async (type: "diff.git_stage_file" | "diff.git_unstage_file" | "diff.git_stage_all" | "diff.git_unstage_all" | "diff.git_revert_file" | "diff.git_revert_all", path?: string) => {
+    if (!snapshot || pendingActionRef.current) return;
     const current = useAppStore.getState();
-    if (current.conversationId !== conversationId || !workspaceRootsEqual(current.workingDirectory, workingDirectory)) return false;
-    if (pendingActionsRef.current.size > 0) return false;
-    pendingActionsRef.current = new Set([key]);
-    setPendingActions(pendingActionsRef.current);
+    if (current.conversationId !== conversationId || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
+    if (snapshot.conversationId !== current.conversationId || !workspaceRootsEqual(snapshot.workspaceRoot, current.workingDirectory)
+      || current.pendingConversationSwitchId || current.pendingConversationCreateId) return;
+    pendingActionRef.current = type; setPendingAction(type);
     try {
-      const result = await sendClientCommandAwaitResult(command, command.type, { silent: true });
+      const result = await sendClientCommandAwaitResult({ type, path,
+        source: snapshot.source, snapshot_generation: snapshot.generation,
+        environment_id: snapshot.environmentId, cwd_uri: snapshot.cwdUri,
+        confirmed: type === "diff.git_revert_file" || type === "diff.git_revert_all" ? true : undefined,
+        conversation_id: snapshot.conversationId, workspace: snapshot.workspaceRoot,
+      }, type, { silent: true });
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("Git 操作失败"));
-      return true;
     } catch (error) {
       pushToast(error instanceof Error ? error.message : tr("Git 操作失败"), "error", 5000);
-      return false;
-    } finally {
-      pendingActionsRef.current = new Set();
-      setPendingActions(pendingActionsRef.current);
-    }
+    } finally { pendingActionRef.current = null; setPendingAction(null); }
   };
-
-  const handleStage = (path: string) => {
-    beginGitAction(`stage:${path}`, { type: "diff.git_stage_file", path, ...gitCommandScope() });
-  };
-
-  const handleUnstage = (path: string) => {
-    beginGitAction(`unstage:${path}`, { type: "diff.git_unstage_file", path, ...gitCommandScope() });
-  };
-
-  const handleStageAll = () => {
-    beginGitAction("stage-all", { type: "diff.git_stage_all", ...gitCommandScope() });
-  };
-
-  const handleUnstageAll = () => {
-    beginGitAction("unstage-all", { type: "diff.git_unstage_all", ...gitCommandScope() });
-  };
-
-  const handleRevert = async (path: string) => {
+  const revert = async (path?: string) => {
     const { showConfirm } = await import("../overlays/DialogService");
-    const confirmed = await showConfirm({
-      title: tr("放弃文件更改"),
-      message: tr("确定放弃 {v0} 的本地更改吗？此操作无法撤销。", { v0: path }),
-      confirmLabel: tr("放弃"),
-      cancelLabel: tr("取消"),
-      danger: true,
-    });
-    if (confirmed) {
-      beginGitAction(`revert:${path}`, { type: "diff.git_revert_file", path, confirmed: true, ...gitCommandScope() });
-    }
+    const confirmed = await showConfirm({ title: tr("放弃更改"),
+      message: path ? tr("确定放弃 {v0} 的本地更改吗？此操作无法撤销。", { v0: path }) : tr("确定放弃此范围内的全部更改吗？此操作无法撤销。"),
+      confirmLabel: tr("放弃"), cancelLabel: tr("取消"), danger: true });
+    if (confirmed) await runAction(path ? "diff.git_revert_file" : "diff.git_revert_all", path);
   };
+  const busy = Boolean(pendingAction || comparison?.loading || !snapshot);
+  const canModify = source === "unstaged" || source === "staged";
+  return <div className="mc-diff-git-layout">
+    <div className="mc-diff-file-sections mc-diff-git-sections">
+    {comparison?.error ? <div className="mc-diff-file-loading" role="alert">{comparison.error}</div>
+      : comparison?.status === "expected" ? <div className="mc-diff-file-loading">{tr(comparison.reason === "default_branch_unavailable" ? "没有可用的默认基准分支" : "无法找到所选分支的共同祖先")}</div>
+      : source === "commit" && !selection.commitSha ? <div className="mc-diff-file-loading">{tr("选择提交以查看更改")}</div>
+      : comparison?.loading && !files.length ? <div className="mc-diff-file-loading" role="status">{tr("正在加载 Git 更改...")}</div>
+      : gitChanges.isGitRepo === false ? <div className="mc-diff-file-loading">{tr("当前文件夹未启用 Git")}</div>
+      : comparison && !files.length ? <div className="mc-diff-file-loading">{tr("没有可显示的更改。")}</div> : null}
+    {files.filter(file => navigation.visiblePath === undefined || file.path === navigation.visiblePath).map(file => <GitFileDiff key={`${source}:${file.path}`} file={file} source={source} snapshot={snapshot} viewMode={viewMode}
+      open={navigation.openPaths.has(file.path)} onToggle={() => navigation.setFileOpen(file.path, !navigation.openPaths.has(file.path))} actions={canModify && <>
+        <button type="button" disabled={busy} onClick={() => void revert(file.path)} title={tr("放弃更改")} aria-label={tr("放弃 {v0} 的更改", { v0: file.path })}><RotateCcw size={14} /></button>
+        <button type="button" disabled={busy} onClick={() => void runAction(source === "staged" ? "diff.git_unstage_file" : "diff.git_stage_file", file.path)}
+          title={tr(source === "staged" ? "取消暂存" : "暂存")} aria-label={tr(source === "staged" ? "取消暂存 {v0}" : "暂存 {v0}", { v0: file.path })}>
+          {source === "staged" ? <Minus size={14} /> : <Plus size={14} />}
+        </button>
+      </>} />)}
 
-  if (gitChanges.loading && gitChanges.staged.length + gitChanges.workingTree.length === 0) {
-    return (
-      <div className="flex-1 grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-        {tr("正在加载 Git 更改...")}</div>
-    );
-  }
-
-  if (gitChanges.error || gitChanges.isGitRepo === false) {
-    return (
-      <div className="flex-1 grid place-items-center p-4">
-        <EmptyState
-          compact
-          icon={gitChanges.error ? <XCircle size={20} /> : <GitBranch size={20} />}
-          title={gitChanges.error ? tr("无法加载 Git 更改") : tr("当前文件夹未启用 Git")}
-          hint={gitChanges.error ? tr("暂时无法读取当前工作区的 Git 状态，可以刷新后重新检查。") : tr("可以继续使用文件编辑和聊天功能。")}
-          action={<div>
-            <button type="button" onClick={requestGitChanges} style={smallActionButtonStyle}>{tr("刷新 Git 状态")}</button>
-            {gitChanges.error && <details className="mt-2 text-left"><summary style={{ cursor: "pointer", fontSize: "var(--text-xs)" }}>{tr("错误详情")}</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: "var(--text-xxs)" }}>{gitChanges.error}</pre></details>}
-          </div>}
-        />
-      </div>
-    );
-  }
-
-  if (gitChanges.staged.length + gitChanges.workingTree.length + gitChanges.untracked.length === 0) {
-    return (
-      <div className="flex-1 grid place-items-center p-4">
-        <EmptyState compact icon={<CheckCircle2 size={20} />} title={tr("没有未提交的更改")} hint={tr("工作区是干净的。")} />
-      </div>
-    );
-  }
-
-  const hasWorkingChanges = gitChanges.workingTree.length + gitChanges.untracked.length > 0;
-  const hasStagedChanges = gitChanges.staged.length > 0;
-  const showMoreGitFiles = (section: keyof typeof visibleGitLimits, hiddenCount: number, label: string) => (
-    hiddenCount > 0 ? (
-      <button
-        type="button"
-        onClick={() => setVisibleGitLimits((limits) => ({
-          ...limits,
-          [section]: limits[section] + GIT_FILE_INCREMENT,
-        }))}
-        className="w-full mt-1 px-2 py-1.5"
-        style={showMoreButtonStyle}
-      >
-        {tr("再显示 {count} 个{label}", { count: Math.min(GIT_FILE_INCREMENT, hiddenCount), label })}
-      </button>
-    ) : null
-  );
-
-  return <div className="mc-diff-file-sections mc-diff-git-sections">
-    <div className="mc-diff-git-actions">
-      <button type="button" disabled={gitChanges.loading || pendingActions.size > 0} onClick={requestGitChanges}
-        title={tr("刷新")} aria-label={tr("刷新 Git 更改")} className="mc-diff-icon-action" style={iconButtonStyle}>
-        <RefreshCw size={14} className={gitChanges.loading ? "spin" : ""} />
-      </button>
-      {hasWorkingChanges && <button type="button" disabled={pendingActions.size > 0} onClick={handleStageAll}
-        aria-label={tr("全部暂存")} style={smallActionButtonStyle}><Plus size={14} />{tr("全部暂存")}</button>}
-      {hasStagedChanges && <button type="button" disabled={pendingActions.size > 0} onClick={handleUnstageAll}
-        aria-label={tr("全部取消暂存")} style={smallActionButtonStyle}><Minus size={14} />{tr("全部取消暂存")}</button>}
     </div>
-    {gitChanges.staged.length > 0 && <div>
-      <div className="mc-diff-file-group-title">{tr("已暂存 (")}{gitChanges.staged.length})</div>
-      {visibleStaged.map((file) => <GitFileDiff key={`staged:${file.path}`} file={file} section="staged" viewMode={viewMode}
-        open={openKeys.has(`staged:${file.path}`)} onToggle={() => selectFile(file.path, "staged")}
-        actions={<button type="button" disabled={pendingActions.size > 0} onClick={() => handleUnstage(file.path)}
-          title={tr("取消暂存")} aria-label={tr("取消暂存 {v0}", { v0: file.path })}><Minus size={14} /></button>} />)}
-      {showMoreGitFiles("staged", hiddenStagedCount, tr("已暂存文件"))}
-    </div>}
-    {gitChanges.workingTree.length > 0 && <div>
-      <div className="mc-diff-file-group-title">{tr("已修改 (")}{gitChanges.workingTree.length})</div>
-      {visibleWorking.map((file) => <GitFileDiff key={`working:${file.path}`} file={file} section="working" viewMode={viewMode}
-        open={openKeys.has(`working:${file.path}`)} onToggle={() => selectFile(file.path, "working")}
-        actions={<>
-          <button type="button" disabled={pendingActions.size > 0} onClick={() => handleRevert(file.path)}
-            title={tr("放弃更改")} aria-label={tr("放弃 {v0} 的更改", { v0: file.path })}><RotateCcw size={14} /></button>
-          <button type="button" disabled={pendingActions.size > 0} onClick={() => handleStage(file.path)}
-            title={tr("暂存")} aria-label={tr("暂存 {v0}", { v0: file.path })}><Plus size={14} /></button>
-        </>} />)}
-      {showMoreGitFiles("working", hiddenWorkingCount, tr("已修改文件"))}
-    </div>}
-    {gitChanges.untracked.length > 0 && <div>
-      <div className="mc-diff-file-group-title">{tr("未跟踪 (")}{gitChanges.untracked.length})</div>
-      {visibleUntracked.map((path) => <GitFileDiff key={`untracked:${path}`} file={{ path }} section="untracked" viewMode={viewMode}
-        open={openKeys.has(`untracked:${path}`)} onToggle={() => selectFile(path, "untracked")}
-        actions={<button type="button" disabled={pendingActions.size > 0} onClick={() => handleStage(path)}
-          title={tr("暂存")} aria-label={tr("暂存 {v0}", { v0: path })}><Plus size={14} /></button>} />)}
-      {showMoreGitFiles("untracked", hiddenUntrackedCount, tr("未跟踪文件"))}
+    {canModify && files.length > 0 && <div className="mc-diff-git-actions">
+      {source === "unstaged" && <button type="button" disabled={busy} onClick={() => void revert()}><RotateCcw size={14} />{tr("全部放弃")}</button>}
+      <button type="button" disabled={busy} onClick={() => void runAction(source === "staged" ? "diff.git_unstage_all" : "diff.git_stage_all")}>
+        {source === "staged" ? <Minus size={14} /> : <Plus size={14} />}{tr(source === "staged" ? "全部取消暂存" : "全部暂存")}</button>
     </div>}
   </div>;
 };
 
-const GitFileDiff = ({ file, section, viewMode, open, onToggle, actions }: {
-  file: { path: string; patch?: string; additions?: number; deletions?: number };
-  section: "staged" | "working" | "untracked"; viewMode: DiffViewMode; open: boolean; onToggle: () => void;
+const GitFileDiff = ({ file, source, snapshot, viewMode, open, onToggle, actions }: {
+  file: Partial<GitChangeFile> & { path: string };
+  source: GitDiffSource; snapshot?: GitDiffSnapshot; viewMode: DiffViewMode; open: boolean; onToggle: () => void;
   actions: React.ReactNode;
 }) => {
   const { t: tr } = useI18n();
   const lines = useMemo(() => parseUnifiedDiff(file.patch ?? ""), [file.patch]);
-  const sectionLabel = section === "staged" ? tr("已暂存") : section === "working" ? tr("未暂存") : tr("未跟踪");
-  return <DiffFileSection path={file.path} label={tr("审阅{v0} {v1}", { v0: sectionLabel, v1: file.path })} additions={file.additions}
+  const conversationId = useAppStore(state => state.conversationId);
+  const workspaceRoot = useAppStore(state => state.workingDirectory);
+  const owner = snapshot?.conversationId === conversationId && workspaceRootsEqual(snapshot.workspaceRoot, workspaceRoot) ? snapshot : undefined;
+  const [loadFullFiles] = useDiffViewPreference("loadFullFiles");
+  const [richPreview] = useDiffViewPreference("richPreview");
+  const kind = owner ? diffPreviewKind(file.path, file.status === "D", richPreview, source) : "diff";
+  const format = kind === "image" || kind === "pdf" ? "binary" : "text";
+  const eligible = Boolean(file.patch && file.oldOid && !file.isBinary
+    && file.status !== "A" && file.status !== "D" && file.oldMode !== "160000" && file.newMode !== "160000");
+  const fullKey = JSON.stringify([owner, file.path, file.revision]);
+  const [cachedFull, setCachedFull] = useState<{ key: string; context: FullDiffContext }>();
+  const cached = cachedFull?.key === fullKey ? cachedFull.context : undefined;
+  const needsFull = eligible && loadFullFiles && !cached;
+  const contents = useGitDiffContents({ path: file.path, open, snapshot: owner,
+    enabled: Boolean(owner && (needsFull || kind === "image" || kind === "pdf")), format,
+    sides: needsFull || kind === "image" || kind === "pdf" ? "both" : "new",
+  });
+  const full = useMemo(() => {
+    if (!eligible || format !== "text") return null;
+    const previous = contents.results?.find(result => result.side === "old"), next = contents.results?.find(result => result.side === "new");
+    return previous?.type === "success" && next?.type === "success" && previous.lines && next.lines
+      ? buildFullDiffContext(file.patch!, previous.lines, next.lines, owner?.hideWhitespace) : null;
+  }, [contents.results, file.patch, eligible, format, owner?.hideWhitespace]);
+  useEffect(() => { if (full) setCachedFull({ key: fullKey, context: full }); }, [full, fullKey]);
+  useEffect(() => {
+    if (loadFullFiles) return;
+    const timer = window.setTimeout(() => setCachedFull(undefined), 60_000);
+    return () => window.clearTimeout(timer);
+  }, [loadFullFiles, fullKey]);
+  const preview = useGitDiffContents({ path: file.path, open, snapshot: owner, enabled: kind === "markdown", format: "markdown-preview", sides: "new" });
+  const nextText = preview.results?.find(result => result.side === "new");
+  const mediaContents = kind === "markdown" ? preview : contents;
+  const loading = !mediaContents.results && !mediaContents.error;
+  const showPreview = kind === "image" || kind === "pdf" || kind === "markdown"
+    && (loading || nextText?.type === "success" && Boolean(nextText.lines?.join("")));
+  const fullError = contents.error?.message ?? contents.results?.find(result => result.type === "error" && result.error.type === "unknown");
+  const errorMessage = typeof fullError === "string" ? fullError : fullError?.type === "error" ? fullError.error.message : undefined;
+  const sectionLabel = tr(sourceLabels[source]);
+  return <DiffFileSection path={file.path} oldPath={file.oldPath} label={tr("审阅{v0} {v1}", { v0: sectionLabel, v1: file.path })} additions={file.additions}
+    workspaceRoot={workspaceRoot} deleted={file.status === "D"} firstLine={firstChangedLine(lines, file.status === "D")}
     deletions={file.deletions} open={open} onToggle={onToggle} actions={<>
-      <button type="button" aria-label={tr("在编辑器中打开 Git 文件 {v0}", { v0: file.path })} title={tr("在编辑器中打开文件")}
-        onClick={() => useAppStore.getState().openEditorFile(file.path, file.path.split(/[/\\]/).pop(), { exact: true })}><ExternalLink size={14} /></button>
+      <DiffHeaderActions path={file.path} workspaceRoot={workspaceRoot} lines={lines} deleted={file.status === "D"} open={open} onToggle={onToggle} />
       {actions}
     </>}>
-    {file.patch ? <DiffBody lines={lines} annotationSourceKey={`git:${section}:${file.path}`} viewMode={viewMode} rawPatch={file.patch} filePath={file.path} annotationMode="conversation"
-      previewLineLimit={GIT_PREVIEW_LINE_LIMIT} inline />
-      : <div className="mc-diff-file-loading">{section === "untracked" ? tr("此文件尚未加入 Git；可打开文件查看，或暂存后审阅。") : tr("所选暂存范围没有差异。")}</div>}
+    <div ref={preview.element}><div ref={contents.element}>
+      {eligible && loadFullFiles && errorMessage && <div className="mc-diff-content-error" title={errorMessage}>
+        <span>{tr("完整文件内容加载失败")}</span><button type="button" onClick={contents.retry}>{tr("重试")}</button>
+      </div>}
+      {showPreview ? <GitDiffMediaPreview path={file.path} kind={kind} results={mediaContents.results} loading={loading}
+        status={file.status === "A" ? "new" : file.status === "D" ? "deleted" : "changed"} workspaceRoot={workspaceRoot} conversationId={conversationId!} />
+        : file.patch ? <DiffBody lines={lines} annotationSourceKey={`git:${source}:${file.path}`} viewMode={viewMode} rawPatch={file.patch} filePath={file.path} annotationMode="conversation"
+          fullContext={loadFullFiles ? full ?? cached : undefined} inline />
+        : <div className="mc-diff-file-loading">{tr("没有可显示的更改。")}</div>}
+    </div></div>
   </DiffFileSection>;
 };

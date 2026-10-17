@@ -834,6 +834,41 @@ describe("Composer goal bar", () => {
     expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("false");
   });
 
+  it("replaces the input with Source Computer Use approval and restores its same draft, selection and attachment", async () => {
+    useAppStore.setState({ conversationId: "native-composer", appMode: "chat", draft: "unfinished application task",
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, slashPanelOpen: false, mentionPanelOpen: false,
+      attachments: [], selectedSkills: [], selectedMentions: [],
+      gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+    const { container } = render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "composer" }) as HTMLTextAreaElement;
+    input.setSelectionRange(2, 9);
+    const attachment = { id: "native-draft-file", name: "notes.txt", type: "text/plain", size: 4, status: "ready" as const,
+      conversationId: "native-composer", artifactId: "native-artifact",
+      attachment: { id: "native-artifact", artifact_id: "native-artifact", file_name: "notes.txt", media_type: "text/plain", kind: "document" } };
+    act(() => useAppStore.setState({ attachments: [attachment], pendingAskUser: {
+      requestId: "native-composer-approval", conversationId: "native-composer", turnId: "native-turn", messageId: "native-message", taskId: "native-task",
+      question: "Allow Codex to use Calculator?", inputSchema: {}, elicitation: { mode: "form", serverName: "cua_repl", meta: {
+        codex_approval_kind: "mcp_tool_call", connector_id: "computer-use", connector_name: "Computer Use", persist: ["session", "always"], riskLevel: "low",
+        tool_params: { app: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" }, tool_params_display: [{ name: "app", display_name: "App", value: "Calculator" }],
+      } },
+    } }));
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("true");
+    expect(container.querySelector(".composer-container .inline-computer-use-approval")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(container.querySelector("textarea")).toBe(input);
+    fireEvent.click(screen.getByRole("button", { name: /允许此对话/ }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "composer" })).toBe(input));
+    expect(mocks.promptResponse).toHaveBeenCalledWith({ type: "control_response", request_id: "native-composer-approval",
+      conversation_id: "native-composer", turn_id: "native-turn", message_id: "native-message", task_id: "native-task",
+      response: { subtype: "success", response: { action: "accept", content: { persist: "session" } } } });
+    expect(input.value).toBe("unfinished application task");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 9]);
+    expect(useAppStore.getState().attachments).toEqual([attachment]);
+    expect(container.querySelector(".composer-container")?.getAttribute("data-approval-replacement")).toBe("false");
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+  });
+
   it("replaces input only for the current owner's queued approval and suppresses old approval during a switch", () => {
     useAppStore.setState({ conversationId: "composer-owner", draft: "kept draft", currentModel: "gpt-5",
       isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],

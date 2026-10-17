@@ -49,6 +49,8 @@ export function CodeReviewMenu({ owner, pending, onClose, onSelect }: {
             <span>{t("审阅未提交的更改")}</span>{pending && <LoaderCircle size={15} className="animate-spin" />}
           </button>
           <div className="code-review-menu-section">{t("与基础分支比较")}</div>
+          {options.comparisonStatus === "expected" && <div className="code-review-menu-section" role="status"
+            data-comparison-status={options.comparisonStatus} data-comparison-reason={options.reason}>{t("选择分支")}</div>}
           {options.branches.map(branch => <button key={branch} type="button" role="menuitem" disabled={pending} data-review-target="base-branch" data-review-branch={branch} onClick={() => onSelect("base-branch", options, branch)}>
             <span>{branch}</span>
           </button>)}

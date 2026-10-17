@@ -1368,7 +1368,7 @@ const NOTICE_EVENT_TYPES = new Set<string>([
 const DIFF_EVENT_TYPES = new Set<string>([
   "turn.diff.updated", "diff.git_working_tree", "diff.git_staged",
   "diff.git_stage_file", "diff.git_unstage_file", "diff.git_stage_all",
-  "diff.git_unstage_all", "diff.git_revert_file",
+  "diff.git_unstage_all", "diff.git_revert_file", "diff.git_revert_all",
 ]);
 
 const EVENT_DISPATCHERS: ReadonlyArray<{

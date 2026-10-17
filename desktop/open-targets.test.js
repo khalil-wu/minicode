@@ -208,7 +208,27 @@ test("actual IPC consumer persists workspace choice and broadcasts it, but expli
   assert.equal(f.launches.length, launchCount);
   await open(event, document, undefined, { targetId: "cursor", workspaceRoot: f.workspace });
   assert.equal(path.basename(f.launches.at(-1).command), "Cursor.exe");
-  f.preferences.setPreferredFileOpenTarget(f.workspace, "minicode");
+  const originalLaunches = f.launches.length;
+  const selectedInternal = await open(event, f.file, 9, { targetId: "minicode", workspaceRoot: f.workspace,
+    persistPreferredTargetPath: f.workspace });
+  assert.equal(selectedInternal.openInEditor, true);
+  assert.equal(selectedInternal.path, f.file);
+  assert.equal(f.launches.length, originalLaunches);
+  assert.equal(f.preferences.preferredFileOpenTarget(f.workspace), "minicode");
+  assert.equal(broadcasts.length, 2);
+  assert.equal(broadcasts[1].payload.fileOpenTargetPerPath[f.workspace], "minicode");
+  f.preferences.init(f.preferencesFile);
+  assert.equal(f.preferences.preferredFileOpenTarget(f.workspace), "minicode");
+  // Source Open with persists actual editor targets only. A non-editor cannot
+  // become the preference even if an IPC caller supplies the explicit field.
+  await open(event, f.workspace, undefined, { targetId: "fileManager", workspaceRoot: f.workspace,
+    persistPreferredTargetPath: f.workspace });
+  assert.equal(f.preferences.preferredFileOpenTarget(f.workspace), "minicode");
+  assert.equal(broadcasts.length, 2);
+  // Primary/header opens carry only targetId and remain temporary for editors.
+  await open(event, f.file, 4, { targetId: "vscode", workspaceRoot: f.workspace });
+  assert.equal(f.preferences.preferredFileOpenTarget(f.workspace), "minicode");
+  assert.equal(broadcasts.length, 2);
   const result = await open(event, document, undefined, { workspaceRoot: f.workspace });
   assert.equal(result.openInEditor, true);
   assert.equal(f.openPaths.at(-1), f.workspace);

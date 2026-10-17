@@ -9,9 +9,14 @@ import { showConfirm } from "../overlays/DialogService";
 import { DiffPanel } from "./DiffPanel";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 import * as deferredTurnDiff from "../chat/loadMessageTurnDiff";
-import type { TurnDiffState } from "../stores/types";
+import type { GitChangeFile, GitChangesState, GitComparisonState, GitDiffSource, GitReviewSelection, TurnDiffState } from "../stores/types";
 import { clearDiffCommentScope, clearDiffReaderDrafts, readDiffCommentState } from "../lib/diff-comment-storage";
 import { setWordDiffsEnabled } from "../chat/diff/word-diff-preference";
+import { clearGitReviewSelection } from "../chat/diff/git-review-selection";
+import { readGitReviewOptions, type GitReviewOptions } from "../chat/diff/git-review-options";
+import { clearReviewExpansion } from "../chat/diff/review-expansion-state";
+
+const commandIds = vi.hoisted(() => ({ next: 0 }));
 
 vi.hoisted(() => {
   globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as any;
@@ -35,8 +40,11 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(),
   sendClientCommandAwaitResult: vi.fn(),
   sendPromptResponseCommand: vi.fn(),
+  createClientCommandId: () => `diff-test-command-${++commandIds.next}`,
   commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed",
 }));
+
+vi.mock("../chat/diff/git-review-options", () => ({ readGitReviewOptions: vi.fn() }));
 
 vi.mock("../overlays/DialogService", () => ({
   showConfirm: vi.fn(),
@@ -53,7 +61,76 @@ vi.mock("../components/MonacoDiffView", () => ({
   MonacoDiffView: () => null,
 }));
 
+const defaultOptions: GitReviewOptions = {
+  is_git_repo: true, current_branch: "feature", default_base_branch: "main", branches: ["main", "feature"],
+  merge_base_sha: "a".repeat(40), commits: [{ sha: "b".repeat(40), committedAt: "2026-10-17T00:00:00Z", subject: "Actual commit", message: "Actual commit body" }],
+  comparison_status: "success", reason: null,
+};
+
+function comparisonFixture(files: GitChangeFile[] = [], overrides: Partial<GitComparisonState> = {}): GitComparisonState {
+  const source = overrides.source ?? "unstaged";
+  return { source, files, loading: false, status: "success", snapshot: {
+    conversationId: "conv-diff", workspaceRoot: "C:\\workspace", source,
+    generation: `snapshot-${source}-1`, hideWhitespace: false,
+  }, ...overrides };
+}
+
+function gitFixture(files: GitChangeFile[] = [], comparison: Partial<GitComparisonState> = {}, fields: Partial<GitChangesState> = {}): GitChangesState {
+  return { workingTree: [], staged: [], untracked: [], loading: false, isGitRepo: true,
+    comparison: comparisonFixture(files, comparison), ...fields };
+}
+
+function supplyComparisons(...responses: GitComparisonState[]) {
+  vi.mocked(useAppStore.getState().requestGitComparison).mockImplementation((selection: GitReviewSelection) => {
+    const response = responses.find(item => item.source === selection.source);
+    if (response) useAppStore.setState(state => ({ gitChanges: { ...state.gitChanges,
+      comparison: { ...response, ...selection } } }));
+  });
+}
+
+function chooseDiffSource(label: string) {
+  fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: label, exact: true }));
+}
+
+function gitFileTrigger(path: string, source: GitDiffSource = "unstaged") {
+  const labels: Record<GitDiffSource, string> = { unstaged: "未暂存", staged: "已暂存", uncommitted: "未提交", branch: "此分支", commit: "提交" };
+  return screen.getByRole("button", { name: `审阅${labels[source]} ${path}`, exact: true });
+}
+
+function openGitFile(path: string, source: GitDiffSource = "unstaged") {
+  const trigger = gitFileTrigger(path, source);
+  if (trigger.getAttribute("aria-expanded") === "false") fireEvent.click(trigger);
+  return trigger;
+}
+
+function changeDiffLayout(mode: "unified" | "split") {
+  const current = JSON.parse(localStorage.getItem("editorDiffViewMode")!) as "unified" | "split" | "auto";
+  if (current === mode) return;
+  if (current === "split") fireEvent.click(screen.getByRole("button", { name: "将差异视图切换为自动布局" }));
+  if (current !== "unified") fireEvent.click(screen.getByRole("button", { name: "自动差异视图：改用统一差异视图" }));
+  if (mode === "split") fireEvent.click(screen.getByRole("button", { name: "切换到拆分差异视图" }));
+}
+
 beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem("last-explicit-review-diff-filter", JSON.stringify("unstaged"));
+  localStorage.setItem("editorDiffViewMode", JSON.stringify("unified"));
+  for (const owner of ["conv-diff", "conv-other", "conv-next", "newer-owner"]) {
+    clearGitReviewSelection(owner);
+    clearReviewExpansion(owner);
+  }
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: { width: 900, height: 600 } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
+    unobserve() {} disconnect() {}
+  });
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver); }
+    unobserve() {} disconnect() {}
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   setWordDiffsEnabled(true);
   clearDiffCommentScope("conv-diff");
   __resetOpenWebInBrowserForTests();
@@ -62,11 +139,14 @@ beforeEach(() => {
     pendingConversationSwitchId: null,
     pendingConversationCreateId: null,
     workingDirectory: "C:\\workspace",
-    requestGitChanges: vi.fn(),
+    requestGitChanges: vi.fn(), requestGitComparison: vi.fn(),
     gitReviewRequest: null,
     turnDiffs: {},
     rightPanelExpanded: false,
+    gitChanges: gitFixture(), diffReview: null, messages: [],
   });
+  vi.mocked(readGitReviewOptions).mockReset().mockResolvedValue(defaultOptions);
+  vi.mocked(sendClientCommand).mockReturnValue(true);
   vi.mocked(sendClientCommandAwaitResult).mockResolvedValue({
     type: "command.result",
     command: "control_response",
@@ -79,8 +159,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
-  useAppStore.setState({ diffReview: null, messages: [], gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+  useAppStore.setState({ diffReview: null, messages: [], gitChanges: gitFixture([]) });
   vi.mocked(sendClientCommand).mockReset();
   vi.mocked(sendClientCommandAwaitResult).mockReset();
   vi.mocked(sendPromptResponseCommand).mockReset();
@@ -111,8 +192,8 @@ describe("DiffPanel", () => {
     });
     try {
       render(<DiffPanel />);
-      fireEvent.click(screen.getByRole("button", { name: "在来源工作区打开" }));
-      await waitFor(() => expect(openEditorFile).toHaveBeenCalledWith("C:/isolated-child/src/app.ts", "app.ts", { exact: true }));
+      fireEvent.click(screen.getByRole("button", { name: "打开位置" }));
+      await waitFor(() => expect(openEditorFile).toHaveBeenCalledWith("C:/isolated-child/src/app.ts", "app.ts", { line: 1, exact: true }));
       expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "workspace.set", path: "C:/isolated-child" }), "workspace.set");
     } finally { useAppStore.setState({ openEditorFile: originalOpen }); }
   });
@@ -128,14 +209,14 @@ describe("DiffPanel", () => {
     vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     try {
       render(<DiffPanel />);
-      fireEvent.click(screen.getByRole("button", { name: "在来源工作区打开" }));
+      fireEvent.click(screen.getByRole("button", { name: "打开位置" }));
       useAppStore.setState({ conversationId: "newer-owner", workingDirectory: "C:/newer-workspace" });
       await act(async () => finish({ command: "workspace.set", level: "success", message: "activated", data: { conversation_id: "child-workspace", workspace_root: "C:/isolated-child" } }));
       expect(openEditorFile).not.toHaveBeenCalled();
       expect(useAppStore.getState().draft).toBe("保留未发送内容");
     } finally { useAppStore.setState({ openEditorFile: originalOpen }); }
   });
-  it("keeps deferred history files visible and only fetches after a file is selected", async () => {
+  it("loads the real deferred history once when its scope opens with files expanded by default", async () => {
     const persisted: TurnDiffState = { threadId: "conv-diff", turnId: "turn", messageId: "answer", diff: null,
       deferred: true, revision: 2, updatedAt: 1, source: "workspace_snapshot",
       files: [{ path: "src/a.ts", additions: 1, deletions: 1 }, { path: "src/b.ts", additions: 1, deletions: 1 }] };
@@ -148,16 +229,57 @@ describe("DiffPanel", () => {
     });
     useAppStore.setState({ diffReview: null, messages: [answer] });
     render(<DiffPanel />);
-    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-    fireEvent.click(screen.getByRole("option", { name: /上一轮/ }));
-    expect(screen.getByText("工作区比较")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "src/b.ts", exact: true }).getAttribute("aria-expanded")).toBe("false");
     expect(load).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "src/b.ts", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "上一轮", exact: true }));
+    expect(screen.getByText("工作区比较")).toBeTruthy();
     await waitFor(() => expect(screen.getByText("newB")).toBeTruthy());
+    expect(screen.getByText("newA")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "src/b.ts", exact: true }).getAttribute("aria-expanded")).toBe("true");
     expect(load).toHaveBeenCalledTimes(1);
     expect(load.mock.calls[0][0]).toEqual({ conversationId: "conv-diff", messageId: "answer", turnId: "turn", revision: 2 });
     expect(screen.getByRole("button", { name: "src/a.ts", exact: true })).toBeTruthy();
+  });
+
+  it("keeps an actual history load error visible without automatically repeating the same revision", async () => {
+    const load = vi.spyOn(deferredTurnDiff, "loadMessageTurnDiff").mockRejectedValue(new Error("Retained patch is unavailable"));
+    useAppStore.setState({ messages: [{ id: "deferred-answer", role: "assistant", content: "Done", turnId: "deferred-turn", timestamp: 1,
+      turnDiff: { threadId: "conv-diff", turnId: "deferred-turn", messageId: "deferred-answer", deferred: true, revision: 7,
+        diff: null, updatedAt: 1, files: [{ path: "src/history.ts", additions: 1, deletions: 1 }] } }] });
+    const view = render(<DiffPanel />);
+    chooseDiffSource("上一轮");
+    await screen.findByText("Retained patch is unavailable");
+    expect(load).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "自动换行" }));
+    view.rerender(<DiffPanel />);
+    await act(async () => {});
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert").textContent).toBe("Retained patch is unavailable");
+  });
+
+  it("aborts the old deferred revision before reading its replacement and ignores the old completion", async () => {
+    const deferred = (revision: number): TurnDiffState => ({ threadId: "conv-diff", turnId: "deferred-turn", messageId: "deferred-answer",
+      deferred: true, revision, diff: null, updatedAt: revision, files: [{ path: "src/history.ts", additions: 1, deletions: 1 }] });
+    const answer = (turnDiff: TurnDiffState) => ({ id: "deferred-answer", role: "assistant" as const, content: "Done",
+      turnId: "deferred-turn", timestamp: 1, turnDiff });
+    const signals: AbortSignal[] = [], completions: Array<(value: TurnDiffState | undefined) => void> = [];
+    const load = vi.spyOn(deferredTurnDiff, "loadMessageTurnDiff").mockImplementation((_owner, signal) => new Promise(resolve => {
+      signals.push(signal!); completions.push(resolve);
+    }));
+    useAppStore.setState({ draft: "Keep my draft", messages: [answer(deferred(1))] });
+    render(<DiffPanel />); chooseDiffSource("上一轮");
+    expect(load).toHaveBeenCalledTimes(1);
+    act(() => useAppStore.setState({ messages: [answer(deferred(2))] }));
+    expect(signals[0].aborted).toBe(true);
+    expect(load.mock.calls.map(([owner]) => owner.revision)).toEqual([1, 2]);
+    await act(async () => completions[0](undefined));
+    expect(screen.getByText("正在加载历史差异…")).toBeTruthy();
+    const loaded = { ...deferred(2), deferred: false, diff: "diff --git a/src/history.ts b/src/history.ts\n@@ -1 +1 @@\n-old\n+new_revision" };
+    await act(async () => { useAppStore.setState({ messages: [answer(loaded)] }); completions[1](loaded); });
+    expect(screen.getByText("new_revision", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("正在加载历史差异…")).toBeNull();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().draft).toBe("Keep my draft");
   });
 
   it("shows incomplete workspace history explicitly in read-only review", () => {
@@ -177,13 +299,13 @@ describe("DiffPanel", () => {
     } : null,
       messages: scope === "history" ? [{ id: "answer", role: "assistant", turnId: "turn", timestamp: 1, content: "Done", artifacts: [],
         turnDiff: { threadId: "conv-diff", turnId: "turn", messageId: "answer", updatedAt: 1, diff: patch } }] : [],
-      gitChanges: { staged: [], workingTree: scope === "git" ? [{ path: "src/app.ts", patch, additions: 1, deletions: 1 }] : [], untracked: [], loading: false },
+      gitChanges: gitFixture(scope === "git" ? [{ path: "src/app.ts", patch, additions: 1, deletions: 1 }] : []),
     });
     const { container } = render(<DiffPanel />);
     if (scope === "history") {
       fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-      fireEvent.click(screen.getByRole("option", { name: /轮次记录/ }));
-    } else if (scope === "git") fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "上一轮", exact: true }));
+    } else if (scope === "git") openGitFile("src/app.ts");
     for (const mode of ["unified", "split"]) {
       expect(screen.queryByRole("button", { name: /加入对话|引用|提问|评论 Diff/ })).toBeNull();
       expect(container.querySelector(".mc-diff-line-quote")).toBeNull();
@@ -191,7 +313,7 @@ describe("DiffPanel", () => {
       fireEvent.click(screen.getByText("new", { exact: true }));
       expect(useAppStore.getState().draft).toBe("Keep the draft");
       expect(useAppStore.getState().selectedMentions).toEqual([]);
-      if (mode === "unified") fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+      if (mode === "unified") changeDiffLayout("split");
     }
   });
 
@@ -206,8 +328,6 @@ describe("DiffPanel", () => {
     render(<DiffPanel />);
     const first = screen.getByRole("button", { name: "src/a.ts", exact: true });
     const second = screen.getByRole("button", { name: "src/b.ts", exact: true });
-    expect(first.getAttribute("aria-expanded")).toBe("true");
-    fireEvent.click(second);
     expect(first.getAttribute("aria-expanded")).toBe("true");
     expect(second.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("newA")).toBeTruthy();
@@ -232,10 +352,9 @@ describe("DiffPanel", () => {
     } } });
     const { container } = render(<DiffPanel />);
     fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-    fireEvent.click(screen.getByRole("option", { name: /轮次记录 · 上一轮/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "上一轮", exact: true }));
     expect(screen.queryByRole("combobox", { name: "轮次修改文件" })).toBeNull();
     expect(screen.queryByText("intermediate")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "src/final-b.ts", exact: true }));
     expect(screen.getByText("finalA")).toBeTruthy();
     expect(screen.getByText("finalB")).toBeTruthy();
     expect(container.querySelector(".mc-diff-total-counts")?.textContent).toBe("+2-2");
@@ -245,14 +364,13 @@ describe("DiffPanel", () => {
 
   it("keeps two Git file patches open and collapses only the clicked range", () => {
     const patch = (path: string, text: string) => `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+${text}`;
-    useAppStore.setState({ gitChanges: { staged: [], untracked: [], loading: false, workingTree: [
+    useAppStore.setState({ gitChanges: gitFixture([
       { path: "src/a.ts", patch: patch("src/a.ts", "gitA"), additions: 1, deletions: 1 },
       { path: "src/b.ts", patch: patch("src/b.ts", "gitB"), additions: 1, deletions: 1 },
-    ] } });
+    ]) });
     render(<DiffPanel />);
-    const first = screen.getByRole("button", { name: "审阅未暂存 src/a.ts" });
-    const second = screen.getByRole("button", { name: "审阅未暂存 src/b.ts" });
-    fireEvent.click(first); fireEvent.click(second);
+    const first = gitFileTrigger("src/a.ts");
+    const second = gitFileTrigger("src/b.ts");
     expect(first.getAttribute("aria-expanded")).toBe("true");
     expect(second.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("gitA")).toBeTruthy();
@@ -269,18 +387,18 @@ describe("DiffPanel", () => {
       files: [{ path: "src/app.ts", patch }], selectedPath: "src/app.ts", status: "pending", mode: "approval", fileDecisions: {}, lineComments: [],
     } });
     render(<DiffPanel />);
-    expect(screen.getByText("中间省略 399 行")).toBeTruthy();
+    expect(screen.getByText(/399\s*行未修改/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "评论 R520" }));
     fireEvent.change(screen.getByRole("textbox", { name: "评论 R520" }), { target: { value: "保留这里的说明" } });
-    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    changeDiffLayout("split");
     expect((screen.getByRole("textbox", { name: "评论 R520" }) as HTMLTextAreaElement).value).toBe("保留这里的说明");
     expect(screen.getByRole("button", { name: "在编辑器中打开 src/app.ts 第 520 行" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
     expect(useAppStore.getState().diffReview?.lineComments).toEqual([expect.objectContaining({ filePath: "src/app.ts",
       position: { path: "src/app.ts", side: "right", line: 520 }, content: "保留这里的说明" })]);
-    fireEvent.click(screen.getByRole("button", { name: "切换为行内视图" }));
+    changeDiffLayout("unified");
     expect((screen.getByRole("textbox", { name: "评论 R520" }) as HTMLTextAreaElement).value).toBe("保留这里的说明");
-    expect(screen.getByText("中间省略 399 行")).toBeTruthy();
+    expect(screen.getByText(/399\s*行未修改/)).toBeTruthy();
   });
 
   it("preserves an exact text selection while changing inline and split views", () => {
@@ -299,26 +417,50 @@ describe("DiffPanel", () => {
     range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
     window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
     fireEvent(document, new Event("selectionchange"));
-    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    changeDiffLayout("split");
     expect(window.getSelection()!.toString()).toBe("ew va");
-    fireEvent.click(screen.getByRole("button", { name: "切换为行内视图" }));
+    changeDiffLayout("unified");
     expect(window.getSelection()!.toString()).toBe("ew va");
     window.getSelection()!.removeAllRanges();
   });
 
-  it("opens the requested staged range even when the same path also has working changes", () => {
+  it("opens the requested staged comparison and never concatenates the working comparison for the same path", () => {
     const before = "diff --git a/src/app.ts b/src/app.ts\n@@ -10 +10 @@\n-base\n+staged value";
     const after = "diff --git a/src/app.ts b/src/app.ts\n@@ -10 +10 @@\n-staged value\n+working value";
-    useAppStore.setState({ gitChanges: { staged: [{ path: "src/app.ts", patch: before, additions: 1, deletions: 1 }], workingTree: [{ path: "src/app.ts", patch: after, additions: 1, deletions: 1 }], untracked: [], loading: false } });
+    const working = comparisonFixture([{ path: "src/app.ts", patch: after, additions: 1, deletions: 1 }]);
+    const staged = comparisonFixture([{ path: "src/app.ts", patch: before, additions: 1, deletions: 1 }], { source: "staged" });
+    supplyComparisons(working, staged);
+    useAppStore.setState({ gitChanges: gitFixture(working.files) });
     render(<DiffPanel />);
     act(() => useAppStore.getState().openGitReview({ path: "src/app.ts", section: "staged", workspaceRoot: "C:\\workspace", conversationId: "conv-diff" }));
     expect(screen.getByText("base")).toBeTruthy();
     expect([...document.querySelectorAll("[data-diff-text]")].some(node => node.textContent === "working value")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/app.ts" }));
-    expect(screen.getByText("base")).toBeTruthy();
+    chooseDiffSource("未暂存");
+    openGitFile("src/app.ts");
+    expect(screen.queryByText("base", { exact: true })).toBeNull();
     expect([...document.querySelectorAll("[data-diff-text]")].some(node => node.textContent === "working value")).toBe(true);
-    expect(useAppStore.getState().gitReviewRequest?.section).toBe("working");
+    expect(useAppStore.getState().requestGitComparison).toHaveBeenLastCalledWith(expect.objectContaining({ source: "unstaged" }));
     expect(within(screen.getByRole("region", { name: "审阅未暂存 src/app.ts" })).queryByRole("button", { name: /加入对话/ })).toBeNull();
+  });
+
+  it("retains explicit file expansion after changing comparison source without replaying an earlier file-open request", () => {
+    const files = ["src/a.ts", "src/b.ts"].map(path => ({ path, patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1 }));
+    supplyComparisons(comparisonFixture(files), comparisonFixture(files, { source: "staged" }));
+    useAppStore.setState({ gitChanges: gitFixture(files) });
+    render(<DiffPanel />);
+    act(() => useAppStore.getState().openGitReview({ path: "src/a.ts", section: "unstaged", workspaceRoot: "C:\\workspace", conversationId: "conv-diff" }));
+    expect(gitFileTrigger("src/a.ts").getAttribute("aria-expanded")).toBe("true");
+    expect(gitFileTrigger("src/b.ts").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(gitFileTrigger("src/a.ts"));
+    chooseDiffSource("已暂存");
+    expect(gitFileTrigger("src/a.ts", "staged").getAttribute("aria-expanded")).toBe("false");
+    expect(gitFileTrigger("src/b.ts", "staged").getAttribute("aria-expanded")).toBe("false");
+    chooseDiffSource("未暂存");
+    expect(gitFileTrigger("src/a.ts").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "跳转到文件", exact: true }));
+    fireEvent.click(screen.getByRole("option", { name: "src/b.ts", exact: true }));
+    expect(gitFileTrigger("src/b.ts").getAttribute("aria-expanded")).toBe("true");
+    expect(gitFileTrigger("src/a.ts").getAttribute("aria-expanded")).toBe("false");
   });
   it.each(["unified", "split"])("uses real source lines across hunks and opens current code in %s view", (viewMode) => {
     const patch = [
@@ -338,7 +480,7 @@ describe("DiffPanel", () => {
     });
     try {
       render(<DiffPanel />);
-      if (viewMode === "split") fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+      if (viewMode === "split") changeDiffLayout("split");
       expect(screen.getByRole("button", { name: "在编辑器中打开 src/app.ts 第 60 行" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "在编辑器中打开 src/app.ts 第 61 行" })).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "在编辑器中打开 src/app.ts 第 100 行" }));
@@ -369,7 +511,7 @@ describe("DiffPanel", () => {
     unsubscribe();
   });
 
-  it("closes a file's active line feedback before switching to another review file", () => {
+  it("keeps approval feedback drafts bound to their own selected file", () => {
     const first = "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-oldA\n+newA";
     const second = "diff --git a/src/b.ts b/src/b.ts\n@@ -1 +1 @@\n-oldB\n+newB";
     useAppStore.setState({ diffReview: {
@@ -380,31 +522,37 @@ describe("DiffPanel", () => {
     render(<DiffPanel />);
     fireEvent.click(screen.getByRole("button", { name: "评论 R1" }));
     fireEvent.change(screen.getByRole("textbox", { name: "评论 R1" }), { target: { value: "For file A" } });
-    fireEvent.click(screen.getByRole("button", { name: "src/b.ts" }));
+    fireEvent.click(screen.getByRole("button", { name: "src/b.ts", exact: true }));
     expect(screen.queryByRole("textbox", { name: /评论 [LR]/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "评论 R1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R1" }), { target: { value: "For file B" } });
+    fireEvent.click(screen.getByRole("button", { name: "src/a.ts", exact: true }));
+    expect((screen.getByRole("textbox", { name: "评论 R1" }) as HTMLTextAreaElement).value).toBe("For file A");
+    fireEvent.click(screen.getByRole("button", { name: "src/b.ts", exact: true }));
+    expect((screen.getByRole("textbox", { name: "评论 R1" }) as HTMLTextAreaElement).value).toBe("For file B");
     expect(useAppStore.getState().diffReview?.lineComments).toEqual([]);
   });
 
   it("shows a plain-folder state and permits detecting a newly initialized repository", () => {
     useAppStore.setState({
       diffReview: null, messages: [],
-      gitChanges: { isGitRepo: false, workingTree: [], staged: [], untracked: [], loading: false },
+      gitChanges: gitFixture([], {  }, { isGitRepo: false }),
     });
     render(<DiffPanel />);
 
     expect(screen.getByText("当前文件夹未启用 Git")).toBeTruthy();
     expect(screen.queryByText("没有未提交的更改")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "刷新 Git 状态" }));
-    expect(useAppStore.getState().requestGitChanges).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "刷新", exact: true }));
+    expect(useAppStore.getState().requestGitComparison).toHaveBeenCalledTimes(2);
   });
 
   it.each(["pendingConversationSwitchId", "pendingConversationCreateId"] as const)(
     "resumes the mounted Git tab when %s settles, including a same-root owner change", pending => {
       useAppStore.setState({ diffReview: null, messages: [], [pending]: "conv-next",
-        gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+        gitChanges: gitFixture([]) });
       render(<DiffPanel />);
-      const request = useAppStore.getState().requestGitChanges;
+      const request = useAppStore.getState().requestGitComparison;
       expect(request).not.toHaveBeenCalled();
       act(() => useAppStore.setState({ [pending]: null, conversationId: "conv-next" }));
       expect(request).toHaveBeenCalledTimes(1);
@@ -415,9 +563,9 @@ describe("DiffPanel", () => {
 
   it("refreshes the mounted Git tab after navigation is cancelled with the current owner unchanged", () => {
     useAppStore.setState({ diffReview: null, messages: [],
-      gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
+      gitChanges: gitFixture([]) });
     render(<DiffPanel />);
-    const request = useAppStore.getState().requestGitChanges;
+    const request = useAppStore.getState().requestGitComparison;
     expect(request).toHaveBeenCalledTimes(1);
     act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
     expect(request).toHaveBeenCalledTimes(1);
@@ -428,12 +576,11 @@ describe("DiffPanel", () => {
   it("keeps repository failures visible without reporting a clean worktree", () => {
     useAppStore.setState({
       diffReview: null, messages: [],
-      gitChanges: { error: "Repository permission denied", workingTree: [], staged: [], untracked: [], loading: false },
+      gitChanges: gitFixture([], { error: "Repository permission denied" }),
     });
     render(<DiffPanel />);
-    expect(screen.getByText("无法加载 Git 更改")).toBeTruthy();
-    expect(screen.getByText("Repository permission denied")).toBeTruthy();
-    expect(screen.queryByText("没有未提交的更改")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toBe("Repository permission denied");
+    expect(screen.queryByText("没有可显示的更改。")).toBeNull();
   });
 
   it("renders historical tool diffs as read-only", () => {
@@ -537,74 +684,121 @@ describe("DiffPanel", () => {
   }, 30_000);
 
   it("sends git action commands from the changes panel", async () => {
-    useAppStore.setState({
-      gitChanges: {
-        workingTree: [{
-          path: "src/app.ts",
-          patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new",
-          additions: 1,
-          deletions: 1,
-        }],
-        staged: [{
-          path: "src/old.ts",
-          patch: "diff --git a/src/old.ts b/src/old.ts\n@@ -1 +1 @@\n-old\n+new",
-          additions: 1,
-          deletions: 1,
-        }],
-        untracked: ["src/new.ts"],
-        loading: false,
-      },
-    });
-
-    render(React.createElement(DiffPanel));
-    expect(screen.getByRole("button", { name: /Diff 来源：未提交 3/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-    expect(screen.getByRole("option", { name: /轮次记录/ })).toBeTruthy();
-    vi.mocked(sendClientCommand).mockClear();
-
+    const patch = "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new";
+    const working = comparisonFixture([{ path: "src/app.ts", patch, additions: 1, deletions: 1 }]);
+    const staged = comparisonFixture([{ path: "src/old.ts", patch, additions: 1, deletions: 1 }], { source: "staged" });
+    supplyComparisons(working, staged);
+    useAppStore.setState({ gitChanges: gitFixture(working.files) });
+    render(<DiffPanel />);
+    await waitFor(() => expect(readGitReviewOptions).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /Diff 来源：未暂存 1/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "全部取消暂存" })).toBeNull();
+    expect(screen.getByRole("button", { name: "全部放弃", exact: true })).toBeTruthy();
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "全部暂存" })));
-    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_stage_all" }), "diff.git_stage_all", { silent: true });
-
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "全部取消暂存" })));
-    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_unstage_all" }), "diff.git_unstage_all", { silent: true });
-
+    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_stage_all",
+      source: "unstaged", snapshot_generation: "snapshot-unstaged-1", conversation_id: "conv-diff", workspace: "C:\\workspace" }), "diff.git_stage_all", { silent: true });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "暂存 src/app.ts" })));
-    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_stage_file", path: "src/app.ts" }), "diff.git_stage_file", { silent: true });
-
+    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_stage_file", path: "src/app.ts",
+      source: "unstaged", snapshot_generation: "snapshot-unstaged-1" }), "diff.git_stage_file", { silent: true });
+    chooseDiffSource("已暂存");
+    expect(screen.queryByRole("button", { name: "全部暂存" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "全部放弃", exact: true })).toBeNull();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "全部取消暂存" })));
+    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_unstage_all",
+      source: "staged", snapshot_generation: "snapshot-staged-1" }), "diff.git_unstage_all", { silent: true });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "取消暂存 src/old.ts" })));
-    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_unstage_file", path: "src/old.ts" }), "diff.git_unstage_file", { silent: true });
+    expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "diff.git_unstage_file", path: "src/old.ts",
+      source: "staged", snapshot_generation: "snapshot-staged-1" }), "diff.git_unstage_file", { silent: true });
   });
 
-  it("previews large git diffs and batches long changed-file lists", () => {
+  it("shows all fifty-three ordinary Git files and complete patch content without pagination", () => {
     const largePatch = [
       "diff --git a/src/file-000.ts b/src/file-000.ts",
       "@@ -1,1000 +1,1000 @@",
       ...Array.from({ length: 1000 }, (_, index) => ` line_${index}`),
     ].join("\n");
     useAppStore.setState({
-      gitChanges: {
-        workingTree: Array.from({ length: 53 }, (_, index) => ({
+      gitChanges: gitFixture(Array.from({ length: 53 }, (_, index) => ({
           path: `src/file-${String(index).padStart(3, "0")}.ts`,
           patch: index === 0 ? largePatch : `diff --git a/src/file-${index}.ts b/src/file-${index}.ts\n@@ -1 +1 @@\n-old\n+new`,
           additions: index === 0 ? 0 : 1,
           deletions: index === 0 ? 0 : 1,
-        })),
-        staged: [],
-        untracked: [],
-        loading: false,
-      },
+        }))),
     });
 
     render(React.createElement(DiffPanel));
 
-    expect(screen.getByRole("button", { name: "审阅未暂存 src/file-000.ts" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "审阅未暂存 src/file-052.ts" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "再显示 5 个已修改文件" }));
-    expect(screen.getByRole("button", { name: "审阅未暂存 src/file-052.ts" })).toBeTruthy();
+    expect(gitFileTrigger("src/file-000.ts")).toBeTruthy();
+    expect(gitFileTrigger("src/file-052.ts")).toBeTruthy();
+    expect(screen.getByText("line_999")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /再显示 .* 个文件|显示完整 Diff/ })).toBeNull();
+    expect(screen.queryByText(/另有 .* 行 Diff 已隐藏/)).toBeNull();
+    expect(screen.queryByText("此差异较大，每次仅显示一个文件")).toBeNull();
+  }, 30_000);
 
-    fireEvent.click(screen.getByRole("button", { name: "审阅未暂存 src/file-000.ts" }));
-    expect(screen.getByText(/另有 .* 行 Diff 已隐藏/)).toBeTruthy();
-    expect(screen.queryByText("line_999")).toBeNull();
+  it("switches the actual displayed file through Next, Previous and Jump in a 129-file Git comparison", () => {
+    const path = (index: number) => `src/file-${String(index).padStart(3, "0")}.ts`;
+    useAppStore.setState({ gitChanges: gitFixture(Array.from({ length: 129 }, (_, index) => ({
+      path: path(index), patch: `diff --git a/${path(index)} b/${path(index)}\n@@ -1 +1 @@\n-old_${index}\n+new_${index}`,
+      additions: 1, deletions: 1,
+    }))) });
+    render(<DiffPanel />);
+    expect(screen.getByText("此差异较大，每次仅显示一个文件")).toBeTruthy();
+    expect(gitFileTrigger(path(0))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: `审阅未暂存 ${path(1)}` })).toBeNull();
+    expect(screen.getByText("new_0", { exact: true })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "上一个文件" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    expect(screen.getByText("new_1", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("new_0", { exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "上一个文件" }));
+    expect(screen.getByText("new_0", { exact: true })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "跳转到文件", exact: true }));
+    fireEvent.change(screen.getByRole("combobox", { name: "跳转到文件" }), { target: { value: "file-128" } });
+    fireEvent.click(screen.getByRole("option", { name: path(128), exact: true }));
+    expect(screen.queryByRole("dialog", { name: "跳转到文件" })).toBeNull();
+    expect(gitFileTrigger(path(128))).toBeTruthy();
+    expect(screen.getByText("new_128", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("new_0", { exact: true })).toBeNull();
+    expect((screen.getByRole("button", { name: "下一个文件" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("defaults ordinary Git files open and deleted files closed while keeping explicit overrides", () => {
+    useAppStore.setState({ gitChanges: gitFixture([
+      { path: "src/active.ts", patch: "@@ -1 +1 @@\n-old\n+active_content", additions: 1, deletions: 1, status: "M" },
+      { path: "src/deleted.ts", patch: "deleted file mode 100644\n--- a/src/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-deleted_content", additions: 0, deletions: 1, status: "D" },
+    ]) });
+    render(<DiffPanel />);
+    expect(gitFileTrigger("src/active.ts").getAttribute("aria-expanded")).toBe("true");
+    expect(gitFileTrigger("src/deleted.ts").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("active_content", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("deleted_content", { exact: true })).toBeNull();
+    fireEvent.click(gitFileTrigger("src/deleted.ts"));
+    expect(screen.getByText("deleted_content", { exact: true })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "折叠全部差异" }));
+    expect(gitFileTrigger("src/active.ts").getAttribute("aria-expanded")).toBe("false");
+    expect(gitFileTrigger("src/deleted.ts").getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "展开全部差异" }));
+    expect(gitFileTrigger("src/active.ts").getAttribute("aria-expanded")).toBe("true");
+    expect(gitFileTrigger("src/deleted.ts").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("labels a selected commit as Commit and displays its real subject separately", async () => {
+    const sha = defaultOptions.commits[0].sha;
+    supplyComparisons(comparisonFixture([{ path: "src/commit.ts", patch: "@@ -1 +1 @@\n-old\n+committed_content", additions: 1, deletions: 1 }], {
+      source: "commit", commitSha: sha,
+    }));
+    render(<DiffPanel />);
+    await waitFor(() => expect(readGitReviewOptions).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "提交", exact: true }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Actual commit", exact: true }));
+    expect(screen.getByRole("button", { name: "Diff 来源：提交 1", exact: true }).textContent).toBe("提交");
+    expect(screen.getByLabelText("选中的提交").textContent).toBe("Actual commit");
+    expect(screen.getByLabelText("选中的提交").getAttribute("title")).toBe("Actual commit body");
+    expect(screen.getByText("committed_content", { exact: true })).toBeTruthy();
+    expect(screen.queryByText(sha)).toBeNull();
+    expect(localStorage.getItem("last-explicit-review-diff-filter")).toBe('"unstaged"');
   });
 
   it("responds to control-protocol diff reviews with control_response", async () => {
@@ -648,33 +842,175 @@ describe("DiffPanel", () => {
   it("confirms before discarding a modified file", async () => {
     vi.mocked(showConfirm).mockResolvedValue(true);
     useAppStore.setState({
-      gitChanges: {
-        workingTree: [{
+      gitChanges: gitFixture([{
           path: "src/app.ts",
           patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new",
           additions: 1,
           deletions: 1,
-        }],
-        staged: [],
-        untracked: [],
-        loading: false,
-      },
+        }]),
     });
 
     render(React.createElement(DiffPanel));
     fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-    fireEvent.click(screen.getByRole("option", { name: /未提交/ }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "未暂存", exact: true }));
     vi.mocked(sendClientCommand).mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "放弃 src/app.ts 的更改" }));
 
     await waitFor(() => {
       expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({
-        title: "放弃文件更改",
+        title: "放弃更改",
         danger: true,
       }));
       expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "diff.git_revert_file", path: "src/app.ts", confirmed: true }), "diff.git_revert_file", { silent: true });
     });
+  });
+
+  it("renders only the selected comparison payload even when both legacy arrays contain the same path", () => {
+    const path = "src/same.ts";
+    const patch = (value: string) => `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+${value}`;
+    useAppStore.setState({ gitChanges: gitFixture([{ path, patch: patch("selected_snapshot"), additions: 13, deletions: 5 }], {}, {
+      workingTree: [{ path, patch: patch("unselected_working"), additions: 90, deletions: 80 }],
+      staged: [{ path, patch: patch("unselected_staged"), additions: 70, deletions: 60 }],
+    }) });
+    const { container } = render(<DiffPanel />);
+    openGitFile(path);
+    expect(screen.getByText("selected_snapshot")).toBeTruthy();
+    expect(screen.queryByText("unselected_working")).toBeNull();
+    expect(screen.queryByText("unselected_staged")).toBeNull();
+    expect(screen.getAllByRole("button", { name: `审阅未暂存 ${path}` })).toHaveLength(1);
+    expect(container.querySelector(".mc-diff-total-counts")?.textContent).toBe("+13-5");
+    expect(useAppStore.getState().requestGitComparison).toHaveBeenCalledWith({ source: "unstaged" });
+  });
+
+  it("keeps a branch comparison selected when no default base exists instead of switching to another source", async () => {
+    localStorage.setItem("last-explicit-review-diff-filter", JSON.stringify("branch"));
+    vi.mocked(readGitReviewOptions).mockResolvedValue({ ...defaultOptions, default_base_branch: null,
+      merge_base_sha: null, branches: ["feature"], comparison_status: "expected", reason: "default_branch_unavailable" });
+    useAppStore.setState({ gitChanges: gitFixture([], { source: "branch", status: "expected",
+      reason: "default_branch_unavailable", snapshot: undefined }) });
+    render(<DiffPanel />);
+    await screen.findByText("没有可用的默认基准分支");
+    expect(screen.getByRole("button", { name: /Diff 来源：此分支/ })).toBeTruthy();
+    expect(vi.mocked(useAppStore.getState().requestGitComparison).mock.calls.every(([selection]) => selection.source === "branch")).toBe(true);
+    expect(localStorage.getItem("last-explicit-review-diff-filter")).toBe('"branch"');
+    expect(screen.queryByRole("button", { name: "全部暂存" })).toBeNull();
+  });
+
+  it("forwards the captured source, snapshot and execution owner when acting on one comparison", async () => {
+    const file = { path: "src/owner.ts", patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1 };
+    const snapshot = { conversationId: "conv-diff", workspaceRoot: "C:\\workspace", source: "unstaged" as const,
+      generation: "owned-comparison-7", environmentId: "accepted-environment", cwdUri: "workspace://accepted/repo", hideWhitespace: false };
+    useAppStore.setState({ gitChanges: gitFixture([file], { snapshot }) });
+    render(<DiffPanel />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "暂存 src/owner.ts" })));
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({ type: "diff.git_stage_file", path: "src/owner.ts",
+      source: "unstaged", snapshot_generation: "owned-comparison-7", environment_id: "accepted-environment", cwd_uri: "workspace://accepted/repo",
+      conversation_id: "conv-diff", workspace: "C:\\workspace", confirmed: undefined }, "diff.git_stage_file", { silent: true });
+  });
+
+  it("does not execute an old snapshot's file action after its owner changes", () => {
+    useAppStore.setState({ draft: "Keep the current draft", gitChanges: gitFixture([{ path: "src/old.ts",
+      patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1 }]) });
+    render(<DiffPanel />);
+    act(() => useAppStore.setState({ conversationId: "conv-other" }));
+    const action = screen.queryByRole("button", { name: "暂存 src/old.ts" });
+    if (action) fireEvent.click(action);
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    expect(useAppStore.getState().draft).toBe("Keep the current draft");
+  });
+
+  it("does not discard a captured file when navigation begins while confirmation is pending", async () => {
+    let answer!: (confirmed: boolean) => void;
+    vi.mocked(showConfirm).mockReturnValue(new Promise(resolve => { answer = resolve; }));
+    useAppStore.setState({ gitChanges: gitFixture([{ path: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1 }]) });
+    render(<DiffPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "放弃 src/app.ts 的更改" }));
+    await waitFor(() => expect(showConfirm).toHaveBeenCalledOnce());
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
+    await act(async () => answer(true));
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+});
+
+describe("snapshot-backed complete-file Diff reading", () => {
+  const path = "src/full.ts";
+  const patch = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -50 +50 @@\n-line_50\n+changed_50\n`;
+  const oldLines = Array.from({ length: 100 }, (_, index) => `line_${index + 1}\n`);
+  const newLines = oldLines.map((line, index) => index === 49 ? "changed_50\n" : line);
+  const file: GitChangeFile = { path, patch, additions: 1, deletions: 1, status: "M", oldOid: "a".repeat(40), newOid: null,
+    oldMode: "100644", newMode: "100644", revision: "complete-reading-file" };
+  const reply = (command: Record<string, any>, results = (command.requests as { side: "old" | "new" }[]).map(request => ({ type: "success",
+    path, side: request.side, source_kind: request.side === "old" ? "object" : "disk", lines: request.side === "old" ? oldLines : newLines }))) => ({
+    type: "command.result" as const, command: "diff.git_file_contents", level: "info" as const, message: "",
+    data: { source: command.source, snapshot_generation: command.snapshot_generation, results },
+  });
+
+  it("uses the real forty-ms content command and expands real context by twenty lines or Shift-all", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementation(async command => reply(command));
+    useAppStore.setState({ gitChanges: gitFixture([file], { snapshot: { conversationId: "conv-diff", workspaceRoot: "C:\\workspace",
+      source: "unstaged", generation: "complete-reading-snapshot", environmentId: "execution-owner", cwdUri: "file:///owned/repo", hideWhitespace: false } }) });
+    render(<DiffPanel />);
+    openGitFile(path);
+    await act(async () => { await vi.advanceTimersByTimeAsync(39); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledOnce();
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "diff.git_file_contents", conversation_id: "conv-diff",
+      workspace: "C:\\workspace", environment_id: "execution-owner", cwd_uri: "file:///owned/repo", source: "unstaged", snapshot_generation: "complete-reading-snapshot",
+      requests: [{ path, side: "old", format: "text" }, { path, side: "new", format: "text" }], max_object_bytes: 5 * 1024 * 1024 }), "diff.git_file_contents", { silent: true });
+    expect(screen.queryByText("line_1", { exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "向下展开 20 行" }));
+    expect(screen.getByText("line_30", { exact: true })).toBeTruthy();
+    expect(screen.getByText("line_49", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("line_29", { exact: true })).toBeNull();
+    expect(screen.queryByText("line_51", { exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "向下展开 20 行" }), { shiftKey: true });
+    expect(screen.getByText("line_1", { exact: true })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "向上展开 20 行" }), { shiftKey: true });
+    expect(screen.getByText("line_100", { exact: true })).toBeTruthy();
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledOnce();
+  });
+
+  it("retains a real partial patch when original objects are unavailable without inventing omitted context", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementation(async command => reply(command,
+      (command.requests as { side: "old" | "new" }[]).map(request => ({ type: "error", path, side: request.side, error: { type: "not-found" } })) as any));
+    useAppStore.setState({ gitChanges: gitFixture([file], { snapshot: { conversationId: "conv-diff", workspaceRoot: "C:\\workspace",
+      source: "unstaged", generation: "unavailable-reading-snapshot", hideWhitespace: false } }) });
+    render(<DiffPanel />); openGitFile(path);
+    await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+    expect(screen.getByText("changed_50", { exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "向下展开 20 行" })).toBeNull();
+    expect(screen.queryByText("line_1", { exact: true })).toBeNull();
+    expect(screen.queryByText("完整文件内容加载失败")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledOnce();
+  });
+
+  it("does not project late old-owner full content into the replacement comparison or disturb its draft", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let finish!: (result: Awaited<ReturnType<typeof sendClientCommandAwaitResult>>) => void;
+    let request!: Record<string, any>;
+    vi.mocked(sendClientCommandAwaitResult).mockImplementation(command => {
+      request = command;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    useAppStore.setState({ draft: "Unsent current draft", gitChanges: gitFixture([file], { snapshot: { conversationId: "conv-diff", workspaceRoot: "C:\\workspace",
+      source: "unstaged", generation: "late-old-reading-snapshot", hideWhitespace: false } }) });
+    render(<DiffPanel />); openGitFile(path);
+    await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+    act(() => useAppStore.setState({ conversationId: "conv-other", workingDirectory: "C:/new-owner", gitChanges: gitFixture([
+      { path, patch: "@@ -1 +1 @@\n-latest_old\n+latest_change", additions: 1, deletions: 1 },
+    ], { snapshot: { conversationId: "conv-other", workspaceRoot: "C:/new-owner", source: "unstaged", generation: "new-owner-snapshot", hideWhitespace: false } }) }));
+    openGitFile(path);
+    await act(async () => finish(reply(request)));
+    expect(screen.getByText("latest_change", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("changed_50", { exact: true })).toBeNull();
+    expect(screen.queryByText("line_1", { exact: true })).toBeNull();
+    expect(useAppStore.getState().draft).toBe("Unsent current draft");
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledOnce();
   });
 });
 
@@ -715,17 +1051,16 @@ describe("Source ordinary Diff annotations", () => {
 
   it.each(["review", "git", "history"])("saves real ordinary comment coordinates from the %s caller without approving a tool", entry => {
     if (entry === "review") useAppStore.setState({ diffReview: review() });
-    else if (entry === "git") useAppStore.setState({ diffReview: null, messages: [], gitChanges: { staged: [], untracked: [], loading: false,
-      workingTree: [{ path, patch, additions: 1, deletions: 1 }] } });
+    else if (entry === "git") useAppStore.setState({ diffReview: null, messages: [], gitChanges: gitFixture([{ path, patch, additions: 1, deletions: 1 }]) });
     else useAppStore.setState({ diffReview: null, messages: [
       { id: "u", role: "user", content: "change the value", timestamp: 1 },
       { id: "a", role: "assistant", content: "done", timestamp: 2, toolCalls: [{ id: "edit", name: "apply_patch", status: "success", args: {}, diff: { patch } }] },
     ] as any });
     const { container } = render(<DiffPanel />);
-    if (entry === "git") fireEvent.click(screen.getByRole("button", { name: `审阅未暂存 ${path}` }));
+    if (entry === "git") openGitFile(path);
     if (entry === "history") {
       fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-      fireEvent.click(screen.getByRole("option", { name: /轮次记录 · 上一轮/ }));
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "上一轮", exact: true }));
     }
     fireEvent.click(container.querySelector('[data-diff-text="1:new"]')!);
     expect(screen.queryByRole("textbox", { name: /评论 [LR]/ })).toBeNull();
@@ -743,7 +1078,7 @@ describe("Source ordinary Diff annotations", () => {
 
   it("preserves a cross-side range and permits editing and deleting the saved comment", () => {
     useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
-    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    changeDiffLayout("split");
     fireEvent.click(screen.getByRole("button", { name: "评论 L100" }));
     fireEvent.click(screen.getByRole("button", { name: "评论 R201" }), { shiftKey: true });
     const input = screen.getByRole("textbox", { name: "评论 L100–R201" });
@@ -762,12 +1097,12 @@ describe("Source ordinary Diff annotations", () => {
     useAppStore.setState({ diffReview: review() }); render(<DiffPanel />);
     fireEvent.click(screen.getByRole("button", { name: "评论 R200" }));
     fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Original draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "切换为分栏视图" }));
+    changeDiffLayout("split");
     expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Original draft");
     fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
     fireEvent.focus(screen.getByRole("textbox", { name: "评论 R200" }));
     fireEvent.change(screen.getByRole("textbox", { name: "评论 R200" }), { target: { value: "Unsaved edit" } });
-    fireEvent.click(screen.getByRole("button", { name: "切换为行内视图" }));
+    changeDiffLayout("unified");
     fireEvent.click(screen.getByRole("button", { name: path, exact: true }));
     fireEvent.click(screen.getByRole("button", { name: path, exact: true }));
     expect((screen.getByRole("textbox", { name: "评论 R200" }) as HTMLTextAreaElement).value).toBe("Unsaved edit");

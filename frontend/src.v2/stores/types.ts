@@ -314,6 +314,39 @@ export interface GitChangeFile {
   additions: number;
   deletions: number;
   isBinary?: boolean;
+  status?: "A" | "M" | "D" | "R" | "C" | "T" | "U";
+  oldMode?: string;
+  newMode?: string;
+  oldOid?: string | null;
+  newOid?: string | null;
+  revision?: string;
+}
+
+export interface GitDiffSnapshot {
+  conversationId: string;
+  workspaceRoot: string;
+  environmentId?: string;
+  cwdUri?: string;
+  source: GitDiffSource;
+  generation: string;
+  hideWhitespace: boolean;
+}
+
+export type GitDiffSource = "uncommitted" | "unstaged" | "staged" | "branch" | "commit";
+export interface GitReviewSelection {
+  source: GitDiffSource;
+  baseBranch?: string;
+  commitSha?: string;
+}
+export interface GitComparisonState extends GitReviewSelection {
+  files: GitChangeFile[];
+  loading: boolean;
+  requestId?: string;
+  snapshot?: GitDiffSnapshot;
+  status?: "success" | "expected";
+  reason?: string | null;
+  error?: string;
+  comparison?: { base_branch?: string; merge_base_sha?: string; commit_sha?: string; parent_sha?: string };
 }
 
 export interface GitChangesState {
@@ -326,6 +359,10 @@ export interface GitChangesState {
   workspaceRoot?: string;
   workingTreeRequestId?: string;
   stagedRequestId?: string;
+  untrackedFiles?: GitChangeFile[];
+  workingTreeSnapshot?: GitDiffSnapshot;
+  stagedSnapshot?: GitDiffSnapshot;
+  comparison?: GitComparisonState;
 }
 
 export interface TurnDiffState {
@@ -542,6 +579,7 @@ export interface UISlice {
   setGitChanges: (changes: Partial<GitChangesState>) => void;
   setGitChangesLoading: (loading: boolean) => void;
   requestGitChanges: () => void;
+  requestGitComparison: (selection: GitReviewSelection) => void;
 }
 
 // ── Workspace Slice ───────────────────────────────────────────────
