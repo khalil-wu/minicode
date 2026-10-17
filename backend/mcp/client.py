@@ -683,7 +683,11 @@ class MCPClient:
             mapped = self._map_connection_error(exc)
             if not ready.done():
                 ready.set_exception(mapped)
-            elif not self._closing:
+            elif self._closing:
+                # Transport cleanup belongs to the close acknowledgement.
+                # Its real failure must reach the original resource owner.
+                raise
+            else:
                 self._connected = False
                 logger.warning("[MCP:%s] session ended: %s", self.server_name, mapped)
                 await self._notify_disconnect()

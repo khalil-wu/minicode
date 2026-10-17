@@ -157,6 +157,7 @@ class SDKSession:
         self._inherited_turn_environments = None
         self._user_shell = None
         self.node_repl_companions = None
+        self.cua_repl_companions = None
 
     async def aclose(self) -> None:
         self._closed = True
@@ -177,6 +178,8 @@ class SDKSession:
         await self._commands.shutdown()
         if self.node_repl_companions is not None:
             await self.node_repl_companions.aclose()
+        if self.cua_repl_companions is not None:
+            await self.cua_repl_companions.aclose()
         if self._thread_environments is not None:
             await self._thread_environments.aclose()
         if self._inherited_turn_environments is not None:

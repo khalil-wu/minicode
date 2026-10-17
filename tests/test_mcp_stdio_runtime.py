@@ -63,6 +63,50 @@ def test_stdio_mcp_delegates_transport_and_session_lifecycle_to_official_sdk(mon
     assert captured["session_closed"] is True
 
 
+@pytest.mark.parametrize("failure_phase", ["session", "transport"])
+def test_original_mcp_close_error_is_not_a_successful_transport_acknowledgement(monkeypatch, failure_phase):
+    from mcp import types
+
+    original = RuntimeError("original " + failure_phase + " close diagnostic")
+
+    @asynccontextmanager
+    async def controlled_transport(_parameters):
+        yield object(), object()
+        if failure_phase == "transport":
+            raise original
+
+    class ControlledSession:
+        def __init__(self, *_streams, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            if failure_phase == "session":
+                raise original
+
+        async def initialize(self):
+            return types.InitializeResult(protocolVersion=types.LATEST_PROTOCOL_VERSION,
+                capabilities=types.ServerCapabilities(tools=types.ToolsCapability()),
+                serverInfo=types.Implementation(name="controlled-close-boundary", version="1.0"))
+
+    async def run():
+        client = MCPClient("actual-close-owner", command="controlled-fixture", startup_timeout=1)
+        await client.connect()
+        assert client.connected
+        with pytest.raises(RuntimeError, match="original " + failure_phase + " close diagnostic") as raised:
+            await client.close()
+        assert raised.value is original
+        assert client._lifecycle_task.done() and client._lifecycle_task.exception() is original
+        assert client._cleanup_completed_at is None
+        assert client._lifecycle_task is not None and client._close_event is not None
+
+    monkeypatch.setattr("backend.mcp.client.stdio_client", controlled_transport)
+    monkeypatch.setattr("backend.mcp.client._LifecycleClientSession", ControlledSession)
+    asyncio.run(run())
+
+
 def test_stdio_mcp_reports_immediate_process_exit() -> None:
     async def run() -> None:
         client = MCPClient(
