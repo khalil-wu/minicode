@@ -33,7 +33,37 @@ Source 的局部 `rn` 清理会清正文 Map 和 `St` 的 unsaved 标记，但�
 | Root Diff 界面 | 首批 59 passed / 2 failed；旧测试的 Range 单文本节点和整句 gettext 假设被真实词级节点拆分，修正实际 DOM 选择构造和读取后该文件 42/42。后续阅读 owner 与 storage 两文件 54/54，含 A/B、来源、页签重开和独立阅读实例。原失败保留。 |
 | Shell 与构建 | SidebarRight 定向检查通过；最终构建包含 TSC、Vite，两项预算通过。首次 UI budget 真实报新增直接图标导入 88 > 86，改走已有 icons 入口后通过，未提高预算。 |
 
-最终前端为 `assets/index-CfrFa9WJ.js`，index SHA256 `076d2b095c4b891f50a1f58b056f302474588ce7e7b3f9bd309a9c7e3ae9b1e7`。最终完整 GitHub CI 和 r17 独立安装结果在收尾后另记，不借上一批 4415 / r16 的结果证明本批。
+最终前端为 `assets/index-CfrFa9WJ.js`，index SHA256 `076d2b095c4b891f50a1f58b056f302474588ce7e7b3f9bd309a9c7e3ae9b1e7`。生产实现冻结为 `bbc52231ca240667e9b01a01fdc9ff775b73c011`，后续 `bf14f6f0f2d0881708cb2b63924b1d912bc51178` 仅修正下面两处测试断言，未改生产源码。
+
+首次完整 [CI 39012403115](https://github.com/khalil-wu/minicode/actions/runs/39012403115) 为 7 项成功、前端 1 项失败；其前端为 4492 passed / 2 failed。两项分别是 ActivityCell 和 transcript remount 对完整 `new value` / `new-a` 的单文本节点查找；实际词级 DOM 已拆分文本，逐行 `textContent` 才是其完整正文。修正后两文件 60/60，通过内容和独立文件展开选择的断言，未关闭词高亮或放宽为任意文字命中。新完整 [CI 39012950337](https://github.com/khalil-wu/minicode/actions/runs/39012950337) 精确绑定 `bf14f6f0`，**8/8 成功**；不借上一批 4415 / r16 的结果证明本批。原始失败和新结果分别在 `output/ci-diff-comments-20261017/` 与 `output/ci-diff-comments-final-20261017/`，本地修正为 `ci-text-assertions.json`。
+
+| 最新完整 CI 范围 | Passed | Skipped |
+| --- | ---: | ---: |
+| Frontend，380 文件 | 4494 | 0 |
+| Backend，backend/tests | 6999 | 118 |
+| Backend，根目录 tests | 1768 | 51 |
+| Windows harness | 362 | 15 |
+| Desktop unit | 161 | 9 |
+| Desktop Electron smoke | 6 | 0 |
+| Electron Playwright | 1 | 0 |
+
+前端 TSC/Vite、bundle/UI debt 预算和两项 pinned Source 原生构建均通过。跳过不计通过；实际跳过原因在 `ci-receipt.json`，包括平台、未配置 owned Source peer 等边界，未把它们算成实际 Source 外机互通。CI API、完整日志、JUnit 和 artifact 都绑定本次 head。
+
+收尾文档提交仅修改本记录及当前差距清单；其 backend、frontend、desktop 和 scripts 树与 `bf14f6f0` 保持一致。`bbc52231 → bf14f6f0` 仅有上述两个测试文件差异，backend/desktop/scripts 树亦相同。具体提交及树身份、推送状态和安装候选仍 held 的事实另存 `output/ci-diff-comments-final-20261017/delivery-receipt.json`，不将文档提交冒称另跑一轮 CI。
+
+## r17 独立安装：身份通过，完整验收未通过
+
+新 backend wheel 绑定 `bbc52231`，SHA256 `37226bb371625b68f8c36233129ff6f65052bc2ffd15362ef6eff0ea8a1e49f2`，16,120,035 bytes。1,274 个冻结输入、1,253 个 backend 成员以及两次 presentation 各 511 个模块的来源和字节核对通过；169 处 checkout 差别仅为 CRLF，零其他差异。后续测试提交没有修改 backend，未重复打包。
+
+新安装的基础 cold 41 项通过且进程 exit 0。首次 presentation 的 9 项断言均通过，但承载 Python 在结束阶段以 `3221225477 / 0xC0000005` 退出，因此**不能记为正式 50/50，也不交付该候选为验收通过**。原执行器在非零退出处停止，manifest 明确 `acceptance_complete=false`、`delivery_hold=true`，未生成成功 delivery receipt。
+
+Windows Application 1000/1001 对应 PID 4684、report `7bc3344a-2be1-4f12-9599-56f8fd48d5a9`，故障模块为 PyAV 自带 `libwinpthread-1-26b1e143f68b103d25cd0ba0a146f5b4.dll`，偏移 `0x5e8c`。实际正常 WS 导入通过 `backend.mcp.result_projection` 的顶层 `import av` 加载该 DLL。r16/r17 对应模块及依赖锁相同，均为 av 17.1.0，本批未新增原生输入；没有证据把崩溃归因为本批评论改动。
+
+进一步只读核对本机对应 `python.exe.4684.dmp`（SHA256 `ef4df71b644b40078c0b6a7950c6266133a6379544e051f57669f2d4aff12476`）：独立 AMD64 PE unwind 与现有 System32 DbgHelp 的 24 帧 PC/RSP 完全一致，所用镜像时间戳匹配 dump。已确认 `Py_Exit → ExitProcess → LdrShutdownProcess → libstdc++ 析构/ostream::flush → __emutls_get_address → pthread_once → libwinpthread 内部函数`，故障指令向 RAX=0 写入，前一调用为 `calloc(1,32)`。这定位了原生退出路径，尚未证明分配为何返回空或可复现触发条件，不认定 OOM，也不把它归为推测的 PyAV logging 回调；单线程 dump 不排除更早线程活动。具体栈、指令与限制见同目录 `NATIVE-EXIT.md`，未附加活进程或安装新诊断工具。
+
+开启 faulthandler 的一次诊断复跑 9 项 exit 0、纯 import 三次以及 r16/r17 正常 WS 导入各两次均 exit 0，故障未稳定复现，不能据此宣称根因已修。当前 DLL 哈希匹配其 RECORD；r16 没有独立保留历史 DLL 字节快照，不从当前对比推断历史字节。没有换依赖、延迟 import、吞错或修改生产 runtime 来消除报告。`startup-health.json` 的空错误仅证明独立 cold MCP logger 范围，与下文真实桌面 Memory Phase 2 原生账号错误分开。
+
+完整报告和原始 Windows 事件、XML、进程退出、来源及字节记录在 `output/source-executor-remote-final-wheel-r17-20261017/REPORT.md`。自有测试进程均已退出，私有 staging 留存审查；用户数据与普通进程未受影响。
 
 ## 真实桌面与边界
 
