@@ -1,6 +1,6 @@
 # Source 媒体计量与 Changes 执行器归属
 
-本批从 `8a600b86` 继续，固定参考 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`。没有修改前端字体或增加尚未接通的菜单控件。最终提交、完整 CI 和新安装候选仍需在本批验证结束后记录，不能沿用上一批结果。
+本批从 `8a600b86` 继续，最终实现为 `53dc068429ce4ba4f1a5b50c4f4a19b9ed08bc10`，固定参考 `.tmp/codex-src` 的 `822e58cc3d666166c7446c5b1ea2e52f5d09594c`。没有修改前端字体或增加尚未接通的菜单控件；下列结果均对应本批输入，不能沿用上一批结果。
 
 ## 移除 PyAV 消费链
 
@@ -46,8 +46,11 @@ Source 实际计量的六个本地静音样本如下；FFmpeg 只用于产生测
 | 初轮 Python 媒体 / MCP / Code Mode / App / 评论 | 5 文件 68/68，0 failed/error/skipped，进程 exit 0、无 av 模块。该轮发生在缓存并发修正和 helper 归属移动之前，不能代替下列最终清理回归或新安装。 |
 | 最终清理的统一受影响回归 | **164/164**，0 failed/error/skipped，120.597s；嵌入 Python 3.11.9 进程 exit 0，`av` / `av.*` 模块列表为空。覆盖本地/真实 Source 的 Changes WS 18 项、Git diff/作用域/确认门、独立模型 Git 权限、Windows native、媒体 26 项、Code Mode 媒体及四项 Git 基础回归。 |
 | 模型 restricted-token 实际执行 | 上述统一批中，真实 Runner→原生 Source launcher→OS 边界验证工作区内写成功、外部写拒绝和 exit 7 原样返回；仅提供无需账号 provisioning 的独立 runtime 查找，不替代 runner、helper 或 OS。 |
-| 完整 CI / 独立新安装 | 待本批最终冻结后运行，旧 `bf14f6f0` 的 CI 和 r17 结果不证明本批。 |
+| 独立新安装 r18 | 冻结 `53dc0684` 的新 wheel、新私有安装目录及外置 sandbox 资源，**101/101**：cold 41、presentation 9、App 7、媒体 26、完整 Changes WS 18，0 failed/error/skipped。5 组承载进程全部自然 exit 0；5 份真实调用后的模块/Windows DLL/PYD 审计均无 `av` / `av.libs`，所有 backend 物理来源均为新安装目录。 |
+| 完整 CI | [39030260425](https://github.com/khalil-wu/minicode/actions/runs/39030260425) 对应 `53dc0684`，**8/8 成功**。前端 4494；backend 7034 passed / 127 skipped；root 1771 passed / 52 skipped；Windows harness 362 / 15 skipped；desktop unit 161 / 9 skipped、smoke 6/6、Electron 集成 1/1。跳过项不计为通过，分类原因与完整日志保存在 `output/ci-source-media-git-20261017/ci-receipt.{json,md}`。 |
 
 媒体集中证据在 `output/source-media-meter-20261017/`，实际激活为 `activation.json`，初轮 Python 为 `root-backend.xml` / `root-backend-receipt.json`；最终清理为 `output/source-changes-menu-20261017/final-batch.{log,xml}`、`final-batch-receipt.json`，同目录保存 worker/主进程源码链及全部旧失败。内核边界、协议同步、重复工具检查通过；文件尺寸扫描仍有既有 79 项软警告，未借本批扩大重构范围。
+
+r18 wheel 为 `minicode-0.2.0-py3-none-win_amd64.whl`，16,908,622 bytes，SHA256 `09eb39d0796fddbbaf69608c27cf2e53ae309071537009017c4c317be14e4542`；六个音频 fixture 已逐一核对分发字节，METADATA 不依赖 av。Windows sandbox 的六个文件位于独立 app-resources，**不在 backend wheel 内**；其来源和实际配置路径单独核对。证据为 `output/source-executor-remote-final-wheel-r18-20261017/` 的 manifest、XML、step receipts 与 load audits。cold 41 的隔离 PATH 仅含 System32，三次 SDK query 的可选 Git prompt enrichment 真实报 WinError 2；它不证明 Git 上下文在该冷验环境可用。完整 WS 18 使用实际 Git 目录与独立 Source peer，Git 操作另有真实证据。最初 finalizer 把 fixture README 误算为音频的审计错误保留在 `finalize-attempt1.json`，修正审计范围后通过，没有修改候选或重跑 101 项。
 
 Changes 四项菜单尚未借本批宣称完成。完整文件加载需要 objectId、rename、host 和 snapshot 链；隐藏空白需要 Git diff/统计的 `--ignore-all-space`；富预览只影响 Source 选择的文本格式；imports 的实际过滤 leaf 仍未留存，不能用正则自行补造。官方账号相关服务继续排除，Windows readiness、系统 Computer Use、私有 MCP relay、外机/WSL/WFP、长任务及全 UI 状态的既有边界仍保留。
