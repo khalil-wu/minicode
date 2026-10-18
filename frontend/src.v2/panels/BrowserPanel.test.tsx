@@ -9,7 +9,7 @@ import type { EmbeddedBrowserState, EmbeddedBrowserSettingsSnapshot } from "../d
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import { ContextMenu } from "../components/ContextMenu";
-import { __resetOpenWebInBrowserForTests, openWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
+import { __resetOpenWebInBrowserForTests, openWebInBrowser, refreshWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 vi.mock("./browser-annotation-capture", () => ({ captureBrowserAnnotationAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], composerAttachments: [] })) }));
 
@@ -667,6 +667,22 @@ describe("BrowserPanel", () => {
     expect(runtimeMocks.create).not.toHaveBeenCalled();
   });
 
+  it("presents the existing preview target across readiness events without a timing window", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("original-preview", "Preview", "https://preview.example/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview" });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      act(() => { openWebInBrowser("https://preview.example/"); });
+      clock.mockReturnValue(5000);
+      act(() => { openWebInBrowser("https://preview.example/"); });
+      expect(screen.getAllByRole("tab")).toHaveLength(1);
+      expect(runtimeMocks.create).not.toHaveBeenCalled();
+      expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+      expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+
   it("delivers a ready preview received before mount to the owning native browser", async () => {
     useAppStore.setState({
       workingDirectory: "C:/browser", conversationWorkbenchStates: {},
@@ -890,6 +906,19 @@ describe("BrowserPanel", () => {
     expect(screen.getByRole("tab", { name: "Second owner" })).toBeTruthy();
     expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://second.example/guide");
     expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads a restarted preview whose desktop workspace uses Windows separators and case", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("preview", "Preview", "http://localhost:4173/", true)]);
+    useAppStore.setState({ workingDirectory: "C:\\Browser" });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview" });
+
+    act(() => { refreshWebInBrowser("http://localhost:4173/", "conv-browser", "c:\\browser"); });
+
+    await waitFor(() => expect(runtimeMocks.runAction).toHaveBeenCalledExactlyOnceWith("conv-browser", "preview", "reload"));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
   });
 
   it("reloads all tabs on the refreshed preview origin without navigating or stealing focus", async () => {

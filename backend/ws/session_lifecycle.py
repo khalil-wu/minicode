@@ -1681,8 +1681,9 @@ class SessionLifecycle:
         try:
             await self._session.event_outbox.drain_delivery()
             await self._session.event_outbox.drain_persistence()
-            await self._session.artifact_store.flush()
         finally:
-            self._session.artifact_store.shutdown()
-            self._session.artifact_store.clear()
-            self._session.run_manager.close_durable_queue()
+            try:
+                await self._session.artifact_store.aclose()
+            finally:
+                self._session.artifact_store.clear()
+                self._session.run_manager.close_durable_queue()

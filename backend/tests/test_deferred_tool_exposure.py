@@ -82,6 +82,8 @@ def test_native_search_namespace_call_and_journal_recovery_use_the_actual_respon
             assert not any(item.get("name") == tool.name for item in first_tools)
             searched = next(item for item in endpoint.requests[1]["input"] if item.get("type") == "tool_search_output")
             assert searched["call_id"] == "search-owned"
+            assert searched["execution"] == "client"
+            assert searched["status"] == "completed"
             [namespace] = searched["tools"]
             assert namespace["type"] == "namespace" and namespace["name"] == tool.model_namespace
             assert namespace["tools"][0]["name"] == tool.model_tool_name

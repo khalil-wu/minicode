@@ -9,6 +9,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import asyncio
+import base64
+import gzip
 import hashlib
 import json
 import os
@@ -143,8 +145,16 @@ class NodeReplCompanions:
             _env_policy(attachment), attachment.config.mcp_policy, network.identity() if network is not None else None],
             sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        # CreateProcess limits the complete Windows command line to 32,767
+        # UTF-16 units. Transport the embedded module compressed, retaining the
+        # same stdin MCP stream and executor-owned process on every platform.
+        module = _SERVER + "\n//# sourceURL=minicode-node-repl.mjs\n"
+        source = base64.b64encode(gzip.compress(module.encode("utf-8"), mtime=0)).decode("ascii")
+        bootstrap = ("await import('data:text/javascript;base64,' + "
+            "(await import('node:zlib')).gunzipSync(Buffer.from('" + source
+            + "', 'base64')).toString('base64'))")
         config = MCPServerConfig("node_repl", command=command,
-            args=["--expose-internals", "--input-type=module", "--eval", _SERVER],
+            args=["--expose-internals", "--input-type=module", "--eval", bootstrap],
             env={"ELECTRON_RUN_AS_NODE": "1"} if not attachment.is_remote else {},
             cwd=attachment.selection.cwd, source=SOURCE_PREFIX + key,
             environment_id=attachment.selection.environment_id)

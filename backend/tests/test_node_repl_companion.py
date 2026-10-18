@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -68,6 +69,7 @@ async def test_real_node_mcp_catalog_persistent_redeclaration_imports_and_metada
     (package / "package.json").write_text('{"type":"module","main":"index.js"}')
     (package / "index.js").write_text('export const version = process.version; export const platform = process.platform;')
     async with companion(tmp_path) as fixture:
+        assert len(subprocess.list2cmdline([fixture.config.command, *fixture.config.args])) < 32767
         tools = await fixture.client.list_tools()
         assert {tool.name for tool in tools} == {"js", "js_reset", "js_add_node_module_dir"}
         assert "persistent" in fixture.client.instructions
@@ -586,17 +588,25 @@ async def test_elevated_account_rejected_node_start_closes_original_handle_and_t
 @pytest.mark.skipif(sys.platform != "win32", reason="actual Windows restricted-token Node startup")
 async def test_restricted_node_starts_without_elevated_accounts_and_keeps_original_kernel(monkeypatch):
     import os
-    import tempfile
+    import shutil
+    from contextlib import ExitStack
+    from uuid import uuid4
     from backend.sandbox import windows_native
     from backend.sandbox.policy import FileSystemSandboxPolicy, FileSystemSandboxEntry, FileSystemPath, FileSystemSpecialPath, FileSystemAccessMode, NetworkSandboxPolicy
 
     executable = Path(__file__).resolve().parents[2] / "desktop/windows-sandbox-runtime/codex.exe"
     if not executable.is_file():
         pytest.skip("Bundled Windows sandbox runtime has not been built")
-    arena = Path(os.environ.get("MINICODE_SANDBOX_TEST_ROOT", "C:/minicode-sbx-test"))
+    arena = Path(os.environ.get("MINICODE_SANDBOX_TEST_ROOT", "C:/minicode-sbx-test")).resolve()
     arena.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="node-readiness-", dir=arena) as directory:
-        root = Path(directory)
+    with ExitStack() as cleanup:
+        # Python's Windows mkdtemp uses a private 0700 DACL. A normal project
+        # inherits its parent's user permissions; the restricted token must
+        # still satisfy those permissions as well as its capability SID.
+        root = arena / ("node-readiness-" + uuid4().hex)
+        root.mkdir()
+        assert root.resolve().is_relative_to(arena) and root.resolve() != arena
+        cleanup.callback(shutil.rmtree, root)
         workspace, home = root / "workspace", root / "home"
         workspace.mkdir()
         monkeypatch.setenv(windows_native._RUNNER_ENV, str(executable))

@@ -340,7 +340,7 @@ function registerIpcHandlers() {
     return { windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId };
   }));
 
-  for (const action of ["list", "discover", "save", "connect", "disconnect", "remove", "open"]) {
+  for (const action of ["list", "discover", "save", "saveMany", "connect", "disconnect", "remove", "open"]) {
     const channel = `minicode:connections:${action}`;
     ipcMain.handle(channel, withMainSender(channel, async (_event, ...args) => {
       try {
@@ -489,6 +489,10 @@ function registerIpcHandlers() {
       setLastPickedWorkspaceRoot(selected);
     }
     return rememberTrustedWorkspaceRoot(selected);
+  }));
+
+  ipcMain.handle("minicode:workspace:directoryEntries", withMainSender("minicode:workspace:directoryEntries", () => {
+    throw new Error("Directory browsing requires a connected remote host");
   }));
 
   ipcMain.handle("minicode:workspace:trust", withMainSender("minicode:workspace:trust", (_event, targetPath) => {

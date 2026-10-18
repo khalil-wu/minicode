@@ -4,7 +4,7 @@ const { RemoteHosts } = require("./remote-host");
 const { releaseEditorWindow } = require("./window-lifecycle");
 
 const NATIVE_CHANNELS = new Set([
-  "minicode:workspace:trust", "minicode:openPreferredPath", "minicode:openPath", "minicode:revealPath",
+  "minicode:workspace:trust", "minicode:workspace:directoryEntries", "minicode:openPreferredPath", "minicode:openPath", "minicode:revealPath",
   "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:searchFiles", "minicode:fs:deletePath",
   "minicode:pty:spawn", "minicode:pty:write", "minicode:pty:resize", "minicode:pty:kill", "minicode:pty:restart",
   "minicode:pty:killConversation", "minicode:pty:list", "minicode:pty:snapshot", "minicode:pty:clear", "minicode:pty:ackExit",
@@ -16,7 +16,8 @@ class RemoteDesktop {
     this.windows = windowManager;
     this.bridge = browserBridge;
     this.log = log;
-    this.hosts = new RemoteHosts(userData, { bridgeEndpoint, spawnTransport });
+    this.hosts = new RemoteHosts(userData, { bridgeEndpoint, spawnTransport, log });
+    this.windowReleases = new WeakMap();
   }
 
   broadcast() {
@@ -24,9 +25,33 @@ class RemoteDesktop {
     for (const window of this.windows.getMainWindows()) window.webContents.send("minicode:connections:changed", connections);
   }
 
-  list() { return this.hosts.list(); }
-  discover() { return this.hosts.discover(); }
-  save(connection) { const result = this.hosts.save(connection); this.broadcast(); return result; }
+  async refresh() {
+    await this.hosts.refresh();
+    for (const [id, host] of [...this.hosts.hosts]) {
+      if (host.closed) continue;
+      const connection = this.hosts.catalog.find(item => item.id === id);
+      if (connection && ["kind", "alias", "sshHost", "sshPort", "identity", "distribution"]
+        .every(field => host.connection[field] === connection[field])) {
+        host.connection = connection;
+        continue;
+      }
+      const reconnect = host.status === "connecting" || host.status === "connected";
+      await this.closeHost(host);
+      await this.hosts.refreshing;
+      if (reconnect && this.hosts.catalog.some(item => item.id === id)) await this.connectHost(id);
+    }
+    return this.hosts.list();
+  }
+  async list() { const connections = await this.refresh(); this.broadcast(); return connections; }
+  discover(kind) { return this.hosts.discover(kind); }
+  async save(connection) { return (await this.saveMany([connection]))[0] ?? null; }
+  async saveMany(connections) {
+    const entries = this.hosts.saveMany(connections);
+    const ids = new Set(entries.map(entry => entry.id));
+    const available = await this.refresh();
+    this.broadcast();
+    return available.filter(connection => ids.has(connection.id));
+  }
   async remove(id) {
     if (this.windows.getMainWindows().some((window) => this.windows.getWindowRecord(window).remoteHostId === id)) {
       throw new Error("Close this connection's windows before removing it");
@@ -36,6 +61,11 @@ class RemoteDesktop {
   }
 
   async connect(id) {
+    await this.refresh();
+    return this.connectHost(id);
+  }
+
+  async connectHost(id) {
     try {
       const connecting = this.hosts.connect(id);
       this.broadcast();
@@ -72,7 +102,17 @@ class RemoteDesktop {
     this.windows.focusMainWindow(window);
   }
 
-  async disconnect(id) { await this.hosts.disconnect(id); this.broadcast(); }
+  async closeHost(host) {
+    let release;
+    while ((release = this.windowReleases.get(host))) await release.task;
+    await host.close();
+  }
+
+  async disconnect(id) {
+    const host = this.hosts.hosts.get(id);
+    if (host) await this.closeHost(host);
+    this.broadcast();
+  }
 
   host(record) {
     const host = this.hosts.hosts.get(record.remoteHostId);
@@ -84,7 +124,7 @@ class RemoteDesktop {
   invoke(record, channel, args) { return this.host(record).native(record, channel, args); }
   mapUrl(record, url) { return this.host(record).mapUrl(url); }
 
-  async releaseWindow(record) {
+  async releaseWindow(record, retry = false) {
     const pending = this.hosts.saved.releasedWindows || (this.hosts.saved.releasedWindows = []);
     if (!pending.some((item) => item.windowInstanceId === record.windowInstanceId)) {
       pending.push({ remoteHostId: record.remoteHostId, remoteGeneration: record.runtime.remoteHost.generation,
@@ -92,22 +132,44 @@ class RemoteDesktop {
       this.hosts.persist();
     }
     const host = this.hosts.hosts.get(record.remoteHostId);
-    if (host && !host.closed) await this.flushReleasedWindows(record.remoteHostId, host);
+    if (host) {
+      const active = this.windowReleases.get(host);
+      if (retry && active?.failed) this.windowReleases.delete(host);
+      if (!host.closed) await this.flushReleasedWindows(record.remoteHostId, host);
+    }
     return { pending: this.hosts.saved.releasedWindows.some((item) => item.windowInstanceId === record.windowInstanceId) };
   }
 
-  async flushReleasedWindows(id, host) {
-    for (const record of [...(this.hosts.saved.releasedWindows || [])].filter((item) => item.remoteHostId === id || item.remoteGeneration === host.ready.generation)) {
-      await Promise.all([
-        host.native(record, "minicode:window:release", [], { lifecycle: true }),
-        releaseEditorWindow({ ...host.runtime(), ...record, desktopLifecycleToken: host.ready.bridge_token }),
-      ]);
-      this.hosts.saved.releasedWindows = this.hosts.saved.releasedWindows.filter((item) => item.windowInstanceId !== record.windowInstanceId);
-      this.hosts.persist();
-    }
+  flushReleasedWindows(id, host) {
+    const active = this.windowReleases.get(host);
+    if (active) return active.task;
+    const release = { task: null, failed: false };
+    release.task = Promise.resolve().then(async () => {
+      let record;
+      while ((record = (this.hosts.saved.releasedWindows || []).find(item => item.remoteGeneration === host.ready.generation))) {
+        await host.waitForNativeRequests(record.windowInstanceId);
+        const results = await Promise.allSettled([
+          host.native(record, "minicode:window:release", [], { lifecycle: true }),
+          releaseEditorWindow({ ...host.runtime(), ...record, desktopLifecycleToken: host.ready.bridge_token }),
+        ]);
+        const errors = results.filter(result => result.status === "rejected").map(result => result.reason);
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, errors.map(error => error.message).join("; "));
+        this.hosts.saved.releasedWindows = this.hosts.saved.releasedWindows.filter(item => item.windowInstanceId !== record.windowInstanceId);
+        this.hosts.persist();
+      }
+    }).then(() => {
+      this.windowReleases.delete(host);
+    }, error => {
+      // Only main's existing explicit cleanup retry can retire this failure.
+      release.failed = true;
+      throw error;
+    });
+    this.windowReleases.set(host, release);
+    return release.task;
   }
 
-  async close() { await this.hosts.close(); }
+  async close() { await Promise.all([...this.hosts.hosts.values()].map(host => this.closeHost(host))); }
 }
 
 module.exports = { RemoteDesktop };

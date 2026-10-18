@@ -160,8 +160,12 @@ def test_sdk_mcp_timeout_persists_cleanup_receipt(
         try:
             assert original is not None and not original.done()
             owner = resistant.context.cleanup_tasks_by_call[resistant.context.tool_call_id]
-            assert resistant.context.pending_cleanup_tasks == {owner}
+            close_owner = next(task for task in resistant.context.pending_cleanup_tasks
+                               if task.get_name().startswith("sdk-mcp-artifact-close["))
+            assert resistant.context.pending_cleanup_tasks == {owner, close_owner}
             assert not owner.done()
+            assert not close_owner.done()
+            assert not resistant.context.artifact_store._cleanup_stop.is_set()
             registry_call = owner.get_coro()
             while registry_call.cr_code.co_qualname != "CapabilityRegistry.execute":
                 registry_call = registry_call.cr_await
@@ -176,6 +180,8 @@ def test_sdk_mcp_timeout_persists_cleanup_receipt(
         assert original.result().content == "released"
         await asyncio.sleep(0)  # Let the actual source's settlement callbacks commit.
         assert not resistant.context.pending_cleanup_tasks
+        assert close_owner.done() and close_owner.result() is None
+        assert resistant.context.artifact_store._cleanup_stop.is_set()
         assert resistant.context.tool_call_id not in resistant.context.cleanup_tasks_by_call
         settled = resistant.context.cleanup_receipts[resistant.context.tool_call_id]
         assert settled["pending"] == 0 and settled["completed"] is True

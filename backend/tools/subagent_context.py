@@ -340,7 +340,7 @@ def build_agent_execution_profile(
             delivery="background",
             delegation="none",
             task_coordination=False,
-            message_coordination=False,
+            message_coordination=True,
             agent_lifecycle=False,
             scheduled_triggers=False,
             constrained_async_surface=True,

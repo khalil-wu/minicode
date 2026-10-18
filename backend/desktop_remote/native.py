@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -50,11 +52,31 @@ def _trust(path: str) -> str:
     return str(target)
 
 
+def _directory_entries(path: str | None, directories_only: bool) -> dict:
+    directory = path.strip() if path and path.strip() else str(Path.home())
+    target = Path(directory)
+    if not target.is_dir():
+        raise HTTPException(404, f"Directory not found: {target}")
+    with os.scandir(target) as contents:
+        entries = []
+        for entry in contents:
+            try:
+                mode = os.stat(entry.path, follow_symlinks=True).st_mode
+            except OSError:
+                # Source fs/readDirectory omits an entry whose target metadata
+                # cannot be read, including a dangling directory link.
+                continue
+            directory_entry = stat.S_ISDIR(mode)
+            entries.append({"name": entry.name, "path": str(target / entry.name), "type": "directory" if directory_entry else "file"})
+    return {"directoryPath": directory, "parentPath": str(target.parent) if target.parent != target else None,
+            "entries": [entry for entry in entries if not directories_only or entry["type"] == "directory"]}
+
+
 class RemoteNative:
     def __init__(self, emit, bridge_endpoint: str, bridge_token: str):
         self.terminals = NativeTerminals(emit)
         self.bridge_token = bridge_token
-        self.bridge = httpx.AsyncClient(base_url=bridge_endpoint, headers={"authorization": f"Bearer {bridge_token}"}, timeout=30)
+        self.bridge = httpx.AsyncClient(base_url=bridge_endpoint, headers={"authorization": f"Bearer {bridge_token}"}, timeout=30, trust_env=False)
         self.router = APIRouter(prefix="/api/desktop-host")
         self.router.add_api_route("/native", self.request, methods=["POST"])
 
@@ -75,6 +97,8 @@ class RemoteNative:
             await self.terminals.release_window(request.window_instance_id)
             return {"released": True}
         await self._binding(request)
+        if channel == "workspace:directoryEntries":
+            return await asyncio.to_thread(_directory_entries, args[0], args[1])
         if channel == "workspace:trust":
             return await asyncio.to_thread(_trust, args[0])
         if channel.startswith("pty:"):

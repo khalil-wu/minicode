@@ -47,7 +47,7 @@ import {
 } from "../desktop/runtime";
 import { parseHttpUrl } from "../lib/network-target";
 import { previewUrlsShareOrigin } from "../lib/preview-projection";
-import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
@@ -718,7 +718,14 @@ export const BrowserPanel = () => {
         return;
       }
       if (request.kind === "open") {
-        openTab(request.url);
+        // Present the existing native target. Explicit new tabs are created by
+        // the tab control; readiness events must not multiply the same page.
+        const existing = tabsRef.current.find((tab) => tab.url === request.url);
+        if (existing) {
+          activeIdRef.current = existing.id;
+          setActiveId(existing.id);
+          window.requestAnimationFrame(syncBounds);
+        } else openTab(request.url);
         return;
       }
       if (request.kind === "resume") {
@@ -732,7 +739,7 @@ export const BrowserPanel = () => {
         }
         return;
       }
-      if (request.workspaceRoot !== normalizeWorkspaceRoot(useAppStore.getState().workingDirectory)) return;
+      if (!workspaceRootsEqual(request.workspaceRoot, useAppStore.getState().workingDirectory)) return;
       for (const tab of tabsRef.current) {
         if (createdIdsRef.current.has(tab.id) && previewUrlsShareOrigin(tab.url, request.url)) {
           void runNavigationAction(tab.id, "reload");

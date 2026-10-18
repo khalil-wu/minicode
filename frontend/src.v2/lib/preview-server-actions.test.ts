@@ -5,6 +5,7 @@ import { registerWebSocketSender, resetPendingCommandResultsForTests, resolveCli
 import { compareWriteWorkspaceFile, readWorkspaceFile } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import { openPreviewLaunchConfiguration, openPreviewServiceManager, restartPreviewService } from "./preview-server-actions";
+import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }));
 vi.mock("../protocol/api", async (load) => ({ ...await load<typeof import("../protocol/api")>(), apiBase: () => "http://test.local", authHeaders: () => ({}), fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) }));
@@ -13,14 +14,17 @@ const scope = { conversation_id: "A", workspace_root: "C:/project" };
 const commands: ClientCommand[] = [];
 const answer = (command: ClientCommand, level = "success", message = "") => resolveClientCommandResult({ type: "command.result", command: command.type, level, message, data: { client_command_id: command.client_command_id, ...scope } } as CommandResultEvent);
 beforeEach(() => {
+  __resetOpenWebInBrowserForTests();
   commands.length = 0;
   registerWebSocketSender((command) => { commands.push(command); return true; });
   useAppStore.setState({ conversationId: "A", workingDirectory: "C:/project", editorTabs: [], activeTabPath: null, editorOpenRequests: [], previewServiceManagerRequest: null, rightStackTab: "tasks" });
 });
-afterEach(() => { resetPendingCommandResultsForTests(); registerWebSocketSender(null); vi.unstubAllGlobals(); });
+afterEach(() => { __resetOpenWebInBrowserForTests(); resetPendingCommandResultsForTests(); registerWebSocketSender(null); vi.unstubAllGlobals(); });
 
 describe("preview service actions", () => {
   it("does not start a replacement until a semantic stop result confirms completion", async () => {
+    const browserRequests: unknown[] = [];
+    subscribeBrowserRequests(request => browserRequests.push(request));
     const operation = restartPreviewService(scope, "web");
     expect(commands.map((command) => command.type)).toEqual(["preview.launch.stop"]);
     const ack = { type: "client.command.ack", client_command_id: commands[0].client_command_id, command_type: "preview.launch.stop" };
@@ -30,8 +34,13 @@ describe("preview service actions", () => {
     answer(commands[0]);
     await vi.waitFor(() => expect(commands).toHaveLength(2));
     expect(commands[1]).toMatchObject({ type: "preview.launch.start", ...scope, name: "web" });
-    answer(commands[1]);
+    expect(browserRequests).toEqual([]);
+    resolveClientCommandResult({ type: "command.result", command: "preview.launch.start", level: "success",
+      message: "", data: { client_command_id: commands[1].client_command_id, ...scope,
+        process: { url: "http://localhost:4173" } } } as CommandResultEvent);
     await operation;
+    expect(browserRequests).toEqual([expect.objectContaining({ kind: "refresh",
+      conversationId: "A", workspaceRoot: "C:/project", url: "http://localhost:4173/" })]);
   });
   it("retains the stop error and refuses a replacement when cleanup is unfinished", async () => {
     const operation = restartPreviewService(scope, "web");

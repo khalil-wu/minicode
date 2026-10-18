@@ -274,7 +274,7 @@ function trustedPathCandidates(targetPath) {
 }
 
 const IPC_CAPABILITIES = new Set([
-  "minicode:connections:list", "minicode:connections:discover", "minicode:connections:save", "minicode:connections:remove",
+  "minicode:connections:list", "minicode:connections:discover", "minicode:connections:save", "minicode:connections:saveMany", "minicode:connections:remove",
   "minicode:connections:connect", "minicode:connections:disconnect", "minicode:connections:open",
   "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
   "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
@@ -306,7 +306,7 @@ const IPC_CAPABILITIES = new Set([
   "minicode:preferences:chooseTaskDirectory",
   "minicode:browser:history", "minicode:browser:removeHistory",
   "minicode:embeddedBrowser:clearBrowsingData", "minicode:embeddedBrowser:capture",
-  "minicode:workspace:pickDirectory", "minicode:workspace:trust",
+  "minicode:workspace:pickDirectory", "minicode:workspace:trust", "minicode:workspace:directoryEntries",
 ]);
 
 function assertIpcCapability(channel, { logger } = {}) {

@@ -465,7 +465,7 @@ def test_foreground_subagent_keeps_coordination_but_denies_delegation_and_plan_t
     assert len(ctx.tool_deny_rules) == len(set(ctx.tool_deny_rules))
 
 
-def test_background_subagent_profile_denies_coordination_and_uses_positive_surface() -> None:
+def test_background_subagent_can_report_without_task_or_lifecycle_authority() -> None:
     profile = build_agent_execution_profile(background=True)
     ctx = build_subagent_permission_context(
         "implement",
@@ -476,9 +476,11 @@ def test_background_subagent_profile_denies_coordination_and_uses_positive_surfa
     policy = subagent_toolset_policy(execution_profile=profile)
 
     assert AGENT_TASK_COORDINATION_TOOLS <= set(ctx.tool_deny_rules)
-    assert AGENT_MESSAGE_TOOLS <= set(ctx.tool_deny_rules)
+    assert AGENT_MESSAGE_TOOLS.isdisjoint(ctx.tool_deny_rules)
     assert "task" in ctx.tool_deny_rules
     assert policy.availability_filters
+    for name in AGENT_MESSAGE_TOOLS:
+        assert policy.is_available(ToolSpec(name=name, capability="agent.coordinate", toolset="agent", exposure="core"))
     assert policy.is_available(
         ToolSpec(
             name="read_file",
@@ -517,7 +519,8 @@ def test_foreground_resume_keeps_authorized_communication_and_exact_permission_o
     assert subagent_toolset_policy(execution_profile=resumed) == subagent_toolset_policy(execution_profile=original)
 
 
-@pytest.mark.parametrize("profile", [build_agent_execution_profile(background=True), build_agent_execution_profile(team_mode=True)])
+@pytest.mark.parametrize("profile", [build_agent_execution_profile(background=True), build_agent_execution_profile(team_mode=True),
+    AgentExecutionProfile(delivery="background", message_coordination=False, task_coordination=False, constrained_async_surface=True)])
 def test_existing_async_and_persistent_resume_profiles_do_not_expand(profile) -> None:
     restored = AgentExecutionProfile.from_mapping(profile.to_dict())
     resumed = execution_profile_for_background_resume(restored)

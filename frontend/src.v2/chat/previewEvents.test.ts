@@ -96,11 +96,11 @@ describe("live preview browser routing", () => {
     expect(browserRequests).not.toHaveBeenCalled();
   });
 
-  it("reuses the existing browser request deduplication for an already-ready launch", () => {
+  it("retains actual readiness requests for the browser to present its existing target", () => {
     send({ type: "preview.launch.started", ...launch, status: "ready" });
     send({ type: "preview.server.ready", id: launch.id, port: launch.port, url });
 
-    expect(browserRequests).toHaveBeenCalledTimes(1);
+    expect(browserRequests).toHaveBeenCalledTimes(2);
     expect(useAppStore.getState().rightStackTab).toBe("browser");
   });
 

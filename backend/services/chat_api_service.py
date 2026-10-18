@@ -397,6 +397,7 @@ async def run_owned_rest_chat(
             llm=llm,
             tool_registry=tool_registry,
             artifact_store=artifact_store,
+            owns_artifact_store=True,
             permission_checker=permission_checker,
             agent_settings=agent_settings,
             token_budget=config.token_budget,

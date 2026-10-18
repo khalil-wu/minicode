@@ -96,6 +96,9 @@ for (const name of ['Buffer','URL','URLSearchParams','TextEncoder','TextDecoder'
     'AbortController','AbortSignal','setTimeout','clearTimeout','setInterval','clearInterval','setImmediate','clearImmediate',
     'queueMicrotask','structuredClone','atob','btoa','crypto']) globals[name] = globalThis[name];
 const context = vm.createContext(globals, { name: 'MiniCode Node REPL' });
+// Inspector stores an execution-context ID, not a strong reference to this
+// object. Keep the VM alive for the worker's lifetime, including idle periods.
+globalThis.__minicodeNodeContext = context;
 vm.runInContext('globalThis.global = globalThis', context);
 process.on('uncaughtExceptionMonitor', error => {
   const call = executions.getStore();

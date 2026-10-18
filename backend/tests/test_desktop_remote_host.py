@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import struct
+import subprocess
 import sys
 
 import httpx
@@ -129,6 +131,135 @@ async def _daemon(tmp_path, *, settings=None):
 
 async def _native(client, window, channel, args, **kwargs):
     return await client.post("/api/desktop-host/native", json={**window, "channel": "minicode:" + channel, "args": args}, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_internal_window_binding_connects_directly_despite_environment_http_proxy(monkeypatch):
+    from backend.desktop_remote.native import NativeRequest, RemoteNative
+
+    bridge_requests, proxy_requests = [], []
+
+    async def respond(reader, writer, *, proxy):
+        head = await reader.readuntil(b"\r\n\r\n")
+        lines = head.decode("ascii").split("\r\n")
+        headers = dict(line.split(": ", 1) for line in lines[1:] if line)
+        headers = {name.lower(): value for name, value in headers.items()}
+        body = await reader.readexactly(int(headers.get("content-length", "0")))
+        (proxy_requests if proxy else bridge_requests).append((lines[0], headers, body))
+        payload = b'{"ok":true}' if not proxy else b'{"error":"owned proxy trap"}'
+        status = b"200 OK" if not proxy else b"502 Bad Gateway"
+        writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\nContent-Length: "
+                     + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    bridge = await asyncio.start_server(lambda reader, writer: respond(reader, writer, proxy=False), "127.0.0.1", 0)
+    proxy = await asyncio.start_server(lambda reader, writer: respond(reader, writer, proxy=True), "127.0.0.1", 0)
+    proxy_url = f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, proxy_url)
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    native = RemoteNative(lambda _event: None, f"http://127.0.0.1:{bridge.sockets[0].getsockname()[1]}", "owned-bridge-only")
+    request = NativeRequest(window_instance_id="direct-window", window_owner_id="primary",
+        window_binding_token="owned-window", channel="minicode:workspace:directoryEntries", args=[])
+    try:
+        async with asyncio.timeout(10):
+            await native._binding(request)
+        assert not proxy_requests
+        assert len(bridge_requests) == 1
+        line, headers, body = bridge_requests[0]
+        assert line == "POST /v1/window-binding HTTP/1.1"
+        assert headers["authorization"] == "Bearer owned-bridge-only"
+        assert json.loads(body) == {"window_instance_id": "direct-window", "window_owner_id": "primary", "window_binding_token": "owned-window"}
+    finally:
+        await native.close()
+        bridge.close()
+        proxy.close()
+        await bridge.wait_closed()
+        await proxy.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_actual_remote_folder_browsing_is_window_bound_and_only_final_selection_grants_workspace_trust(tmp_path):
+    parent = tmp_path / "remote chooser 中文"
+    parent.mkdir()
+    selected = parent / "selected project"
+    selected.mkdir()
+    (parent / ".hidden-folder").mkdir()
+    (parent / "not-a-folder.txt").write_text("actual remote file", encoding="utf-8")
+    if os.name == "nt":
+        subprocess.run([shutil.which("node"), "-e", "require('node:fs').symlinkSync(process.argv[1],process.argv[2],'junction')",
+                        str(selected), str(parent / "junction")], check=True)
+    async with _daemon(tmp_path) as (first, _attach, windows, _state):
+        window = {"window_instance_id": "directory-picker-window", "window_owner_id": "primary", "window_binding_token": secrets.token_hex(16)}
+        windows[window["window_instance_id"]] = window
+        ready = first.ready
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{ready['backend_port']}", headers={"x-minicode-token": ready["runtime_token"]}, timeout=15) as client:
+            assert (await _native(client, window, "fs:listTree", [str(parent)])).status_code == 403
+            response = await _native(client, window, "workspace:directoryEntries", [str(parent), True])
+            assert response.status_code == 200, response.text
+            listing = response.json()
+            assert listing["directoryPath"] == str(parent)
+            assert listing["parentPath"] == str(parent.parent)
+            assert {entry["name"] for entry in listing["entries"]} == {"selected project", ".hidden-folder", *({"junction"} if os.name == "nt" else set())}
+            assert all(entry["type"] == "directory" and Path(entry["path"]).is_dir() for entry in listing["entries"])
+            assert (await _native(client, window, "fs:listTree", [str(parent)])).status_code == 403
+            root = Path(parent.anchor)
+            assert (await _native(client, window, "workspace:directoryEntries", [str(root), True])).json()["parentPath"] is None
+            assert (await _native(client, window, "workspace:directoryEntries", [str(parent / "missing"), True])).status_code == 404
+            assert (await _native(client, window, "workspace:directoryEntries", [str(parent / "not-a-folder.txt"), True])).status_code == 404
+            forged = {**window, "window_binding_token": "different-owner"}
+            assert (await _native(client, forged, "workspace:directoryEntries", [str(parent), True])).status_code == 403
+            assert (await _native(client, window, "workspace:trust", [str(selected)])).status_code == 200
+            assert (await _native(client, window, "fs:listTree", [str(selected)])).status_code == 200
+            assert (await _native(client, window, "fs:listTree", [str(parent)])).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_remote_picker_directory_links_match_actual_source_filesystem(tmp_path):
+    source = os.environ.get("MINICODE_SOURCE_EXECUTOR")
+    if source is None:
+        pytest.skip("MINICODE_SOURCE_EXECUTOR is not configured; actual Source directory-link classification not claimed")
+    from backend.desktop_remote.native import _directory_entries
+    from backend.environments import EnvironmentManager
+
+    parent = tmp_path / "source picker 中文"
+    parent.mkdir()
+    selected = parent / "selected project"
+    selected.mkdir()
+    (parent / "plain.txt").write_bytes(b"actual source filesystem comparison\n")
+    vanished = parent / "vanished target"
+    vanished.mkdir()
+    link = parent / "directory link"
+    dangling = parent / "dangling link"
+    if os.name == "nt":
+        for destination, target in [(link, selected), (dangling, vanished)]:
+            subprocess.run([shutil.which("node"), "-e", "require('node:fs').symlinkSync(process.argv[1],process.argv[2],'junction')",
+                            str(target), str(destination)], check=True)
+    else:
+        link.symlink_to(selected, target_is_directory=True)
+        dangling.symlink_to(vanished, target_is_directory=True)
+        (parent / "file link").symlink_to(parent / "plain.txt")
+    vanished.rmdir()
+    home = tmp_path / "owned-source-home"
+    home.mkdir()
+    manager = EnvironmentManager(tmp_path, environ={"CODEX_EXEC_SERVER_URL": "none"})
+    reference = manager.upsert({"id": "directory-reference", "program": source,
+        "args": ["exec-server", "--listen", "stdio", "--concurrent-requests", "4"], "env": {"CODEX_HOME": str(home)}})
+    try:
+        expected = await reference.filesystem.read_directory(parent.as_uri(), sandbox=None)
+        actual = _directory_entries(str(parent), False)
+        assert {entry["name"]: entry["type"] for entry in actual["entries"]} == {
+            entry["fileName"]: "directory" if entry["isDirectory"] else "file" for entry in expected}
+        directory_names = {entry["name"] for entry in _directory_entries(str(parent), True)["entries"]}
+        assert directory_names == {"selected project", "directory link"}
+        assert "dangling link" not in {entry["name"] for entry in actual["entries"]}
+        child = reference.client.connection.transport.child
+    finally:
+        await manager.close()
+    assert child.returncode == 0 and not reference.client.transport_receipts[-1].forced
 
 
 @pytest.mark.asyncio

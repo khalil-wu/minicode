@@ -29,6 +29,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.services.workspace_api_service import capture_workspace_execution
 from backend.tests.test_executor_tool_admission import executor_host
 from backend.workspace.api import create_workspace_router
+from backend.workspace.executor_editor import ExecutorEditorService
 from backend.workspace.executor_service import ExecutorWorkspaceService
 from backend.workspace.trust import trust_created_task_directory
 from backend.ws.handler import WebSocketSession
@@ -152,6 +153,132 @@ async def test_http_editor_bytes_hash_rename_preview_and_dirty_search_use_accept
     assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
     removed = await server.client.delete("/api/workspace/path", params={**server.params, "path": "new-folder", "recursive": True})
     assert removed.status_code == 200 and not (server.host.workspace / "new-folder").exists(), removed.text
+
+
+async def _owned_worktree_repository(service):
+    async def git(*args):
+        result = await service.run(["git", *args])
+        assert result.returncode == 0, result.stderr
+
+    await git("init", "-b", "main")
+    await service.write_bytes("nested 用户 % #/tracked.txt", b"actual checkout content\n")
+    await service.write_bytes(".gitignore", b".minicode/\n")
+    await git("add", "nested 用户 % #/tracked.txt", ".gitignore")
+    await git("-c", "user.name=Owned Test", "-c", "user.email=owned@test.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Owned checkout")
+    return git
+
+
+@pytest.mark.parametrize("checkout", ["main", "linked"])
+@pytest.mark.asyncio
+async def test_http_worktree_nested_paths_identify_checkout_without_retargeting_scope(editor_server, monkeypatch, checkout):
+    from backend.agent.environment_runtime import resolve_environment_config, thread_environment_defaults
+    from backend.agent.environment_selection import ThreadEnvironments
+    from backend.workspace import executor_git
+
+    server = editor_server
+    async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
+        async with ExecutorEditorService(context) as service:
+            git = await _owned_worktree_repository(service)
+            linked = service.cwd.joinpath(".minicode/worktrees/linked 用户 % #")
+            await git("-c", "core.autocrlf=false", "worktree", "add", "-b", "owned-linked", linked.native)
+            selected = service.cwd if checkout == "main" else linked
+            nested = selected.joinpath("nested 用户 % #")
+    params = server.params
+    if checkout == "linked":
+        owner_path = selected.uri if server.host.kind == "source" else selected.native
+        conversation = server.session.conversation_repo.create_conversation(conversation_id="linked-worktree",
+            title="Linked worktree", workspace_root=owner_path, worktree_path=owner_path, execution_cwd=owner_path,
+            permission_mode="bypass")
+        permission = server.session.permission_context_for_conversation(conversation, source="owned-linked-worktree")
+        owner = ThreadEnvironments.retarget(server.host.manager,
+            thread_environment_defaults(permission, server.session.config.config_layer_stack), resolve_config=resolve_environment_config,
+            attachment=server.host.environments.primary(), cwd=selected.uri, workspace_roots=(selected.uri,))
+        runtime = server.manager.execution_contexts.thread_runtime(server.session.conversation_repo.store_instance_id(), conversation.id)
+        runtime.thread_environments = owner
+        server.session.active_conversation_id = conversation.id
+        server.session.session_lifecycle.workspace_root = selected.to_local_path() if server.host.kind == "local" else None
+        if server.host.kind == "local":
+            trust_created_task_directory(selected.to_local_path())
+        params = {**server.params, "conversation_id": conversation.id, "workspace_root": selected.uri}
+    async with capture_workspace_execution(server.session, params["conversation_id"]) as context:
+        async with ExecutorEditorService(context) as service:
+            assert service.cwd == selected
+            calls = []
+            original_metadata = executor_git.run_executor_git_metadata
+
+            async def metadata(captured, args, **kwargs):
+                calls.append((captured.cwd, kwargs["cwd"]))
+                return await original_metadata(captured, args, **kwargs)
+
+            monkeypatch.setattr(executor_git, "run_executor_git_metadata", metadata)
+            for path in (nested.native, nested.uri):
+                response = await server.client.get("/api/workspace/git/worktree", params={**params, "path": path})
+                assert response.status_code == 200, response.text
+                result = response.json()
+                display = selected.uri if server.host.kind == "source" else selected.native
+                assert result["is_git_repo"] and result["is_worktree"] == (checkout == "linked")
+                assert result["current_path"] == display
+                assert result["current_branch"] == ("main" if checkout == "main" else "owned-linked")
+                assert result["path_uri"] == service.cwd.uri
+                current = [entry for entry in result["worktrees"] if entry["is_current"]]
+                assert len(current) == 1 and current[0]["path_uri"] == selected.uri
+                assert current[0]["is_main"] == (checkout == "main") and not current[0]["can_remove"]
+                assert result["worktree_count"] == 2
+            assert calls and all(cwd == service.cwd and requested == nested for cwd, requested in calls)
+            assert await service.read_bytes(selected.joinpath("nested 用户 % #/tracked.txt")) == b"actual checkout content\n"
+    assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
+
+
+@pytest.mark.parametrize("repository", [True, False])
+@pytest.mark.asyncio
+async def test_http_projectless_worktree_keeps_task_cwd_and_empty_project_scope(editor_server, repository):
+    from backend.agent.environment_runtime import resolve_environment_config, thread_environment_defaults
+    from backend.agent.environment_selection import ThreadEnvironments
+
+    server = editor_server
+    previous_id = server.params["conversation_id"]
+    async with capture_workspace_execution(server.session, previous_id) as context:
+        async with ExecutorEditorService(context) as service:
+            if repository:
+                await _owned_worktree_repository(service)
+            root = service.cwd
+            task = root.joinpath("2026-10-18/new-chat")
+            await service.write_bytes(task.joinpath("task.txt"), b"owned task\n")
+    conversation = server.session.conversation_repo.create_conversation(conversation_id="projectless-worktree",
+        title="Projectless worktree", workspace_root="", worktree_path="", execution_cwd=task.uri if server.host.kind == "source" else task.native,
+        permission_mode="bypass")
+    permission = server.session.permission_context_for_conversation(conversation, source="owned-projectless-worktree")
+    owner = ThreadEnvironments.retarget(server.host.manager,
+        thread_environment_defaults(permission, server.session.config.config_layer_stack), resolve_config=resolve_environment_config,
+        attachment=server.host.environments.primary(), cwd=task.uri, workspace_roots=())
+    runtime = server.manager.execution_contexts.thread_runtime(server.session.conversation_repo.store_instance_id(), conversation.id)
+    runtime.thread_environments = owner
+    server.session.active_conversation_id = conversation.id
+    server.session.session_lifecycle.workspace_root = None
+    if server.host.kind == "local":
+        trust_created_task_directory(task.to_local_path())
+    params = {**server.params, "conversation_id": conversation.id, "workspace_root": task.uri}
+    response = await server.client.get("/api/workspace/git/worktree", params=params)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["is_git_repo"] is repository and result["path_uri"] == task.uri
+    if repository:
+        assert result["current_path"] == (root.uri if server.host.kind == "source" else root.native)
+        assert result["current_branch"] == "main" and not result["is_worktree"]
+        assert len(result["worktrees"]) == 1 and result["worktrees"][0]["is_current"]
+        assert not result["worktrees"][0]["can_remove"]
+    else:
+        assert result["worktrees"] == [] and result["worktree_count"] == 0
+    stale = await server.client.get("/api/workspace/git/worktree", params={**params, "workspace_root": root.uri})
+    assert stale.status_code == 409 and "owner is stale" in stale.text
+    outside = await server.client.get("/api/workspace/file", params={**params, "path": root.joinpath("same.txt").uri})
+    assert outside.status_code == 400 and "outside workspace root" in outside.text
+    unchanged = server.session.conversation_repo.get_conversation_summary(conversation.id)
+    assert unchanged.workspace_root == "" and unchanged.worktree_path == ""
+    assert unchanged.execution_cwd == (task.uri if server.host.kind == "source" else task.native)
+    async with capture_workspace_execution(server.session, conversation.id) as captured:
+        assert captured.permission.environment_scope.cwd_uri == task.uri
+        assert captured.permission.environment_scope.workspace_root_uris == ()
 
 
 @pytest.mark.asyncio

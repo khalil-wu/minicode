@@ -60,8 +60,9 @@ const runtimeConfig = {
   desktop: {
     connections: {
       list: () => connectionCommand("list"),
-      discover: () => connectionCommand("discover"),
+      discover: (kind) => connectionCommand("discover", kind),
       save: (connection) => connectionCommand("save", connection),
+      saveMany: (connections) => connectionCommand("saveMany", connections),
       remove: (id) => connectionCommand("remove", id),
       connect: (id) => connectionCommand("connect", id),
       disconnect: (id) => connectionCommand("disconnect", id),
@@ -142,6 +143,7 @@ const runtimeConfig = {
     },
     pickDirectory: () => ipcRenderer.invoke("minicode:pickDirectory"),
     pickWorkspaceDirectory: () => ipcRenderer.invoke("minicode:workspace:pickDirectory"),
+    workspaceDirectoryEntries: (directoryPath, directoriesOnly) => ipcRenderer.invoke("minicode:workspace:directoryEntries", directoryPath, directoriesOnly),
     trustWorkspace: (path) => ipcRenderer.invoke("minicode:workspace:trust", path),
     openExternal: (target) => ipcRenderer.invoke("minicode:openExternal", target),
     openPath: (target) => ipcRenderer.invoke("minicode:openPath", target),

@@ -4,6 +4,7 @@ import { readWorkspaceFile } from "../protocol/workspace";
 import type { ClientCommand, CommandResultEvent, PreviewLaunchConfigInfo, PreviewLaunchProcessInfo } from "../protocol/events";
 import { commandResultSucceeded, LONG_COMMAND_RESULT_TIMEOUT_MS, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "./workspace-path";
+import { refreshWebInBrowser } from "../chat/openWebInBrowser";
 
 export interface PreviewServiceScope {
   conversation_id: string;
@@ -32,7 +33,9 @@ export const runPreviewServiceCommand = async (command: ClientCommand): Promise<
 export const restartPreviewService = async (scope: PreviewServiceScope, name: string): Promise<PreviewServiceResult | null> => {
   await runPreviewServiceCommand({ type: "preview.launch.stop", ...scope, name });
   if (!previewServiceScopeIsCurrent(scope)) return null;
-  return runPreviewServiceCommand({ type: "preview.launch.start", ...scope, name });
+  const result = await runPreviewServiceCommand({ type: "preview.launch.start", ...scope, name });
+  refreshWebInBrowser(result.data!.process!.url, scope.conversation_id, scope.workspace_root);
+  return result;
 };
 
 export const openPreviewServiceManager = (): void => {

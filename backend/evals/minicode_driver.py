@@ -667,6 +667,7 @@ async def _run(prompt: str) -> int:
             llm=llm,
             tool_registry=registry,
             artifact_store=artifacts,
+            owns_artifact_store=True,
             permission_checker=checker,
             # The evaluator owns this isolated checkout and records approval
             # through the same canonical boundary used by the desktop channel.

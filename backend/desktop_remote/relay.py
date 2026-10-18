@@ -5,6 +5,7 @@ import asyncio
 import base64
 from dataclasses import dataclass, field
 import json
+import logging
 import struct
 from collections.abc import Callable
 
@@ -12,6 +13,7 @@ from collections.abc import Callable
 MAX_FRAME_BYTES = 1024 * 1024
 STREAM_CHUNK_BYTES = 64 * 1024
 STREAM_WINDOW_BYTES = 256 * 1024
+logger = logging.getLogger(__name__)
 
 
 async def read_frame(reader: asyncio.StreamReader) -> dict:
@@ -44,6 +46,7 @@ class _Stream:
     read_ended: bool = False
     write_ended: bool = False
     peer_ended: bool = False
+    peer_closed: bool = False
     closed: bool = False
 
 
@@ -72,37 +75,43 @@ class Relay:
         stream.tasks.add(self.group.create_task(operation, name=f"desktop-host-{stream.id}-{label}"))
 
     async def _pump(self, stream: _Stream, reader: asyncio.StreamReader) -> None:
-        try:
-            while True:
-                while not stream.send_credit:
-                    stream.credit_changed.clear()
-                    await stream.credit_changed.wait()
+        while True:
+            while not stream.send_credit:
+                stream.credit_changed.clear()
+                await stream.credit_changed.wait()
+            try:
                 data = await reader.read(min(STREAM_CHUNK_BYTES, stream.send_credit))
-                if not data:
-                    break
-                stream.send_credit -= len(data)
-                await self.send({"type": "data", "id": stream.id, "data": base64.b64encode(data).decode("ascii")})
-            await self.send({"type": "end", "id": stream.id})
-            stream.read_ended = True
-            await self._finish_stream(stream)
-        except OSError as error:
-            await self._stream_error(stream, error)
+            except OSError as error:
+                await self._stream_error(stream, error)
+                return
+            if not data:
+                break
+            stream.send_credit -= len(data)
+            await self.send({"type": "data", "id": stream.id, "data": base64.b64encode(data).decode("ascii")})
+        await self.send({"type": "end", "id": stream.id})
+        stream.read_ended = True
+        await self._finish_stream(stream)
 
     async def _write(self, stream: _Stream) -> None:
         await stream.opened.wait()
         writer = stream.writer
-        try:
-            while (data := await stream.incoming.get()) is not None:
-                writer.write(data)
+        while True:
+            data = await stream.incoming.get()
+            try:
+                if data is None:
+                    writer.write_eof()
+                else:
+                    writer.write(data)
                 await writer.drain()
-                stream.receive_credit += len(data)
-                await self.send({"type": "credit", "id": stream.id, "bytes": len(data)})
-            writer.write_eof()
-            await writer.drain()
-            stream.write_ended = True
-            await self._finish_stream(stream)
-        except OSError as error:
-            await self._stream_error(stream, error)
+            except OSError as error:
+                await self._stream_error(stream, error)
+                return
+            if data is None:
+                break
+            stream.receive_credit += len(data)
+            await self.send({"type": "credit", "id": stream.id, "bytes": len(data)})
+        stream.write_ended = True
+        await self._finish_stream(stream)
 
     def _new_stream(self, stream_id: int) -> _Stream:
         stream = _Stream(stream_id)
@@ -137,29 +146,54 @@ class Relay:
     async def _stream_error(self, stream: _Stream, error: OSError) -> None:
         if stream.closed or self.closed:
             return
+        await self._report_stream_error(stream, error)
+        await self._close_stream(stream.id, reported_error=error)
+
+    async def _report_stream_error(self, stream: _Stream, error: OSError) -> None:
+        logger.warning("Remote desktop TCP stream %s failed", stream.id, exc_info=error)
         await self.send({"type": "error", "id": stream.id, "error": str(error)})
-        await self._close_stream(stream.id)
 
     async def _finish_stream(self, stream: _Stream) -> None:
-        if stream.read_ended and stream.write_ended:
-            await self._close_stream(stream.id, notify=True)
+        if stream.write_ended and (stream.read_ended or stream.peer_closed):
+            await self._close_stream(stream.id, notify=not stream.peer_closed, graceful=True)
 
-    async def _close_stream(self, stream_id: int, *, notify: bool = False) -> None:
-        stream = self.streams.pop(stream_id, None)
+    async def _close_stream(self, stream_id: int, *, notify: bool = False, graceful: bool = False, reported_error: OSError | None = None) -> None:
+        stream = self.streams.get(stream_id)
         if stream is None:
             return
+        if stream.closed:
+            if not graceful and stream.writer is not None:
+                stream.writer.transport.abort()
+            return
         stream.closed = True
-        current = asyncio.current_task()
-        tasks = tuple(task for task in stream.tasks if task is not current and not task.done())
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if stream.writer is not None:
-            stream.writer.close()
-            await stream.writer.wait_closed()
-        if notify:
-            await self.send({"type": "close", "id": stream_id})
+        try:
+            current = asyncio.current_task()
+            tasks = tuple(task for task in stream.tasks if task is not current and not task.done())
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if stream.writer is not None:
+                if graceful:
+                    stream.writer.close()
+                else:
+                    stream.writer.transport.abort()
+                try:
+                    await stream.writer.wait_closed()
+                except OSError as error:
+                    # The close waiter reports connection_lost's socket error;
+                    # retain new notifications within the original stream.
+                    if error is not reported_error:
+                        await self._report_stream_error(stream, error)
+                    return
+            if notify:
+                await self.send({"type": "close", "id": stream_id})
+        except asyncio.CancelledError:
+            if stream.writer is not None:
+                stream.writer.transport.abort()
+            raise
+        finally:
+            self.streams.pop(stream_id)
 
     async def run(self, ready: dict | None = None) -> None:
         async with asyncio.TaskGroup() as group:
@@ -207,7 +241,16 @@ class Relay:
                     elif kind == "end":
                         stream.peer_ended = True
                         stream.incoming.put_nowait(None)
-                    elif kind in {"close", "error"}:
+                    elif kind == "close":
+                        stream.peer_closed = True
+                        if stream.peer_ended:
+                            # The writer owns the queued data and EOF before
+                            # this graceful close, even if frames were coalesced.
+                            if stream.write_ended:
+                                self._task(stream, self._finish_stream(stream), "close")
+                        else:
+                            await self._close_stream(stream_id)
+                    elif kind == "error":
                         await self._close_stream(stream_id)
                     else:
                         raise ValueError(f"unknown remote desktop frame: {kind}")

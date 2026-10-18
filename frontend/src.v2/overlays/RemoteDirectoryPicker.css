@@ -1,0 +1,25 @@
+.remote-directory-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: var(--backdrop-strong); font-family: var(--font-ui); }
+.remote-directory-dialog { width: min(540px, calc(100vw - 32px)); padding: 20px; display: grid; gap: 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
+.remote-directory-dialog header, .remote-directory-dialog footer { display: flex; align-items: center; gap: 8px; }
+.remote-directory-dialog header { justify-content: space-between; }
+.remote-directory-dialog h3 { margin: 0; font: inherit; }
+.remote-directory-body { display: flex; flex-direction: column; height: 280px; min-height: 224px; min-width: 0; }
+.remote-directory-path { display: flex; align-items: center; gap: 4px; margin: 4px 0 8px; }
+.remote-directory-path input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); background: var(--surface-soft); color: inherit; font: inherit; }
+.remote-directory-current { align-self: flex-start; padding: 6px 8px; margin-bottom: 8px; color: var(--text-primary); background: transparent; border: 0; border-radius: var(--mc-control-radius); font: inherit; cursor: pointer; }
+.remote-directory-current:hover:not(:disabled) { background: var(--surface-hover); }
+.remote-directory-contents { flex: 1; min-height: 0; display: flex; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-soft); }
+.remote-directory-contents > p { width: 100%; margin: auto; padding: 12px 16px; text-align: center; color: var(--text-secondary); }
+.remote-directory-contents > [role="listbox"] { width: 100%; padding: 4px 0; }
+.remote-directory-contents [role="option"] { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; background: transparent; text-align: start; color: var(--text-primary); font: inherit; cursor: pointer; }
+.remote-directory-contents [role="option"] > svg { flex-shrink: 0; color: var(--text-secondary); }
+.remote-directory-contents [role="option"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-directory-contents [role="option"]:hover:not(:disabled), .remote-directory-contents [role="option"][data-active] { background: var(--surface-hover); }
+.remote-directory-dialog footer { justify-content: flex-end; }
+.remote-directory-dialog .mc-dialog-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 6px 12px; border: 0; border-radius: var(--mc-control-radius); background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
+.remote-directory-dialog .mc-dialog-btn:hover:not(:disabled) { background: var(--surface-hover); }
+.remote-directory-dialog .mc-dialog-btn[data-primary] { background: var(--accent-primary); color: var(--text-on-accent); }
+.remote-directory-dialog button:disabled { opacity: .5; cursor: default; }
+.remote-directory-spinner { animation: remote-directory-spin 1s linear infinite; }
+@keyframes remote-directory-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .remote-directory-spinner { animation: none; } }

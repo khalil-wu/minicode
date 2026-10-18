@@ -489,6 +489,7 @@ def test_real_registry_timeout_late_mutation_keeps_shared_owner_and_other_sessio
 
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
+        tool_call_issued = asyncio.Event()
         captured, loans, submissions = [], [], []
         marker = tmp_path / "late-mutation.txt"
         runtime = AgentRuntime(
@@ -525,6 +526,7 @@ def test_real_registry_timeout_late_mutation_keeps_shared_owner_and_other_sessio
             async def stream_chat(self, messages, tools=None):
                 self.calls += 1
                 if self.calls == 1:
+                    tool_call_issued.set()
                     yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
                         ToolCallEvent(id="stubborn-call", name="lifecycle_probe", arguments={}),
                     ])
@@ -549,6 +551,8 @@ def test_real_registry_timeout_late_mutation_keeps_shared_owner_and_other_sessio
         )
         caller = asyncio.create_task(_collect(session.query("execute probe")))
         try:
+            # Initial harness/capability assembly is separate from tool entry.
+            await asyncio.wait_for(tool_call_issued.wait(), 10)
             await asyncio.wait_for(entered.wait(), 2)
             events = await asyncio.wait_for(asyncio.shield(caller), 2)
             done = [event for event in events if event.type == "done"]

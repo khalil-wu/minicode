@@ -244,13 +244,20 @@ export interface BrowserHistoryVisit { id: string; url: string; title: string; v
 export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
 export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
 
-export type RemoteDesktopConnection = { id: string; displayName: string; kind: "ssh" | "wsl"; sshHost?: string; sshPort?: number | null; identity?: string | null; distribution?: string; status?: "connecting" | "connected" | "disconnected" };
+export type RemoteDesktopConnection = { id: string; displayName: string; kind: "ssh" | "wsl"; source?: "manual" | "discovered"; alias?: string; sshHost?: string; sshPort?: number | null; identity?: string | null; distribution?: string; appServerVersion?: string; status?: "connecting" | "connected" | "disconnected" };
+
+export interface RemoteDirectoryEntries {
+  directoryPath: string;
+  parentPath: string | null;
+  entries: Array<{ name: string; path: string; type: "directory" | "file" }>;
+}
 
 interface MiniCodeDesktop {
   connections?: {
     list(): Promise<RemoteDesktopConnection[]>;
-    discover(): Promise<{ sshAliases: string[]; wslDistributions: string[] }>;
-    save(connection: Omit<RemoteDesktopConnection, "status">): Promise<RemoteDesktopConnection>;
+    discover(kind: "ssh" | "wsl"): Promise<{ sshAliases: string[]; wslDistributions: string[] }>;
+    save(connection: Omit<RemoteDesktopConnection, "status">): Promise<RemoteDesktopConnection | null>;
+    saveMany(connections: Array<Omit<RemoteDesktopConnection, "status">>): Promise<RemoteDesktopConnection[]>;
     remove(id: string): Promise<void>;
     connect(id: string): Promise<void>;
     disconnect(id: string): Promise<void>;
@@ -306,6 +313,7 @@ interface MiniCodeDesktop {
   };
   pickDirectory(): Promise<string | null>;
   pickWorkspaceDirectory(): Promise<string | null>;
+  workspaceDirectoryEntries(directoryPath: string | null, directoriesOnly: boolean): Promise<RemoteDirectoryEntries>;
   trustWorkspace(path: string): Promise<string | null>;
   openExternal(target: string): Promise<boolean>;
   openPath(target: string): Promise<boolean>;
@@ -421,14 +429,19 @@ export const isDesktop = (): boolean =>
 
 export const pickDirectory = async (): Promise<string | null> => {
   if (runtime()?.remoteHost) {
-    const { showPrompt } = await import("../overlays/DialogService");
-    return await showPrompt({ title: "选择远端文件夹", message: runtime()!.remoteHost!.displayName, defaultValue: runtime()!.remoteHost!.home });
+    const { showRemoteDirectoryPicker } = await import("../overlays/RemoteDirectoryPicker");
+    return showRemoteDirectoryPicker({ initialDirectoryPath: runtime()!.remoteHost!.home,
+      platform: runtime()!.remoteHost!.platform, listDirectory: remoteDirectoryEntries });
   }
-  try {
-    return (await desktop()?.pickDirectory()) ?? null;
-  } catch {
-    return null;
-  }
+  return (await desktop()?.pickDirectory()) ?? null;
+};
+
+export const remoteDirectoryEntries = async (directoryPath: string | null): Promise<RemoteDirectoryEntries> => {
+  const result = await desktop()!.workspaceDirectoryEntries(directoryPath, true);
+  result.entries.sort((left, right) => left.type !== right.type ? (left.type === "directory" ? -1 : 1)
+    : left.name.startsWith(".") !== right.name.startsWith(".") ? (left.name.startsWith(".") ? 1 : -1)
+    : left.name.localeCompare(right.name));
+  return result;
 };
 
 export const pickWorkspaceDirectory = async (): Promise<string | null> => {

@@ -723,7 +723,8 @@ def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
     """
     call_id = str(message.tool_call_id or "")
     if message.tool_search_output is not None:
-        return {"type": "tool_search_output", "call_id": call_id, "tools": deepcopy(message.tool_search_output)}
+        return {"type": "tool_search_output", "call_id": call_id,
+            "status": "completed", "execution": "client", "tools": deepcopy(message.tool_search_output)}
     if message.native_tool_output is not None:
         return {"type": "function_call_output", "call_id": call_id,
             "output": deepcopy(message.native_tool_output)}

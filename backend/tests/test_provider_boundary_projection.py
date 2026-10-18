@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import aclosing
 from types import SimpleNamespace
 
 import httpx
@@ -45,6 +46,22 @@ def test_structured_provider_kind_survives_event_reclassification() -> None:
     assert projected.provider_error_type == "model"
     assert projected.fatal is True
     assert projected.retryable is False
+
+
+def test_provider_request_diagnostic_survives_into_runtime_evidence() -> None:
+    request = httpx.Request("POST", "https://gateway.example/v1/responses")
+    response = httpx.Response(400, request=request, json={"error": {
+        "type": "invalid_request_error",
+        "message": "No tool output found for tool search call search-owned.",
+    }})
+    error = httpx.HTTPStatusError("bad request", request=request, response=response)
+    event = StreamEvent(type=StreamEventType.ERROR,
+        content=sanitize_llm_error_message(error, classify_llm_error(error)),
+        raw=llm_error_raw(error, "openai_responses"))
+    _, _, evidence = provider_error_details(event)
+    assert evidence["status_code"] == 400
+    assert evidence["provider_error_schema_type"] == "invalid_request_error"
+    assert evidence["provider_error_message"] == "No tool output found for tool search call search-owned."
 
 
 def test_anthropic_messages_exception_preserves_safe_provider_diagnostics() -> None:
@@ -122,7 +139,8 @@ def test_anthropic_error_code_and_schema_type_do_not_reintroduce_secrets(http_er
 
 @pytest.mark.asyncio
 async def test_web_fetch_keeps_fetched_artifact_when_model_extraction_fails(tmp_path) -> None:
-    tool = WebFetchTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    store = ArtifactStore(storage_dir=tmp_path / "artifacts")
+    tool = WebFetchTool(store)
     request = httpx.Request("POST", "https://gateway.example/v1/messages")
     response = httpx.Response(
         400,
@@ -161,10 +179,11 @@ async def test_web_fetch_keeps_fetched_artifact_when_model_extraction_fails(tmp_
         llm=SimpleNamespace(_provider_id="custom_anthropic"),
     )
 
-    result = await tool.execute(
-        {"url": "https://example.test/page", "prompt": "summarize it"},
-        context,
-    )
+    async with aclosing(store):
+        result = await tool.execute(
+            {"url": "https://example.test/page", "prompt": "summarize it"},
+            context,
+        )
 
     assert result.is_error is True
     assert result.extraction_status == "failed"

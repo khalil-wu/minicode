@@ -93,6 +93,7 @@ async def handle_preview_launch_config(session: "WebSocketSession", data: dict[s
 
 async def handle_preview_launch_start(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.preview import mark_preview_ready, start_preview_launch
+    from backend.sandbox.policy import PermissionProfile, SandboxPolicy
     from backend.preview.verifier import PreviewProcessChangedError, wait_until_ready
     from backend.services.preview_service import (
         preview_launch_detected_event,
@@ -124,6 +125,10 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
             broadcast=broadcast,
             session_id=session.session_id,
             conversation_id=scope.conversation_id,
+            # Source process/spawn is a user-authored desktop operation, separate
+            # from an agent tool's captured filesystem/network permissions.
+            sandbox_policy=SandboxPolicy(permission_profile=PermissionProfile.disabled(),
+                protect_workspace_metadata=False),
         )
     except Exception as exc:
         await emit_command_error(session, "preview.launch.start", f"Failed to start preview: {exc}", data=scope.apply({}))

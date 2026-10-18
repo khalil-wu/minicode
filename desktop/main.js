@@ -456,7 +456,7 @@ function releaseWindowResources(record, retry = false) {
     desktopLifecycleToken: EMBEDDED_BROWSER_TOKEN };
   embeddedBrowserBridge.releaseWindow(record.windowInstanceId);
   embeddedBrowserManager.releaseWindow(record.windowInstanceId);
-  const cleanupTask = record.remoteHostId ? remoteDesktop.releaseWindow(record) : Promise.all([
+  const cleanupTask = record.remoteHostId ? remoteDesktop.releaseWindow(record, retry) : Promise.all([
     ptyManager.releaseWindow(record.windowInstanceId),
     releaseEditorWindow(runtime),
   ]);

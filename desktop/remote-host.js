@@ -15,6 +15,77 @@ const CHUNK_BYTES = 64 * 1024;
 const exec = promisify(execFile);
 const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
 
+function sshConfigValue(raw, multiple = false) {
+  const values = [];
+  let value = "", quoted = false, escaped = false;
+  for (const character of raw) {
+    if (escaped) { value += character === '"' ? character : "\\" + character; escaped = false; }
+    else if (character === '"' && (multiple || !value || quoted)) quoted = !quoted;
+    else if (character === "\\") escaped = true;
+    else if (!quoted && character === "#" && (!multiple || values.length)) break;
+    else if (multiple && !quoted && /[ \t=]/.test(character)) { if (value) { values.push(value); value = ""; } }
+    else value += character;
+  }
+  if (quoted || escaped) throw new Error(`Unexpected line break in SSH config: ${raw}`);
+  if (!multiple) return value.trim();
+  if (value) values.push(value);
+  if (!values.length) throw new Error("Missing value in SSH config");
+  return values.length > 1 ? values : values[0].split(/\s+/).filter(Boolean);
+}
+
+function discoverSshAliases(entrypoint, homeDirectory) {
+  if (!fs.existsSync(entrypoint)) return [];
+  const aliases = new Set(), visited = new Set();
+  const rootDirectory = path.dirname(path.resolve(entrypoint));
+  const visit = configPath => {
+    if (visited.has(configPath)) return;
+    visited.add(configPath);
+    let inBlock = false;
+    for (const line of fs.readFileSync(configPath, "utf8").split(/\r?\n/)) {
+      const directive = line.match(/^\s*([^#\s=]+)[ \t]*(?:=[ \t]*)?(.*)$/);
+      if (!directive) continue;
+      const keyword = directive[1].toLowerCase();
+      if (keyword === "host") {
+        inBlock = true;
+        const alias = sshConfigValue(directive[2], true).find(value => !/[!*?[\]]/.test(value));
+        if (alias) aliases.add(alias);
+      } else if (keyword === "match") inBlock = true;
+      // Source scans root directives; Host/Match own the following Include lines.
+      else if (keyword === "include" && !inBlock) {
+        for (const value of sshConfigValue(directive[2]).split(/\s+/).filter(Boolean)) {
+          const expanded = value === "~" ? homeDirectory
+            : value.startsWith("~/") || value.startsWith("~\\") ? path.join(homeDirectory, value.slice(2)) : value;
+          const includePath = path.isAbsolute(expanded) ? expanded : path.resolve(rootDirectory, expanded);
+          const matches = fs.globSync(includePath);
+          if (!matches.length && !/[*?[\]{}()]/.test(includePath)) {
+            if (fs.existsSync(includePath)) visit(includePath);
+          } else for (const match of matches) if (fs.statSync(match).isFile()) visit(match);
+        }
+      }
+    }
+  };
+  visit(path.resolve(entrypoint));
+  return [...aliases].filter(alias => alias.trim().toLowerCase() !== "colima").sort((left, right) => left.localeCompare(right));
+}
+
+function sshMetadata(stdout) {
+  let hostname = null, port = null, identity = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const directive = line.match(/^\s*([^#\s=]+)[ \t]*(?:=[ \t]*)?(.*)$/);
+    if (!directive) continue;
+    const keyword = directive[1].toLowerCase();
+    if (!["hostname", "port", "identityfile"].includes(keyword)) continue;
+    const value = sshConfigValue(directive[2]);
+    if (!value) continue;
+    if (keyword === "hostname" && hostname === null) hostname = value;
+    else if (keyword === "port" && port === null) {
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed)) port = parsed;
+    } else if (keyword === "identityfile" && identity === null && value !== "none") identity = value;
+  }
+  return { hostname, port, identity };
+}
+
 function remoteLoginShellCommand(command) {
   const payload = 'PATH="${MINICODE_INSTALL_DIR:-$HOME/.local/bin}:$PATH"; export PATH; ' + command;
   const execute = 'exec /bin/sh -c "$MINICODE_REMOTE_PAYLOAD"';
@@ -34,9 +105,12 @@ function remoteLoginShellCommand(command) {
 
 function sshCommand(connection, command) {
   const args = ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=12", "-o", "ExitOnForwardFailure=yes"];
-  if (connection.sshPort != null) args.push("-p", String(connection.sshPort));
-  if (connection.identity) args.push("-i", connection.identity);
-  args.push("--", connection.sshHost, remoteLoginShellCommand(command));
+  const alias = connection.alias?.trim();
+  if (!alias) {
+    if (connection.sshPort != null) args.push("-p", String(connection.sshPort));
+    if (connection.identity) args.push("-i", connection.identity);
+  }
+  args.push("--", alias || connection.sshHost, remoteLoginShellCommand(command));
   return ["ssh", args];
 }
 
@@ -58,6 +132,7 @@ class RemoteHost extends EventEmitter {
     this.bridgeEndpoint = bridgeEndpoint;
     this.streams = new Map();
     this.servers = new Map();
+    this.nativeRequests = new Set();
     this.nextId = 1;
     this.closed = false;
     this.status = "disconnected";
@@ -91,7 +166,7 @@ class RemoteHost extends EventEmitter {
     const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
     const failed = (error) => {
       rejectReady(error);
-      void this.close(error);
+      if (!this.closed) void this.close(error);
     };
     const timeout = setTimeout(() => failed(new Error("Remote MiniCode host did not become ready within 60 seconds")), 60_000);
     this.process.once("error", failed);
@@ -170,7 +245,7 @@ class RemoteHost extends EventEmitter {
 
   track(id, socket) {
     const stream = { socket, sendCredit: this.ready.stream_window_bytes, receiveCredit: this.ready.stream_window_bytes,
-      waiters: [], received: Promise.resolve(), sent: Promise.resolve() };
+      waiters: [], received: Promise.resolve(), sent: Promise.resolve(), peerEnded: false };
     this.streams.set(id, stream);
     socket.on("data", (data) => {
       socket.pause();
@@ -209,7 +284,10 @@ class RemoteHost extends EventEmitter {
     const stream = this.streams.get(frame.id);
     const socket = stream?.socket;
     if (frame.type === "close" || frame.type === "error") {
-      if (socket) socket.destroy(frame.type === "error" ? new Error(frame.error) : undefined);
+      if (socket) {
+        if (frame.type === "close" && stream.peerEnded) stream.received = stream.received.then(() => socket.destroy());
+        else socket.destroy(frame.type === "error" ? new Error(frame.error) : undefined);
+      }
       return;
     }
     if (!socket) return; // The original local consumer may have closed this stream.
@@ -221,7 +299,10 @@ class RemoteHost extends EventEmitter {
       return;
     }
     if (frame.type === "end") {
-      stream.received = stream.received.then(() => socket.end());
+      stream.peerEnded = true;
+      stream.received = stream.received.then(() => new Promise((resolve, reject) => {
+        socket.end(error => error ? reject(error) : resolve());
+      })).catch(error => socket.destroy(error));
       return;
     }
     if (frame.type !== "data") throw new Error(`Unknown remote desktop frame: ${frame.type}`);
@@ -271,26 +352,49 @@ class RemoteHost extends EventEmitter {
     return { revision: 1, backendPort: this.backendPort, apiBaseUrl: `http://127.0.0.1:${this.backendPort}`,
       wsBaseUrl: `ws://127.0.0.1:${this.backendPort}`, runtimeToken: this.ready.runtime_token,
       remoteHost: { id: this.connection.id, displayName: this.connection.displayName, kind: this.connection.kind,
-        platform: this.ready.platform, home: this.ready.home, generation: this.ready.generation } };
+        platform: this.ready.platform === "windows" ? "win32" : this.ready.platform,
+        home: this.ready.home, generation: this.ready.generation } };
   }
 
-  async native(record, channel, args, { lifecycle = false } = {}) {
-    const response = await fetch(`${this.runtime().apiBaseUrl}/api/desktop-host/native`, {
-      method: "POST", headers: { "content-type": "application/json", "x-minicode-token": this.ready.runtime_token,
-        ...(lifecycle ? { "x-minicode-desktop-lifecycle-token": this.ready.bridge_token } : {}) },
-      body: JSON.stringify({ window_instance_id: record.windowInstanceId, window_owner_id: record.windowOwnerId,
-        window_binding_token: record.windowBindingToken || "", channel, args }), signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`Remote desktop operation ${channel}: HTTP ${response.status} ${await response.text()}`);
-    return response.json();
+  native(record, channel, args, { lifecycle = false } = {}) {
+    if (this.closing) return Promise.reject(new Error("Remote desktop attachment is disconnecting"));
+    const operation = { windowInstanceId: record.windowInstanceId, task: null };
+    operation.task = (async () => {
+      const response = await fetch(`${this.runtime().apiBaseUrl}/api/desktop-host/native`, {
+        method: "POST", headers: { "content-type": "application/json", "x-minicode-token": this.ready.runtime_token,
+          ...(lifecycle ? { "x-minicode-desktop-lifecycle-token": this.ready.bridge_token } : {}) },
+        body: JSON.stringify({ window_instance_id: record.windowInstanceId, window_owner_id: record.windowOwnerId,
+          window_binding_token: record.windowBindingToken || "", channel, args }), signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) throw new Error(`Remote desktop operation ${channel}: HTTP ${response.status} ${await response.text()}`);
+      return response.json();
+    })().finally(() => this.nativeRequests.delete(operation));
+    this.nativeRequests.add(operation);
+    return operation.task;
+  }
+
+  async waitForNativeRequests(windowInstanceId) {
+    let pending;
+    while ((pending = [...this.nativeRequests].filter(operation =>
+      windowInstanceId === undefined || operation.windowInstanceId === windowInstanceId)).length) {
+      // Each original caller keeps its result/error; this join owns completion.
+      await Promise.allSettled(pending.map(operation => operation.task));
+    }
   }
 
   async close(error) {
+    if (error) {
+      this.closeFailure ||= error;
+      if (this.closing && !this.closed) for (const stream of this.streams.values()) stream.socket.destroy(error);
+    }
     if (!this.closing) this.closing = this.closeTransport(error);
     return this.closing;
   }
 
   async closeTransport(error) {
+    if (this.status === "connected" && !error) await this.waitForNativeRequests();
+    error = this.closeFailure || error;
+    const graceful = this.status === "connected" && !error;
     this.closed = true;
     this.status = "disconnected";
     for (const stream of this.streams.values()) stream.socket.destroy();
@@ -299,14 +403,21 @@ class RemoteHost extends EventEmitter {
     this.servers.clear();
     let transportClosed;
     if (this.process) {
-      this.process.stdin.end(); // EOF detaches; it does not stop the persistent MiniCode host.
       if (this.process.pid && this.process.exitCode === null && this.process.signalCode === null) {
         transportClosed = once(this.process, "close");
-        this.process.kill(); // Only the owned SSH/WSL client; the remote daemon has a separate lifetime.
       }
+      this.process.stdin.end(); // EOF detaches; it does not stop the persistent MiniCode host.
+      if (transportClosed && !graceful) this.process.kill();
     }
     await Promise.all(closing);
-    if (transportClosed) await transportClosed;
+    if (transportClosed) {
+      const [code, signal] = await transportClosed;
+      if (graceful && code !== 0) {
+        const failure = new Error(`Remote MiniCode transport exited (${signal || code}): ${this.stderr.trim()}`);
+        this.emit("status", this.status, failure);
+        throw failure;
+      }
+    }
     this.emit("status", this.status, error);
   }
 }
@@ -317,56 +428,111 @@ class RemoteHosts {
     this.saved = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8"))
       : { desktopId: crypto.randomBytes(16).toString("hex"), connections: [] };
     this.dependencies = dependencies;
+    this.log = dependencies.log ?? console.warn;
     this.hosts = new Map();
+    this.catalog = this.saved.connections.filter(connection => connection.source !== "discovered");
+    this.refreshGeneration = 0;
   }
 
-  persist() { atomicWriteTextSync(this.file, JSON.stringify(this.saved, null, 2)); }
-  list() { return this.saved.connections.map((connection) => ({ ...connection, status: this.hosts.get(connection.id)?.status || "disconnected" })); }
-  save(connection) {
-    if (!["ssh", "wsl"].includes(connection.kind)) throw new Error("Desktop connections use SSH or WSL");
-    const entry = { id: connection.id || crypto.randomUUID(), kind: connection.kind, displayName: connection.displayName.trim(),
-      ...(connection.kind === "ssh" ? { sshHost: connection.sshHost.trim(), sshPort: connection.sshPort ?? null, identity: connection.identity || null }
-        : { distribution: connection.distribution.trim() }) };
-    if (!/^[A-Za-z0-9_-]{1,96}$/.test(entry.id)) throw new Error("Invalid desktop connection identity");
-    if (!entry.displayName.trim() || !(entry.kind === "ssh" ? entry.sshHost : entry.distribution)?.trim()) throw new Error("A connection name and target are required");
-    if (entry.kind === "ssh" && entry.sshHost.startsWith("-")) throw new Error("SSH hostname cannot be an option");
-    if (entry.sshPort != null && (!Number.isInteger(entry.sshPort) || entry.sshPort < 1 || entry.sshPort > 65535)) throw new Error("SSH port must be between 1 and 65535");
-    if (this.saved.connections.some(item => item.id !== entry.id && item.displayName === entry.displayName)) throw new Error("A connection with this display name already exists");
-    if (this.hosts.get(entry.id)?.status !== undefined && this.hosts.get(entry.id).status !== "disconnected") throw new Error("Disconnect this connection before editing it");
-    this.saved.connections = [...this.saved.connections.filter((item) => item.id !== entry.id), entry];
-    this.persist();
-    return entry;
+  persist(saved = this.saved) {
+    atomicWriteTextSync(this.file, JSON.stringify(saved, null, 2));
+    this.saved = saved;
+  }
+  list() {
+    return this.catalog.map(connection => {
+      const host = this.hosts.get(connection.id), status = host?.status || "disconnected";
+      return { ...connection, status, ...(status === "connected" ? { appServerVersion: host.ready.version } : {}) };
+    });
+  }
+  async resolveAlias(connection) {
+    const homeDirectory = this.dependencies.homeDirectory ?? os.homedir();
+    const entrypointPath = path.join(homeDirectory, ".ssh", "config");
+    let result;
+    try {
+      result = await (this.dependencies.execFile ?? exec)("ssh", ["-G", "-F", entrypointPath, connection.alias],
+        { windowsHide: true, encoding: "utf8" });
+    } catch (error) {
+      this.log(`[desktop] ssh_alias_resolution_failed ${JSON.stringify({ entrypointPath, alias: connection.alias,
+        code: error.code, stderr: error.stderr, error: error.message })}`);
+      if (Number.isInteger(error.code)) return null;
+      throw error;
+    }
+    const metadata = sshMetadata(result.stdout);
+    if (metadata.hostname === null) {
+      this.log(`[desktop] ssh_alias_missing_hostname ${JSON.stringify({ entrypointPath, alias: connection.alias })}`);
+      return null;
+    }
+    if (metadata.hostname.trim().toLowerCase() === "github.com") {
+      this.log(`[desktop] ssh_alias_excluded ${JSON.stringify({ entrypointPath, alias: connection.alias, hostname: metadata.hostname })}`);
+      return null;
+    }
+    return { ...connection, sshHost: metadata.hostname, sshPort: metadata.port, identity: metadata.identity };
+  }
+  refresh() {
+    const generation = ++this.refreshGeneration;
+    this.refreshing = Promise.all(this.saved.connections.map(connection => connection.source === "discovered"
+      ? this.resolveAlias(connection) : connection)).then(connections => {
+      if (generation !== this.refreshGeneration) return this.refreshing;
+      this.catalog = connections.filter(connection => connection !== null);
+      return this.list();
+    });
+    return this.refreshing;
+  }
+  save(connection) { return this.saveMany([connection])[0]; }
+  saveMany(connections) {
+    const entries = connections.map(connection => {
+      if (!["ssh", "wsl"].includes(connection.kind)) throw new Error("Desktop connections use SSH or WSL");
+      const alias = connection.kind === "ssh" && connection.source === "discovered" ? connection.alias.trim() : null;
+      const entry = { id: connection.id || crypto.randomUUID(), kind: connection.kind, displayName: connection.displayName.trim(),
+        ...(connection.kind === "ssh" ? alias !== null
+          ? { source: "discovered", alias, sshHost: alias, sshPort: null, identity: null }
+          : { sshHost: connection.sshHost.trim(), sshPort: connection.sshPort ?? null, identity: connection.identity || null }
+          : { distribution: connection.distribution.trim() }) };
+      if (!/^[A-Za-z0-9_-]{1,96}$/.test(entry.id)) throw new Error("Invalid desktop connection identity");
+      if (!entry.displayName || !(entry.kind === "ssh" ? entry.sshHost : entry.distribution)) throw new Error("A connection name and target are required");
+      if (entry.kind === "ssh" && entry.sshHost.startsWith("-")) throw new Error("SSH hostname cannot be an option");
+      if (entry.sshPort != null && (!Number.isInteger(entry.sshPort) || entry.sshPort < 1 || entry.sshPort > 65535)) throw new Error("SSH port must be between 1 and 65535");
+      return entry;
+    });
+    const ids = new Set(entries.map(entry => entry.id));
+    if (ids.size !== entries.length) throw new Error("Desktop connection identities must be unique");
+    const next = [...this.saved.connections.filter(connection => !ids.has(connection.id)), ...entries];
+    const names = new Set();
+    for (const connection of next) {
+      if (names.has(connection.displayName)) throw new Error("A connection with this display name already exists");
+      names.add(connection.displayName);
+    }
+    this.persist({ ...this.saved, connections: next });
+    return entries;
   }
   async remove(id) {
     const host = this.hosts.get(id);
     if (host && host.status !== "disconnected") throw new Error("Only disconnected connections can be removed");
-    this.saved.connections = this.saved.connections.filter((item) => item.id !== id);
-    this.persist();
+    this.persist({ ...this.saved, connections: this.saved.connections.filter(item => item.id !== id) });
+    this.catalog = this.catalog.filter(item => item.id !== id);
   }
   async connect(id) {
+    const connection = this.catalog.find(item => item.id === id);
+    if (!connection) throw new Error("Desktop connection is unavailable");
     const existing = this.hosts.get(id);
     if (existing && !existing.closed) return existing.connecting;
-    const connection = this.saved.connections.find((item) => item.id === id);
-    if (!connection) throw new Error("Desktop connection does not exist");
     const host = new RemoteHost(connection, this.saved.desktopId, this.dependencies);
     this.hosts.set(id, host);
     host.connecting = host.connect();
     await host.connecting;
-    this.persist();
     return host;
   }
   async disconnect(id) { const host = this.hosts.get(id); if (host) await host.close(); }
   async close() { await Promise.all([...this.hosts.values()].map((host) => host.close())); }
-  async discover() {
-    const sshFile = path.join(os.homedir(), ".ssh", "config");
-    const aliases = fs.existsSync(sshFile) ? [...fs.readFileSync(sshFile, "utf8").matchAll(/^\s*Host\s+([^#\r\n]+)/gmi)]
-      .flatMap((match) => match[1].trim().split(/\s+/)).filter((alias) => !/[*?!]/.test(alias)) : [];
+  async discover(kind) {
+    const homeDirectory = this.dependencies.homeDirectory ?? os.homedir();
+    const aliases = kind === "ssh" ? discoverSshAliases(path.join(homeDirectory, ".ssh", "config"), homeDirectory) : [];
     let distributions = [];
-    if (process.platform === "win32") {
-      const { stdout } = await exec("wsl.exe", ["--list", "--quiet"], { windowsHide: true, encoding: "buffer" });
+    if (kind === "wsl" && (this.dependencies.platform ?? process.platform) === "win32") {
+      const { stdout } = await (this.dependencies.execFile ?? exec)("wsl.exe", ["--list", "--quiet"], { windowsHide: true, encoding: "buffer" });
       distributions = stdout.toString("utf16le").replace(/\0/g, "").split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
     }
-    return { sshAliases: [...new Set(aliases)], wslDistributions: distributions };
+    return { sshAliases: aliases, wslDistributions: distributions };
   }
 }
 

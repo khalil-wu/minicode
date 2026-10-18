@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -66,6 +68,29 @@ async def test_start_finishes_after_http_probe_and_retains_its_original_owner(tm
     assert result.data["request_id"] == "start-request"
     assert result.data["data"]["process"]["status"] == "ready"
     assert result.data["data"]["verification"]["status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_desktop_preview_launches_its_real_user_process_without_agent_sandbox_setup(tmp_path):
+    session = menu_session(tmp_path)
+    port = launcher._allocate_loopback_port()
+    config = tmp_path / ".minicode" / "launch.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"configurations": [{"name": "desktop-http",
+        "runtimeExecutable": sys.executable,
+        "args": ["-u", "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        "port": port}]}), encoding="utf-8")
+    try:
+        await handle_preview_launch_start(session, {"conversation_id": "A", "workspace_root": str(tmp_path),
+            "name": "desktop-http", "client_command_id": "real-desktop-preview"})
+        result = session.send_event.await_args.args[0]
+        assert result.type == "command.result" and result.data["level"] == "success", result.data
+        assert result.data["data"]["verification"]["status_code"] == 200
+        [process] = launcher.running_preview_processes(session_id="session", conversation_id="A", workspace_root=tmp_path)
+        assert process.is_active and process.process.pid
+    finally:
+        await launcher.stop_preview_launch("desktop-http", session_id="session", conversation_id="A", workspace_root=tmp_path)
+    assert not launcher.running_preview_processes(session_id="session", conversation_id="A", workspace_root=tmp_path)
 
 
 @pytest.mark.asyncio

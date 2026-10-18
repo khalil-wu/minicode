@@ -309,6 +309,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                     patches.append(generate_unified_diff(value, "", contents.content))
             return {"is_git_repo": True, "diff": "".join(patches), **self.identity()}
         if operation == "worktree":
+            checkout_root = self.resolve(verified.stdout.decode("utf-8").strip())
             records, record = [], {}
             for value in (await run("worktree", "list", "--porcelain", "-z")).stdout.decode("utf-8").split("\0"):
                 if not value:
@@ -321,20 +322,20 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             if record:
                 records.append(record)
             main = self.resolve(records[0]["worktree"])
-            current = next(item for item in records if self.resolve(item["worktree"]) == root)
+            current = next(item for item in records if self.resolve(item["worktree"]) == checkout_root)
             common = self.resolve((await run("rev-parse", "--path-format=absolute", "--git-common-dir")).stdout.decode("utf-8").strip())
             def display(path):
                 return path.uri if self.context.turn_environment.is_remote else path.native
             entries = [{"path": display(self.resolve(item["worktree"])), "branch": item.get("branch", "").removeprefix("refs/heads/"),
-                "commit": item.get("HEAD", "")[:8], "is_main": index == 0, "is_current": self.resolve(item["worktree"]) == root,
+                "commit": item.get("HEAD", "")[:8], "is_main": index == 0, "is_current": self.resolve(item["worktree"]) == checkout_root,
                 "is_detached": "detached" in item, "is_isolated": self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees")),
-                "can_remove": self.resolve(item["worktree"]) != root
+                "can_remove": self.resolve(item["worktree"]) != checkout_root
                     and self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees"))
                     and (not self.context.turn_environment.is_remote
                         or self.scope.resolve_access(self.cwd.uri).can_write
                         and self.scope.resolve_access(self.resolve(item["worktree"]).uri).can_read),
                 **self.identity(self.resolve(item["worktree"]))} for index, item in enumerate(records)]
-            return {"is_git_repo": True, "is_worktree": root != main, "current_path": display(root), "main_repo_path": display(main),
+            return {"is_git_repo": True, "is_worktree": checkout_root != main, "current_path": display(checkout_root), "main_repo_path": display(main),
                 "current_branch": current.get("branch", "").removeprefix("refs/heads/"), "common_git_dir": display(common),
                 "worktree_count": len(entries), "worktrees": entries, **self.identity()}
         raise HTTPException(503, "The selected executor has no worktree lifecycle service configured.")

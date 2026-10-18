@@ -36,6 +36,28 @@ def notifications(caplog):
 
 
 @pytest.mark.asyncio
+async def test_idle_kernel_keeps_its_vm_context_through_full_gc(kernel_source, monkeypatch, tmp_path):
+    node, source = kernel_source
+    # Collect from the worker host after its completed call has released every
+    # execution reference. Inspector IDs alone do not keep a vm.Context alive.
+    source = source.replace("parentPort.postMessage({ kind: 'finished', id: message.id });", """
+    setImmediate(() => {
+      require('node:v8').setFlagsFromString('--expose_gc');
+      vm.runInNewContext('gc')();
+      require('node:fs').writeFileSync('idle-gc-finished', 'collected');
+      parentPort.postMessage({ kind: 'finished', id: message.id });
+    });
+    """, 1)
+    monkeypatch.setattr(node, "_SERVER", source)
+    async with companion(tmp_path) as fixture:
+        first = await fixture.client.call_tool("js", {"code": "const retained = 41; nodeRepl.write(retained)"})
+        assert not first.is_error and body(first) == "41", body(first)
+        await wait_file(tmp_path / "idle-gc-finished", "collected")
+        second = await fixture.client.call_tool("js", {"code": "nodeRepl.write(retained + 1)"})
+        assert not second.is_error and body(second) == "42", body(second)
+
+
+@pytest.mark.asyncio
 async def test_actual_import_cpu_double_reset_keeps_original_output_and_new_generation(kernel_source, tmp_path):
     async with companion(tmp_path) as fixture:
         for index in range(12):

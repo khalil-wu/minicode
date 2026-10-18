@@ -84,6 +84,7 @@ class AgentSession:
     guardian_host: GuardianHostState | None = None
     mcp_tool_approvals: MCPApprovalStore = field(default_factory=MCPApprovalStore)
     network_approval_service: Any | None = None
+    owns_artifact_store: bool = False
     owns_guardian_host: bool = True
     thread_environments: ThreadEnvironments | None = None
     owns_thread_environments: bool = False
@@ -99,25 +100,32 @@ class AgentSession:
         return self._owned_commands
 
     async def aclose(self) -> None:
-        """Release commands created by this session; injected host services are borrowed."""
+        """Release owned resources after their real borrowers have settled."""
         if self.guardian_host is not None and self.owns_guardian_host:
             await self.guardian_host.aclose()
         if self._command_shutdown_task is not None:
             if self._command_shutdown_task.done():
                 self._command_shutdown_task.result()
             return
-        if (self._owned_commands is not None or self.owns_thread_environments
+        if (self._owned_commands is not None or self.owns_thread_environments or self.owns_artifact_store
                 or self.node_repl_companions is not None or self.cua_repl_companions is not None):
+            async def close_resources() -> None:
+                try:
+                    if self._owned_commands is not None:
+                        await self._owned_commands.shutdown()
+                    if self.node_repl_companions is not None:
+                        await self.node_repl_companions.aclose()
+                    if self.cua_repl_companions is not None:
+                        await self.cua_repl_companions.aclose()
+                    if self.owns_thread_environments and self.thread_environments is not None:
+                        await self.thread_environments.aclose()
+                finally:
+                    if self.owns_artifact_store:
+                        await self.artifact_store.aclose()
+
             borrowers = {task for task in self.lifecycle_cleanup_tasks if not task.done()}
             if not borrowers:
-                if self._owned_commands is not None:
-                    await self._owned_commands.shutdown()
-                if self.node_repl_companions is not None:
-                    await self.node_repl_companions.aclose()
-                if self.cua_repl_companions is not None:
-                    await self.cua_repl_companions.aclose()
-                if self.owns_thread_environments and self.thread_environments is not None:
-                    await self.thread_environments.aclose()
+                await close_resources()
                 return
 
             async def shutdown_after_cleanup() -> None:
@@ -129,17 +137,19 @@ class AgentSession:
                         await asyncio.wait(pending)
                     except asyncio.CancelledError:
                         continue
-                if self._owned_commands is not None:
-                    await self._owned_commands.shutdown()
-                if self.node_repl_companions is not None:
-                    await self.node_repl_companions.aclose()
-                if self.cua_repl_companions is not None:
-                    await self.cua_repl_companions.aclose()
-                if self.owns_thread_environments and self.thread_environments is not None:
-                    await self.thread_environments.aclose()
+                await close_resources()
 
             self._command_shutdown_task = asyncio.create_task(shutdown_after_cleanup())
             retain_cleanup_task(self._command_shutdown_task, self.lifecycle_cleanup_tasks)
+
+            def shutdown_completed(task: asyncio.Task) -> None:
+                if not task.cancelled() and (error := task.exception()) is not None:
+                    logger.error(
+                        "Agent session %s resource shutdown failed", self.command_session_id,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+
+            self._command_shutdown_task.add_done_callback(shutdown_completed)
 
 
 @dataclass(slots=True)

@@ -142,6 +142,7 @@ def provider_error_details(event: Any):
         **({"provider_event_type": redact_secrets(str(raw["event_type"]))[:128]} if raw.get("event_type") else {}),
         **({"status_code": status_code} if status_code is not None else {}),
         **({"provider_error_code": provider_error_code} if provider_error_code else {}),
+        **({"provider_error_message": raw["provider_error_message"]} if raw.get("provider_error_message") else {}),
         **(
             {"provider_error_schema_type": provider_error_schema_type}
             if provider_error_schema_type

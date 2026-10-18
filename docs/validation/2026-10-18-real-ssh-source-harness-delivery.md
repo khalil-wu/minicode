@@ -79,7 +79,7 @@ Root 在同一最新前端的独立生产 Electron 实际点击设置连接，�
 - 新目录原生产物的实际执行权限丢失通过真实 EACCES 发现，源头已修；旧安装可执行不能替代新构建/新安装验证。
 - 快速切新会话时旧 owner 的 tree 请求返回 409，随后新 owner 请求 200，保留实际归属语义。
 
-本轮仍未补齐的桌面功能包括 SSH discovered-alias 选择、可浏览远端目录选择器和显式远端安装入口。当前手输 alias/绝对目录的真实链路已实测；这些发现/浏览/安装控件不能据此算对齐。独立 exec-server session 的外机全矩阵、真实模型长任务、普通 WSL、Windows WFP provisioning、系统 CUA 输入/截图与所有 UI 状态仍需各自证据。
+这份冻结 SSH 批次当时只验证了手输 alias/绝对目录，不能据此算发现/浏览控件已对齐。后续已补齐 discovered-alias、实际连接详情和可浏览目录选择器，并分别核对其最新证据，见[发现、目录选择与生命周期后续](2026-10-18-ssh-selectors-relay-delivery.md)。此前“显式远端安装入口”作为缺口的判断撤回：当前 Source 的连接行 consumer 明确过滤 install-codex，不能因为后端 API 存在就添加该 UI。独立 exec-server session 的外机全矩阵、普通 WSL、Windows WFP provisioning、系统 CUA 输入/截图与全界面状态仍需各自证据；真实模型范围由后续报告单列。
 
 ## 最终 GitHub CI 与产物
 

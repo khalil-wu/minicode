@@ -135,7 +135,7 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
     if code_mode_only is not None:
         settings_args["code_mode_only"] = code_mode_only
     settings = AgentSettings(**settings_args)
-    session = session or AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+    session = session or AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"), owns_artifact_store=True,
         permission_checker=PermissionChecker(PermissionSettings(require_confirm=[] if mode == "bypass" else [tool.name for tool in tools if not tool.read_only], require_diff_review=[]), tmp_path),
         agent_settings=settings, token_budget=budget, context_builder=builder, approval_handler=approval)
     runtime = AgentRuntime(metrics_file=tmp_path / "runtime/metrics.jsonl", swarm_store_dir=tmp_path / "runtime/swarm", enable_lease_heartbeat=False)
@@ -155,9 +155,10 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
                 events.append(event)
                 if observe: await observe(event)
     finally:
-        await session.aclose()
-        session.artifact_store.shutdown()
-        runtime.close(release_lease=True)
+        try:
+            await session.aclose()
+        finally:
+            runtime.close(release_lease=True)
     return state, builder, journal, events, run_context
 
 

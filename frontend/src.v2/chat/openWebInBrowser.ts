@@ -17,11 +17,9 @@ type BrowserRequest = BrowserRequestBase & (
 
 type BrowserRequestListener = (request: BrowserRequest) => void;
 
-const BROWSER_NAVIGATE_DEDUPE_MS = 750;
 const listeners = new Set<BrowserRequestListener>();
 let requestSequence = 0;
 const pendingRequests = new Map<string, BrowserRequest>();
-let lastNavigate: { url: string; conversationId: string; at: number } | null = null;
 
 export function isPreviewableHttpUrl(value: string): boolean {
   return parseHttpUrl(value) !== null;
@@ -36,18 +34,8 @@ export function openWebInBrowser(url: string): boolean {
 
   useAppStore.getState().setRightStackTab("browser");
 
-  const now = Date.now();
-  if (
-    lastNavigate?.url === normalizedUrl
-    && lastNavigate.conversationId === conversationId
-    && now - lastNavigate.at < BROWSER_NAVIGATE_DEDUPE_MS
-  ) {
-    return true;
-  }
-
   const request: BrowserRequest = { kind: "open", id: ++requestSequence, url: normalizedUrl, conversationId };
   pendingRequests.set("open", request);
-  lastNavigate = { url: normalizedUrl, conversationId, at: now };
   listeners.forEach((listener) => listener(request));
   return true;
 }
@@ -114,7 +102,6 @@ export function acknowledgeBrowserRequest(id: number): void {
 
 export function __resetOpenWebInBrowserForTests(): void {
   pendingRequests.clear();
-  lastNavigate = null;
   requestSequence = 0;
   listeners.clear();
 }

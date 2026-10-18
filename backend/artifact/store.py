@@ -583,6 +583,7 @@ class ArtifactStore:
         self._preview_lines_index: dict[str, int] = {}
         self._lock = threading.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_stop = asyncio.Event()
         self._cleanup_pending = False
         self._cleanup_error = ""
         self._owner_context: ContextVar[tuple[str, str]] = ContextVar(
@@ -1022,15 +1023,19 @@ class ArtifactStore:
                 self._preview_lines_index.pop(artifact_id, None)
 
     async def _cleanup_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.sleep(self._cleanup_interval)
+        try:
+            while not self._cleanup_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._cleanup_stop.wait(), timeout=self._cleanup_interval
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                if self._cleanup_stop.is_set():
+                    return
                 await self._async_cleanup_once()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                logger.error("artifact cleanup pending error=%r", exc)
-                return
+        except Exception as exc:
+            logger.error("artifact cleanup pending error=%r", exc)
 
     def cleanup_status(self) -> dict[str, object]:
         return {
@@ -1039,6 +1044,8 @@ class ArtifactStore:
         }
 
     def _ensure_cleanup_scheduled(self) -> None:
+        if self._cleanup_stop.is_set():
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -1052,14 +1059,28 @@ class ArtifactStore:
             )
 
     def shutdown(self) -> None:
-        """Cancel the recurring cleanup task if one is running.
+        """Request cleanup to stop after its current disk scan settles."""
+        self._cleanup_stop.set()
 
-        Idempotent and safe when no loop exists. Used by tests and may be
-        called optionally from ``bootstrap/app.py`` during shutdown.
-        """
-
-        if self._cleanup_task is not None:
-            self._cleanup_task.cancel()
+    async def aclose(self) -> None:
+        """Join owned cleanup before releasing the store's session resources."""
+        self.shutdown()
+        task = self._cleanup_task
+        if task is not None:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling an await of to_thread does not stop its worker.
+                # Keep the actual scan owned until it can no longer mutate disk.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                task.result()
+                await self.flush()
+                raise
+        await self.flush()
 
     async def flush(self) -> None:
         """Session lifecycle fence; save() is durable when it returns."""

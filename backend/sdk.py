@@ -25,6 +25,7 @@ from backend.agent.execution_journal import ExecutionJournal, execution_journal_
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import execute_tool_batch
 from backend.artifact.store import ArtifactStore
+from backend.async_cleanup import retain_cleanup_task
 from backend.config import AgentSettings, AppConfig, PermissionSettings, TokenBudget, load_config
 from backend.feature_flags import feature_enabled
 from backend.llm.base import LLMAdapter, ToolCallEvent
@@ -551,7 +552,8 @@ async def _query_unclaimed(
     selected_snapshot = run_context.model_execution
     config = config or (selected_snapshot.config if selected_snapshot is not None
         else load_config(cwd=resolved_workspace_root))
-    artifact_store = artifact_store or ArtifactStore()
+    owns_artifact_store = artifact_store is None
+    artifact_store = artifact_store if artifact_store is not None else ArtifactStore()
     if llm is None:
         if selected_snapshot is not None:
             llm = selected_snapshot.llm
@@ -617,6 +619,7 @@ async def _query_unclaimed(
             llm=llm,
             tool_registry=tool_registry,
             artifact_store=artifact_store,
+            owns_artifact_store=owns_artifact_store,
             permission_checker=permission_checker,
             approval_handler=approval_handler,
             agent_settings=agent_settings,
@@ -702,7 +705,7 @@ def _mcp_callable_for_tool(
             resolved_workspace,
         )
         registry = create_tool_registry(sdk_tool)
-        store = artifact_store or ArtifactStore()
+        store = artifact_store if artifact_store is not None else ArtifactStore()
         sandbox_policy = SandboxPolicy.workspace_default(resolved_workspace)
         context = ToolExecutionContext(
             permission=effective_permission,
@@ -765,6 +768,39 @@ def _mcp_callable_for_tool(
                     }
                 )
             raise
+        finally:
+            if artifact_store is None:
+                if any(not task.done() for task in context.pending_cleanup_tasks):
+                    async def close_artifacts_after_cleanup() -> None:
+                        while pending := {
+                            task for task in context.pending_cleanup_tasks
+                            if task is not asyncio.current_task() and not task.done()
+                        }:
+                            try:
+                                await asyncio.wait(pending)
+                            except asyncio.CancelledError:
+                                continue
+                        await store.aclose()
+
+                    close_task = asyncio.create_task(
+                        close_artifacts_after_cleanup(), name=f"sdk-mcp-artifact-close[{call_id}]"
+                    )
+                    receipt = {
+                        "resource_kind": "artifact_store", "resource_id": call_id,
+                        "reason": "sdk_mcp_artifact_store_close", "pending": 1, "completed": False,
+                    }
+                    context.cleanup_receipts[f"{call_id}:artifact_store"] = receipt
+                    retain_cleanup_task(close_task, context.pending_cleanup_tasks)
+
+                    def artifacts_closed(completed: asyncio.Task) -> None:
+                        receipt.update(completed=not completed.cancelled(), pending=0)
+                        if not completed.cancelled() and (error := completed.exception()) is not None:
+                            receipt["error"] = str(error)
+                            journal.append_cleanup({**receipt, "status": "failed"})
+
+                    close_task.add_done_callback(artifacts_closed)
+                else:
+                    await store.aclose()
 
         if result_event is None or not state.tool_calls:
             journal.append(

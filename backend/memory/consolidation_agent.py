@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from pathlib import Path
 from uuid import uuid4
 
@@ -124,6 +125,7 @@ async def run_memory_consolidation_agent(
             llm=llm,  # type: ignore[arg-type]
             tool_registry=registry,
             artifact_store=artifact_store,
+            owns_artifact_store=True,
             permission_checker=permission_checker,
             agent_settings=settings,
             token_budget=budget,
@@ -133,13 +135,11 @@ async def run_memory_consolidation_agent(
                 llm=llm,
             ),
         )
-        async for _event in QueryEngine().submit(QuerySubmission(
-            user_message=prompt,
-            session=agent_session,
-            state=state,
-            runtime=runtime,
-        )):
-            pass
+        async with aclosing(agent_session), aclosing(QueryEngine().submit(QuerySubmission(
+            user_message=prompt, session=agent_session, state=state, runtime=runtime,
+        ))) as stream:
+            async for _event in stream:
+                pass
     finally:
         artifact_store.reset_owner(owner_token)
 

@@ -100,11 +100,8 @@ async def _dispose_unadopted_connection_resources(
         adopted_artifact_store = getattr(adopted_session, "artifact_store", None)
         if artifact_store is not adopted_artifact_store:
             try:
-                await artifact_store.flush()
-            except Exception:
-                logger.exception("Failed to flush an unadopted artifact store")
+                await artifact_store.aclose()
             finally:
-                artifact_store.shutdown()
                 artifact_store.clear()
 
 
