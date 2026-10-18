@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerEvent } from "../protocol/events";
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", {
@@ -27,9 +27,6 @@ const deferred = <T,>() => {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 };
-const response = (payload: unknown, status = 200) => new Response(JSON.stringify(payload), { status });
-const personalization = (instructions = "old") => ({ instructions, path: "C:/user/INSTRUCTIONS.md", exists: true, max_bytes: 32768 });
-const source = (path: string) => ({ path, scope: "workspace", source_kind: "agent_instruction", label: "Project instructions" });
 const skill = (name: string, root: string) => ({ name, description: "workflow", source_level: "workspace", path: `${root}/.minicode/skills/${name}/SKILL.md`, icon: "./icon.svg" });
 const buffers = { textStreamBuffer: { destroy: vi.fn(), flush: vi.fn(), push: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn(), flush: vi.fn(), push: vi.fn() } };
 let caseNumber = 0;
@@ -45,76 +42,10 @@ beforeEach(() => {
     runtimeCapabilities: null, conversationAgentStates: {}, conversationWorkbenchStates: {}, conversationMessages: {}, conversationStreaming: {},
     currentModel: "model-a", currentProvider: "custom", permissionMode: "confirm", availableModels: ["model-a"],
   });
-  mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
-    if (url.includes("/api/settings/personalization")) return response(personalization(init?.method === "PUT" ? JSON.parse(String(init.body)).instructions : "old"));
-    if (url.includes("/api/guidelines")) return response({ blocks: [source(`${new URL(url).searchParams.get("workspace_dir")}/AGENTS.md`)] });
-    throw new Error(`Unexpected request: ${url}`);
-  });
 });
 afterEach(cleanup);
 
 describe("settings and selected catalog ownership", () => {
-  it("loads project instruction sources for the active workspace", async () => {
-    const root = useAppStore.getState().workingDirectory;
-    render(<PersonalizationTab />);
-    await screen.findByText(`${root}/AGENTS.md`);
-    expect(mocks.fetch.mock.calls.some(([url]) => new URL(String(url)).searchParams.get("workspace_dir") === root)).toBe(true);
-  });
-
-  it("preserves new instruction edits typed while the saved baseline is pending", async () => {
-    const save = deferred<Response>();
-    const normal = mocks.fetch.getMockImplementation()!;
-    mocks.fetch.mockImplementation((url, init) => init?.method === "PUT" ? save.promise : normal(url, init));
-    render(<PersonalizationTab />);
-    const input = await screen.findByRole("textbox", { name: "自定义指令" });
-    fireEvent.change(input, { target: { value: "first edit" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    fireEvent.change(input, { target: { value: "newer edit" } });
-    await act(async () => save.resolve(response(personalization("first edit"))));
-    expect((input as HTMLTextAreaElement).value).toBe("newer edit");
-    expect((screen.getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it("replaces A sources with B and rejects A's delayed response", async () => {
-    const originalRoot = useAppStore.getState().workingDirectory;
-    const old = deferred<Response>();
-    const normal = mocks.fetch.getMockImplementation()!;
-    mocks.fetch.mockImplementation((url, init) => new URL(String(url)).searchParams.get("workspace_dir") === originalRoot ? old.promise : normal(url, init));
-    render(<PersonalizationTab />);
-    await screen.findByRole("textbox", { name: "自定义指令" });
-    act(() => useAppStore.getState().setWorkingDirectory(`${originalRoot}-B`));
-    await screen.findByText(`${originalRoot}-B/AGENTS.md`);
-    await act(async () => old.resolve(response({ blocks: [source(`${originalRoot}/AGENTS.md`)] })));
-    expect(screen.queryByText(`${originalRoot}/AGENTS.md`)).toBeNull();
-  });
-
-  it("shows a source-load error without reporting that no instructions exist", async () => {
-    const normal = mocks.fetch.getMockImplementation()!;
-    mocks.fetch.mockImplementation((url, init) => String(url).includes("guidelines") ? response("source denied", 503) : normal(url, init));
-    render(<PersonalizationTab />);
-    await screen.findByRole("button", { name: "重试读取指令来源" });
-    expect(screen.getByRole("alert").textContent).toContain("source denied");
-    expect(screen.queryByText("暂无指令文件。")).toBeNull();
-    expect(screen.getByRole("textbox", { name: "自定义指令" })).toBeTruthy();
-  });
-
-  it("loads fresh source evidence after saving instead of sharing an old in-flight read", async () => {
-    const old = deferred<Response>();
-    let sourceRequests = 0;
-    const normal = mocks.fetch.getMockImplementation()!;
-    mocks.fetch.mockImplementation((url, init) => String(url).includes("guidelines")
-      ? ++sourceRequests === 1 ? old.promise : Promise.resolve(response({ blocks: [source("C:/user/INSTRUCTIONS.md")] }))
-      : normal(url, init));
-    render(<PersonalizationTab />);
-    const input = await screen.findByRole("textbox", { name: "自定义指令" });
-    fireEvent.change(input, { target: { value: "new instructions" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await screen.findAllByText("C:/user/INSTRUCTIONS.md");
-    await waitFor(() => expect(sourceRequests).toBe(2));
-    await act(async () => old.resolve(response({ blocks: [] })));
-    expect(screen.queryByText("暂无指令文件。")).toBeNull();
-  });
-
   it("cancels a task memory confirmation when its conversation changes", async () => {
     const confirmation = deferred<boolean>();
     mocks.confirm.mockReturnValue(confirmation.promise);

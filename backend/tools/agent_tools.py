@@ -2390,6 +2390,7 @@ class TaskTool(BaseTool):
                 if runtime.begin_subagent_worktree_retirement(
                     subagent_id, resource_id=str(info.worktree_path), **subagent_fence,
                     acquired_metadata=({"git_root": str(info.git_root), "branch": info.branch,
+                        "worktree_branch": info.temporary_branch,
                         "head_commit": info.head_commit} if worktree_acquisition_unpublished else None),
                 ):
                     return ""

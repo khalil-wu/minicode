@@ -39,7 +39,7 @@ it("persists keyboard-selected theme and exact numeric sizes without font-style 
   expect(localStorage.getItem(LS.theme)).toBe("light");
   expect(within(theme).getAllByRole("radio").filter((node) => node.tabIndex === 0)).toHaveLength(1);
   expect(screen.getByRole("spinbutton", { name: "编辑器字号" }).closest("details")).toHaveProperty("open", false);
-  fireEvent.click(screen.getByText("高级"));
+  fireEvent.click(screen.getByText("高级", { selector: ".settings-appearance-advanced-trigger" }));
   expect(screen.getAllByRole("spinbutton")).toHaveLength(3);
   fireEvent.change(screen.getByRole("spinbutton", { name: "界面字号" }), { target: { value: "16" } });
   expect(document.documentElement.style.getPropertyValue("--app-text-scale")).toBe(String(16 / 14));
@@ -64,7 +64,7 @@ it("resets sizes separately from editing behavior and retains custom code snippe
       aiEnabled: true, aiModel: "saved-model", snippets: [snippet] } });
   render(<AppearanceTab />);
 
-  fireEvent.click(screen.getByText("高级"));
+  fireEvent.click(screen.getByText("高级", { selector: ".settings-appearance-advanced-trigger" }));
 
   fireEvent.click(screen.getByRole("button", { name: "恢复默认字号" }));
 
@@ -79,7 +79,7 @@ it("resets sizes separately from editing behavior and retains custom code snippe
 it("retains the unfinished code template when advanced settings are collapsed and reopened", () => {
   render(<AppearanceTab />);
   expect(screen.getByRole("spinbutton", { name: "编辑器字号" }).closest("details")).toHaveProperty("open", false);
-  const advanced = screen.getByText("高级");
+  const advanced = screen.getByText("高级", { selector: ".settings-appearance-advanced-trigger" });
   const disclosure = advanced.closest("details") as HTMLDetailsElement;
   expect(disclosure.open).toBe(false);
   fireEvent.click(advanced);

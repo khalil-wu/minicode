@@ -38,3 +38,11 @@ Source 片段及消费者见 `output/git-settings-20261018/{source-contracts,rev
 | 最终前端 | TSC、Vite build 和两项预算通过；`build-final.log`、`budgets-final-recheck.log` |
 
 相对记录均位于 `output/playwright/desktop-alignment-finish-20261018/`。更早集中验证及必要复验保留，不宣称重跑全部产品测试。GitHub CI 以本轮提交对应 run 为准。大型编码/长时断网、普通 WSL、WFP 流量矩阵、私有 MCP relay、主题分发来源和全界面逐状态对照仍见[当前差距](2026-10-16-current-desktop-gaps.md)，不声称全产品等价。
+
+## 首次 CI 发现与修正
+
+`1972157d` 的 [CI 39122516570](https://github.com/khalil-wu/minicode/actions/runs/39122516570) 为 6 success / 3 failure，原日志保留。前端 8 个失败来自两个旧设置测试文件：编辑器高级区域改为准确定位；删除 5 个已移除来源面板或保存中强行输入的过时用例，不用 skip/todo 掩盖。来源变化的真实 `guidelines.updated`/Inspector 链保留原覆盖，独立编辑页的 ACK、禁用、返回和草稿竞态已有专项覆盖。root 的旧 review fixture 改用真实工作区路径接口，并明确提供本地 Git 执行上下文。
+
+backend 两个失败还暴露了实际遗漏：工作树获取后、注册未成功时的退休记录没有写入原创建分支。现已在该原始调用点传入捕获的 `temporary_branch`，不从当前分支或新前缀推断。两个 owner/epoch × 两种已发布状态共四个既有节点复验通过。前端三个受影响文件 14/14、root 原失败节点 1/1；分别见 `ci-acquisition-owner-final`、`ci-settings-final`、`ci-root-fixture-final` 的日志/XML。不因前两类是旧用例就忽略真实后端失败。
+
+生产前端没有在本次 CI 修正中变化，不重复构建。`1972157d` 的最新完整前后端窗口另行冷启动并核对 Git 设置实际消费者，见 `output/playwright/alignment-final-1972157d-20261018/boot-receipt.json`；原用户窗口保留。之后的一行后端修复仍需由新进程加载，不能借该冷启动记录冒称已经加载。

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -95,7 +96,7 @@ def test_catalog_commands_are_registered_as_slash_commands() -> None:
         assert registry.dispatch_slash_sync(command_name)
 
 
-def test_template_slash_expands_prompt_with_extra_context(tmp_path) -> None:
+def test_template_slash_expands_prompt_with_extra_context(tmp_path, monkeypatch) -> None:
     session = _FakeSession()
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -106,8 +107,14 @@ def test_template_slash_expands_prompt_with_extra_context(tmp_path) -> None:
         workspace_root=str(workspace)
     ).id
     session.session_lifecycle = SimpleNamespace(
-        workspace_root_for_conversation=lambda owner: Path(owner.execution_cwd)
+        workspace_path_for_conversation=lambda owner: owner.execution_cwd
     )
+
+    @asynccontextmanager
+    async def local_git_execution(*_args):
+        yield None
+
+    monkeypatch.setattr("backend.ws.handlers.diff._git_execution", local_git_execution)
     register_all_slash_commands(session.command_registry)
 
     handled, next_content = _dispatch_slash(
