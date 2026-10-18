@@ -45,4 +45,10 @@ Source 片段及消费者见 `output/git-settings-20261018/{source-contracts,rev
 
 backend 两个失败还暴露了实际遗漏：工作树获取后、注册未成功时的退休记录没有写入原创建分支。现已在该原始调用点传入捕获的 `temporary_branch`，不从当前分支或新前缀推断。两个 owner/epoch × 两种已发布状态共四个既有节点复验通过。前端三个受影响文件 14/14、root 原失败节点 1/1；分别见 `ci-acquisition-owner-final`、`ci-settings-final`、`ci-root-fixture-final` 的日志/XML。不因前两类是旧用例就忽略真实后端失败。
 
-生产前端没有在本次 CI 修正中变化，不重复构建。`1972157d` 的最新完整前后端窗口另行冷启动并核对 Git 设置实际消费者，见 `output/playwright/alignment-final-1972157d-20261018/boot-receipt.json`；原用户窗口保留。之后的一行后端修复仍需由新进程加载，不能借该冷启动记录冒称已经加载。
+生产前端没有在本次 CI 修正中变化，不重复构建。`1972157d` 的完整前后端窗口另行冷启动并核对 Git 设置实际消费者，见 `output/playwright/alignment-final-1972157d-20261018/boot-receipt.json`。最后一行后端修复完成后，将没有对话、草稿或运行回复的该 QA 窗口正常关闭（exit 0），复用其 profile 启动最终实现 `41e1e2d6`；新进程已连接、原字体保留，见同目录 `final-41e1e2d6-receipt.json`。原用户聊天窗口保留，未强杀进程。
+
+## 最终实现检查点
+
+实现提交 `41e1e2d6fa100caadbf8ad48d8cecb49815c0464` 的 [CI 39123747377](https://github.com/khalil-wu/minicode/actions/runs/39123747377) 已 **9/9 success**。前端 403 文件、4665 tests 通过；backend 7141 passed / 160 skipped；root 1785 passed / 52 skipped。跳过继续保留真实平台/条件原因，不计通过。两项 Source 原生构建、Windows harness、Electron 集成、桌面单元/烟测和 Linux wheel 冷安装均成功。
+
+最终原日志为 `output/playwright/desktop-alignment-finish-20261018/ci-41e1e2d6-{frontend,backend,root}.log`，首轮失败记录仍保留。此后的记录整理只有文档变化，不改变该实现的生产、测试或构建输入；不把纯文档整理称为再次运行整套 CI。全产品等价的边界仍按当前差距清单保留。
