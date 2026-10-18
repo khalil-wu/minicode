@@ -1,5 +1,7 @@
 # 原生命令投影与内部证据链：最终交付
 
+2026-10-18 真实 SSH 后续入口：[Linux 安装与 Source 核对](2026-10-18-real-ssh-source-harness-delivery.md)。已在真实外机核对 Source SSH 启动契约、实际 Linux managed 元数据与两个原生引擎的 ABI/可执行权限，修复由实机发现的 Monaco 初始化及缺失 READ 路径形状。最新目标候选统一 **67 passed / 6 real skipped**，随后同包的真实远程 Electron 新会话、命令、Changes、Diff→编辑器、中文路径及原草稿均有各自证据。`7b4885fa` 的[完整 CI 39093047592](https://github.com/khalil-wu/minicode/actions/runs/39093047592) 已 **9/9 成功**，含新增的 Linux wheel 冷安装。历史失败和精确范围见该报告；不继续把下方“未有实际外机”当作当前状态，普通 WSL/独立 exec-server 外机矩阵仍保留。
+
 2026-10-18 最新后续入口：[本机 Changes 与 harness 收尾交付](2026-10-17-local-changes-and-harness-delivery.md)。最新实现 `37f05e5f` 的 [CI 39047123759](https://github.com/khalil-wu/minicode/actions/runs/39047123759) 已 **8/8 成功**。已补五类真实 Git 比较、完整内容/预览/导入过滤、Source 导航和展开合同、原生 CUA owner/审批/关闭链；build 6 真实 Electron 与 r20 新安装分别留证。下方“Computer Use 未实现”、旧 wheel、构建与当时待办均为历史，不表示本批状态。当前范围按用户限定为本机与 codexsrc，外机/普通 WSL 不冒称通过。
 
 本轮后续收尾入口：[Node、桌面投影与安装候选](2026-10-16-node-desktop-followup-delivery.md)。r13 新包独立 41/41、startup ERROR=[]，实际生产 Electron 的两轮 Node、标题、图片及完成折叠/草稿已验；0c CI 的多窗口测试提前退出另已修 fixture，完整新 CI 按独立运行核对。下方“r13 尚待”及 r12 记录保留为各阶段事实，不代表最新候选。

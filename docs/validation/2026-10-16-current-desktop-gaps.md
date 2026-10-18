@@ -1,5 +1,7 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
+2026-10-18 真实外机后续见[SSH、Linux 安装与 Source 核对](2026-10-18-real-ssh-source-harness-delivery.md)。SSH 的登录环境、BatchMode、CLI 准入已按当前桌面 Source 调整；真实 Ubuntu 20.04 目标已完成文件/PTY/IPv4/IPv6/断线任务/归属及 managed 权限的第一批实测。最新 `c2c514ff` Linux wheel 的统一受影响验证为 **67 passed / 6 real skipped**，随后相同安装包的生产 Electron 新会话、命令、默认分支 Changes、Diff→Monaco、中文路径、工作区列表与本地/隐藏远端草稿均有实际证据。最新前端为 `index-DOL_HuZW.js`，下列本机 build 6 和 r20 属各自历史身份；旧 SSH 第一批结果不冒称在新候选全量重跑。`7b4885fa` 的[完整 CI 39093047592](https://github.com/khalil-wu/minicode/actions/runs/39093047592) 已 **9/9 成功**，包含新增的 Linux wheel 冷安装；原两轮 wheel job 失败和取消记录另列保留。远端专属构建、daemon、shim 与临时 SSH 授权均已清理。
+
 2026-10-18 收尾状态见[本机 Changes 与 harness 收尾交付](2026-10-17-local-changes-and-harness-delivery.md)：最新生产 `37f05e5f` 的 [CI 39047123759](https://github.com/khalil-wu/minicode/actions/runs/39047123759) **8/8 成功**；本机前端 build 6 `index-C5LbDzwP.js`，后端 r20 冻结 `82e659d6`。五类真实比较、完整文件、预览、空白/导入过滤、文件导航与全局大差异状态均已接通；132 文件、20 行/Shift 展开、正文实际宽度 auto、PDF 两侧独立分页及真实评论保护已在独立生产 Electron 核对。最后逐图核查发现的目录 RTL 斜杠错位也已按 Source 的 LTR/plaintext 内层修复，build 6 实测与 72 项回归通过。显式 Source runtime 的 CUA 服务及 SDK owner/清理链已接通，新安装 226 passed / 4 real skipped。旧 CI `39045562403` 为 7 success / 1 failure，保留历史，不混用构建身份。下列日期段保留为各阶段历史；本表与末尾边界描述当前范围，不据旧报告继续列已经补齐的缺口。
 
 2026-10-17 最新实现为 `53dc068429ce4ba4f1a5b50c4f4a19b9ed08bc10`：[完整 CI 39030260425](https://github.com/khalil-wu/minicode/actions/runs/39030260425) **8/8 成功**，前端 4494 passed、backend 7034 passed / 127 skipped、根目录 1771 passed / 52 skipped。本批按实际桌面 `host.spawn → process/spawn` 纠正 Changes WS 的执行归属，删除误套模型沙箱后增加的权限拼接、备用 cwd/SID/临时位置和双向 numstat；模型 Git 权限保持原样。媒体计量改为固定 Source 原生实现并移除 PyAV 消费及依赖，真实 restricted-token 启动也交给 Source 创建并保活 private desktop。清理后统一受影响回归 **164/164**；新 Windows backend 候选 r18 独立安装 **101/101**、0 failed/error/skipped，5 组进程自然 exit 0，实际消费后的模块和 DLL/PYD 均无 av/av.libs。r17 的原崩溃与未知上游触发仍保留为历史；本批关闭的是应用加载该依赖的路径。cold 41 的受限 PATH 另有 3 条真实 Git enrichment 日志，范围和真实 Git WS 验证分开记录。详见[Source 媒体与 Git 执行器](2026-10-17-source-media-and-git-executor.md)。本批没有新增前端菜单或修改前端构建；下列全界面、四项 Changes 菜单和外机等边界仍保留。
@@ -23,14 +25,15 @@ Node 专项收尾见[Node 与桌面后续交付](2026-10-16-node-desktop-followu
 | MCP 交互式 App 界面 | 已补注册 descriptor→原调用会话→事件/恢复→交互 App；完成后常驻、原 iframe 跨历史/虚拟行/真实侧栏连续。官方 ext-apps postMessage 与 Codex 私有 sandbox relay 的协议差异明确保留，不能宣称私有 relay 已复刻。 | [本批集成与验证](2026-10-16-desktop-harness-integration.md)；`output/mcp-apps-20261016/implementation-audit.md` |
 | Windows 原生权限边界 | 目标 LSP、环境安装、Git delivery、工作树快照/移除/恢复与真实 WS 新会话切换均已有实现。linked Git metadata、实际 cwd/policy cwd 分离及模型/GUI 共用快照消费链已修复；原 Unicode 归因已排除。仍保留 Source restricted token 对私有 OWNER RIGHTS Temp ACL 的拒绝，以及 unelevated deny-read 明确不支持的原生边界。 | [Windows 工作树后续修复](2026-10-16-windows-worktree-followup.md)；[目标语言服务](2026-10-16-executor-editor-lsp.md) |
 | Windows backend 退出稳定性 | 应用媒体路径已移除 PyAV，直接消费固定 Source 算法。r20 新安装 226 passed / 4 real skipped；13 次真实模块/原生映像审计无 av，验收 Python 均 exit 0。原生 pipe host 自然 exit 0，CUA launcher 被 owned-tree close 后实际 exit 1、closed/released 确认完整，分别记录。r17 原崩溃与 r19 SDK 失败保留，不据旧候选宣称本批通过。 | [本机 Changes 与 harness](2026-10-17-local-changes-and-harness-delivery.md)；`output/source-executor-remote-final-wheel-r20-20261017/REPORT.md` |
-| Linux 本地 managed 网络路由 | 已接通 pinned Source helper 的 namespace、SCM_RIGHTS、attribution、proxy bridge、seccomp 与生命周期，含 Source 的 FD 前置参数分派。`ee80a807` CI 的 Linux 路由 16/16 通过，其中七项真实 namespace/proxy/cancel；不再列为未实现。Linux 独立安装包冷验仍不由本 Windows wheel 证明。 | `desktop/native-network/linux/entry.rs`；`output/linux-managed-routing-20261016/`；`output/ci-ee80a807-20261016/CI-REPORT.md` |
+| Linux 本地 managed 网络路由 | 已接通 pinned Source helper 的 namespace、SCM_RIGHTS、attribution、proxy bridge、seccomp 与生命周期，含 Source 的 FD 前置参数分派。最新 Ubuntu 20.04 目标重建、非 editable wheel/独立安装、READ 元数据目录、DENY、WRITE 与持久 Node 均有新证据；producer 与 installed executable mode 直接验证，不在验证前补权限。不能据此覆盖全部 Linux/发行版场景。 | [真实 SSH 与 Linux 包](2026-10-18-real-ssh-source-harness-delivery.md)；`desktop/native-network/linux/entry.rs` |
+| SSH 桌面连接与安装入口 | 手输 alias、预装 CLI 和绝对远端目录的真实连接/命令/文件/Changes/编辑器已实测；discovered-alias 选择、可浏览远端目录选择器和显式远端安装入口仍未实现。 | [真实 SSH 与 Linux 包](2026-10-18-real-ssh-source-harness-delivery.md)；`output/ssh-source-audit-20261018/current-source/` |
 | Windows 远端 PTY 尺寸调整 | 已补原 ConPTY 请求/ACK 通道，实际尺寸、原 PID、断线重连、重复取消与窗口释放均通过；正式 runtime 已激活并核对字节及输入哈希。普通用户窗口没有被重启，新 Python 消费链需新进程加载。 | [PTY 实测](2026-10-16-windows-remote-pty-resize.md)；`output/windows-remote-pty-resize-20261016/formal-runtime-activation.json` |
 
 永久 MCP 批准、discovery/tool_search、Skill/提示词注入、CodeMode、Guardian、多 agent 委派和消息不再按旧清单笼统列为“未实现”；它们已有生产消费链和各自范围的验证。它们的存在也不证明所有扩展服务已就绪。
 
 ## 已实现但尚未完整实机验收
 
-- 外部 SSH 主机及真实 WSL 发行版的部署、连接、路径、权限、终端、预览和重连整链。现有本机真实 daemon/loopback 验证不替代外机验收。
+- 真实 SSH 主机的 desktop-host 第一批已完成上述实测，最新候选又单独核过受影响实现和真实桌面链；独立 exec-server session 的外机全矩阵及普通 WSL 发行版仍未验收，不据已通过的 SSH desktop-host 推算其它环境。
 - Windows WFP 的真实流量矩阵。显式 setup/status/readiness 已有，但本轮没有执行账号、ACL、防火墙 provisioning，相关跳过不能计通过。
 - 相同真实模型下的大型编码任务、多 agent 长任务和长时断网对照。受控模型的端到端验收与两次真实天气任务不等于该范围已验证。
 - 外部应用启动、系统剪贴板全部 MIME 类型、更多设备与平台分支。既有目的地拦截或局部系统验证不能扩大成全范围。
