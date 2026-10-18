@@ -602,7 +602,8 @@ async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_hando
             from backend.agent.worktree import resume_agent_worktree
             record = case.runtime.get_subagent(child_id)
             info = resume_agent_worktree(record.resume_config["worktree_path"],
-                expected_repo_root=case.workspace, expected_subagent_id=child_id)
+                expected_repo_root=case.workspace, expected_subagent_id=child_id,
+                expected_worktree_branch=record.resume_config["worktree_branch"])
             original_worktree_cleanup(info)
 
 
@@ -800,6 +801,8 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         path = Path(original_resource["resource_id"])
         if branch_changed:
             subprocess.run(["git", "switch", "-c", "agent-created-branch"], cwd=path, check=True)
+            from backend.services.git_settings_service import GitPreferences, update_git_preferences
+            update_git_preferences(GitPreferences(branch_prefix="after-resume/"))
         sender = FollowupTaskTool() if delivery == "trigger_turn" else SendMessageTool()
         sent = await sender.execute({"target": child_id, "recipient": child_id,
             "message": "exact worktree accepted mailbox task"}, context=case.context)
@@ -826,6 +829,8 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         assert resource["metadata"]["git_root"] == original_resource["metadata"]["git_root"]
         assert resource["metadata"]["head_commit"] == original_resource["metadata"]["head_commit"]
         assert resource["metadata"]["branch"] == ("agent-created-branch" if branch_changed else original_resource["metadata"]["branch"])
+        assert resource["metadata"]["worktree_branch"] == original_resource["metadata"]["worktree_branch"]
+        assert current.resume_config["worktree_branch"] == original_resource["metadata"]["worktree_branch"]
         assert path.exists()
         assert sum("exact worktree accepted mailbox task" in text for text in received[1]) == 1
         scheduler = case.runtime._subagent_mailbox_turns[child_id][0]
@@ -987,6 +992,7 @@ async def test_departing_worker_cannot_delete_a_reassigned_worktree(
         resource, = previous.cleanup_resources
         path = Path(resource["resource_id"])
         info = resume_agent_worktree(path, expected_repo_root=case.workspace, expected_subagent_id=child_id,
+            expected_worktree_branch=resource["metadata"]["worktree_branch"],
             expected_head_commit=resource["metadata"]["head_commit"])
         assert info is not None
         reassigned = previous.to_dict()

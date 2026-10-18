@@ -7,7 +7,8 @@ import { showConfirm } from "../overlays/DialogService";
 import { bindWorkspaceOwnerRuntime } from "../protocol/workspace-owner";
 
 vi.mock("../overlays/DialogService", () => ({ showConfirm: vi.fn(async () => false) }));
-const localStatus = { is_git_repo: true, branch: "feature", repo_root: "C:/project", remotes: ["origin", "backup"], upstream: "origin/feature", commits: [], detached: false };
+const localStatus = { is_git_repo: true, branch: "feature", repo_root: "C:/project", remotes: ["origin", "backup"], upstream: "origin/feature", commits: [], detached: false,
+  preferences: { branch_prefix: "codex/", always_force_push: false, create_draft_pull_requests: true, pull_request_merge_method: "merge", commit_instructions: "", pull_request_instructions: "" } };
 const github = { eligible: true, available: true, authenticated: false, host: "github.com", message: "尚未连接。" };
 beforeEach(() => {
   localStorage.clear();
@@ -173,4 +174,59 @@ it("restores each workspace's draft without overwriting the hidden workspace", a
   rerender(<GitDelivery workspaceRoot="C:/project" stagedCount={2} onChanged={() => {}} />);
   expect((screen.getByRole("textbox", { name: "提交说明" }) as HTMLTextAreaElement).value).toBe("project preserved draft");
   expect(JSON.parse(localStorage.getItem("minicode.git.draft:C:/another")!).message).toBe("another preserved draft");
+});
+
+it("uses saved force-push and draft preferences only after explicit confirmation", async () => {
+  vi.mocked(fetch).mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? { message: "Done" } : {
+    ...localStatus, github: { ...github, authenticated: true },
+    preferences: { ...localStatus.preferences, always_force_push: true, create_draft_pull_requests: false },
+  })));
+  vi.mocked(showConfirm).mockResolvedValue(true);
+  renderDelivery();
+  fireEvent.click(await screen.findByText("创建 PR", { selector: "summary" }));
+  fireEvent.click(screen.getByText("分支与推送", { selector: "summary" }));
+  expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "推送" }));
+  await waitFor(() => expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: "使用 --force-with-lease 将 feature 推送到 origin。" })));
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));
+  const push = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === "POST")!;
+  expect(JSON.parse(String(push[1]?.body))).toMatchObject({ action: "push", force_with_lease: true });
+  await waitFor(() => expect((screen.getByRole("textbox", { name: "PR 标题" }) as HTMLInputElement).disabled).toBe(false));
+  fireEvent.change(screen.getByRole("textbox", { name: "PR 标题" }), { target: { value: "Explicit PR title" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建 PR" }));
+  await waitFor(() => expect(showConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "创建 PR" })));
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2));
+  const create = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "POST")[1];
+  expect(JSON.parse(String(create[1]?.body))).toMatchObject({ action: "create_pr", expected_branch: "feature" });
+});
+
+it("preserves edits and rejects an old owner's generated message", async () => {
+  targetOwner();
+  let finish!: (value: Response) => void;
+  let signal: AbortSignal | null | undefined;
+  vi.mocked(fetch).mockImplementation(async (_url, init) => {
+    if (init?.method === "POST") { signal = init.signal; return new Promise((resolve) => { finish = resolve; }); }
+    return new Response(JSON.stringify(targetStatus(useAppStore.getState().conversationId ?? "")));
+  });
+  renderDelivery();
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  const input = screen.getByRole("textbox", { name: "提交说明" });
+  fireEvent.change(input, { target: { value: "Original draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "生成提交说明" }));
+  await waitFor(() => expect(signal).toBeTruthy());
+  const [url, init] = vi.mocked(fetch).mock.calls.find(([, options]) => options?.method === "POST")!;
+  expect(new URL(String(url)).pathname).toBe("/api/workspace/git/generate-message");
+  expect(new URL(String(url)).searchParams.get("environment_id")).toBe("target");
+  expect(JSON.parse(String(init?.body))).toMatchObject({ expected_registration_id: "original", expected_branch: "feature" });
+  fireEvent.change(input, { target: { value: "Edit while generating" } });
+  await act(async () => { finish(new Response(JSON.stringify({ message: "Generated message" }))); });
+  expect((input as HTMLTextAreaElement).value).toBe("Edit while generating");
+  fireEvent.click(screen.getByRole("button", { name: "生成提交说明" }));
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(2));
+  await act(async () => { useAppStore.setState({ conversationId: "two" }); });
+  await screen.findByText("请在所选设备连接 GitHub 后刷新。");
+  fireEvent.change(input, { target: { value: "New owner draft" } });
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { finish(new Response(JSON.stringify({ message: "Old owner result" }))); });
+  expect((input as HTMLTextAreaElement).value).toBe("New owner draft");
 });

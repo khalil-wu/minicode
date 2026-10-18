@@ -21,6 +21,7 @@ import type { StreamBuffer } from "../lib/stream-buffer";
 import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
 import { clearDiffCommentScope, getDiffCommentScope, readDiffCommentState, setDiffComments } from "../lib/diff-comment-storage";
 import { hydrateMessages } from "../chat/transcriptHydration";
+import { createCodeReview } from "../protocol/code-review";
 
 const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], accepted: true, toast: vi.fn() }));
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", { configurable: true,
@@ -38,7 +39,8 @@ vi.mock("./contextPayload", () => ({
 }));
 vi.mock("../protocol/code-review", () => ({
   fetchCodeReviewOptions: vi.fn(async (_owner: string, cwd: string) => ({ cwd, gitRoot: cwd, currentBranch: "feature", branches: ["main"] })),
-  prepareCodeReview: vi.fn(async (_owner: string, cwd: string, mode: "uncommitted" | "base-branch", baseBranch: string | undefined, _sha: string | undefined, requestMessage: string) => ({
+  createCodeReview: vi.fn(async (owner: string, cwd: string, mode: "uncommitted" | "base-branch", baseBranch: string | undefined, _sha: string | undefined, requestMessage: string) => ({
+    delivery: "inline", reviewThreadId: owner, sourceConversationId: owner,
     scope: { mode, cwd, gitRoot: cwd, ...(baseBranch ? { baseBranch, mergeBaseSha: "abcdef1234" } : {}) },
     prompt: `## Code review guidelines:\nFull installed review guidelines\n## My request:\n${requestMessage}`,
     requestMessage, diff: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n",
@@ -286,6 +288,35 @@ describe("actual composer durable admission boundary", () => {
     expect(user.codeReview).toEqual(command.code_review);
     expect(user.content).toBe(command.display_content);
     expect(user.backendContent).toBe(command.content);
+  });
+
+  it("starts detached review on its own conversation and preserves the original composer draft", async () => {
+    const { attachment } = fileDraft();
+    useAppStore.setState({ draft: "/review", agentMode: "plan", attachments: [attachment],
+      slashCommands: [{ name: "review", command: "review", label: "/review", description: "Review", type: "template", source: "builtin" }] });
+    vi.mocked(createCodeReview).mockImplementationOnce(async (source, cwd, mode, _base, _sha, requestMessage) => {
+      useAppStore.setState(state => ({ conversations: [...state.conversations,
+        { id: "separate-review", title: "Review", workspaceRoot: root, executionCwd: root }] }));
+      return { delivery: "detached", reviewThreadId: "separate-review", sourceConversationId: source!,
+        scope: { mode, cwd, gitRoot: cwd }, prompt: "## Code review guidelines:\n## My request:\nReview original changes",
+        requestMessage: requestMessage!, diff: "" };
+    });
+    render(<Composer />); submit();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "审查未提交的更改" }));
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(command.conversation_id).toBe("separate-review");
+    expect(command.code_review?.cwd).toBe(root);
+    expect(command.attachments).toBeUndefined();
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
+    await waitFor(() => expect(useAppStore.getState().pendingConversationSwitchId).toBe("separate-review"));
+    expect(useAppStore.getState().conversationId).toBe("main");
+    expect(useAppStore.getState().draft).toBe("/review");
+    expect(useAppStore.getState().attachments[0].id).toBe(attachment.id);
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    expect(useAppStore.getState().conversationMessages["separate-review"].some(message => message.role === "user")).toBe(true);
+    expect(useAppStore.getState().conversationWorkbenchStates["separate-review"].diffReview?.conversationId).toBe("separate-review");
   });
 
   const received = (command: UserMessageCommand) => acknowledgeClientCommand({ type: "client.command.ack",

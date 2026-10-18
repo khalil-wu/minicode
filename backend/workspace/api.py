@@ -52,6 +52,7 @@ from .text_search import WorkspaceTextSearchRequest, search_workspace_text
 from .editor_language import EditorLanguageRequest, EditorLanguageLifecycleOperation, editor_language_request, editor_language_lifecycle
 from .editor_ai import EditorCompletionRequest, editor_completion_response
 from .delivery import GitDeliveryRequest, git_delivery_action, git_delivery_status
+from .git_message_generation import GitMessageRequest, generate_git_message
 from .environment_setup import EnvironmentSetupRequest, environment_setup_response, environment_setup_status
 
 
@@ -327,6 +328,11 @@ def create_workspace_router() -> APIRouter:
             from .executor_commands import workbench_http_request
             return await workbench_http_request(http_request, executor_delivery_action(service, request))
         return await git_delivery_action(_local_service(service).workspace_root_path(), request)
+
+    @router.post("/git/generate-message")
+    async def workspace_git_generate_message(request: GitMessageRequest, http_request: Request, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        from .executor_commands import workbench_http_request
+        return await workbench_http_request(http_request, generate_git_message(service, request))
 
     @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
     async def workspace_project_index_api(

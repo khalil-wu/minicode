@@ -254,7 +254,8 @@ def test_worktree_uses_requested_checkout_and_resume_preserves_original_head(tmp
     original_head = child.head_commit
     (child.worktree_path / "version.txt").write_text("CHILD", encoding="utf-8")
     git(child.worktree_path, "commit", "-qam", "child")
-    resumed = worktree.resume_agent_worktree(child.worktree_path, expected_repo_root=alternate, expected_subagent_id="fixture-child", expected_head_commit=original_head)
+    resumed = worktree.resume_agent_worktree(child.worktree_path, expected_repo_root=alternate, expected_subagent_id="fixture-child",
+        expected_worktree_branch=child.temporary_branch, expected_head_commit=original_head)
     assert resumed.head_commit == original_head
     assert worktree.has_worktree_changes(resumed)
     monkeypatch.setattr(worktree, "_ACTIVE_WORKTREE_PATHS", set())

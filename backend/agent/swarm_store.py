@@ -698,6 +698,29 @@ class FileSwarmStore:
             for row in rows
         ]
 
+    def upgrade_legacy_worktree_owner(self, expected: dict[str, Any]) -> dict[str, Any]:
+        """Upgrade one exact owner/incarnation without replacing other state."""
+        from backend.agent.worktree_owner_upgrade import upgrade_legacy_worktree_owners
+
+        paths = [Path(item["resource_id"]) for item in expected["cleanup_resources"] if item["resource_kind"] == "worktree"]
+        with file_mutation_locks(paths), self._write() as connection:
+            row = connection.execute("SELECT payload_json FROM subagent_runs WHERE subagent_id = ?", (expected["subagent_id"],)).fetchone()
+            if row is None:
+                raise SubagentResourceOwnershipError("Worktree owner disappeared before its schema upgrade")
+            current = json.loads(row["payload_json"])
+            if any(current[key] != expected[key] for key in ("runtime_owner_token", "agent_path", "mailbox_epoch")):
+                raise SubagentResourceOwnershipError("Worktree owner changed before its schema upgrade")
+
+            def read_run(run_id):
+                run = connection.execute("SELECT payload_json FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+                return json.loads(run["payload_json"]) if run is not None else None
+
+            if upgrade_legacy_worktree_owners(current, journal_root=self.root.parent / "sidechains", read_run=read_run,
+                    states={"active", "retiring", "continuation", "retained"}):
+                connection.execute("UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
+                    (_json(current), epoch_ms(), current["subagent_id"]))
+            return current
+
     def get_subagent(self, subagent_id: str) -> dict[str, Any] | None:
         clean_id = str(subagent_id or "").strip()
         if not clean_id:
@@ -2209,8 +2232,16 @@ class FileSwarmStore:
                     )
                 subagent_records = []
                 if before_delete is not None:
+                    from backend.agent.worktree_owner_upgrade import upgrade_legacy_worktree_owners
+
+                    def read_creation_run(run_id):
+                        run = connection.execute("SELECT payload_json FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+                        return json.loads(run["payload_json"]) if run is not None else None
+
                     for row in children:
                         record = json.loads(row[4])
+                        upgraded = upgrade_legacy_worktree_owners(record, journal_root=self.root.parent / "sidechains", read_run=read_creation_run,
+                            states={"active", "retiring", "continuation"})
                         retiring = False
                         for resource in record.get("cleanup_resources", []):
                             if resource["resource_kind"] == "worktree" and resource["state"] == "continuation":
@@ -2220,6 +2251,7 @@ class FileSwarmStore:
                         if retiring:
                             record.update(cleanup_pending=True, cleanup_reason="conversation_deleted",
                                 cleanup_requested_at=epoch_ms(), cleanup_completed_at=None)
+                        if retiring or upgraded:
                             connection.execute(
                                 "UPDATE subagent_runs SET payload_json = ?, updated_at = ? WHERE subagent_id = ?",
                                 (_json(record), epoch_ms(), record["subagent_id"]),

@@ -154,7 +154,7 @@ def test_journal_terminal_never_uses_an_earlier_iteration_receipt(tmp_path):
 
 def test_ignored_agent_outputs_are_retained_without_a_remove_command(tmp_path, monkeypatch):
     calls = []
-    info = worktree.AgentWorktree(tmp_path / "child", "codex/audit", "head", tmp_path)
+    info = worktree.AgentWorktree(tmp_path / "child", "codex/audit", "head", tmp_path, temporary_branch="codex/audit")
     def git(cwd, *args):
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, "!! output/report.pdf\n" if "--ignored" in args else "", "")

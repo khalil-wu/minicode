@@ -80,6 +80,7 @@
       "security.js",
       "utils.js",
       "window-manager.js",
+      "window-appearance.js",
       "window-lifecycle.js",
       "updater.js",
       "startup-error.html",

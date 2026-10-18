@@ -89,6 +89,13 @@ const runtimeConfig = {
       consumeInitialNavigation: () => ipcRenderer.sendSync("minicode:window:initialNavigation:consume"),
       openConversation: (conversationId) => ipcRenderer.invoke("minicode:window:openConversation", conversationId),
       getState: () => ipcRenderer.invoke("minicode:window:state"),
+      getAppearance: () => ipcRenderer.invoke("minicode:window:appearance:get"),
+      setAppearance: (options) => ipcRenderer.invoke("minicode:window:appearance:set", options),
+      onAppearanceChanged: (callback) => {
+        const listener = (_event, state) => callback(state);
+        ipcRenderer.on("minicode:window:appearance", listener);
+        return () => ipcRenderer.removeListener("minicode:window:appearance", listener);
+      },
       onStateChanged: (callback) => {
         const listener = (_event, state) => callback(state);
         ipcRenderer.on("minicode:window:state", listener);

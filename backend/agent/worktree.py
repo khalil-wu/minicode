@@ -6,10 +6,10 @@ throwaway worktree on a temporary branch under ``.minicode/worktrees/``,
 run the subagent inside it, then remove worktree + branch when nothing
 changed and keep it (reporting the path) when it did.
 
-All functions are synchronous subprocess wrappers; callers in async code
-should invoke them via ``asyncio.to_thread``. Failures never raise — a
-``None`` / conservative result lets the caller degrade to non-isolated
-execution with an explanation.
+Git subprocess operations are synchronous; async callers use
+``asyncio.to_thread``. Creation returns its actual failure reason to the owner.
+Requested worktree isolation must fail startup when creation fails; it must not
+start the subagent in the original workspace instead.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.runtime_env import sanitized_git_env
+from backend.services.git_settings_service import generated_branch_name
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class AgentWorktree:
     branch: str
     head_commit: str
     git_root: Path
+    # Creation ownership survives a later checkout or preference change.
+    temporary_branch: str
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -103,7 +106,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
 
     worktrees_dir = git_root / ".minicode" / "worktrees"
     worktree_path = worktrees_dir / slug
-    branch = f"minicode/{slug}"
+    branch = generated_branch_name(slug)
     if worktree_path.exists():
         return None, f"worktree path already exists: {worktree_path}"
     try:
@@ -129,6 +132,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
             branch=branch,
             head_commit=head,
             git_root=git_root.resolve(),
+            temporary_branch=branch,
         ),
         "",
     )
@@ -184,7 +188,7 @@ def remove_agent_worktree(worktree: AgentWorktree) -> bool:
         stderr = (result.stderr or "").strip() if result is not None else "git unavailable"
         logger.warning("Failed to remove agent worktree %s: %s", worktree.worktree_path, stderr)
         return False
-    temporary_branch = f"minicode/{worktree.worktree_path.name}"
+    temporary_branch = worktree.temporary_branch
     branch_result = _git(worktree.git_root, "branch", "-D", temporary_branch)
     if branch_result is None or branch_result.returncode != 0:
         logger.warning("Could not delete agent worktree branch %s", temporary_branch)
@@ -211,10 +215,13 @@ def resume_agent_worktree(
     *,
     expected_repo_root: str | Path,
     expected_subagent_id: str,
+    expected_worktree_branch: str,
     expected_head_commit: str = "",
 ) -> AgentWorktree | None:
     """Re-adopt a worktree recorded in a checkpoint for a resumed subagent.
 
+    The actual branch is read from Git; the created branch comes from its
+    durable owner and remains the only branch eligible for cleanup.
     Returns ``None`` when the directory is gone or no longer a valid worktree;
     the caller must then refuse the isolated resume.
     """
@@ -256,6 +263,7 @@ def resume_agent_worktree(
             branch=branch,
             head_commit=head,
             git_root=git_root.resolve(),
+            temporary_branch=expected_worktree_branch,
         )
     except OSError as exc:
         logger.warning("Could not resume agent worktree %s: %s", worktree_path, exc)

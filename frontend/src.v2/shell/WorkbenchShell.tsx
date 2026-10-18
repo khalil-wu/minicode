@@ -306,7 +306,7 @@ export const WorkbenchShell = () => {
         inset: 0,
         display: "flex",
         flexDirection: "column",
-        background: "var(--desktop-shell-background)",
+        background: "var(--native-shell-background, var(--desktop-shell-background))",
         color: "var(--text-primary)",
         fontFamily: "var(--font-ui)",
         fontSize: "var(--text-md)",

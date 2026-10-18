@@ -39,7 +39,7 @@ import { uniqueMessageId } from "../stores/shared-helpers";
 import { composerWorkspaceKey } from "../stores/composer-drafts";
 import type { CommandResultEvent } from "../protocol/events";
 import { CodeReviewMenu, type CodeReviewOwner } from "./CodeReviewMenu";
-import { prepareCodeReview } from "../protocol/code-review";
+import { createCodeReview } from "../protocol/code-review";
 import type { CodeReviewOptions } from "../protocol/code-review-types";
 import { publishCodeReview } from "../chat/codeReview";
 import { GuardianApprovalMenu } from "./GuardianApprovalMenu";
@@ -249,21 +249,24 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     return runSubmission(async () => {
       const requestMessage = mode === "uncommitted" ? tr("请审阅未提交的更改")
         : tr("请审阅 {from} 相对 {to} 的更改", { from: options.currentBranch, to: branch! });
-      const prepared = await prepareCodeReview(owner.conversationId, owner.cwd, mode, branch, undefined, requestMessage);
+      const prepared = await createCodeReview(owner.conversationId, owner.cwd, mode, branch, undefined, requestMessage);
       const state = useAppStore.getState();
       if ((state.conversationId || "") !== (owner.conversationId || "") || !workspaceRootsEqual(state.workingDirectory, owner.cwd)) {
         throw new Error(tr("工作区已变化，请重新选择审阅目标。"));
       }
       const userMessageId = uniqueMessageId("u");
-      let admittedOwner = owner.conversationId || "";
+      let admittedOwner = prepared.reviewThreadId;
       const sent = await sendChatMessage({ displayContent: prepared.requestMessage, backendContent: prepared.prompt,
-        conversationId: owner.conversationId, codeReview: prepared.scope, userMessageId, awaitAdmission: true,
+        conversationId: prepared.reviewThreadId, codeReview: prepared.scope, userMessageId, awaitAdmission: true,
         onAdmission: event => { if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id; },
       });
       if (!sent) return;
-      clearSubmittedInput(owner.input, owner.conversationId || "", owner.cwd, owner.selectedCommand, admittedOwner);
+      if (prepared.delivery === "inline") clearSubmittedInput(owner.input, owner.conversationId || "", owner.cwd, owner.selectedCommand, admittedOwner);
       publishCodeReview(prepared, admittedOwner, userMessageId);
       setReviewOwner(undefined);
+      if (prepared.delivery === "detached" && useAppStore.getState().conversationId === owner.conversationId) {
+        useAppStore.getState().requestConversationSwitch(admittedOwner);
+      }
     });
   };
 

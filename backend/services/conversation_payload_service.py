@@ -17,6 +17,7 @@ from backend.conversations.models import (
 )
 from backend.conversations.public_projection import project_public_conversation, project_public_transcript
 from backend.services.runtime_control_service import CommandOutcome
+from backend.services.git_settings_service import generated_branch_name
 from backend.ws.utils import normalize_permission_mode
 
 
@@ -476,7 +477,7 @@ def create_isolated_worktree_binding(
 
     worktree_root = isolated_worktree_root(base_root)
     worktree_path = worktree_root / conversation_id
-    branch = f"minicode/{conversation_id}"
+    branch = generated_branch_name(conversation_id)
     try:
         worktree_root.mkdir(parents=True, exist_ok=True)
         created = manager.create_worktree(worktree_path, branch=branch, new_branch=True)

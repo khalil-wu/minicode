@@ -28,6 +28,9 @@ def test_worktree_include_copies_only_allowlisted_non_symlink_files(tmp_path) ->
 
 
 def test_handoff_preflight_allows_explicit_stash_for_dirty_source(tmp_path, monkeypatch) -> None:
+    from backend.services.git_settings_service import GitPreferences, update_git_preferences
+
+    update_git_preferences(GitPreferences(branch_prefix="feature/"))
     root = tmp_path / "repo"
     root.mkdir()
     conversation = SimpleNamespace(
@@ -35,7 +38,7 @@ def test_handoff_preflight_allows_explicit_stash_for_dirty_source(tmp_path, monk
         git_isolated=False,
         workspace_root=str(root),
         worktree_path="",
-        git_branch="",
+        git_branch="main",
         archived=False,
     )
 
@@ -72,6 +75,7 @@ def test_handoff_preflight_allows_explicit_stash_for_dirty_source(tmp_path, monk
 
     assert preflight["allowed"] is True
     assert preflight["dirty_action"] == "stash"
+    assert preflight["destination"]["branch"] == "feature/conv_handoff123"
     assert preflight["main_checkout"] == {
         "path": str(root),
         "branch": "main",

@@ -1595,9 +1595,24 @@ class SessionCommandDispatcher:
                         return
                     if builtin_review:
                         review_scope = command_results.results[-1]["data"]["code_review"]
+                        prepared_content = content.rstrip()[:-len(slash_input)] + content_override
+                        review_request = content_override.rsplit("## My request:", 1)[1].strip()
+                        from backend.services.git_settings_service import get_git_preferences
+
+                        if get_git_preferences().review_delivery == "detached":
+                            from backend.services.review_delivery_service import queue_detached_review
+
+                            review_thread_id = await queue_detached_review(self._session, target_conversation_id,
+                                review_scope, prompt=prepared_content, request_message=review_request, input_id=user_message_id)
+                            with self._session.event_outbox.capture_command_results(include_data=True) as review_results:
+                                await self._session.emit_command_result("review", "Separate review input queued.", level="success",
+                                    data={"reviewThreadId": review_thread_id, "sourceConversationId": target_conversation_id,
+                                          "delivery": "detached", "queued": True})
+                            await self._emit_native_user_message_completion(command, cmd_name, review_results.results)
+                            return
                         command.data["code_review"] = review_scope
                         message_metadata["code_review"] = review_scope
-                        message_metadata["display_content"] = content_override.rsplit("## My request:", 1)[1].strip()
+                        message_metadata["display_content"] = review_request
                         command.data["display_content"] = message_metadata["display_content"]
                         requested_agent_mode = None
                         message_metadata.pop("agent_mode", None)

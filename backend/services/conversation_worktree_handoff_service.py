@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from backend.runtime_env import sanitized_git_env
+from backend.services.git_settings_service import generated_branch_name
 from backend.services.workspace_service import readonly_git_policy, run_readonly_git
 from backend.workspace.worktree import isolated_worktree_root
 from backend.sandbox.runner import SandboxUnavailableError
@@ -78,7 +79,6 @@ def build_handoff_preflight(
     source_policy = readonly_git_policy(source_path)
     main_policy = readonly_git_policy(base_root)
     worktree_path = isolated_worktree_root(base_root) / conversation_id
-    worktree_branch = str(getattr(conversation, "git_branch", "") or f"minicode/{conversation_id}")
     checks: list[dict[str, Any]] = []
 
     if target not in {"local", "worktree"}:
@@ -93,6 +93,7 @@ def build_handoff_preflight(
     source_status = _status(source_path, sandbox_policy=source_policy) if source_path.exists() else "<missing>"
     source_head = _head(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
     source_branch = _branch(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
+    worktree_branch = generated_branch_name(conversation_id) if target == "worktree" else source_branch
     if source_path == base_root:
         main_status, main_head, main_branch = source_status, source_head, source_branch
     else:

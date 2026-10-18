@@ -122,7 +122,7 @@ def test_doctor_services_and_handoff_read_snapshots_use_request_root(monkeypatch
     assert preflight["allowed"] is True
     assert preflight["source"]["path"] == str(main)
     assert preflight["conversation_id"] == "target-b"
-    assert ("show-ref", "--verify", "refs/heads/minicode/target-b") in calls
+    assert ("show-ref", "--verify", "refs/heads/codex/target-b") in calls
 
 
 def test_handoff_mutations_keep_explicit_control_plane(monkeypatch, tmp_path):

@@ -11,6 +11,7 @@ from backend.workspace.executor_commands import require_workspace_registration, 
 from backend.workspace.executor_git import executor_git_environment, executor_git_write_scope, run_executor_git
 from backend.workspace.executor_service import executor_registration_id
 from backend.sandbox.policy import SandboxEnforcement
+from backend.services.git_settings_service import get_git_preferences
 
 
 async def _git(service, *args, allow_failure=False):
@@ -23,14 +24,15 @@ async def _git(service, *args, allow_failure=False):
 async def executor_delivery_status(service, *, include_github=True, programs=None):
     root, code, error = await _git(service, "rev-parse", "--show-toplevel", allow_failure=True)
     if code:
-        return {"is_git_repo": False, "error": error, "registration_id": executor_registration_id(service.context), **service.identity()}
+        return {"is_git_repo": False, "error": error, "registration_id": executor_registration_id(service.context),
+            "preferences": get_git_preferences().model_dump(), **service.identity()}
     branch, remotes, upstream, log = await asyncio.gather(_git(service, "branch", "--show-current"),
         _git(service, "remote"), _git(service, "rev-parse", "--abbrev-ref", "@{upstream}", allow_failure=True),
         _git(service, "log", "-8", "--format=%h%x09%s", allow_failure=True))
     result = {"is_git_repo": True, "repo_root": root, "branch": branch[0], "remotes": remotes[0].splitlines(),
         "upstream": upstream[0] if upstream[1] == 0 else "", "detached": not branch[0],
         "commits": [{"hash": row.split("\t", 1)[0], "subject": row.split("\t", 1)[1]} for row in log[0].splitlines()],
-        "registration_id": executor_registration_id(service.context), **service.identity()}
+        "registration_id": executor_registration_id(service.context), "preferences": get_git_preferences().model_dump(), **service.identity()}
     if include_github:
         programs = await target_programs(service) if programs is None else programs
         host = programs["__github_host__"] or "github.com"
@@ -72,7 +74,7 @@ async def executor_delivery_action(service, request):
         result = await run_workbench_command(service, [programs["git"], "init", "-b", "main"],
             env=environment, shell_policy=policy, permission_scope=scope)
         return {"message": result.stdout.strip(), **service.identity()}
-    status = await executor_delivery_status(service, include_github=request.action == "draft_pr", programs=programs)
+    status = await executor_delivery_status(service, include_github=request.action in {"draft_pr", "create_pr"}, programs=programs)
     if not status["is_git_repo"]:
         raise HTTPException(409, "当前文件夹没有 Git 仓库。")
     if request.expected_branch != status["branch"]:
@@ -91,7 +93,8 @@ async def executor_delivery_action(service, request):
     elif request.action == "push":
         if not status["branch"] or request.remote not in status["remotes"]:
             raise HTTPException(422, "请选择当前仓库的远端，并切换到一个分支。")
-        argv = [programs["git"], "push", "--set-upstream", "--", request.remote, "HEAD"]
+        argv = [programs["git"], "push", *(["--force-with-lease"] if request.force_with_lease else []),
+            "--set-upstream", "--", request.remote, "HEAD"]
     else:
         github = status["github"]
         if not github["eligible"]:
@@ -102,9 +105,9 @@ async def executor_delivery_action(service, request):
             raise HTTPException(401, "请在所选设备连接 GitHub 后刷新。")
         if not request.title.strip() or not request.base.strip() or not status["branch"]:
             raise HTTPException(422, "请填写 PR 标题、目标分支，并切换到一个分支。")
-        argv = [programs["gh"], "pr", "create", "--draft", "--head", status["branch"], "--base", request.base,
+        argv = [programs["gh"], "pr", "create", *(["--draft"] if request.action == "draft_pr" else []), "--head", status["branch"], "--base", request.base,
             "--title", request.title, "--body-file"]
         input_text = request.body
     result = await run_workbench_command(service, argv, env=environment, shell_policy=policy,
         permission_scope=scope, input_text=input_text, programs=programs)
-    return {"message": result.stdout.strip(), "url": result.stdout.strip() if request.action == "draft_pr" else "", **service.identity()}
+    return {"message": result.stdout.strip(), "url": result.stdout.strip() if request.action in {"draft_pr", "create_pr"} else "", **service.identity()}

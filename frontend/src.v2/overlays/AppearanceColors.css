@@ -3,6 +3,11 @@
 .settings-card.settings-appearance-colors .appearance-theme-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-theme-heading > h4 { margin: 0; font-size: inherit; }
 .appearance-theme-heading-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.appearance-colors-advanced > summary { display: flex; align-items: center; gap: 8px; padding: 12px 16px; list-style: none; color: var(--text-secondary); cursor: pointer; }
+.appearance-colors-advanced > summary::-webkit-details-marker { display: none; }
+.appearance-colors-advanced > summary > svg { width: 14px; height: 14px; transform: rotate(-90deg); transition: transform var(--duration-base) var(--easing-standard); }
+.appearance-colors-advanced[open] > summary > svg { transform: rotate(0); }
+.appearance-colors-advanced input[type="range"] { width: 160px; max-width: 100%; accent-color: var(--accent-primary); }
 @media (max-width: 560px) { .appearance-theme-heading { flex-wrap: wrap; } .appearance-theme-heading-controls { flex-wrap: wrap; margin-left: auto; } }
 .appearance-color-control {
   display: flex;

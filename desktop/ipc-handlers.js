@@ -6,6 +6,7 @@ const { execFile } = require("node:child_process");
 const { ipcMain, dialog, shell, app } = require("electron");
 const { NATIVE_MENU_KEYS } = require("./menu-popup");
 const { openInTarget } = require("./open-targets");
+const windowAppearance = require("./window-appearance");
 const nativeFileExtensions = require("./native-open-file-extensions.json");
 
 const {
@@ -367,6 +368,8 @@ function registerIpcHandlers() {
     return true;
   }));
   ipcMain.handle("minicode:window:state", withMainSender("minicode:window:state", event => ({ isMaximized: getWin(event).isMaximized(), isFocused: getWin(event).isFocused() })));
+  ipcMain.handle("minicode:window:appearance:get", withMainSender("minicode:window:appearance:get", event => windowAppearance.get(getWin(event))));
+  ipcMain.handle("minicode:window:appearance:set", withMainSender("minicode:window:appearance:set", (event, options) => windowAppearance.set(getWin(event), options)));
 
   ipcMain.handle("minicode:window:maximize", withMainSender("minicode:window:maximize", (event) => {
     const win = getWin(event);

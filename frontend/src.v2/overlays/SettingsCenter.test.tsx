@@ -251,7 +251,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     }
   });
 
-  it("edits the user AGENTS.md from personalization and shows instruction sources", async () => {
+  it("opens the local instructions page and returns only after the actual save completes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.endsWith("/api/settings/personalization") && init?.method === "PUT") {
@@ -285,11 +285,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "个性化" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
 
     const editor = await screen.findByRole("textbox", { name: "自定义指令" }) as HTMLTextAreaElement;
     expect(editor.value).toBe("复用现有结构");
-    expect(screen.getByText("全局指令")).toBeTruthy();
-    expect(screen.getByText("项目指令")).toBeTruthy();
 
     fireEvent.change(editor, { target: { value: "复用现有结构\n统一运行测试" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -299,7 +298,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
       expect(put).toBeTruthy();
       expect(JSON.parse(String(put?.[1]?.body)).instructions).toBe("复用现有结构\n统一运行测试");
     });
-    expect((await screen.findByRole("button", { name: "已保存" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByRole("button", { name: "编辑本机指令" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "自定义指令" })).toBeNull();
   });
 
   it("keeps long-term generation separate from new-task inheritance", async () => {
@@ -394,7 +394,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("persists code sizing and reduced-motion preferences with real consumers", () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
-    fireEvent.click(within(document.querySelector('[data-settings-tab="appearance"]')!).getByText("高级"));
+    fireEvent.click(document.querySelector<HTMLElement>('[data-settings-tab="appearance"] .settings-appearance-advanced-trigger')!);
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "编辑器字号" }), { target: { value: "16" } });
     fireEvent.click(screen.getByRole("switch", { name: "减少动态效果" }));

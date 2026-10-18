@@ -55,6 +55,15 @@ export const SETTINGS_OPTIONS: SettingsOption[] = [
     ["下载", "设置浏览器下载策略。", "下载 文件 保存 拦截"],
     ["站点权限与数据", "管理网站权限和保存的数据。", "网站 cookie 清理"],
   ]),
+  ...options("workspaceGit", [
+    ["分支前缀", "MiniCode 创建新分支时使用的前缀", "git branch prefix"],
+    ["Pull Request 合并方式", "选择 MiniCode 合并 Pull Request 的方式", "git merge squash"],
+    ["始终强制推送", "从 MiniCode 推送时使用 --force-with-lease", "git push force"],
+    ["创建草稿 Pull Request", "从 MiniCode 创建 PR 时默认使用草稿", "git draft pr"],
+    ["提交指令", "添加到提交说明生成提示词中", "git commit instructions"],
+    ["Pull Request 指令", "添加到 PR 标题和说明生成提示词中", "git pr instructions"],
+    ["审查结果呈现方式", "尽可能在当前聊天中启动 /review，或启动单独的审查聊天", "review inline detached 审阅 独立"],
+  ]),
   ...options("connectors", [
     ["MCP 服务", "管理服务连接、登录和能力目录。", "mcp 工具 服务 资源"],
     ["服务名称", "创建或编辑 MCP 服务配置。", "添加 命令 参数 地址"],

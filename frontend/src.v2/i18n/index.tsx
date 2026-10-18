@@ -14,10 +14,12 @@ import connectionsEn from "./connections.en.json";
 import connectionsZh from "./connections.zh-CN.json";
 import appearanceEn from "./appearance.en.json";
 import appearanceZh from "./appearance.zh-CN.json";
+import gitEn from "./git.en.json";
+import gitZh from "./git.zh-CN.json";
 import { resolveLocale, type Locale } from "./locale";
 
-const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn };
-const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh };
+const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn, ...gitEn };
+const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh, ...gitZh };
 export type TranslationKey = keyof typeof en;
 export type TranslationValues = Record<string, string | number>;
 export type Translate = (key: TranslationKey, values?: TranslationValues) => string;

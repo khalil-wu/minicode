@@ -27,6 +27,7 @@ def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, tmp
     monkeypatch.setattr("backend.workspace.recent_projects.DEFAULT_STORE_PATH", data_root / "recent_projects.json")
     monkeypatch.setattr("backend.config.SETTINGS_FILE", state_root / "settings.json", raising=False)
     monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", state_root / "settings.json", raising=False)
+    monkeypatch.setattr("backend.services.git_settings_service.GIT_PREFERENCES_FILE", state_root / "git-preferences.json")
     monkeypatch.setattr("backend.vault.store.VAULT_FILE", state_root / "vault.json", raising=False)
     monkeypatch.setattr("backend.conversations.repository.CONVERSATION_DATA_DIR", conversations, raising=False)
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversations, raising=False)

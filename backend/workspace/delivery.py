@@ -9,10 +9,11 @@ from backend.subprocesses import communicate, spawn_exec
 from backend.services.github_service import (
     GitHubCommandError, github_cli_command, github_connection_status, github_repository_context,
 )
+from backend.services.git_settings_service import get_git_preferences
 
 
 class GitDeliveryRequest(BaseModel):
-    action: Literal["commit", "push", "draft_pr", "branch", "init"]
+    action: Literal["commit", "push", "draft_pr", "create_pr", "branch", "init"]
     message: str = Field(default="", max_length=20000)
     remote: str = ""
     branch: str = ""
@@ -21,6 +22,7 @@ class GitDeliveryRequest(BaseModel):
     body: str = Field(default="", max_length=50000)
     expected_branch: str = ""
     expected_registration_id: str = ""
+    force_with_lease: bool = False
 
 
 async def run_delivery_command(
@@ -58,7 +60,7 @@ async def git_delivery_status(root: Path, *, include_github: bool = True):
         root, ["git", "rev-parse", "--show-toplevel"], allow_failure=True
     )
     if status:
-        return {"is_git_repo": False, "error": error}
+        return {"is_git_repo": False, "error": error, "preferences": get_git_preferences().model_dump()}
     branch, remotes, upstream, log = await asyncio.gather(
         run_delivery_command(root, ["git", "branch", "--show-current"]),
         run_delivery_command(root, ["git", "remote"]),
@@ -82,6 +84,7 @@ async def git_delivery_status(root: Path, *, include_github: bool = True):
             for line in log[0].splitlines()
         ],
         "detached": not branch[0],
+        "preferences": get_git_preferences().model_dump(),
     }
     if include_github:
         repository = await github_repository_context(root)
@@ -129,7 +132,8 @@ async def git_delivery_action(root: Path, request: GitDeliveryRequest):
                 status_code=422, detail="请选择当前仓库的远端，并切换到一个分支。"
             )
         output, _, _ = await run_delivery_command(
-            root, ["git", "push", "--set-upstream", "--", request.remote, "HEAD"]
+            root, ["git", "push", *(["--force-with-lease"] if request.force_with_lease else []),
+                   "--set-upstream", "--", request.remote, "HEAD"]
         )
     else:
         repository = await github_repository_context(root)
@@ -158,7 +162,7 @@ async def git_delivery_action(root: Path, request: GitDeliveryRequest):
                 command,
                 "pr",
                 "create",
-                "--draft",
+                *(["--draft"] if request.action == "draft_pr" else []),
                 "--head",
                 status["branch"],
                 "--base",
@@ -170,4 +174,4 @@ async def git_delivery_action(root: Path, request: GitDeliveryRequest):
             ],
             input_data=request.body.encode("utf-8"),
         )
-    return {"message": output, "url": output if request.action == "draft_pr" else ""}
+    return {"message": output, "url": output if request.action in {"draft_pr", "create_pr"} else ""}

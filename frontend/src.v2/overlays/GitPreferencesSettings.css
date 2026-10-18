@@ -1,0 +1,26 @@
+.settings-git-preferences .settings-git-prefix {
+  width: 148px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+}
+.settings-git-instructions-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.settings-git-instructions-header h3 { margin: 0; }
+.settings-git-instructions-header p { margin: 4px 0 0; }
+.settings-git-instructions textarea { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; resize: vertical; background: transparent; color: var(--text-primary); font: inherit; font-size: var(--text-sm); line-height: 1.6; }
+.settings-git-instructions textarea:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.settings-git-instructions-saved { color: var(--text-secondary); font-size: var(--text-xs); }
+.settings-git-segments { display: inline-flex; align-items: center; gap: 2px; }
+.settings-git-segments button { border: 0; border-radius: 999px; min-height: 28px; padding: 4px 10px; background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.settings-git-segments button[aria-pressed="true"] { background: var(--surface-soft); color: var(--text-primary); }
+.settings-git-segments button:hover { background: var(--surface-hover); }
+.settings-git-segments button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.settings-git-segments button:disabled { opacity: .5; cursor: default; }
+.settings-git-preferences .settings-git-prefix:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}

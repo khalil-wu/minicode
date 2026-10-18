@@ -96,7 +96,8 @@ def _register_worktree(runtime, child, root: Path):
         child.subagent_id,
         resource_kind="worktree",
         resource_id=str(worktree.worktree_path),
-        metadata={"git_root": str(repository)},
+        metadata={"git_root": str(repository), "worktree_branch": worktree.temporary_branch,
+            "head_commit": worktree.head_commit},
     )
     return worktree.worktree_path
 

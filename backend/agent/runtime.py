@@ -144,7 +144,8 @@ def _purge_conversation_files(
             try:
                 metadata = resource["metadata"]
                 worktree = resume_agent_worktree(path, expected_repo_root=metadata["git_root"],
-                    expected_subagent_id=record["subagent_id"], expected_head_commit=metadata["head_commit"])
+                    expected_subagent_id=record["subagent_id"], expected_worktree_branch=metadata["worktree_branch"],
+                    expected_head_commit=metadata["head_commit"])
                 if worktree is None:
                     raise RuntimeError("Conversation worktree no longer matches its durable owner")
                 had_changes = has_worktree_changes(worktree)
@@ -1994,6 +1995,10 @@ class AgentRuntime:
                 ) and completed
                 continue
             try:
+                if "worktree_branch" not in metadata:
+                    record = self.upgrade_legacy_worktree_owner(record.subagent_id)
+                    resource = next(item for item in record.cleanup_resources if item["resource_kind"] == "worktree" and item["resource_id"] == path_text)
+                    metadata = resource["metadata"]
                 from backend.agent.worktree import (
                     cleanup_agent_worktree,
                     has_worktree_changes,
@@ -2003,6 +2008,7 @@ class AgentRuntime:
                 def cleanup() -> tuple[bool, str, bool]:
                     worktree = resume_agent_worktree(path, expected_repo_root=git_root,
                         expected_subagent_id=record.subagent_id,
+                        expected_worktree_branch=metadata["worktree_branch"],
                         expected_head_commit=str(metadata.get("head_commit") or ""))
                     if worktree is None:
                         raise RuntimeError("Recovered worktree no longer matches its durable resource owner")
@@ -2035,6 +2041,15 @@ class AgentRuntime:
                 )
                 completed = False
         return completed
+
+    def upgrade_legacy_worktree_owner(self, subagent_id: str) -> SubagentRunRecord:
+        record = self._subagents[subagent_id]
+        if not any(item["resource_kind"] == "worktree" and "worktree_branch" not in item["metadata"] for item in record.cleanup_resources):
+            return record
+        upgraded = self._swarm_store.upgrade_legacy_worktree_owner(record.to_dict())
+        record = _subagent_from_dict(upgraded)
+        self._subagents[subagent_id] = record
+        return record
 
     def _reconcile_recovered_cleanup_resources(self) -> None:
         """Reconcile dead-runtime resources before clearing durable intent."""

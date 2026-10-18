@@ -13,7 +13,13 @@ async def handle_code_review(session: Any, data: dict[str, Any], *, command: str
     owner = None
     identity = {}
     try:
-        owner = resolve_command_scope(session, data, require_conversation=False, require_workspace=True, allow_executor_uri=True)
+        owner = resolve_command_scope(session, data, require_conversation=command == "review.create", require_workspace=True, allow_executor_uri=True)
+        if command == "review.create":
+            from backend.services.review_delivery_service import create_review_context
+
+            payload = await create_review_context(session, owner, data)
+            await session.emit_command_result(command, "Code review thread prepared.", level="success", data=owner.apply(payload))
+            return True
         async with _git_execution(session, owner, data, identity) as service:
             if command == "review.options":
                 payload = await code_review_options_on_executor(owner.workspace_root, service)
@@ -27,4 +33,4 @@ async def handle_code_review(session: Any, data: dict[str, Any], *, command: str
     return True
 
 
-HANDLERS = {command: partial(handle_code_review, command=command) for command in ("review.options", "review.prepare")}
+HANDLERS = {command: partial(handle_code_review, command=command) for command in ("review.options", "review.prepare", "review.create")}

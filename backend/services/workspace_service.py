@@ -645,12 +645,14 @@ async def _run_gh_pr_view(gh_path: str, *, cwd: str) -> tuple[int, str]:
 
 
 async def _run_gh_pr_merge_auto(gh_path: str, *, cwd: str, pr_number: int, enabled: bool) -> tuple[int, str]:
+    from backend.services.git_settings_service import get_git_preferences
+
     proc = await spawn_exec(
         gh_path,
         "pr",
         "merge",
         str(pr_number),
-        *( ["--auto", "--merge"] if enabled else ["--disable-auto"] ),
+        *(["--auto", "--" + get_git_preferences().pull_request_merge_method] if enabled else ["--disable-auto"]),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,

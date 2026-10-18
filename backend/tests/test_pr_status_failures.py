@@ -88,3 +88,22 @@ async def test_successful_pr_query_keeps_actual_check_results(tmp_path, monkeypa
     assert result["pr"]["number"] == 7
     assert result["checks"][0]["status"] == "failure"
     assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_saved_merge_method_only_changes_the_next_explicit_auto_merge_command(tmp_path, monkeypatch):
+    from backend.services import git_settings_service as settings
+    from backend.api import routes_git_settings
+    from fastapi import Response
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(settings, "GIT_PREFERENCES_FILE", tmp_path / "git-preferences.json")
+    spawned = AsyncMock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(workspace_service, "spawn_exec", spawned)
+    monkeypatch.setattr(workspace_service, "communicate", AsyncMock(return_value=(b"", b"")))
+    routes_git_settings.put_git_settings(settings.GitPreferences(pull_request_merge_method="squash"), Response())
+    spawned.assert_not_awaited()
+    await workspace_service._run_gh_pr_merge_auto("gh", cwd=str(tmp_path), pr_number=7, enabled=True)
+    assert spawned.await_args.args == ("gh", "pr", "merge", "7", "--auto", "--squash")
+    await workspace_service._run_gh_pr_merge_auto("gh", cwd=str(tmp_path), pr_number=7, enabled=False)
+    assert spawned.await_args.args == ("gh", "pr", "merge", "7", "--disable-auto")

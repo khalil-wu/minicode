@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, Upload } from "lucide-react";
+import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, Sparkles, Upload } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { appendWorkspaceOwner, workspaceFileOwner, workspaceRequestOwner, type WorkspaceRequestOwner } from "../protocol/workspace-owner";
 import { showConfirm } from "../overlays/DialogService";
@@ -10,12 +10,14 @@ import { readLS, writeLS } from "../stores/shared-helpers";
 import { safeJsonParse } from "../lib/safe-parse";
 import { SelectMenu } from "../components/SelectMenu";
 import { openSettings } from "../lib/settings-navigation";
+import type { GitPreferences } from "../protocol/git-preferences";
 
 interface DeliveryStatus extends Partial<WorkspaceRequestOwner> {
   registration_id?: string;
   is_git_repo: boolean; branch: string; repo_root: string; remotes: string[]; upstream: string;
   commits: Array<{ hash: string; subject: string }>; detached: boolean; error?: string;
   github?: { eligible: boolean; host: string; available: boolean; authenticated: boolean | null; message: string; remote?: boolean };
+  preferences: GitPreferences;
 }
 type GitDeliveryProps = { workspaceRoot: string; stagedCount: number; onChanged: () => void; refreshKey?: number; active?: boolean };
 type LoadedDelivery = { value: DeliveryStatus; owner: WorkspaceRequestOwner | undefined; conversationId: string | null; root: string };
@@ -45,6 +47,7 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
   const owns = (snapshot: LoadedDelivery) => Boolean(loaded.current
     && loaded.current.value.registration_id === snapshot.value.registration_id
     && loaded.current.value.environment_id === snapshot.value.environment_id
+    && loaded.current.value.branch === snapshot.value.branch
     && useAppStore.getState().conversationId === snapshot.conversationId
     && useAppStore.getState().workingDirectory === snapshot.root);
   const endpoint = (owner?: WorkspaceRequestOwner) => {
@@ -56,6 +59,11 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
     setStatus(null); setBusy(""); setError(""); setFeedback(""); setUrl("");
     return () => operation.current?.abort();
   }, [workspaceRoot, conversationId]);
+  useEffect(() => {
+    const refreshPreferences = () => setRevision((value) => value + 1);
+    window.addEventListener("minicode-git-preferences-changed", refreshPreferences);
+    return () => window.removeEventListener("minicode-git-preferences-changed", refreshPreferences);
+  }, []);
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
@@ -76,10 +84,14 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
     const snapshot = loaded.current;
     if (!snapshot) return;
     const branchAtClick = snapshot.value.branch ?? "";
-    if (action === "push" || action === "draft_pr") {
-      const confirmed = await showConfirm({ title: action === "push" ? tr("推送当前分支") : tr("创建草稿 PR"),
-        message: action === "push" ? tr("将 {branch} 推送到 {remote}。", { branch: branchAtClick, remote }) : tr("从 {branch} 向 {base} 创建草稿 PR：{title}", { branch: branchAtClick, base, title: "\n" + title }),
-        confirmLabel: action === "push" ? tr("推送") : tr("创建草稿 PR") });
+    const forceWithLease = snapshot.value.preferences.always_force_push;
+    const isCreatePR = action === "draft_pr" || action === "create_pr";
+    const actionLabel = action === "push" ? tr("推送") : action === "draft_pr" ? tr("创建草稿 PR") : tr("创建 PR");
+    if (action === "push" || isCreatePR) {
+      const confirmed = await showConfirm({ title: action === "push" ? tr("推送当前分支") : actionLabel,
+        message: action === "push" ? forceWithLease ? tr("使用 --force-with-lease 将 {branch} 推送到 {remote}。", { branch: branchAtClick, remote }) : tr("将 {branch} 推送到 {remote}。", { branch: branchAtClick, remote })
+          : action === "draft_pr" ? tr("从 {branch} 向 {base} 创建草稿 PR：{title}", { branch: branchAtClick, base, title: "\n" + title }) : tr("从 {branch} 向 {base} 创建 PR：{title}", { branch: branchAtClick, base, title: "\n" + title }),
+        confirmLabel: actionLabel });
       if (!confirmed || !owns(snapshot)) return;
     }
     if (!owns(snapshot)) return;
@@ -89,7 +101,7 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
       const owner = snapshot.value.registration_id ? workspaceFileOwner(snapshot.value) : snapshot.owner;
       const response = await fetchWithTimeout(endpoint(owner), { method: "POST", headers: authHeaders({ "content-type": "application/json" }), signal: controller.signal,
         body: JSON.stringify({ action, message, remote, branch, title, base, body, expected_branch: branchAtClick,
-          expected_registration_id: snapshot.value.registration_id ?? "" }) }, { timeoutMs: 130000 });
+          expected_registration_id: snapshot.value.registration_id ?? "", force_with_lease: action === "push" && forceWithLease }) }, { timeoutMs: 130000 });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
       const result = await response.json() as { message: string; url?: string };
       if (!owns(snapshot) || controller.signal.aborted) return;
@@ -99,17 +111,43 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
     } catch (reason) { if (owns(snapshot) && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { if (owns(snapshot) && operation.current === controller) setBusy(""); }
   };
+  const generate = async (kind: "commit" | "pull_request") => {
+    const snapshot = loaded.current;
+    if (!snapshot || !owns(snapshot)) return;
+    const controller = operation.current = new AbortController();
+    const originalMessage = message;
+    setBusy("generate_" + kind); setError(""); setFeedback("");
+    try {
+      const owner = snapshot.value.registration_id ? workspaceFileOwner(snapshot.value) : snapshot.owner;
+      const url = endpoint(owner); url.pathname = "/api/workspace/git/generate-message";
+      const response = await fetchWithTimeout(url, { method: "POST", headers: authHeaders({ "content-type": "application/json" }), signal: controller.signal,
+        body: JSON.stringify({ kind, message: originalMessage, base, expected_branch: snapshot.value.branch,
+          expected_registration_id: snapshot.value.registration_id ?? "" }) }, { timeoutMs: 60000 });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
+      const result = await response.json() as { message: string; title: string; body: string };
+      if (!owns(snapshot) || controller.signal.aborted) return;
+      if (kind === "commit") setMessage((current) => !current.trim() || current === originalMessage ? result.message : current);
+      else {
+        setTitle((current) => current.trim() ? current : result.title);
+        setBody((current) => current.trim() ? current : result.body);
+      }
+    } catch (reason) { if (owns(snapshot) && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (owns(snapshot) && operation.current === controller) setBusy(""); }
+  };
   const github = status?.github;
+  const draftPR = status ? status.preferences.create_draft_pull_requests : true;
+  const createPRLabel = draftPR ? tr("创建草稿 PR") : tr("创建 PR");
   const githubReady = !statusLoading && Boolean(github?.eligible && github.available && github.authenticated === true);
   const githubReason = statusLoading ? tr("正在读取 GitHub 连接状态…") : !github ? tr("GitHub 连接状态待确认。")
     : github.remote && github.message ? github.message
     : !github.eligible ? github.message || tr("当前仓库未关联 GitHub 远端。")
     : !github.available ? tr("GitHub 连接组件未就绪。")
     : github.authenticated === null ? github.message || tr("GitHub 连接状态待确认。")
-    : !github.authenticated ? tr("连接 GitHub 后可创建草稿 PR。") : "";
+    : !github.authenticated ? draftPR ? tr("连接 GitHub 后可创建草稿 PR。") : tr("连接 GitHub 后可创建 PR。") : "";
   return <section className="mc-git-delivery" aria-label={tr("Git 交付")}>
     {status?.is_git_repo === false ? <button type="button" disabled={Boolean(busy)} onClick={() => void run("init")}><GitBranch size={14} />{tr("初始化 Git 仓库")}</button> : <>
-      <textarea aria-label={tr("提交说明")} placeholder={tr("提交说明…")} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} disabled={Boolean(busy)} />
+      <textarea aria-label={tr("提交说明")} placeholder={tr("提交说明…")} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} disabled={Boolean(busy) && busy !== "generate_commit"} />
+      <button type="button" disabled={!status || !stagedCount || Boolean(busy)} onClick={() => void generate("commit")}><Sparkles size={13} />{busy === "generate_commit" ? tr("生成中…") : tr("生成提交说明")}</button>
       <button type="button" disabled={!status || !message.trim() || !stagedCount || Boolean(busy)} onClick={() => void run("commit")}><GitCommitHorizontal size={14} />{busy === "commit" ? tr("提交中…") : tr("提交已暂存的 {count} 个文件", { count: stagedCount })}</button>
       <details><summary>{tr("分支与推送")}</summary><small>{status?.repo_root}<br />{status?.upstream ? tr("跟踪 {branch}", { branch: status.upstream }) : tr("尚未设置跟踪分支")}</small>
         <div className="mc-git-delivery-row"><input aria-label={tr("新分支名称")} placeholder={tr("新分支名称")} value={branch} onChange={(event) => setBranch(event.target.value)} /><button type="button" disabled={!status || !branch.trim() || Boolean(busy)} onClick={() => void run("branch")}>{tr("创建")}</button></div>
@@ -117,12 +155,14 @@ function GitDeliveryPanel({ workspaceRoot, stagedCount, onChanged, refreshKey = 
           <button type="button" disabled={!remote || Boolean(busy) || status?.detached} onClick={() => void run("push")}><Upload size={13} />{tr("推送")}</button></div>
       </details>
       {!githubReady && <div className="mc-git-pr-connection"><p role="status">{githubReason}</p>{!github?.remote && <button type="button" onClick={() => openSettings("workspaceGit")}>{tr("查看 GitHub 连接设置")}</button>}</div>}
-      <details><summary>{tr("创建草稿 PR")}</summary><input aria-label={tr("PR 标题")} placeholder={tr("标题")} value={title} disabled={!githubReady || Boolean(busy)} onChange={(event) => setTitle(event.target.value)} /><input aria-label={tr("PR 目标分支")} placeholder={tr("目标分支")} value={base} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBase(event.target.value)} />
-        <textarea aria-label={tr("PR 说明")} placeholder={tr("说明与验证结果")} rows={4} value={body} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBody(event.target.value)} /><button type="button" disabled={!githubReady || !title.trim() || !base.trim() || Boolean(busy) || status?.detached} onClick={() => void run("draft_pr")}><GitPullRequest size={14} />{tr("创建草稿 PR")}</button>
+      <details><summary>{createPRLabel}</summary><input aria-label={tr("PR 标题")} placeholder={tr("标题")} value={title} disabled={!githubReady || (Boolean(busy) && busy !== "generate_pull_request")} onChange={(event) => setTitle(event.target.value)} /><input aria-label={tr("PR 目标分支")} placeholder={tr("目标分支")} value={base} disabled={!githubReady || Boolean(busy)} onChange={(event) => setBase(event.target.value)} />
+        <textarea aria-label={tr("PR 说明")} placeholder={tr("说明与验证结果")} rows={4} value={body} disabled={!githubReady || (Boolean(busy) && busy !== "generate_pull_request")} onChange={(event) => setBody(event.target.value)} />
+        <button type="button" disabled={!githubReady || !base.trim() || Boolean(busy) || Boolean(title.trim() && body.trim())} onClick={() => void generate("pull_request")}><Sparkles size={13} />{busy === "generate_pull_request" ? tr("生成中…") : tr("生成 PR 标题和说明")}</button>
+        <button type="button" disabled={!githubReady || !title.trim() || !base.trim() || Boolean(busy) || status?.detached} onClick={() => void run(draftPR ? "draft_pr" : "create_pr")}><GitPullRequest size={14} />{createPRLabel}</button>
       </details>
       {status?.commits?.length ? <details><summary>{tr("最近提交")}</summary>{status.commits.map((commit) => <p key={commit.hash}><code>{commit.hash}</code> {commit.subject}</p>)}</details> : null}
     </>}
     {error && <p role="alert">{error}</p>}{feedback && <p role="status"><Check size={13} />{feedback}</p>}
-    {url && <button type="button" onClick={() => void openExternal(url)}>{tr("打开草稿 PR")}</button>}
+    {url && <button type="button" onClick={() => void openExternal(url)}>{tr("打开 PR")}</button>}
   </section>;
 }

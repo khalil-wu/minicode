@@ -215,6 +215,7 @@ ClientCommandType = Literal[
     "user_message.queue.steer",
     "review.options",
     "review.prepare",
+    "review.create",
     "thread/approveGuardianDeniedAction",
     "interrupt",
     "ping",

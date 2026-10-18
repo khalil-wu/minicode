@@ -34,23 +34,38 @@ def continuation_owner(tmp_path):
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl",
         swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
 
-    def held(name: str, *, session_id: str = "owner-session"):
+    def held(name: str, *, session_id: str = "owner-session", legacy_owner: bool = False):
+        from backend.services.git_settings_service import GitPreferences, update_git_preferences
+
         conversation_id = "conversation-" + name
         parent = runtime.start_run(run_id="parent-" + name,
             conversation_id=conversation_id, session_id=session_id)
         child = runtime.start_subagent(subagent_id="subagent-" + name,
             parent_run_id=parent.run_id, agent_type="worker", session_id=session_id,
             background=True, resume_config={"isolation": "worktree"})
+        if legacy_owner:
+            update_git_preferences(GitPreferences(branch_prefix="minicode/"))
         worktree, error = create_agent_worktree(child.subagent_id, repository)
         assert worktree is not None, error
+        metadata = {"git_root": str(worktree.git_root), "branch": worktree.branch, "head_commit": worktree.head_commit}
+        resume = {"isolation": "worktree", "worktree_path": str(worktree.worktree_path), "worktree_head_commit": worktree.head_commit}
+        if not legacy_owner:
+            metadata["worktree_branch"] = resume["worktree_branch"] = worktree.temporary_branch
         assert runtime.register_subagent_cleanup_resource(child.subagent_id,
             resource_kind="worktree", resource_id=str(worktree.worktree_path),
-            metadata={"git_root": str(worktree.git_root), "branch": worktree.branch,
-                "head_commit": worktree.head_commit})
+            metadata=metadata)
         assert runtime.update_subagent_resume_config(child.subagent_id,
-            {"isolation": "worktree", "worktree_path": str(worktree.worktree_path),
-                "worktree_head_commit": worktree.head_commit},
+            resume,
             agent_path=child.agent_path, mailbox_epoch=child.mailbox_epoch) is not None
+        if legacy_owner:
+            creation = runtime.start_run(conversation_id=conversation_id, parent_run_id=parent.run_id,
+                role="subagent:worker", task_id=child.subagent_id, session_id=session_id, mailbox_epoch=child.mailbox_epoch)
+            runtime.execution_journal(child.subagent_id).append("user_prompt", {
+                "run_id": creation.run_id, "worktree_path": str(worktree.worktree_path),
+                "worktree_branch": worktree.branch, "content": "Original admitted worktree request",
+            })
+            runtime.commit_terminal(creation.run_id, "completed")
+            update_git_preferences(GitPreferences(branch_prefix="after-legacy/"))
         mail = runtime.send_swarm_message(sender_id=parent.run_id,
             recipient_id=child.subagent_id, content="Accepted work must survive retirement",
             conversation_id=conversation_id, delivery_mode="queue_only")
@@ -111,7 +126,25 @@ def test_cold_conversation_delete_finishes_original_workspace_without_global_hyd
     continuation_owner, monkeypatch, changed,
 ):
     owner = continuation_owner
-    item, peer = owner.held("deleted"), owner.held("peer", session_id="peer-session")
+    item, peer = owner.held("deleted", legacy_owner=True), owner.held("peer", session_id="peer-session")
+    worktree = item.worktree.worktree_path
+    assert _git(worktree, "switch", "-c", "preserved-user-branch").returncode == 0
+    (worktree / "user-commit.txt").write_text("committed user work survives\n", encoding="utf-8")
+    assert _git(worktree, "add", "user-commit.txt").returncode == 0
+    assert _git(worktree, "-c", "user.name=Owner Audit", "-c", "user.email=audit@example.invalid",
+        "commit", "-m", "User branch commit").returncode == 0
+    current_head = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+    legacy = owner.runtime.get_subagent(item.child.subagent_id).to_dict()
+    legacy["cleanup_resources"][0]["metadata"].update(branch="preserved-user-branch", head_commit=current_head)
+    legacy["resume_config"]["worktree_head_commit"] = current_head
+    assert "worktree_branch" not in legacy["cleanup_resources"][0]["metadata"]
+    assert owner.runtime._swarm_store.upsert_subagent(legacy,
+        expected_owner_token=legacy["runtime_owner_token"]) is not None
+    from backend.agent.worktree_owner_upgrade import WorktreeOwnerUpgradeError, upgrade_legacy_worktree_owners
+    with pytest.raises(WorktreeOwnerUpgradeError, match="original registration and admitted prompt"):
+        upgrade_legacy_worktree_owners(legacy, journal_root=owner.root / "missing-creation-journal", read_run=owner.runtime._swarm_store.get_agent_run,
+            states={"active", "retiring", "continuation"})
+    assert worktree.exists()
     if changed:
         (item.worktree.worktree_path / "user-draft.txt").write_text(
             "unsaved user work stays here\n", encoding="utf-8")
@@ -124,6 +157,18 @@ def test_cold_conversation_delete_finishes_original_workspace_without_global_hyd
         raise AssertionError("targeted conversation deletion must not hydrate the global runtime")
 
     monkeypatch.setattr(runtime_module, "AgentRuntime", unexpected_hydration)
+    retire = runtime_module._purge_conversation_files
+
+    def verify_upgrade(*args, **kwargs):
+        persisted = owner.runtime._swarm_store.get_subagent(item.child.subagent_id)
+        metadata = persisted["cleanup_resources"][0]["metadata"]
+        assert metadata["worktree_branch"] == item.worktree.temporary_branch
+        assert metadata["branch"] == "preserved-user-branch" and metadata["head_commit"] == current_head
+        assert metadata["worktree_owner_upgrade"]["agent_path"] == item.child.agent_path
+        assert persisted["resume_config"]["worktree_branch"] == item.worktree.temporary_branch
+        return retire(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "_purge_conversation_files", verify_upgrade)
     removed = runtime_module.purge_persisted_conversation_runtime(item.conversation_id)
 
     assert removed["subagent_ids"] == [item.child.subagent_id]
@@ -132,6 +177,7 @@ def test_cold_conversation_delete_finishes_original_workspace_without_global_hyd
     assert runtime_module.default_runtime_if_initialized() is None
     assert peer.worktree.worktree_path.is_dir()
     assert owner.runtime._swarm_store.get_subagent(peer.child.subagent_id) == peer_before
+    assert _git(owner.repository, "show", "preserved-user-branch:user-commit.txt").stdout == "committed user work survives\n"
 
 
 @pytest.mark.asyncio

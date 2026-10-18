@@ -127,6 +127,21 @@
 
 /* Application chrome and left navigation */
 
+html[data-native-window-opaque="false"],
+html[data-native-window-opaque="false"] body,
+html[data-native-window-opaque="false"] #root {
+  background: transparent;
+}
+
+html[data-native-window-opaque="false"] {
+  --native-shell-background: transparent;
+  --native-sidebar-background: transparent;
+}
+
+html[data-native-window-opaque="false"] .mc-desktop-workspace {
+  background: transparent;
+}
+
 .mc-desktop-shell::after {
   content: "";
   position: absolute;
@@ -140,7 +155,7 @@
   min-height: var(--header-height) !important;
   height: var(--header-height) !important;
   padding-inline: 8px !important;
-  background: var(--desktop-shell-background) !important;
+  background: var(--native-shell-background, var(--desktop-shell-background)) !important;
   border-bottom: 0 !important;
 }
 
@@ -150,7 +165,7 @@
 
 .mc-sidebar-left,
 .sidebar-animate {
-  background: var(--workbench-sidebar) !important;
+  background: var(--native-sidebar-background, var(--workbench-sidebar)) !important;
   border-right-color: var(--border-subtle) !important;
 }
 

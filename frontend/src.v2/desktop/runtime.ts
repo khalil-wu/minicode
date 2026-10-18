@@ -252,6 +252,12 @@ export interface RemoteDirectoryEntries {
   entries: Array<{ name: string; path: string; type: "directory" | "file" }>;
 }
 
+export interface WindowAppearanceState {
+  supportsTranslucency: boolean;
+  opaque: boolean;
+  theme: "light" | "dark";
+}
+
 interface MiniCodeDesktop {
   connections?: {
     list(): Promise<RemoteDesktopConnection[]>;
@@ -277,6 +283,9 @@ interface MiniCodeDesktop {
     consumeInitialNavigation(): boolean;
     openConversation(conversationId: string): Promise<{ windowOwnerId: string; windowInstanceId: string }>;
     getState(): Promise<{ isMaximized: boolean; isFocused: boolean }>;
+    getAppearance(): Promise<WindowAppearanceState>;
+    setAppearance(options: { themeMode: "system" | "light" | "dark"; opaqueWindows: boolean }): Promise<WindowAppearanceState>;
+    onAppearanceChanged(callback: (state: WindowAppearanceState) => void): () => void;
     onStateChanged(callback: (state: { isMaximized: boolean; isFocused: boolean }) => void): () => void;
     minimize(): Promise<void>;
     maximize(): Promise<void>;

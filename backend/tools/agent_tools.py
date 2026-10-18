@@ -1533,6 +1533,7 @@ class TaskTool(BaseTool):
                 f"Subagent {subagent_id} has no durable runtime record to resume."
             )
         runtime.validate_subagent_task_registration(subagent_id, parent_run_id=record.parent_run_id)
+        record = runtime.upgrade_legacy_worktree_owner(subagent_id)
 
         from backend.agent.checkpoint import load_latest_run_checkpoint
 
@@ -1714,6 +1715,8 @@ class TaskTool(BaseTool):
             subagent_metadata["_resume_mailbox_claims"] = mailbox_claims
         if continuation_resource is not None:
             subagent_metadata["_resume_worktree_continuation"] = continuation_resource
+        if resume_workspace_root is not None:
+            subagent_metadata["_resume_worktree_branch"] = previous_config["worktree_branch"]
         llm_resolution = await self._prepare_subagent_llm_resolution(
             context=context,
             agent_type=agent_type,
@@ -2139,6 +2142,8 @@ class TaskTool(BaseTool):
                 read_only=subagent_config["read_only"],
                 write_scope=subagent_config["write_scope"],
                 resume_config={
+                    **({"worktree_branch": subagent_metadata["_resume_worktree_branch"]}
+                       if resume_workspace_root is not None else {}),
                     "execution_started_at": 0,
                     "read_only": bool(subagent_config.get("read_only")),
                     "write_scope": list(subagent_config.get("write_scope") or []),
@@ -2553,6 +2558,8 @@ class TaskTool(BaseTool):
                     resume_workspace_root,
                     expected_repo_root=parent_workspace_root,
                     expected_subagent_id=subagent_id,
+                    expected_worktree_branch=(continuation_metadata["worktree_branch"] if continuation_metadata is not None
+                        else subagent_record.resume_config["worktree_branch"]),
                     expected_head_commit=(continuation_metadata["head_commit"] if continuation_metadata is not None
                         else str(subagent_record.resume_config.get("worktree_head_commit") or "")),
                 )
@@ -2562,7 +2569,8 @@ class TaskTool(BaseTool):
                     subagent_id,
                     resource_kind="worktree",
                     resource_id=str(agent_worktree.worktree_path),
-                    metadata={"git_root": str(agent_worktree.git_root), "branch": agent_worktree.branch, "head_commit": agent_worktree.head_commit},
+                    metadata={"git_root": str(agent_worktree.git_root), "branch": agent_worktree.branch,
+                        "worktree_branch": agent_worktree.temporary_branch, "head_commit": agent_worktree.head_commit},
                 )
             explicit_child_workspace = None
             raw_child_cwd = str(subagent_config.get("cwd") or "").strip()
@@ -2589,6 +2597,7 @@ class TaskTool(BaseTool):
                         if not runtime.register_subagent_cleanup_resource(
                             subagent_id, resource_kind="worktree", resource_id=str(agent_worktree.worktree_path),
                             metadata={"git_root": str(agent_worktree.git_root), "branch": agent_worktree.branch,
+                                "worktree_branch": agent_worktree.temporary_branch,
                                 "head_commit": agent_worktree.head_commit},
                         ):
                             raise RuntimeError(
@@ -2609,6 +2618,7 @@ class TaskTool(BaseTool):
                         "detach_from_parent": bool(subagent_record.detach_from_parent),
                         "plan_slug": str(subagent_config.get("plan_slug") or ""),
                         "worktree_head_commit": agent_worktree.head_commit if agent_worktree is not None else "",
+                        "worktree_branch": agent_worktree.temporary_branch if agent_worktree is not None else "",
                         "worktree_path": str(
                             resume_workspace_root
                             or (
@@ -2720,7 +2730,7 @@ class TaskTool(BaseTool):
                                 or (agent_worktree.worktree_path if agent_worktree is not None else "")
                             ),
                             "worktree_branch": str(
-                                agent_worktree.branch if agent_worktree is not None else ""
+                                agent_worktree.temporary_branch if agent_worktree is not None else ""
                             ),
                     }
                 except Exception as journal_exc:

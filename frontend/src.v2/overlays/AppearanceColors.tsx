@@ -1,10 +1,13 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { HexColorPicker } from "react-colorful";
+import { ChevronDown } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { colorInputDraft, completeColorInput, effectiveAppearanceColors, type AppearanceColorRole } from "../lib/appearance-colors";
 import { defaultThemePreferences } from "../lib/appearance-themes";
+import { desktop, isDesktop } from "../desktop/runtime";
+import { pushToast } from "./ToastContainer";
 import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
 import { AppearanceCodeThemePicker } from "./AppearanceCodeThemePicker";
 import "./AppearanceColors.css";
@@ -104,6 +107,23 @@ export function AppearanceColors() {
   const { contrast, opaqueWindows, semanticColors } = selection ?? defaultThemePreferences(variant);
   const snapshot = { codeThemeId, theme: { contrast, opaqueWindows, semanticColors, ...effective, accentSource: "custom" as const } };
   const variantLabel = t(variant === "light" ? "浅色" : "深色");
+  const [supportsTranslucency, setSupportsTranslucency] = useState(false);
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let current = true;
+    void desktop()!.windowControls.getAppearance().then(state => {
+      if (current) setSupportsTranslucency(state.supportsTranslucency);
+    }).catch(error => {
+      if (current) pushToast(t("窗口外观读取失败：{v0}", { v0: String(error) }), "error");
+    });
+    const unsubscribe = desktop()!.windowControls.onAppearanceChanged(state => setSupportsTranslucency(state.supportsTranslucency));
+    return () => { current = false; unsubscribe(); };
+  }, [t]);
+  const patchTheme = (patch: { contrast?: number; opaqueWindows?: boolean }) => {
+    void importTheme(variant, { ...snapshot, theme: { ...snapshot.theme, ...patch } }).catch(error => {
+      pushToast(t("主题更新失败：{v0}", { v0: String(error) }), "error");
+    });
+  };
   return <section className="settings-card settings-appearance-colors" aria-label={t("主题")}>
     <div className="settings-row appearance-theme-heading"><h4 className="settings-row-title">{t("主题")}</h4><div className="appearance-theme-heading-controls">
       <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} />
@@ -114,5 +134,20 @@ export function AppearanceColors() {
       <div className="settings-row-control"><ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
         value={effective[role]} onChange={value => setColor(variant, role, value)} /></div>
     </div>)}
+    <details className="appearance-colors-advanced">
+      <summary><ChevronDown aria-hidden="true" />{t("高级")}</summary>
+      {supportsTranslucency && <div className="settings-row">
+        <div className="settings-row-copy"><div className="settings-row-title">{t("半透明侧栏")}</div></div>
+        <div className="settings-row-control"><button type="button" className="settings-toggle" role="switch"
+          aria-label={t("{variant}半透明侧栏", { variant: variantLabel })} aria-checked={!opaqueWindows}
+          data-active={String(!opaqueWindows)} onClick={() => patchTheme({ opaqueWindows: !opaqueWindows })}><span /></button></div>
+      </div>}
+      <div className="settings-row">
+        <div className="settings-row-copy"><div className="settings-row-title">{t("对比度")}</div></div>
+        <div className="settings-row-control"><input type="range" min={0} max={100} step={1} value={contrast}
+          aria-label={t("{variant}对比度", { variant: variantLabel })}
+          onChange={event => patchTheme({ contrast: Number(event.target.value) })} /></div>
+      </div>
+    </details>
   </section>;
 }

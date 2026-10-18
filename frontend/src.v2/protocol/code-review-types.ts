@@ -23,12 +23,18 @@ export interface PreparedCodeReview {
   diff: string;
 }
 
+export interface CreatedCodeReview extends PreparedCodeReview {
+  delivery: "inline" | "detached";
+  reviewThreadId: string;
+  sourceConversationId: string;
+}
+
 export type CodeReviewCommand = {
   type: "review.options";
   conversation_id?: string;
   execution_cwd: string;
 } | {
-  type: "review.prepare";
+  type: "review.prepare" | "review.create";
   conversation_id?: string;
   execution_cwd: string;
   mode: CodeReviewScope["mode"];

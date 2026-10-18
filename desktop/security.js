@@ -298,6 +298,7 @@ const IPC_CAPABILITIES = new Set([
   "minicode:update:activity", "minicode:update:check", "minicode:update:download", "minicode:update:install",
   "minicode:update:preflight", "minicode:update:status:get",
   "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize", "minicode:window:state",
+  "minicode:window:appearance:get", "minicode:window:appearance:set",
   "minicode:window:unload:capture", "minicode:window:unload:resume",
   "minicode:window:openConversation",
   "minicode:window:initialNavigation:consume",

@@ -214,5 +214,16 @@
   "无法加载提交": "Unable to load commits",
   "此差异较大，每次仅显示一个文件": "This diff is large, showing one file at a time",
   "上一个文件": "Previous file",
-  "下一个文件": "Next file"
+  "下一个文件": "Next file",
+  "放弃未保存的更改？": "Discard unsaved changes?",
+  "返回后将放弃对自定义指令的更改。": "Going back discards changes to custom instructions.",
+  "继续编辑": "Keep editing",
+  "编辑此电脑上的 {v0}。项目指令也可能适用。": "Edit {v0} on this computer. Repository instructions may also apply.",
+  "编辑此电脑上的自定义指令，项目指令也可能适用。": "Edit custom instructions on this computer. Repository instructions may also apply.",
+  "添加自定义指令…": "Add your custom instructions…",
+  "自定义指令不能超过 {v0} KiB": "Custom instructions cannot exceed {v0} KiB",
+  "从当前任务生成可复用的记忆，供今后的任务参考。": "Create reusable memories from this task for future tasks.",
+  "删除此电脑上生成的长期记忆，保留任务对话与记忆模式。": "Delete memories generated on this computer while keeping task chats and memory modes.",
+  "编辑本机指令": "Edit local instructions",
+  "本机指令": "Local instructions"
 }

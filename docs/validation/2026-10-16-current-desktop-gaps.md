@@ -1,6 +1,8 @@
 # 当前 MiniCode 与 Codex 桌面端的差距
 
-2026-10-18 当前续修见[SSH 发现、目录选择与生命周期](2026-10-18-ssh-selectors-relay-delivery.md)和[并行真实 UI/agent 链](2026-10-18-real-ui-agent-chain-delivery.md)。发现、Details、目录浏览、实际 Source 链接分类、Git 子目录、FIFO/EOF、窗口与普通 native 请求归属及内部回环直连已补齐并有专项验证。最新 rC2EnfFC 构建及真实快速连接/关闭/首次应用退出、预览重启/页面刷新、原草稿与附件保留均已通过所列范围的实机验收；本批 CI 按新冻结提交取证。旧“显式远端安装按钮”缺口已按实际 consumer 撤回。下列历史提交、构建和 CI 不替代本批身份，也不证明全产品等价。
+2026-10-18 最新批次见[Git、独立审查、设置与窗口外观收尾](2026-10-18-git-review-settings-native-delivery.md)。最终前端为 `assets/index-Bcb9YBtH.js`，TSC、构建与两项预算见 `output/playwright/desktop-alignment-finish-20261018/{build-final,budgets-final-recheck}.log`；此前 `index-8EVAgKHh.js` 的真实模型审查、行内评论、自动折叠和原草稿保留另有记录。旧工作树归属升级、slash 审查限定丢失和设置迟到读取覆盖新选择已修复并做受影响复验。GitHub CI 以本轮提交对应 run 为准，下列旧提交、候选和 CI 只证明各自范围，过滤未执行项不算通过。
+
+2026-10-18 此前续修见[SSH 发现、目录选择与生命周期](2026-10-18-ssh-selectors-relay-delivery.md)和[并行真实 UI/agent 链](2026-10-18-real-ui-agent-chain-delivery.md)。发现、Details、目录浏览、实际 Source 链接分类、Git 子目录、FIFO/EOF、窗口与普通 native 请求归属及内部回环直连已补齐并有专项验证。当时 rC2EnfFC 构建及真实快速连接/关闭/首次应用退出、预览重启/页面刷新、原草稿与附件保留均已通过所列范围的实机验收；该批 CI 按其冻结提交取证。旧“显式远端安装按钮”缺口已按实际 consumer 撤回。下列历史提交、构建和 CI 不替代本批身份，也不证明全产品等价。
 
 2026-10-18 真实外机后续见[SSH、Linux 安装与 Source 核对](2026-10-18-real-ssh-source-harness-delivery.md)。SSH 的登录环境、BatchMode、CLI 准入已按当前桌面 Source 调整；真实 Ubuntu 20.04 目标已完成文件/PTY/IPv4/IPv6/断线任务/归属及 managed 权限的第一批实测。最新 `c2c514ff` Linux wheel 的统一受影响验证为 **67 passed / 6 real skipped**，随后相同安装包的生产 Electron 新会话、命令、默认分支 Changes、Diff→Monaco、中文路径、工作区列表与本地/隐藏远端草稿均有实际证据。最新前端为 `index-DOL_HuZW.js`，下列本机 build 6 和 r20 属各自历史身份；旧 SSH 第一批结果不冒称在新候选全量重跑。`7b4885fa` 的[完整 CI 39093047592](https://github.com/khalil-wu/minicode/actions/runs/39093047592) 已 **9/9 成功**，包含新增的 Linux wheel 冷安装；原两轮 wheel job 失败和取消记录另列保留。远端专属构建、daemon、shim 与临时 SSH 授权均已清理。
 
@@ -22,7 +24,8 @@ Node 专项收尾见[Node 与桌面后续交付](2026-10-16-node-desktop-followu
 
 | 范围 | 当前实际边界 | 源码依据 |
 | --- | --- | --- |
-| Computer Use 配套服务 | 已接通显式已安装 Source runtime、原生 pipe/helper、thread/turn、人工 app 审批与 owner 清理。r20 两个新 profile 实际 bootstrap/inventory/metadata/cleanup 通过；真实系统截图、输入与 app 审批操作未实机验证。外部私有 SDK/helper 不随 wheel 分发，不能宣称独立重写或完整系统操作等价。 | [本机 Changes 与 harness](2026-10-17-local-changes-and-harness-delivery.md)；`backend/mcp/cua_repl.py` |
+| Computer Use 配套服务 | 已接通显式已安装 Source runtime、原生 pipe/helper、thread/turn、app 审批与 owner 清理。本轮真实 Windows consumer 的系统截图、点击、文字输入及一次会话级 app 审批响应通过，最终截图可见原始输入标记；未验证前端审批卡点击、音频、其它 app 策略或平台。host exit 0、launcher 经 owner 关闭后 exit 1，注册表、waiter 与自有进程均清空，不称 launcher 自然 exit 0。外部私有 SDK/helper 不随 wheel 分发，不宣称独立重写或完整系统操作等价。 | `output/native-cua-finish-20261018/acceptance-receipt.json`；[本机 Changes 与 harness](2026-10-17-local-changes-and-harness-delivery.md) |
+| Git 设置与工作树原始所有权 | 分支前缀已进入实际建分支链；新建记录的清理使用创建时的原始分支名，不随后来修改的前缀重算。缺少 `worktree_branch` 的旧资源仍待显式持久 owner 升级及验证，不记全部收尾完成。force-with-lease、草稿 PR 默认值和 merge/squash 设置分别进入用户明确发起的推送、PR 和合并动作；提交/PR 指令按各自范围进入无工具调用的 `side_query`，保留原 executor。本地/远端 consumer 六项精确重跑通过；已接收的 mailbox 后续任务到其确切下一轮前仍持有原工作树，归属重跑通过。 | `output/git-settings-20261018/source-contracts.json`；`output/playwright/desktop-alignment-finish-20261018/{backend-async,worktree-owner-recheck}.xml` |
 | Node 内核与原始准入 | 已有持久 Node MCP、Code Mode/图片/Guardian、长会话与取消清理证据；本批继续修复无 runtime 的 catalog 准入、restricted-token readiness、SDK CUA 三类 owner 和 MCP 原 close 错误传播。r20 是最新独立 backend 安装候选；旧 r19 HOLD 和 r12/r13 不能证明新输入。公开 Source 未公开的内核实现不声称已复刻。 | [本机 Changes 与 harness](2026-10-17-local-changes-and-harness-delivery.md)；[分批 Node 结果](2026-10-16-node-companion.md) |
 | MCP 交互式 App 界面 | 已补注册 descriptor→原调用会话→事件/恢复→交互 App；完成后常驻、原 iframe 跨历史/虚拟行/真实侧栏连续。官方 ext-apps postMessage 与 Codex 私有 sandbox relay 的协议差异明确保留，不能宣称私有 relay 已复刻。 | [本批集成与验证](2026-10-16-desktop-harness-integration.md)；`output/mcp-apps-20261016/implementation-audit.md` |
 | Windows 原生权限边界 | 目标 LSP、环境安装、Git delivery、工作树快照/移除/恢复与真实 WS 新会话切换均已有实现。linked Git metadata、实际 cwd/policy cwd 分离及模型/GUI 共用快照消费链已修复；原 Unicode 归因已排除。仍保留 Source restricted token 对私有 OWNER RIGHTS Temp ACL 的拒绝，以及 unelevated deny-read 明确不支持的原生边界。 | [Windows 工作树后续修复](2026-10-16-windows-worktree-followup.md)；[目标语言服务](2026-10-16-executor-editor-lsp.md) |
@@ -37,7 +40,9 @@ Node 专项收尾见[Node 与桌面后续交付](2026-10-16-node-desktop-followu
 
 - 真实 SSH 主机的 desktop-host 第一批已完成上述实测，最新候选又单独核过受影响实现和真实桌面链；独立 exec-server session 的外机全矩阵及普通 WSL 发行版仍未验收，不据已通过的 SSH desktop-host 推算其它环境。
 - Windows WFP 的真实流量矩阵。显式 setup/status/readiness 已有，但本轮没有执行账号、ACL、防火墙 provisioning，相关跳过不能计通过。
-- 相同真实模型下的大型编码任务、多 agent 长任务和长时断网对照。受控模型的端到端验收与两次真实天气任务不等于该范围已验证。
+- 相同真实模型下的大型编码任务、多 agent 长任务和长时断网对照。本轮小编码链已由两个真实 `gpt-6.1-sol/high` 子 agent 并行读取、修改并发信，父 agent 实际收到两条 mailbox 消息、完成第三处修改并运行原验证器，7 条断言通过且最终完成，见 `output/real-coding-final-20261018/corrected/verdict.json`；该受限任务不证明大型或长时范围。
+- 独立审查的小仓库真实模型 UI 链已通过：实际读文件/运行命令、定位 `pricing.py:2`、Changes 行内评论、最终过程折叠及源 `/review` 草稿保留，见本轮 `review-ui-receipt.json`。模型正文信息量、指针命中验证和大型审查仍有明确边界，不能由小任务推算所有 review 状态等价；Source 合同及准确范围见收尾报告。
+- 原生文件/目录 picker 自动化尚未通过；已有界面观察和受控 consumer 验证不能代替该项实机验收，自动化未完成也不直接归为产品 bug。
 - 外部应用启动、系统剪贴板全部 MIME 类型、更多设备与平台分支。既有目的地拦截或局部系统验证不能扩大成全范围。
 
 原 daemon / executor 会话已死亡时，当前会明确中断或保留待清理证据，不会接管另一环境来冒充原任务。这个限制与“断开前端 proxy 后原 daemon/命令继续”不同；本页不据此推断 Codex 能接管已经死亡的进程。
@@ -62,7 +67,9 @@ Root 另外通过 Playwright CLI 实际点击隔离浏览器中的真实 ChatTur
 
 ### 全界面一致性尚未完成验收
 
-过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。后续已补设置标题、无历史的真实有效 provider、浏览器设备和 Problems 筛选菜单，并实测设备尺寸、字体及重载后的草稿保留，见[设置与预览后续修复](2026-10-16-settings-preview-followup.md)。三色主题编辑也已完成，见[外观配色](2026-10-16-appearance-colors.md)。最新一批进一步加入 Source 中 15 个开源代码主题、23 个明暗变体、分享/导入，以及 Markdown、Diff 和 Monaco 的真实 TextMate 消费链；字体、未保存代码、当前及隐藏草稿保持原样。14 个许可不明的定制主题未收录，因此不是完整 29 主题目录；OS 半透明效果和 Source app Diff 最终背景覆盖链也未借此宣称闭合。详见[主题与 MCP 媒体后续交付](2026-10-16-code-themes-mcp-media.md)。
+本轮设置已接入 Git 分段选项及独立自定义指令编辑页：显式保存后返回、取消放弃修改、脏内容返回确认，隐藏设置/切换页保留草稿；实际写入 MiniCode 的 `INSTRUCTIONS.md`，不伪称 Source 的文件路径。真实 Electron 原生外观桥已接通 Windows Mica 和不透明切换，对比度进入实际颜色计算；`current-ui-state.txt` 返回 `supportsTranslucency=true / opaque=false`，原消息草稿及字体仍保留。`output/native-cua-appearance-recheck-20261018/visual-verdict.json` 核对了一次自有窗口激活后的正确原生截图与可访问性内容；首次遮挡截图内容错误保留，不据重拍单独证明 OS 合成器内部或全状态视觉等价。
+
+过程组合、主/子 agent 工作记录、底部审批替换、侧栏选中、项目动作、统一选择菜单等已有实现和真实场景证据，不能再统称未做。后续已补设置标题、无历史的真实有效 provider、浏览器设备和 Problems 筛选菜单，并实测设备尺寸、字体及重载后的草稿保留，见[设置与预览后续修复](2026-10-16-settings-preview-followup.md)。三色主题编辑也已完成，见[外观配色](2026-10-16-appearance-colors.md)。此前已加入 Source 中 15 个开源代码主题、23 个明暗变体、分享/导入，以及 Markdown、Diff 和 Monaco 的真实 TextMate 消费链；字体、未保存代码、当前及隐藏草稿保持原样。另 14 个定制主题的 21 个变体完整数据与当前 ASAR 哈希一致，但尚未建立完整规则及覆盖数据的可分发来源，也未证实为现有 MIT Shiki 父主题的纯换色，仍未收录；不把来源未定写成技术上无法重建，因此当前不是完整 29 主题目录。详见[主题与 MCP 媒体后续交付](2026-10-16-code-themes-mcp-media.md)和 `output/code-theme-20261016/theme-data-manifest.json`。
 
 上一批主题交付入口为 `assets/index-WzIWjdjR.js`，index SHA256 `684f9691c65912832d1bf9e6f21d34f920783284f71683328623c41eaa2f9b76`。该批实际生产 Electron 的主题菜单、导入、代码块与脏编辑器切色、嵌套焦点及重载后的活动/隐藏草稿见 `output/playwright/code-themes-20261017/`，字体仍为该 profile 原 13px/400；QA 错误与隔离环境 Git 失败单列保留。此前 CCh 构建的十项配色观测仍保留在 `output/playwright/latest-ui-followup-20261016/validation.json`，不混记为 Wz 的整场复验。JS 工具的真实 `title` 过程短行也已按参考源码修正，原参数/输出保留。后续 CE/C9 构建进一步修复双窗口配置和普通 Diff 的背景、正文、行/词/gutter 配色；Cfr 补 HTML 词内片段、普通会话评论、真实行坐标和隐藏阅读草稿；本页顶部 build 5 再补完整文件、富预览、空白/导入过滤及 Source 导航合同，它们不再列为未实现。所有区域同构建、同尺寸和缩放的普通、hover、focus、disabled、菜单、滚动及过渡状态仍未全量核完。
 

@@ -9,5 +9,13 @@
   "已复制{variant}主题": "{variant} theme copied",
   "{variant}代码主题": "{variant} code theme",
   "加载{theme}主题预览失败": "Couldn’t load {theme} theme preview",
-  "无法应用{variant}代码主题": "Couldn’t apply {variant} code theme"
+  "无法应用{variant}代码主题": "Couldn’t apply {variant} code theme",
+  "窗口外观更新失败：{v0}": "Couldn’t update window appearance: {v0}",
+  "窗口外观读取失败：{v0}": "Couldn’t load window appearance: {v0}",
+  "主题更新失败：{v0}": "Couldn’t update theme: {v0}",
+  "半透明侧栏": "Translucent sidebar",
+  "高级": "Advanced",
+  "{variant}半透明侧栏": "{variant} translucent sidebar",
+  "对比度": "Contrast",
+  "{variant}对比度": "{variant} contrast"
 }

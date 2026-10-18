@@ -6,6 +6,7 @@ import { ToastContainer } from "./overlays/ToastContainer";
 import { useWebSocketConnection } from "./hooks/useWebSocket";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useDesktopEvents } from "./hooks/useDesktopEvents";
+import { useNativeWindowAppearance } from "./hooks/useNativeWindowAppearance";
 import { useWorkspaceGit } from "./hooks/useWorkspaceGit";
 import { useAppStore } from "./stores";
 import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
@@ -33,6 +34,7 @@ const AppContent = () => {
   useWebSocketConnection();
   useKeyboardShortcuts();
   useDesktopEvents();
+  useNativeWindowAppearance();
   useWorkspaceGit();
 
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);

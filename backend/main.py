@@ -59,6 +59,7 @@ from backend.api.routes_chat import router as chat_router
 from backend.api.routes_llm import router as llm_router
 from backend.api.routes_voice import router as voice_router
 from backend.api.routes_github import router as github_router
+from backend.api.routes_git_settings import router as git_settings_router
 from backend.api.routes_skills import router as skills_router
 from backend.api.routes_agents import router as agents_router
 from backend.api.routes_replay import router as replay_router
@@ -359,6 +360,7 @@ app.include_router(chat_router)
 app.include_router(llm_router)
 app.include_router(voice_router)
 app.include_router(github_router)
+app.include_router(git_settings_router)
 app.include_router(skills_router)
 app.include_router(agents_router)
 app.include_router(replay_router)

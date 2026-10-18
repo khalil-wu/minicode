@@ -874,18 +874,20 @@ def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
 
 
 async def _handle_code_review(ws: "WebSocketSession", arg: str, attachments: Any) -> tuple[bool, str]:
-    from backend.async_cleanup import to_thread_cancel_safe
-    from backend.services.code_review_service import prepare_code_review
+    from backend.services.code_review_service import prepare_code_review_on_executor
+    from backend.ws.command_scope import CommandScope
+    from backend.ws.handlers.diff import _git_execution
 
     owner_id = _active_conversation_id(ws)
     owner = ws.conversation_repo.get_conversation_summary(owner_id)
-    cwd = ws.session_lifecycle.workspace_root_for_conversation(owner)
-    if cwd is None:
+    cwd = ws.session_lifecycle.workspace_path_for_conversation(owner)
+    if not cwd:
         raise ValueError("Open a Git workspace before starting code review.")
     target, _, branch = arg.strip().partition(" ")
     mode = "base-branch" if target == "base-branch" else "uncommitted"
     request = f"Please review my uncommitted changes\n\n{arg.strip()}" if arg.strip() and target not in {"uncommitted", "base-branch"} else ""
-    prepared = await to_thread_cancel_safe(prepare_code_review, cwd, mode, branch.strip() if mode == "base-branch" else "", "", request)
+    async with _git_execution(ws, CommandScope(owner_id, cwd, ""), {}, {}) as service:
+        prepared = await prepare_code_review_on_executor(cwd, service, mode, branch.strip() if mode == "base-branch" else "", "", request)
     await ws.emit_command_result("review", "Code review request prepared.", data={"code_review": prepared["scope"]})
     return False, prepared["prompt"]
 

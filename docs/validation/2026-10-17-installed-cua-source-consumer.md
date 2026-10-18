@@ -87,3 +87,61 @@ pool empty. No app approval was raised or answered. No screenshot, desktop
 input, ordinary-window open/close operation or official-home access was made.
 This is read-only native enumeration evidence; app approval, screenshot and
 input behavior remain outside these two probes.
+
+## Real native screenshot, input and app request, 2026-10-18
+
+`output/native-cua-finish-20261018/proof.json` extends that boundary through the
+actual installed runtime. The local acceptance transport uses a real
+`WebSocketSession`, conversation repository, QueryGuard claim, `AppBootstrap`
+owner resolver, `MCPServerManager`, `CuaReplMCPClient` and the original native
+helper. No callback, helper, app response or MCP tool result was mocked.
+No model/provider request was needed for this consumer acceptance.
+
+The selected target was one temporary Python/Tk plain-text window, found by
+its exact title in the real returned `list_windows()` inventory. Before any
+capture, the original package requested access to `pythonw.exe`. Its real
+`elicitation/create` reached the owning session's control request with the
+original conversation, turn and message identity. An explicit session-scoped
+`accept` was submitted through the production control-response dispatcher;
+the wire records its success and `mcp_elicitation_resolved`. The later calls
+did not produce a second approval.
+
+The original native service then captured the target, clicked its observed
+text surface, typed `MINICODE_NATIVE_CUA_20261018_OK` and captured it again.
+Every call returned `is_error=false`. The before/focus/after images are saved
+beside the proof; visual inspection confirmed the caret and then the exact
+typed marker. This is native Windows capture/input through MiniCode's
+consumer, not browser CDP or this chat's separate Computer Use tool.
+
+The original host exited 0. The executor registry, companion pool and typed
+waiter registry ended empty. The source launcher exited 1 when its executor
+owner closed it, matching the previous r20 installed consumer receipt; this
+is recorded explicitly and is not counted as a natural launcher exit 0.
+The exact owned QA-window process was stopped afterwards. No ordinary user
+window, user/official profile, model key, or Windows/browser security
+permission was accessed or answered.
+
+The native screenshot/input and backend app-request lane are now exercised.
+This does not claim a rendered frontend approval-card click, other app
+policies, audio, macOS/Linux native execution, or installation/redistribution
+of the private runtime. The installed runtime is still an explicit external
+dependency. The successful native target used the machine's existing Tk
+runtime without modifying Electron.
+
+The two preceding Electron QA-launcher assertions were subsequently diagnosed
+separately, not attributed to CUA or the production runtime. An existing but
+empty `ELECTRON_RUN_AS_NODE` variable reproduces the original
+`isolate_data->snapshot_data()` assertion and exit 134. On this machine's
+PowerShell 7.6.5, assigning an empty string **or** calling
+`Environment.SetEnvironmentVariable(..., $null, 'Process')` leaves such an
+empty variable present. Removing that environment entry is materially
+different. The QA script also called `setAccessibilitySupportEnabled` before
+`app.whenReady`, which the current Electron rejects; only that ignored QA
+launcher was corrected. With the variable absent and that API inside
+`whenReady`, the same runtime and QA entry created a visible window and
+closed naturally with `will-quit`, exit 0 and empty stderr. The minimal
+independent app also passed. Original errors and the controlled comparison
+remain in `electron-diagnostic-final.json`,
+`electron-diagnostic-powershell-null-env.json` and
+`electron-diagnostic-receipt.json` beside the CUA proof. No runtime file was
+changed, downloaded or reinstalled.

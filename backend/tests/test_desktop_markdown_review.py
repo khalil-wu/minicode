@@ -79,7 +79,7 @@ def test_builtin_slash_prepares_same_full_prompt_and_real_scope(repo: Path) -> N
     async def emit(command, message, **kwargs):
         emitted.append((command, kwargs["data"]))
     ws = SimpleNamespace(active_conversation_id="owner", conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: object()),
-                         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda _: repo), emit_command_result=emit)
+                         session_lifecycle=SimpleNamespace(workspace_path_for_conversation=lambda _: str(repo)), emit_command_result=emit)
     handler = build_slash_command_handler({"command": "review", "source": "builtin", "type": "template"})
     handled, prompt = asyncio.run(handler(ws, "", []))
     assert not handled and prompt == prepare_code_review(repo, "uncommitted")["prompt"]

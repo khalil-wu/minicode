@@ -1220,6 +1220,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "user_message.queue.steer",
   "review.options",
   "review.prepare",
+  "review.create",
   "thread/approveGuardianDeniedAction",
   "interrupt",
   "ping",

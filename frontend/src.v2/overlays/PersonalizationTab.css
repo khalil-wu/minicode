@@ -1,0 +1,109 @@
+.personalization-tab {
+  display: grid;
+  gap: 36px;
+}
+
+.personalization-tab > .settings-section {
+  padding: 0;
+  border: 0;
+  background: transparent !important;
+  box-shadow: none;
+  gap: 16px;
+}
+
+.personalization-memory-card,
+.personalization-instructions-entry {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--mc-card-radius);
+  background: transparent;
+}
+
+.personalization-memory-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  margin: 0 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.personalization-memory-row:last-child { border-bottom: 0; }
+
+.personalization-instructions-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 16px;
+  color: var(--text-primary);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.personalization-instructions-entry:hover { background: var(--surface-hover); }
+.personalization-instructions-entry > svg { flex: 0 0 auto; width: 16px; height: 16px; color: var(--text-muted); stroke-width: var(--mc-icon-stroke); }
+
+.personalization-memory-isolation {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  margin-top: 14px;
+  color: var(--text-secondary);
+}
+
+.personalization-memory-isolation > svg { width: 18px; height: 18px; margin-top: 2px; color: var(--state-warning); }
+.personalization-isolation-copy { display: grid; min-width: 0; gap: 4px; line-height: var(--leading-normal); }
+.personalization-isolation-copy > strong { color: var(--text-primary); font-weight: var(--fw-medium); }
+.personalization-isolation-sources { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.personalization-isolation-sources > span { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.personalization-source-detail { color: var(--text-muted); overflow-wrap: anywhere; }
+
+/* The detail page owns its heading only while this exact pane is visible. */
+.settings-center-content:has(.settings-tab-pane[data-settings-tab="personalization"]:not([hidden]) .personalization-instructions-page) > .settings-page-heading { display: none; }
+
+.personalization-instructions-page { display: grid; gap: 20px; }
+.personalization-editor-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; align-items: center; margin: 0; }
+.personalization-editor-heading > h2 { grid-column: 1 / -1; margin: 0; line-height: var(--leading-tight); }
+.personalization-editor-heading > p { grid-column: 1 / -1; margin: 0; color: var(--text-secondary); line-height: var(--leading-normal); }
+.personalization-editor-actions { display: flex; align-items: center; gap: 8px; }
+.personalization-back { display: inline-flex; align-items: center; justify-self: start; gap: 6px; padding: 5px 8px; margin-left: -8px; border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
+.personalization-back > svg { width: 16px; height: 16px; stroke-width: var(--mc-icon-stroke); }
+.personalization-back:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-primary); }
+.personalization-back:disabled { opacity: .45; cursor: default; }
+
+.settings-center-main .personalization-instructions-input {
+  display: block;
+  width: 100%;
+  min-height: 300px;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  line-height: var(--leading-relaxed);
+  resize: vertical;
+}
+
+.personalization-instructions-input:focus { border-color: var(--border-strong); outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.personalization-instructions-input::placeholder { color: var(--text-muted); }
+.personalization-instructions-input:disabled { opacity: .65; }
+.personalization-loading { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); min-height: 64px; }
+.personalization-loading > svg { width: 15px; height: 15px; }
+.personalization-editor-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--state-danger); overflow-wrap: anywhere; }
+.personalization-inline-error { margin: 12px 0 0; color: var(--state-danger); line-height: var(--leading-normal); overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .personalization-tab { gap: 28px; }
+  .personalization-memory-row { gap: 12px; margin: 0 12px; }
+  .personalization-instructions-entry { gap: 12px; padding: 14px 12px; }
+  .personalization-memory-isolation { grid-template-columns: 20px minmax(0, 1fr); }
+  .personalization-memory-isolation > button { grid-column: 2; justify-self: start; }
+  .personalization-editor-error { align-items: start; }
+}

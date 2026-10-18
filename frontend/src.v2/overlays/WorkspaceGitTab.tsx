@@ -1,11 +1,13 @@
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { GithubConnection } from "./GithubConnection";
+import { GitPreferencesSettings } from "./GitPreferencesSettings";
 
 export const WorkspaceGitTab = ({ active = true }: { active?: boolean }) => {
   const { t: tr } = useI18n();
   return (
   <>
+  <GitPreferencesSettings active={active} />
   <GithubConnection active={active} />
   <section className="settings-group">
     <div className="settings-section-heading"><h3 className="settings-group-title">{tr("当前工作区")}</h3></div>

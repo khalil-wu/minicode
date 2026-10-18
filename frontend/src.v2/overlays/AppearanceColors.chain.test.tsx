@@ -56,7 +56,7 @@ it("uses a real accessible react-colorful popover with immediate keyboard edits 
   expect(screen.getByRole("dialog", { name: "浅色强调色" })).toBeTruthy();
   expect(document.querySelector('input[type="color"]')).toBeNull();
   const hue = screen.getByRole("slider", { name: "Hue" });
-  const firstSlider = screen.getAllByRole("slider")[0];
+  const firstSlider = screen.getByRole("dialog", { name: "浅色强调色" }).querySelector<HTMLElement>('[role="slider"]')!;
   trigger.focus(); fireEvent.keyDown(trigger, { key: "Tab" });
   expect(document.activeElement).toBe(firstSlider);
   fireEvent.keyDown(firstSlider, { key: "Tab" });
