@@ -879,6 +879,7 @@ def test_preview_launch_config_rejects_workspace_outside_session(monkeypatch, tm
 def test_preview_launch_start_rejects_workspace_outside_session(monkeypatch, tmp_path) -> None:
     from backend.preview.launcher import PreviewLaunchConfig
     from backend.preview.verifier import PreviewVerification
+    from backend.sandbox.policy import PermissionProfile, SandboxPolicy
     from backend.ws.handlers.preview import handle_preview_launch_start
 
     workspace = tmp_path / "workspace"
@@ -930,10 +931,13 @@ def test_preview_launch_start_rejects_workspace_outside_session(monkeypatch, tmp
         *,
         session_id: str,
         conversation_id: str,
+        sandbox_policy: SandboxPolicy,
     ):
         calls.append(str(Path(workspace_root).resolve()))
         assert session_id == "session-preview-start-boundary"
         assert conversation_id == "conv-preview-start-boundary"
+        assert sandbox_policy.permission_profile == PermissionProfile.disabled()
+        assert sandbox_policy.protect_workspace_metadata is False
         return FakeLaunch()
 
     async def fake_wait_until_ready(url: str, timeout: float = 20.0, interval: float = 1.0, *, process=None):

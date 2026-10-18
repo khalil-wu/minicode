@@ -380,8 +380,12 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     conversation = repository.create_conversation(workspace_root=str(tmp_path))
     repository.append_transcript_message(conversation.id, {"id": "prior-user", "role": "user", "content": "prior task context"})
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    artifact_store = SimpleNamespace(aclose=AsyncMock(return_value=None))
     class Engine:
         def submit(self, submission):
+            assert submission.session.artifact_store is artifact_store
+            assert submission.session.owns_artifact_store is True
+            artifact_store.aclose.assert_not_awaited()
             context = submission.session.context_builder
             assert context is not None
             assert "prior task context" in json.dumps(context.export_snapshot())
@@ -398,7 +402,7 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     monkeypatch.setattr(scheduled, "run_owned_rest_chat", run)
     config = AppConfig(llm=LLMSettings(api_key="", model="heartbeat-test"))
     monkeypatch.setattr(chat, "load_config", lambda **kwargs: config)
-    monkeypatch.setattr(chat, "ArtifactStore", object)
+    monkeypatch.setattr(chat, "ArtifactStore", lambda: artifact_store)
     monkeypatch.setattr(chat, "default_runtime", lambda: runtime)
     monkeypatch.setattr(scheduled, "default_runtime", lambda: runtime)
     bootstrap = SimpleNamespace(create_tool_registry=lambda *args, **kwargs: object(),
@@ -414,6 +418,7 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     conversation = repository.get_conversation(conversation.id)
     assert result["status"] == "completed"
     assert "new heartbeat checkpoint" in json.dumps(conversation.context_snapshot)
+    artifact_store.aclose.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

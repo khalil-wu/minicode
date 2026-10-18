@@ -142,13 +142,13 @@ describe("ToolCallCard", () => {
     expect(document.querySelector('img[src*="google.com/s2/favicons"]')).toBeNull();
   });
 
-  it("dedupes repeated browser opens from a single web result", () => {
+  it("delivers both explicit browser opens from a single web result", () => {
     const requests: string[] = [];
     const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
     render(React.createElement(ToolCallCard, {
       viewMode: "verbose",
       record: {
-        id: "web-dedupe",
+        id: "web-browser-clicks",
         name: "web_search",
         args: { query: "MiniCode app commands" },
         resultKind: "search",
@@ -161,9 +161,13 @@ describe("ToolCallCard", () => {
     }));
 
     fireEvent.click(screen.getByRole("button", { name: "MiniCode app commands" }));
+    expect(requests).toEqual(["https://developers.openai.com/minicode/app"]);
     fireEvent.click(screen.getByRole("button", { name: "在浏览器中打开" }));
 
-    expect(requests).toEqual(["https://developers.openai.com/minicode/app"]);
+    expect(requests).toEqual([
+      "https://developers.openai.com/minicode/app",
+      "https://developers.openai.com/minicode/app",
+    ]);
     expect(mockStoreState.rightStackTab).toBe("browser");
     expect(openLivePreviewMock).not.toHaveBeenCalled();
     expect(sendMock).not.toHaveBeenCalled();

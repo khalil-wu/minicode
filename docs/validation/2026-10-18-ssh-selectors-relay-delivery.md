@@ -75,4 +75,6 @@
 
 ## 本批 CI 身份
 
+首轮生产提交 `7f20e5665254ded97c8ec14ee98639c955055095` 的 [CI 39108669632](https://github.com/khalil-wu/minicode/actions/runs/39108669632) 为 6 success / 3 failure；9 份完整日志、8 类原始产物和 84 项 Source/ABI/wheel 校验齐全。7 个失败用例对应旧 prompt/750ms 去重断言、漏传桌面策略，以及未迁移 awaited store close 的夹具。后续仅更新测试合同，未恢复旧生产策略或加入兼容兜底。统一前端五文件 **211 passed**；后端四文件 **106 passed**、0 skip。扩展本机验证另发现两项既有测试混合了冷准备/命令排队与实际完成，现按真实准备信号和已登记的 delete owner 等待，保留原 1s/2s 行为时限与上下文隔离/不启动索引和 MCP 断言。原调试批 104 pass / 2 fail 和普通模式 4 pass / 2 fail 均保留，不将重跑累计。
+
 本报告与生产修改一同冻结提交，九项新 CI 和八类产物只接受该完整 SHA 的实际运行。最终 run、原始日志/JUnit、真实 skip、ELF ABI/Source 身份、wheel RECORD/可执行权限和冷安装回执保存在 `output/ssh-selectors-20261018/ci-current/`；GitHub [本分支 CI](https://github.com/khalil-wu/minicode/actions/workflows/ci.yml?query=branch%3Acodex%2Frelease-readiness-20260927) 可核对提交与结果。各批次数量存在重叠，不相加为全产品覆盖率。

@@ -862,17 +862,18 @@ describe("MarkdownRenderer", () => {
     expect(container.querySelector(".md-web-link .brand-icon")).toBeTruthy();
   });
 
-  it("deduplicates rapid repeated Browser navigation for the same url", () => {
-    useAppStore.setState({ conversationId: "conv-markdown-dedupe" });
+  it("delivers each explicit Browser click for the same URL", () => {
+    useAppStore.setState({ conversationId: "conv-markdown-browser-clicks" });
     const requests: string[] = [];
     const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
     render(<MarkdownRenderer content={"Open [docs](https://docs.example/guide)."} />);
 
     const link = screen.getByRole("link", { name: "docs" });
     fireEvent.click(link);
+    expect(requests).toEqual(["https://docs.example/guide"]);
     fireEvent.click(link);
 
-    expect(requests).toEqual(["https://docs.example/guide"]);
+    expect(requests).toEqual(["https://docs.example/guide", "https://docs.example/guide"]);
     expect(useAppStore.getState().rightStackTab).toBe("browser");
     unsubscribe();
   });

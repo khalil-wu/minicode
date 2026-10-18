@@ -134,15 +134,11 @@ def test_websocket_reconnect_closes_resources_created_for_the_discarded_connecti
 
     class _Artifacts:
         def __init__(self) -> None:
-            self.flushed = False
-            self.shutdown_called = False
             self.cleared = False
+            self.close_calls = 0
 
-        async def flush(self) -> None:
-            self.flushed = True
-
-        def shutdown(self) -> None:
-            self.shutdown_called = True
+        async def aclose(self) -> None:
+            self.close_calls += 1
 
         def clear(self) -> None:
             self.cleared = True
@@ -213,11 +209,11 @@ def test_websocket_reconnect_closes_resources_created_for_the_discarded_connecti
     assert session is existing
     assert generation == 5
     assert incoming_llm.closed is True
-    assert incoming_artifacts.flushed is True
-    assert incoming_artifacts.shutdown_called is True
+    assert incoming_artifacts.close_calls == 1
     assert incoming_artifacts.cleared is True
     assert existing.llm.closed is False
-    assert existing.artifact_store.flushed is False
+    assert existing.artifact_store.close_calls == 0
+    assert existing.artifact_store.cleared is False
 
 
 class _DisconnectingWebSocket(_FakeWebSocket):
@@ -611,12 +607,16 @@ def test_active_run_context_is_isolated_from_conversation_switch(monkeypatch, tm
 
     class CapturingQueryEngine:
         def __init__(self) -> None:
+            self.prepared = asyncio.Event()
+            self.begin = asyncio.Event()
             self.started = asyncio.Event()
             self.proceed = asyncio.Event()
             self.snapshots: list[dict[str, object]] = []
             self.captured_builder = None
 
         async def submit(self, submission):
+            self.prepared.set()
+            await self.begin.wait()
             await _admit_query_submission(submission)
             self.captured_builder = submission.session.context_builder
             self.snapshots.append(submission.session.context_builder.export_snapshot())
@@ -661,10 +661,18 @@ def test_active_run_context_is_isolated_from_conversation_switch(monkeypatch, tm
                 },
             )
         )
+        # Model/runtime assembly precedes this test's admission/isolation phase.
+        await engine.prepared.wait()
+        model_refresh = session._extension_runtime_state(first.id).get("model_refresh_task")
+        if model_refresh is not None:
+            await model_refresh
+        engine.begin.set()
         await asyncio.wait_for(engine.started.wait(), timeout=2.0)
         await session.command_dispatcher._handle_command(
             UserCommand(type="conversation.switch", data={"conversation_id": second.id})
         )
+        await session.conversation_runtime.wait_for_hydration(second.id)
+        assert "second history" in [message["content"] for message in session.context_builder.export_snapshot()["history"]]
         engine.proceed.set()
         # Run settlement performs several atomic generation/inventory writes.
         # A 500 ms wall-clock limit flakes under the full Windows regression
@@ -836,6 +844,12 @@ def test_delete_active_conversation_does_not_start_workspace_index(monkeypatch, 
             ),
             timeout=1,
         )
+        # Command dispatch acknowledges the owned delete; its task publishes the list.
+        delete_task, = (
+            task for task in session.command_dispatcher.command_tasks
+            if task.get_name() == f"conversation-delete:{active.id}"
+        )
+        await delete_task
         try:
             await asyncio.wait_for(initialize_started.wait(), timeout=1)
             started = True

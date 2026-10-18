@@ -1,16 +1,17 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-const scope = vi.hoisted(() => ({ sessionId: "session-a", conversationId: "conversation-a", root: "C:/view", prompt: vi.fn() }));
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const scope = vi.hoisted(() => ({ sessionId: "session-a", conversationId: "conversation-a", root: "C:/view", remotePicker: vi.fn() }));
 vi.mock("../stores", () => ({ useAppStore: { getState: () => ({ conversationId: scope.conversationId, workingDirectory: scope.root }) } }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: scope.sessionId }) }));
-vi.mock("../overlays/DialogService", () => ({ showPrompt: scope.prompt }));
+vi.mock("../overlays/RemoteDirectoryPicker", () => ({ showRemoteDirectoryPicker: scope.remotePicker }));
 import { readWorkspaceFile, compareWriteWorkspaceFile } from "./workspace";
 import { bindWorkspaceOwnerRuntime, workspaceFileOwner } from "./workspace-owner";
 import { fsListTree, pickDirectory, pickWorkspaceDirectory } from "../desktop/runtime";
 import { artifactResourceUrl } from "../lib/artifact-resource";
 
-beforeEach(() => { scope.sessionId = "session-a"; scope.conversationId = "conversation-a"; scope.prompt.mockReset(); vi.unstubAllGlobals();
+beforeEach(() => { scope.sessionId = "session-a"; scope.conversationId = "conversation-a"; scope.remotePicker.mockReset(); vi.unstubAllGlobals();
   bindWorkspaceOwnerRuntime(() => ({ session_id: scope.sessionId, conversation_id: scope.conversationId, workspace_root: scope.root })); });
+afterEach(() => { delete window.__MINICODE_RUNTIME__; });
 
 describe("actual workspace request ownership", () => {
   it("captures the read target for a later save while another conversation is active", async () => {
@@ -51,15 +52,23 @@ describe("actual workspace request ownership", () => {
     expect(Object.fromEntries(url.searchParams)).toMatchObject({ session_id: "session-new", conversation_id: "conversation-a", environment_id: "target" });
   });
 
-  it("uses the selected remote host path prompt and trust operation", async () => {
+  it("uses the selected remote host browser and trusts only the confirmed workspace", async () => {
     const nativePicker = vi.fn(), trust = vi.fn(async path => path);
+    const list = vi.fn().mockResolvedValue({ directoryPath: "/home/owned", parentPath: "/home", entries: [
+      { name: "project", path: "/home/owned/project", type: "directory" },
+    ] });
     window.__MINICODE_RUNTIME__ = { remoteHost: { id: "remote", displayName: "Remote", kind: "ssh", platform: "linux", home: "/home/owned", generation: "generation" },
-      desktop: { pickDirectory: nativePicker, pickWorkspaceDirectory: nativePicker, trustWorkspace: trust } as never };
-    scope.prompt.mockResolvedValueOnce("/home/owned/selected").mockResolvedValueOnce("/home/owned/project");
+      desktop: { pickDirectory: nativePicker, pickWorkspaceDirectory: nativePicker, workspaceDirectoryEntries: list, trustWorkspace: trust } as never };
+    scope.remotePicker.mockResolvedValueOnce("/home/owned/selected").mockResolvedValueOnce("/home/owned/project");
     expect(await pickDirectory()).toBe("/home/owned/selected");
+    expect(trust).not.toHaveBeenCalled();
+    const options = scope.remotePicker.mock.calls[0][0];
+    expect(options).toMatchObject({ initialDirectoryPath: "/home/owned", platform: "linux" });
+    await expect(options.listDirectory("/home/owned")).resolves.toMatchObject({ directoryPath: "/home/owned" });
+    expect(list).toHaveBeenCalledExactlyOnceWith("/home/owned", true);
     expect(await pickWorkspaceDirectory()).toBe("/home/owned/project");
-    expect(scope.prompt).toHaveBeenCalledWith(expect.objectContaining({ defaultValue: "/home/owned" }));
-    expect(trust).toHaveBeenCalledWith("/home/owned/project");
+    expect(scope.remotePicker).toHaveBeenCalledTimes(2);
+    expect(trust).toHaveBeenCalledExactlyOnceWith("/home/owned/project");
     expect(nativePicker).not.toHaveBeenCalled();
   });
 });

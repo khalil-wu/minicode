@@ -23,12 +23,13 @@ from backend.ws.permission_runtime import _managed_permission_projection
 
 @pytest.mark.asyncio
 async def test_cancelled_adapter_close_still_releases_unadopted_artifact_owner():
-    llm = SimpleNamespace(aclose=AsyncMock(side_effect=asyncio.CancelledError))
-    store = SimpleNamespace(flush=AsyncMock(), shutdown=Mock(), clear=Mock())
-    with pytest.raises(asyncio.CancelledError):
+    cancellation = asyncio.CancelledError("owned adapter close cancelled")
+    llm = SimpleNamespace(aclose=AsyncMock(side_effect=cancellation))
+    store = SimpleNamespace(aclose=AsyncMock(), clear=Mock())
+    with pytest.raises(asyncio.CancelledError) as raised:
         await _dispose_unadopted_connection_resources(llm, store)
-    store.flush.assert_awaited_once()
-    store.shutdown.assert_called_once()
+    assert raised.value is cancellation
+    store.aclose.assert_awaited_once()
     store.clear.assert_called_once()
 
 
