@@ -155,7 +155,7 @@ jobs:
         run: |
           source="$RUNNER_TEMP/linux-wheel-source"
           mkdir -p "$source" "$RUNNER_TEMP/linux-wheel"
-          git archive HEAD backend pyproject.toml setup.py | tar -x -C "$source" \
+          git -c safe.directory="$GITHUB_WORKSPACE" archive HEAD backend pyproject.toml setup.py | tar -x -C "$source" \
             --exclude='backend/permissions/resources/execpolicy/*' --exclude='backend/network/resources/*'
           mkdir -p "$source/backend/permissions/resources/execpolicy" "$source/backend/network/resources"
           chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
