@@ -47,8 +47,6 @@ python3.11 desktop/scripts/prepare-execpolicy-runtime.py \
 python3.11 desktop/scripts/prepare-network-runtime.py \
   --cargo "$cargo_bin" --source-checkout .tmp/codex-src --build-directory .tmp/native-network-build \
   --output-directory backend/network/resources/x86_64-unknown-linux-gnu
-chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy \
-  backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
 python3.11 -m pip install -e .
 ```
 

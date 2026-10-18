@@ -48,7 +48,6 @@ jobs:
           --output-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
       - name: Verify the actual ELF ABI and Source identity
         run: |
-          chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
           python3 scripts/verify-linux-native-runtime.py \
           --runtime-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu \
           --report-directory "$RUNNER_TEMP/execpolicy-abi"
@@ -108,7 +107,6 @@ jobs:
           --output-directory backend/network/resources/x86_64-unknown-linux-gnu
       - name: Verify the actual ELF ABI and Source identity
         run: |
-          chmod +x backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
           python3 scripts/verify-linux-native-runtime.py \
           --runtime-directory backend/network/resources/x86_64-unknown-linux-gnu \
           --report-directory "$RUNNER_TEMP/network-abi"

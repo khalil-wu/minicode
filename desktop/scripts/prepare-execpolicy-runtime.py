@@ -71,7 +71,7 @@ def main() -> None:
             contents.extend([path.name, path.read_text(encoding="utf-8")])
         notices.append("\n\n".join(contents))
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(binary, output / binary.name)
+    shutil.copy2(binary, output / binary.name)
     for name in ("LICENSE.openai-codex", "NOTICE.openai-codex", "source-manifest.json"):
         shutil.copyfile(PROJECT / name, output / name)
     (output / "THIRD_PARTY_NOTICES.txt").write_text("\n\n".join(notices) + "\n", encoding="utf-8")

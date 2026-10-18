@@ -209,7 +209,7 @@ def main():
             contents.extend([path.name, path.read_text(encoding="utf-8")])
         notices.append("\n\n".join(contents))
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(binary, output / binary.name)
+    shutil.copy2(binary, output / binary.name)
     license_file = source / "LICENSE"
     shutil.copyfile(license_file, output / "LICENSE.openai-codex")
     shutil.copyfile(source / "NOTICE", output / "NOTICE.openai-codex")
