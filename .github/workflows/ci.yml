@@ -418,3 +418,10 @@ jobs:
       - name: Run Electron-facing frontend tests
         working-directory: frontend
         run: xvfb-run -a npm run test:e2e:electron
+      - name: Upload Electron-facing frontend evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-frontend-test-evidence
+          path: frontend/test-results/
+          if-no-files-found: ignore

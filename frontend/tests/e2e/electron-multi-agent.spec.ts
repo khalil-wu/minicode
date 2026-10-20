@@ -387,11 +387,13 @@ async function openAgentsPanel(window: Page) {
     await agentsTab.click();
     return;
   }
-  const openRightPanel = window.getByRole("button", { name: "打开右侧栏", exact: true });
-  if (await openRightPanel.isVisible()) await openRightPanel.click();
-  await expect(window.getByRole("tablist", { name: "右侧栏面板" })).toBeVisible();
-  await window.getByRole("button", { name: "添加面板", exact: true }).click();
-  await window.getByRole("menuitem", { name: "子智能体", exact: true }).click();
+  const closeRightPanel = window.getByRole("button", { name: "关闭右侧栏", exact: true });
+  if (await closeRightPanel.isVisible()) await closeRightPanel.click();
+  const summaryToggle = window.getByRole("button", { name: "切换摘要", exact: true });
+  if (await summaryToggle.getAttribute("aria-pressed") !== "true") await summaryToggle.click();
+  const summary = window.getByRole("complementary", { name: "工作区上下文摘要", exact: true });
+  await expect(summary).toBeVisible();
+  await summary.getByRole("button", { name: "子智能体", exact: true }).click();
   await expect(agentsTab).toBeVisible();
 }
 
